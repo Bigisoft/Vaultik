@@ -239,7 +239,7 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
     }
 
     os::ErrorCode err = 0;
-    os::File file = os::File::open_read(path, err);
+    os::File file = os::File::open_source(path, err);
     if (!file.valid()) {
         warn("skipped " + path + ": " + os::error_message(err));
         return false;

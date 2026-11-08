@@ -136,6 +136,9 @@ public:
     // Sequential read of a source file (Windows: backup semantics, so ACLs do not block an
     // elevated run). Returns an invalid File and sets `err` on failure.
     static File open_read(const std::string& path, ErrorCode& err);
+    // Like open_read, for a file found by a backup scan: never follows a link and only opens a
+    // regular file, so an entry swapped for a link after the scan cannot redirect the read.
+    static File open_source(const std::string& path, ErrorCode& err);
     // Random-access read of a repository file.
     static File open_random(const std::string& path, ErrorCode& err);
     // Appends to a file, creating it if missing. `mode` as for create.
@@ -200,7 +203,8 @@ Bytes unprotect_secret(ByteSpan sealed);  // throws Error when it cannot be decr
 
 // ---- process ------------------------------------------------------------------------------
 
-// Runs a program (argv[0] is looked up on PATH) without a console window, waits for it, and
+// Runs a program without a console window (argv[0]: a bare name is taken from the system folder
+// on Windows and looked up on PATH on POSIX), waits for it, and
 // returns its exit code. stdout and stderr are captured into `output` when given. Throws
 // OsError when it cannot be started.
 int run_command(const std::vector<std::string>& argv, std::string* output = nullptr);

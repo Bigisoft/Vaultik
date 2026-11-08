@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <optional>
 
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/platform/os.hpp"
@@ -23,6 +24,14 @@ std::vector<std::string> split_snapshot_path(const std::string& path) {
     }
     if (!cur.empty()) parts.push_back(std::move(cur));
     return parts;
+}
+
+// Type of what is at `path` without following links; nothing when there is nothing.
+std::optional<os::EntryType> entry_type(const std::string& path) {
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    if (!os::stat(path, info, err)) return std::nullopt;
+    return info.type;
 }
 
 os::FileInfo info_of(const Node& node) {
@@ -90,8 +99,9 @@ void RestoreEngine::ensure_dir(const std::string& path) {
     const os::ErrorCode err = os::make_dir(path);
     if (err == 0) return;
     if (os::is_exists(err)) {
-        if (os::is_directory(path)) return;
-        throw Error("cannot create folder " + path + ": a file with that name exists");
+        // Must be a real folder: a link to a folder elsewhere would let the restore write there.
+        if (entry_type(path) == os::EntryType::Dir) return;
+        throw Error("cannot create folder " + path + ": a file or link with that name exists");
     }
     os::throw_error("cannot create folder " + path, err);
 }
@@ -108,7 +118,19 @@ void RestoreEngine::ensure_dir_chain(const std::string& path) {
 }
 
 void RestoreEngine::restore_file(const Node& node, const std::string& path) {
-    if (options_.overwrite) os::make_writable(path);  // allow replacing read-only files
+    if (options_.overwrite) {
+        // Replace only regular files. A link is removed rather than written through (it could
+        // point anywhere); a folder is left alone.
+        const std::optional<os::EntryType> existing = entry_type(path);
+        if (existing && *existing != os::EntryType::File) {
+            if (*existing == os::EntryType::Dir || os::remove_file(path) != 0) {
+                warn("cannot replace " + path + ": a folder or link with that name exists");
+                return;
+            }
+        } else if (existing) {
+            os::make_writable(path);  // allow replacing read-only files
+        }
+    }
     os::ErrorCode err = 0;
     // Private until the content and final permissions are in place; snapshots from Windows carry
     // no permissions, so those get the umask default.
@@ -148,7 +170,10 @@ void RestoreEngine::restore_file(const Node& node, const std::string& path) {
 }
 
 void RestoreEngine::restore_symlink(const Node& node, const std::string& path) {
-    if (options_.overwrite && os::exists(path) && !os::is_directory(path)) os::remove_file(path);
+    if (options_.overwrite) {
+        const std::optional<os::EntryType> existing = entry_type(path);
+        if (existing && *existing != os::EntryType::Dir) os::remove_file(path);
+    }
     const os::ErrorCode err = os::make_symlink(node.link_target, path);
     if (err != 0) {
         if (os::is_exists(err)) {

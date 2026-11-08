@@ -261,13 +261,35 @@ File& File::operator=(File&& other) noexcept {
 }
 
 File File::open_read(const std::string& path, ErrorCode& err) {
-    // O_NOATIME keeps backups from touching access times; only allowed for the owner or root.
-    int fd = retry([&] { return ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOATIME); });
-    if (fd < 0 && errno == EPERM) fd = retry([&] { return ::open(path.c_str(), O_RDONLY | O_CLOEXEC); });
+    const int fd = retry([&] { return ::open(path.c_str(), O_RDONLY | O_CLOEXEC); });
     if (fd < 0) {
         err = static_cast<ErrorCode>(errno);
         return File();
     }
+    err = 0;
+    ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+    return File(fd);
+}
+
+File File::open_source(const std::string& path, ErrorCode& err) {
+    // O_NOATIME keeps backups from touching access times; only allowed for the owner or root.
+    // O_NOFOLLOW and the S_ISREG check below: the entry was a regular file when it was scanned;
+    // if it has been swapped for a link (or a pipe) since, refuse it instead of reading whatever it
+    // points to with the backup's (possibly root) rights. O_NONBLOCK keeps a pipe from hanging.
+    constexpr int kFlags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
+    int fd = retry([&] { return ::open(path.c_str(), kFlags | O_NOATIME); });
+    if (fd < 0 && errno == EPERM) fd = retry([&] { return ::open(path.c_str(), kFlags); });
+    if (fd < 0) {
+        err = static_cast<ErrorCode>(errno);
+        return File();
+    }
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(fd);
+        err = ELOOP;
+        return File();
+    }
+    ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) & ~O_NONBLOCK);
     err = 0;
     ::posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL);
     return File(fd);
@@ -286,7 +308,7 @@ File File::open_random(const std::string& path, ErrorCode& err) {
 
 File File::open_append(const std::string& path, ErrorCode& err, std::uint32_t mode) {
     const int fd = retry(
-        [&] { return ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, static_cast<mode_t>(mode)); });
+        [&] { return ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, static_cast<mode_t>(mode)); });
     if (fd < 0) {
         err = static_cast<ErrorCode>(errno);
         return File();
@@ -296,7 +318,8 @@ File File::open_append(const std::string& path, ErrorCode& err, std::uint32_t mo
 }
 
 File File::create(const std::string& path, bool overwrite, ErrorCode& err, std::uint32_t mode) {
-    const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | (overwrite ? O_TRUNC : O_EXCL);
+    // Never write through a link: with overwrite, a symlink at `path` fails with ELOOP.
+    const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | (overwrite ? O_TRUNC : O_EXCL);
     const int fd = retry([&] { return ::open(path.c_str(), flags, static_cast<mode_t>(mode)); });
     if (fd < 0) {
         err = static_cast<ErrorCode>(errno);
@@ -381,7 +404,15 @@ void set_metadata(const std::string& path, const FileInfo& info) {
     // Ownership first: chown clears set-user-ID bits that chmod then restores.
     if (::geteuid() == 0 && (info.uid != 0 || info.gid != 0))
         (void)::lchown(path.c_str(), static_cast<uid_t>(info.uid), static_cast<gid_t>(info.gid));
-    if (!link && info.mode != 0) (void)::chmod(path.c_str(), static_cast<mode_t>(info.mode));
+    if (!link && info.mode != 0) {
+        // Through a descriptor opened without following links, so a path swapped for a link
+        // cannot redirect the change. O_NONBLOCK: never hang on a pipe.
+        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        if (fd >= 0) {
+            (void)::fchmod(fd, static_cast<mode_t>(info.mode));
+            ::close(fd);
+        }
+    }
     if (info.mtime != 0) {
         struct timespec times[2];
         times[0].tv_sec = 0;

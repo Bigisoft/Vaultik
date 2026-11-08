@@ -207,6 +207,46 @@ TEST_CASE("init refuses an existing repository") {
     CHECK_THROWS_AS(init_repo(tmp.path / "repo"), Error);
 }
 
+TEST_CASE("restore never writes through links already in the target") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    const fs::path outside = tmp.path / "outside";
+    write_file(src / "sub" / "inner.txt", text("inner"));
+    write_file(src / "top.txt", text("top"));
+    write_file(outside / "keep.txt", text("must stay"));
+
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    const BackupResult backup = run_backup(*repo, options);
+
+    // Prepare the target: the folder "sub" is a link to `outside`, and "top.txt" is a link to a
+    // file there. Creating links needs Developer Mode or elevation on Windows.
+    const fs::path out = tmp.path / "out";
+    const fs::path restored = restored_location(out, src);
+    fs::create_directories(restored);
+    std::error_code ec;
+    fs::create_directory_symlink(outside, restored / "sub", ec);
+    if (!ec) fs::create_symlink(outside / "keep.txt", restored / "top.txt", ec);
+    if (ec) {
+        MESSAGE("skipped: cannot create symbolic links here (" << ec.message() << ")");
+        return;
+    }
+
+    RestoreOptions ro;
+    ro.target = u8(out);
+    ro.overwrite = true;
+    const RestoreResult rr = run_restore(*repo, backup.snapshot, ro);
+
+    CHECK(rr.errors >= 1);                           // the linked folder is refused
+    CHECK_FALSE(fs::exists(outside / "inner.txt"));  // nothing written through it
+    CHECK(read_file(outside / "keep.txt") == text("must stay"));
+    CHECK_FALSE(fs::is_symlink(restored / "top.txt"));  // the file link was replaced
+    CHECK(read_file(restored / "top.txt") == text("top"));
+}
+
 TEST_CASE("damaged pack data is detected") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";

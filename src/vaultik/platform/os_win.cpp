@@ -3,6 +3,7 @@
 #include "vaultik/platform/os.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 
 #include "vaultik/util/resources.hpp"
@@ -268,6 +269,40 @@ File File::open_read(const std::string& path, ErrorCode& err) {
                             FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS, err));
 }
 
+File File::open_source(const std::string& path, ErrorCode& err) {
+    constexpr DWORD kShare = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    constexpr DWORD kFlags = FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_BACKUP_SEMANTICS;
+    // Open the entry itself, not what it may point to: it was a regular file when it was scanned,
+    // and if it has been swapped for a link since, the backup must not follow it with its
+    // (possibly elevated) rights.
+    File f(open_handle(path, GENERIC_READ, kShare, OPEN_EXISTING, kFlags | FILE_FLAG_OPEN_REPARSE_POINT, err));
+    if (!f.valid()) return f;
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (!GetFileInformationByHandleEx(as_handle(f.h_), FileAttributeTagInfo, &tag, sizeof tag)) {
+        err = GetLastError();
+        return File();
+    }
+    if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) return f;
+    if (is_link_tag(tag.ReparseTag)) {
+        err = ERROR_STOPPED_ON_SYMLINK;
+        return File();
+    }
+    // Other reparse points (deduplicated or WOF-compressed files) need their file system filter
+    // to read the content: open again normally and check that it is still the same file.
+    FILE_ID_INFO before{};
+    const bool have_id = GetFileInformationByHandleEx(as_handle(f.h_), FileIdInfo, &before, sizeof before) != 0;
+    File g(open_handle(path, GENERIC_READ, kShare, OPEN_EXISTING, kFlags, err));
+    if (!g.valid() || !have_id) return g;
+    FILE_ID_INFO after{};
+    if (!GetFileInformationByHandleEx(as_handle(g.h_), FileIdInfo, &after, sizeof after) ||
+        after.VolumeSerialNumber != before.VolumeSerialNumber ||
+        std::memcmp(&after.FileId, &before.FileId, sizeof after.FileId) != 0) {
+        err = ERROR_STOPPED_ON_SYMLINK;
+        return File();
+    }
+    return g;
+}
+
 File File::open_random(const std::string& path, ErrorCode& err) {
     return File(open_handle(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, err));
@@ -279,8 +314,44 @@ File File::open_append(const std::string& path, ErrorCode& err, std::uint32_t /*
 }
 
 File File::create(const std::string& path, bool overwrite, ErrorCode& err, std::uint32_t /*mode*/) {
-    return File(open_handle(path, GENERIC_WRITE, 0, overwrite ? CREATE_ALWAYS : CREATE_NEW,
-                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, err));
+    constexpr DWORD kFlags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
+    // CREATE_NEW never follows a link at `path` (it fails because something exists).
+    if (!overwrite) return File(open_handle(path, GENERIC_WRITE, 0, CREATE_NEW, kFlags, err));
+    // CREATE_ALWAYS would write through a link, and FILE_FLAG_OPEN_REPARSE_POINT cannot be combined
+    // with it. So open the existing entry itself, refuse links and folders, and truncate it; or
+    // create it when there is nothing yet.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        File f(open_handle(path, GENERIC_WRITE, 0, OPEN_EXISTING, kFlags | FILE_FLAG_OPEN_REPARSE_POINT, err));
+        if (f.valid()) {
+            FILE_ATTRIBUTE_TAG_INFO tag{};
+            if (!GetFileInformationByHandleEx(as_handle(f.h_), FileAttributeTagInfo, &tag, sizeof tag)) {
+                err = GetLastError();
+                return File();
+            }
+            if ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && is_link_tag(tag.ReparseTag))) {
+                err = ERROR_STOPPED_ON_SYMLINK;
+                return File();
+            }
+            if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                // Not a link (deduplicated, cloud or compressed file): let the file system replace
+                // it as a whole, which needs its filter and so the normal open.
+                f.close();
+                return File(open_handle(path, GENERIC_WRITE, 0, CREATE_ALWAYS, kFlags, err));
+            }
+            FILE_END_OF_FILE_INFO eof{};
+            if (!SetFileInformationByHandle(as_handle(f.h_), FileEndOfFileInfo, &eof, sizeof eof)) {
+                err = GetLastError();
+                return File();
+            }
+            return f;
+        }
+        if (!is_not_found(err)) return File();
+        File n(open_handle(path, GENERIC_WRITE, 0, CREATE_NEW, kFlags, err));
+        if (n.valid() || !is_exists(err)) return n;
+        // Created by someone else in between: look at it again.
+    }
+    return File();
 }
 
 bool File::valid() const {
@@ -359,20 +430,18 @@ void make_writable(const std::string& path) {
 }
 
 void set_metadata(const std::string& path, const FileInfo& info) {
-    const std::wstring p = native(path);
-    const bool is_dir = info.type == EntryType::Dir;
-    if (info.mtime != 0 || info.ctime != 0) {
-        UniqueHandle h(CreateFileW(p.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                   nullptr, OPEN_EXISTING,
-                                   is_dir ? FILE_FLAG_BACKUP_SEMANTICS : FILE_ATTRIBUTE_NORMAL, nullptr));
-        if (h.valid()) {
-            const FILETIME c = u64_to_filetime(info.ctime);
-            const FILETIME m = u64_to_filetime(info.mtime);
-            SetFileTime(h.get(), info.ctime ? &c : nullptr, nullptr, info.mtime ? &m : nullptr);
-        }
-    }
     const DWORD attrs = info.attributes & kRestorableAttributes;
-    if (attrs != 0) SetFileAttributesW(p.c_str(), attrs | (is_dir ? FILE_ATTRIBUTE_DIRECTORY : 0));
+    if (info.mtime == 0 && info.ctime == 0 && attrs == 0) return;
+    // Through a handle on the entry itself, so a path swapped for a link cannot redirect it.
+    UniqueHandle h(CreateFileW(native(path).c_str(), FILE_WRITE_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                               FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!h.valid()) return;
+    FILE_BASIC_INFO basic{};  // zero fields are left unchanged
+    basic.CreationTime.QuadPart = static_cast<LONGLONG>(info.ctime);
+    basic.LastWriteTime.QuadPart = static_cast<LONGLONG>(info.mtime);
+    basic.FileAttributes = attrs;
+    SetFileInformationByHandle(h.get(), FileBasicInfo, &basic, sizeof basic);
 }
 
 ErrorCode make_symlink(const std::string& target, const std::string& path) {
@@ -467,8 +536,19 @@ int run_command(const std::vector<std::string>& argv, std::string* output) {
         si.hStdOutput = w.get();
         si.hStdError = w.get();
     }
+    // A bare program name is taken from the system folder only. Letting CreateProcess search would
+    // look in the program's own folder and the current folder first, where a planted schtasks.exe
+    // could run instead.
+    std::wstring program = widen(argv[0]);
+    if (program.find_first_of(L"\\/") == std::wstring::npos) {
+        wchar_t sys[MAX_PATH];
+        const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) throw_last_error("cannot find the system folder");
+        program = std::wstring(sys, n) + L"\\" + program;
+    }
+
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, output != nullptr, CREATE_NO_WINDOW, nullptr,
+    if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, output != nullptr, CREATE_NO_WINDOW, nullptr,
                         nullptr, &si, &pi))
         throw_last_error("cannot start " + argv[0]);
     UniqueHandle process(pi.hProcess);
