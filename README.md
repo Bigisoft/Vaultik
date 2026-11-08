@@ -61,7 +61,9 @@ Start `vaultik-gui`, then **New backup job**:
 - **General:** a name, the destination folder (USB drive, other disk, network share) and the
   repository password. A new destination gets a new encrypted repository; an existing one is
   opened with its password.
-- **What to back up:** folders and files, and name patterns to skip (`*.tmp`, `node_modules`).
+- **What to back up:** folders and files, name patterns to skip (`*.tmp`, `node_modules`), and
+  whether to use a Volume Shadow Copy for open and locked files (on by default; it needs
+  administrator rights, see "Current limits").
 - **Schedule:** manually, every few hours, daily, or on selected weekdays. Schedules are kept by
   Task Scheduler (Windows, task folder `\Vaultik`) or a systemd user timer (Linux), so Vaultik does
   not need to stay open; a run missed while the computer was off starts at the next chance.
@@ -104,6 +106,9 @@ The repository can be any folder: an internal disk, a USB drive or a network sha
 (or use `--password-file`) for unattended runs, or use `--job` to take the repository and stored
 password from a saved job. Snapshot paths start with the drive letter (`C/...`) or
 `UNC/server/share/...` on Windows, and with the top-level folder (`home/...`) on Linux.
+
+On Windows, `backup` reads from a Volume Shadow Copy when it runs as administrator
+(`--vss auto`, the default); `--vss on` makes that required and `--vss off` always reads live.
 
 `--json` turns the output into one JSON event per line (`progress`, `warning`, `done`); with it,
 a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses this.
@@ -162,8 +167,12 @@ Priorities only take effect when something else competes for the resource, so on
 
 ## Current limits
 
-- Files are read live, without a VSS snapshot: files locked by another program are skipped with a
-  warning, and a file being written during the backup may be captured mid-change.
+- Open and locked files (Outlook data files, databases, files of running programs) are only
+  backed up when Vaultik runs with administrator rights: it then reads from a Volume Shadow Copy,
+  a frozen view of each source volume made at the start of the backup. Without those rights, and
+  on Linux, files are read live: locked files are skipped with a warning, and a file being
+  written during the backup may be captured mid-change. Scheduled jobs run without
+  administrator rights for now.
 - Windows: file content, attributes, creation and modification times are kept. ACLs, alternate
   data streams and symlink/junction targets are not (links are recorded without content).
   Linux: content, permissions, owner (restored when running as root), modification time and
@@ -179,7 +188,7 @@ Priorities only take effect when something else competes for the resource, so on
 
 1. Repository format, file backup/restore/verify, CLI (done)
 2. Saved jobs, scheduling, resource controls, Qt frontend on Windows, retention
-   (`forget`/`prune`), repository locks (done); next: VSS snapshots
+   (`forget`/`prune`), repository locks, Volume Shadow Copy (done)
 3. Linux port: build and test the existing POSIX platform layer, systemd timers and the frontend
 4. S3-compatible cloud backend (Cloudflare R2, Backblaze B2, MinIO)
 5. Volume image backup, restore to a volume or `.vhdx`

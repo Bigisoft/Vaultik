@@ -197,15 +197,30 @@ void RepoLock::release() {
     }
 }
 
+bool RepoLock::held() {
+    if (lost_) return false;
+    try {
+        if (!repo_.backend().exists(name_)) lost_ = true;
+    } catch (const Error&) {
+        // Cannot tell (for example a network hiccup): the refresh thread keeps checking.
+    }
+    return !lost_;
+}
+
 void RepoLock::refresh_loop() {
-    const auto interval = std::chrono::seconds(kLockRefreshTicks / 10'000'000ull);
     std::unique_lock lock(mu_);
-    while (!cv_.wait_for(lock, interval, [this] { return stop_; })) {
-        info_.time = os::now();
+    std::uint64_t last_write = info_.time;
+    while (!cv_.wait_for(lock, std::chrono::minutes(1), [this] { return stop_; })) {
+        // Never write back a lock that someone removed: that run may be deleting data now.
+        if (!held()) return;
+        const std::uint64_t now = os::now();
+        if (now - last_write < kLockRefreshTicks) continue;
+        info_.time = now;
         try {
             write_lock(repo_, name_, info_);
+            last_write = now;
         } catch (const Error&) {
-            // Try again next time; the lock only goes stale after several missed refreshes.
+            // Try again next minute; the lock only goes stale after many missed refreshes.
         }
     }
 }

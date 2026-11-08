@@ -178,6 +178,12 @@ QWidget* JobDialog::build_sources() {
     });
     connect(remove_ex, &QPushButton::clicked, this, [this] { qDeleteAll(excludes_->selectedItems()); });
     layout->addWidget(row({add_ex, remove_ex}));
+
+#ifdef _WIN32
+    vss_ = new QCheckBox(tr("Back up open and locked files too (Volume Shadow Copy; only when Vaultik "
+                            "runs with administrator rights, otherwise such files are skipped)"));
+    layout->addWidget(vss_);
+#endif
     return page;
 }
 
@@ -314,6 +320,7 @@ void JobDialog::load(const jobs::Job& job) {
     for (const auto& s : job.sources) sources_->addItem(qs(s));
     excludes_->clear();
     for (const auto& e : job.excludes) excludes_->addItem(qs(e));
+    if (vss_ != nullptr) vss_->setChecked(job.vss);
 
     schedule_kind_->setCurrentIndex(static_cast<int>(job.schedule.kind));
     time_->setTime(QTime(job.schedule.hour, job.schedule.minute));
@@ -355,6 +362,7 @@ jobs::Job JobDialog::collect() const {
     for (const QString& s : items_of(sources_)) j.sources.push_back(u8(s));
     j.excludes.clear();
     for (const QString& e : items_of(excludes_)) j.excludes.push_back(u8(e));
+    if (vss_ != nullptr) j.vss = vss_->isChecked();
 
     j.schedule.kind = static_cast<jobs::Schedule::Kind>(schedule_kind_->currentIndex());
     if (j.schedule.kind == jobs::Schedule::Kind::Hourly) {

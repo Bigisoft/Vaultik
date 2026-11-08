@@ -121,6 +121,8 @@ private:
     void warn(const std::string& message);
     void report(bool force = false);
     void check_cancel();
+    // The path to do I/O on for a real path (a shadow copy, or the path itself).
+    std::string io(const std::string& path) const { return options_.read_path ? options_.read_path(path) : path; }
 
     Repository& repo_;
     const BackupOptions& options_;
@@ -239,7 +241,7 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
     }
 
     os::ErrorCode err = 0;
-    os::File file = os::File::open_source(path, err);
+    os::File file = os::File::open_source(io(path), err);
     if (!file.valid()) {
         warn("skipped " + path + ": " + os::error_message(err));
         return false;
@@ -281,7 +283,7 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
         case os::EntryType::Symlink: {
             node.kind = NodeKind::Symlink;
             node.size = 0;
-            const os::ErrorCode err = os::read_symlink(path, node.link_target);
+            const os::ErrorCode err = os::read_symlink(io(path), node.link_target);
             if (err != 0) {
                 warn("cannot read link " + path + ": " + os::error_message(err));
                 return false;
@@ -293,7 +295,7 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
             node.kind = NodeKind::Dir;
             node.size = 0;
             // Another file system mounted here: skip kernel pseudo file systems such as /proc.
-            if (info.device != parent_device && os::is_pseudo_filesystem(path)) {
+            if (info.device != parent_device && os::is_pseudo_filesystem(io(path))) {
                 ++stats_.skipped;
                 node.subtree = save_virtual(VirtualDir{});
                 return true;
@@ -315,7 +317,7 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
 
 Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, const Tree* parent) {
     Tree tree;
-    os::DirReader reader(dir);
+    os::DirReader reader(io(dir));
     if (!reader.ok()) {
         warn("cannot list " + dir + ": " + os::error_message(reader.error()));
         return tree;
@@ -385,12 +387,12 @@ BackupResult BackupEngine::run() {
     for (const Source& s : sources) {
         os::FileInfo info;
         os::ErrorCode err = 0;
-        if (!os::stat(s.full, info, err)) {
+        if (!os::stat(io(s.full), info, err)) {
             warn("cannot back up " + s.full + ": " + os::error_message(err));
             continue;
         }
         // A source named explicitly is followed even if it is a link to a folder.
-        if (info.type != os::EntryType::Dir && info.type != os::EntryType::File && os::is_directory(s.full))
+        if (info.type != os::EntryType::Dir && info.type != os::EntryType::File && os::is_directory(io(s.full)))
             info.type = os::EntryType::Dir;
 
         if (s.comps.empty()) {
@@ -414,6 +416,7 @@ BackupResult BackupEngine::run() {
 
     snap.tree = save_virtual(root);
     repo_.flush();
+    if (options_.before_save) options_.before_save();
     stats_.stored_bytes = repo_.write_stats().stored_bytes_added - before.stored_bytes_added;
     snap.stats = stats_;
     report(true);

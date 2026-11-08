@@ -31,10 +31,17 @@ struct BackupOptions {
     std::optional<Id> parent;
     bool use_parent = true;
 
+    // Where to read a path from (for example inside a shadow copy). Snapshot paths, excludes and
+    // messages always use the real path. Unset: read the path itself.
+    std::function<std::string(const std::string&)> read_path;
+
     std::function<void(const BackupProgress&)> on_progress;  // called at most ~5 times per second
     std::function<void(const std::string&)> on_warning;
     // Polled between files; returning true stops the backup with a Cancelled error.
     std::function<bool()> should_cancel;
+    // Called just before the snapshot is saved; may throw to discard it (for example when the
+    // repository lock was lost and data the snapshot relies on may have been pruned).
+    std::function<void()> before_save;
 };
 
 struct BackupResult {

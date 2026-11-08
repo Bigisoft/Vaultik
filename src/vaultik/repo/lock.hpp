@@ -7,6 +7,7 @@
 // because they delete data that a concurrent run could be relying on. A holder refreshes its lock
 // every few minutes, so the lock of a run that crashed or lost power goes stale and is ignored.
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -75,10 +76,17 @@ public:
     // Removes the lock now (also done by the destructor).
     void release();
 
+    // False once the lock file has disappeared: another run judged it stale (this computer slept
+    // or hung for a long time) and may have deleted data since. Checked by the refresh thread
+    // every minute; held() checks the repository right now.
+    bool lost() const { return lost_.load(); }
+    bool held();
+
 private:
     void refresh_loop();
 
     Repository& repo_;
+    std::atomic<bool> lost_{false};
     std::string name_;
     LockInfo info_;
     std::mutex mu_;

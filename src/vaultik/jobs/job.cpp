@@ -136,6 +136,7 @@ std::string to_json(const Job& job) {
         {"sources", job.sources},
         {"excludes", job.excludes},
         {"tags", job.tags},
+        {"vss", job.vss},
         {"schedule",
          {{"kind", to_string(job.schedule.kind)},
           {"hour", job.schedule.hour},
@@ -172,6 +173,7 @@ Job job_from_json(const std::string& text) {
         job.sources = strings(j, "sources");
         job.excludes = strings(j, "excludes");
         job.tags = strings(j, "tags");
+        job.vss = j.value("vss", true);
         if (j.contains("schedule")) {
             const json& s = j.at("schedule");
             job.schedule.kind = kind_from(s.value("kind", std::string("manual")));

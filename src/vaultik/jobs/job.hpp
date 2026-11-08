@@ -33,6 +33,9 @@ struct Job {
     std::vector<std::string> sources;
     std::vector<std::string> excludes;
     std::vector<std::string> tags;
+    // Windows: read from a Volume Shadow Copy when the run has administrator rights, so open and
+    // locked files are backed up too. Without the rights the files are read live.
+    bool vss = true;
     Schedule schedule;
     ResourcePolicy resources;
     // Old snapshots of this job to remove after each run (then unused data is pruned). Empty keeps

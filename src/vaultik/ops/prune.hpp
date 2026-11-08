@@ -66,6 +66,9 @@ struct PruneOptions {
     double repack_unused = 0.25;
     std::function<void(const std::string&)> on_progress;
     std::function<void(const std::string&)> on_warning;
+    // Called after the new packs are written and before anything is deleted; may throw to stop
+    // (for example when the exclusive lock was lost).
+    std::function<void()> before_delete;
 };
 
 struct PruneResult {

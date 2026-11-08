@@ -307,6 +307,7 @@ PruneResult run_prune(Repository& repo, const PruneOptions& o) {
     }
     repo.flush();  // the new packs and an index file for them
     r.packs_written = repo.write_stats().packs_written - before.packs_written;
+    if (o.before_delete) o.before_delete();
 
     // 4b. A fresh index for the packs that stay, then 4c the old index files, then 4d the packs.
     progress("writing the new index");

@@ -32,6 +32,7 @@
 #include "vaultik/repo/repository.hpp"
 #include "vaultik/util/resources.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/platform/vss.hpp"
 
 #ifdef _WIN32
 #include "vaultik/util/win.hpp"
@@ -64,6 +65,11 @@ Commands:
       --tag <tag>              Label the snapshot (repeatable)
       --no-parent              Re-read every file instead of reusing unchanged ones
       --parent <snapshot>      Compare against this snapshot instead of the latest
+      --vss <mode>             Windows: read from a Volume Shadow Copy, so open and
+                               locked files are included and everything is from one
+                               moment. auto (default): when running as administrator,
+                               otherwise read live with a warning; on: required;
+                               off: never. run-job follows the job's setting
   snapshots                    List snapshots
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
   restore <snapshot>           Restore files
@@ -152,7 +158,7 @@ struct Args {
 const std::set<std::string> kValueOptions = {
     "--repo",     "--tag", "--exclude", "--target",    "--path",       "--password-file",
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
-    "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--keep-last",
+    "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all"};
@@ -379,9 +385,16 @@ RetentionPolicy retention_arg(const Args& a) {
     return p;
 }
 
-PruneResult prune_and_report(Repository& repo, bool dry_run) {
+constexpr char kLockLost[] =
+    "the repository lock was lost (this computer was probably asleep or stalled for a long time and "
+    "another run took over); stopped without saving";
+
+PruneResult prune_and_report(Repository& repo, RepoLock& lock, bool dry_run) {
     PruneOptions o;
     o.dry_run = dry_run;
+    o.before_delete = [&lock] {
+        if (!lock.held()) throw LockedError(kLockLost);
+    };
     o.on_progress = [](const std::string& msg) {
         if (!g_json) status("Prune: " + msg + "...");
     };
@@ -465,9 +478,58 @@ int cmd_init(const Args& a) {
     return kExitOk;
 }
 
+enum class VssMode { Off, Auto, On };
+
+// --vss auto|on|off. Auto (the Windows default) uses a shadow copy when it can be made.
+VssMode vss_arg(const Args& a, VssMode fallback) {
+    const auto v = a.value("--vss");
+    if (!v) return fallback;
+    if (*v == "auto") return VssMode::Auto;
+    if (*v == "on") return VssMode::On;
+    if (*v == "off") return VssMode::Off;
+    throw Error("--vss takes auto, on or off");
+}
+
+#ifdef _WIN32
+constexpr VssMode kDefaultVss = VssMode::Auto;
+#else
+constexpr VssMode kDefaultVss = VssMode::Off;
+#endif
+
+// Makes shadow copies of the source volumes and points the backup's reads at them. The returned
+// object must outlive the backup. Auto falls back to reading live with a warning.
+std::unique_ptr<os::ShadowCopy> prepare_shadow_copy(VssMode mode, BackupOptions& o) {
+    if (mode == VssMode::Off) return nullptr;
+    std::vector<std::string> full;
+    for (const std::string& p : o.paths) full.push_back(os::absolute_path(p));
+    if (!g_json) status("Creating a shadow copy...");
+    std::unique_ptr<os::ShadowCopy> sc;
+    try {
+        sc = os::ShadowCopy::create(full);
+    } catch (const Error& e) {
+        if (!g_json) clear_status();
+        if (mode == VssMode::On) throw;
+        warning(std::string("reading files live, without a shadow copy (open or locked files may be skipped): ") +
+                e.what());
+        return nullptr;
+    }
+    if (!g_json) clear_status();
+    for (const std::string& s : sc->skipped()) warning("no shadow copy for " + s + "; read live");
+    if (sc->volumes().empty()) return nullptr;
+    if (!g_json) {
+        std::string list;
+        for (const std::string& v : sc->volumes()) list += (list.empty() ? "" : ", ") + v;
+        err("Reading from a shadow copy of " + list + "\n");
+    }
+    const os::ShadowCopy* raw = sc.get();
+    o.read_path = [raw](const std::string& p) { return raw->map(p); };
+    return sc;
+}
+
 // Runs a backup with console or JSON reporting. Fills `record` with the outcome (also on failure,
-// before rethrowing) and returns the exit code.
-int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record) {
+// before rethrowing) and returns the exit code. `lock` is the shared lock held for it.
+int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
+                      RepoLock& lock, VssMode vss) {
     // Never back up the repository into itself.
     const std::string repo_full = os::absolute_path(repo_location);
     o.excludes.push_back(repo_full);
@@ -491,13 +553,23 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
                format_bytes(p.new_bytes) + "  " + p.current);
     };
     o.on_warning = [](const std::string& msg) { warning(msg); };
-    o.should_cancel = [] { return g_cancel.load(); };
+    o.should_cancel = [&lock] { return g_cancel.load() || lock.lost(); };
+    o.before_save = [&lock] {
+        if (!lock.held()) throw LockedError(kLockLost);
+    };
 
     BackupResult r;
+    std::unique_ptr<os::ShadowCopy> shadow;
     try {
+        shadow = prepare_shadow_copy(vss, o);
         r = run_backup(repo, o);
     } catch (const Cancelled&) {
         record.finished = os::now();
+        if (lock.lost()) {
+            record.status = jobs::RunStatus::Failed;
+            record.message = kLockLost;
+            throw LockedError(kLockLost);
+        }
         record.status = jobs::RunStatus::Cancelled;
         record.message = "cancelled";
         throw;
@@ -554,6 +626,7 @@ int cmd_backup(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik backup -r <repo> <path>...");
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "backup", lock_wait(a));
+    repo->reload_index();  // a prune may have finished before the lock was granted
 
     BackupOptions o;
     o.paths = a.positional;
@@ -562,7 +635,7 @@ int cmd_backup(const Args& a) {
     o.use_parent = !a.has("--no-parent");
     if (auto p = a.value("--parent")) o.parent = resolve_snapshot(*repo, *p).id;
     jobs::RunRecord record;
-    return backup_and_report(*repo, std::move(o), repo_path(a), record);
+    return backup_and_report(*repo, std::move(o), repo_path(a), record, lock, vss_arg(a, kDefaultVss));
 }
 
 int cmd_jobs(const Args& /*a*/) {
@@ -615,7 +688,7 @@ std::string clean_up(Repository& repo, const jobs::Job& job) {
         const ForgetResult fr = run_forget(repo, fo);
         if (!g_json) clear_status();
         if (fr.removed == 0) return {};
-        const PruneResult pr = prune_and_report(repo, false);
+        const PruneResult pr = prune_and_report(repo, lock, false);
         const std::string note = "removed " + std::to_string(fr.removed) + " old snapshot(s), freed " +
                                  format_bytes(space_freed(pr));
         if (g_json) {
@@ -675,7 +748,9 @@ int cmd_run_job(const Args& a) {
             // A scheduled run waits a while for a prune of the same repository to finish.
             RepoLock lock(*repo, RepoLock::Mode::Shared, "backup (job " + job->id + ")",
                           lock_wait(a, std::chrono::minutes(10)));
-            code = backup_and_report(*repo, std::move(o), job->repository, record);
+            repo->reload_index();  // a prune may have finished before the lock was granted
+            code = backup_and_report(*repo, std::move(o), job->repository, record, lock,
+                                     vss_arg(a, job->vss ? kDefaultVss : VssMode::Off));
         }
         if (!job->retention.empty()) {
             const std::string note = clean_up(*repo, *job);
@@ -721,7 +796,7 @@ int cmd_forget(const Args& a) {
             (fo.dry_run ? "would be removed" : "removed") + " (keeping " + describe(fo.policy) + ")\n");
     }
     if (a.has("--prune") && fr.removed > 0 && !fo.dry_run) {
-        const PruneResult pr = prune_and_report(*repo, false);
+        const PruneResult pr = prune_and_report(*repo, lock, false);
         if (g_json) {
             emit({{"event", "prune"}, {"freed", space_freed(pr)}});
         } else {
@@ -736,7 +811,7 @@ int cmd_prune(const Args& a) {
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Exclusive, "prune", lock_wait(a));
     const auto start = std::chrono::steady_clock::now();
-    const PruneResult r = prune_and_report(*repo, dry);
+    const PruneResult r = prune_and_report(*repo, lock, dry);
     if (g_json) {
         emit({{"event", "done"},
               {"status", "success"},
@@ -816,6 +891,7 @@ int cmd_ls(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik ls -r <repo> <snapshot> [path]");
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "ls", lock_wait(a));
+    repo->reload_index();  // a prune may have finished before the lock was granted
     const SnapshotRef ref = resolve_snapshot(*repo, a.positional[0]);
     const std::string path = a.positional.size() > 1 ? a.positional[1] : std::string();
     Node node;
@@ -838,6 +914,7 @@ int cmd_restore(const Args& a) {
     if (!target) throw Error("restore needs --target <folder>");
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "restore", lock_wait(a));
+    repo->reload_index();  // a prune may have finished before the lock was granted
     const SnapshotRef ref = resolve_snapshot(*repo, a.positional[0]);
 
     RestoreOptions o;
@@ -884,6 +961,7 @@ int cmd_restore(const Args& a) {
 int cmd_verify(const Args& a) {
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "verify", lock_wait(a));
+    repo->reload_index();  // a prune may have finished before the lock was granted
     VerifyOptions o;
     o.read_data = a.has("--read-data");
     o.on_progress = [](const std::string& msg) { status("Checking " + msg); };
