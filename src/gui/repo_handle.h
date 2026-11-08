@@ -1,0 +1,30 @@
+#pragma once
+
+#include <QObject>
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "vaultik/crypto/hash.hpp"
+#include "vaultik/model/snapshot.hpp"
+#include "vaultik/repo/repository.hpp"
+
+struct SnapshotEntry {
+    vaultik::Id id{};
+    vaultik::Snapshot snapshot;
+};
+
+// Opens a job's repository on a worker thread (key derivation and index loading take a moment,
+// longer on a USB disk) and lists its snapshots, newest first. The opened repository is then
+// used from the UI thread only.
+class RepoHandle : public QObject {
+    Q_OBJECT
+
+public:
+    using Done = std::function<void(std::shared_ptr<vaultik::Repository>, std::vector<SnapshotEntry>, QString error)>;
+
+    // Calls `done` on the UI thread. `context` going away cancels the callback.
+    static void open_async(QObject* context, std::string repository, std::string password, Done done);
+};

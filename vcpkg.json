@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "vaultik",
+  "version-string": "0.2.0",
+  "description": "Lightweight deduplicating, compressing, encrypted backup tool for Windows and Linux",
+  "builtin-baseline": "ec48c11eae9448c8c6e7739d93e06fa2433aa95f",
+  "dependencies": [
+    "zstd",
+    "blake3",
+    "doctest",
+    "nlohmann-json",
+    { "name": "openssl", "platform": "linux" }
+  ],
+  "features": {
+    "gui": {
+      "description": "Qt 6 Widgets frontend (on Linux the system Qt is used instead)",
+      "dependencies": [
+        {
+          "name": "qtbase",
+          "default-features": false,
+          "features": [ "gui", "widgets", "png" ],
+          "platform": "windows"
+        }
+      ]
+    }
+  }
+}
