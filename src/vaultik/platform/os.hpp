@@ -143,7 +143,8 @@ public:
     static File open_random(const std::string& path, ErrorCode& err);
     // Appends to a file, creating it if missing. `mode` as for create.
     static File open_append(const std::string& path, ErrorCode& err, std::uint32_t mode = 0644);
-    // New file for writing. Without `overwrite` it fails with is_exists(err) if present.
+    // New file for writing. Without `overwrite` it fails with is_exists(err) if present; with it,
+    // an existing file or link is deleted and a new file created (never written through).
     // `mode` sets POSIX permissions (ignored on Windows).
     static File create(const std::string& path, bool overwrite, ErrorCode& err, std::uint32_t mode = 0644);
 

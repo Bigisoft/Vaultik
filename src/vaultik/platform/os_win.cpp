@@ -315,41 +315,16 @@ File File::open_append(const std::string& path, ErrorCode& err, std::uint32_t /*
 
 File File::create(const std::string& path, bool overwrite, ErrorCode& err, std::uint32_t /*mode*/) {
     constexpr DWORD kFlags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN;
-    // CREATE_NEW never follows a link at `path` (it fails because something exists).
-    if (!overwrite) return File(open_handle(path, GENERIC_WRITE, 0, CREATE_NEW, kFlags, err));
-    // CREATE_ALWAYS would write through a link, and FILE_FLAG_OPEN_REPARSE_POINT cannot be combined
-    // with it. So open the existing entry itself, refuse links and folders, and truncate it; or
-    // create it when there is nothing yet.
+    // CREATE_NEW never follows a link at `path` (it fails because something exists). To overwrite,
+    // the old entry is deleted first rather than truncated: DeleteFileW removes a link itself, not
+    // its target, and a fresh file cannot be a hard link to some other file.
     for (int attempt = 0; attempt < 3; ++attempt) {
-        File f(open_handle(path, GENERIC_WRITE, 0, OPEN_EXISTING, kFlags | FILE_FLAG_OPEN_REPARSE_POINT, err));
-        if (f.valid()) {
-            FILE_ATTRIBUTE_TAG_INFO tag{};
-            if (!GetFileInformationByHandleEx(as_handle(f.h_), FileAttributeTagInfo, &tag, sizeof tag)) {
-                err = GetLastError();
-                return File();
-            }
-            if ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
-                ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && is_link_tag(tag.ReparseTag))) {
-                err = ERROR_STOPPED_ON_SYMLINK;
-                return File();
-            }
-            if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                // Not a link (deduplicated, cloud or compressed file): let the file system replace
-                // it as a whole, which needs its filter and so the normal open.
-                f.close();
-                return File(open_handle(path, GENERIC_WRITE, 0, CREATE_ALWAYS, kFlags, err));
-            }
-            FILE_END_OF_FILE_INFO eof{};
-            if (!SetFileInformationByHandle(as_handle(f.h_), FileEndOfFileInfo, &eof, sizeof eof)) {
-                err = GetLastError();
-                return File();
-            }
-            return f;
+        File f(open_handle(path, GENERIC_WRITE, 0, CREATE_NEW, kFlags, err));
+        if (f.valid() || !overwrite || !is_exists(err)) return f;
+        if (!DeleteFileW(native(path).c_str())) {
+            err = GetLastError();
+            if (!is_not_found(err)) return File();  // a folder, or not ours to delete
         }
-        if (!is_not_found(err)) return File();
-        File n(open_handle(path, GENERIC_WRITE, 0, CREATE_NEW, kFlags, err));
-        if (n.valid() || !is_exists(err)) return n;
-        // Created by someone else in between: look at it again.
     }
     return File();
 }

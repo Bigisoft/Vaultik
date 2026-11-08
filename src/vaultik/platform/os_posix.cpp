@@ -318,15 +318,24 @@ File File::open_append(const std::string& path, ErrorCode& err, std::uint32_t mo
 }
 
 File File::create(const std::string& path, bool overwrite, ErrorCode& err, std::uint32_t mode) {
-    // Never write through a link: with overwrite, a symlink at `path` fails with ELOOP.
-    const int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | (overwrite ? O_TRUNC : O_EXCL);
-    const int fd = retry([&] { return ::open(path.c_str(), flags, static_cast<mode_t>(mode)); });
-    if (fd < 0) {
+    // O_EXCL never follows a link at `path`. To overwrite, the old entry is unlinked first rather
+    // than truncated: unlink removes a link itself, not its target, and a fresh file cannot be a
+    // hard link to some other file.
+    constexpr int kFlags = O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        const int fd = retry([&] { return ::open(path.c_str(), kFlags, static_cast<mode_t>(mode)); });
+        if (fd >= 0) {
+            err = 0;
+            return File(fd);
+        }
         err = static_cast<ErrorCode>(errno);
-        return File();
+        if (!overwrite || err != EEXIST) return File();
+        if (::unlink(path.c_str()) != 0 && errno != ENOENT) {
+            err = static_cast<ErrorCode>(errno);  // a folder, or not ours to delete
+            return File();
+        }
     }
-    err = 0;
-    return File(fd);
+    return File();
 }
 
 bool File::valid() const {
