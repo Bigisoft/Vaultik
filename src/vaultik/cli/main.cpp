@@ -23,9 +23,11 @@
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/backup.hpp"
+#include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/local_backend.hpp"
+#include "vaultik/repo/lock.hpp"
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/repo/repository.hpp"
 #include "vaultik/util/resources.hpp"
@@ -39,7 +41,7 @@ namespace vaultik::cli {
 
 namespace {
 
-constexpr char kVersion[] = "0.1.0";
+constexpr char kVersion[] = "0.2.0";
 
 // Exit codes.
 constexpr int kExitOk = 0;
@@ -47,6 +49,7 @@ constexpr int kExitError = 1;
 constexpr int kExitAuth = 2;
 constexpr int kExitPartial = 3;  // finished, but some files could not be read or written
 constexpr int kExitCancelled = 4;
+constexpr int kExitLocked = 5;  // another run holds a conflicting repository lock
 
 constexpr char kUsage[] = R"(Vaultik - deduplicating, compressed, encrypted backups
 
@@ -70,6 +73,22 @@ Commands:
   verify                       Check repository structure and snapshots
       --read-data              Also read and decrypt every stored chunk
   stats                        Repository size and deduplication summary
+  forget                       Remove old snapshots by a keep policy; each rule
+                               keeps the newest snapshot of each of the last N
+                               periods (local time), applied per job, or per
+                               computer and paths for snapshots made without one
+      --keep-last <n>          The n newest snapshots
+      --keep-hourly <n>        One per hour   --keep-daily <n>    One per day
+      --keep-weekly <n>        One per week   --keep-monthly <n>  One per month
+      --keep-yearly <n>        One per year
+      --tag <tag>              Only snapshots with this tag (repeatable), e.g.
+                               job:documents
+      --prune                  Run prune afterwards
+      --dry-run                Only show what would be removed
+  prune                        Delete data no snapshot uses any more
+      --dry-run                Only show what would be deleted
+  unlock                       Remove locks left by runs that ended abnormally
+      --all                    Remove every lock (only when no other run is active)
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
                                sources, destination, password and resource
@@ -100,11 +119,14 @@ Options:
   --password-file <file>       Read the password from a file (or set VAULTIK_PASSWORD)
   --json                       Machine-readable output: one JSON event per line;
                                a line "cancel" on stdin stops a backup or restore
+  --lock-wait <time>           When another run holds the repository (prune holds
+                               it alone), wait this long for it, e.g. 30s, 10m
+                               (default: do not wait; run-job: 10m)
   -h, --help                   Show this help
   --version                    Show the version
 
 Exit codes: 0 ok, 1 error, 2 wrong password or damaged data, 3 finished with skipped files,
-4 cancelled.
+4 cancelled, 5 repository in use by another run.
 )";
 
 struct Args {
@@ -130,9 +152,10 @@ struct Args {
 const std::set<std::string> kValueOptions = {
     "--repo",     "--tag", "--exclude", "--target",    "--path",       "--password-file",
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
-    "--max-memory", "--read-limit", "--write-limit", "--job"};
-const std::set<std::string> kFlagOptions = {"--json", "--no-parent", "--overwrite", "--read-data", "--recursive",
-                                              "--help",      "--version"};
+    "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--keep-last",
+    "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
+const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
+                                              "--help",    "--version",   "--dry-run",   "--prune",     "--all"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -309,6 +332,69 @@ std::unique_ptr<Repository> open_repo(const Args& a) {
     return repo;
 }
 
+// --lock-wait: "90", "30s", "10m" or "2h".
+std::chrono::seconds lock_wait(const Args& a, std::chrono::seconds fallback = std::chrono::seconds(0)) {
+    const auto v = a.value("--lock-wait");
+    if (!v) return fallback;
+    std::string s = *v;
+    long long unit = 1;
+    if (!s.empty()) {
+        const char u = static_cast<char>(std::tolower(static_cast<unsigned char>(s.back())));
+        if (u == 's' || u == 'm' || u == 'h') {
+            unit = u == 's' ? 1 : u == 'm' ? 60 : 3600;
+            s.pop_back();
+        }
+    }
+    try {
+        std::size_t used = 0;
+        const long long n = std::stoll(s, &used);
+        if (used == s.size() && n >= 0 && n <= 7 * 24 * 3600) return std::chrono::seconds(n * unit);
+    } catch (const std::exception&) {
+    }
+    throw Error("invalid --lock-wait value " + *v + " (use for example 30s or 10m)");
+}
+
+RetentionPolicy retention_arg(const Args& a) {
+    RetentionPolicy p;
+    auto count = [&](const char* key, int& out) {
+        const auto v = a.value(key);
+        if (!v) return;
+        try {
+            std::size_t used = 0;
+            const int n = std::stoi(*v, &used);
+            if (used == v->size() && n >= 0) {
+                out = n;
+                return;
+            }
+        } catch (const std::exception&) {
+        }
+        throw Error(std::string("invalid value for ") + key + ": " + *v);
+    };
+    count("--keep-last", p.last);
+    count("--keep-hourly", p.hourly);
+    count("--keep-daily", p.daily);
+    count("--keep-weekly", p.weekly);
+    count("--keep-monthly", p.monthly);
+    count("--keep-yearly", p.yearly);
+    return p;
+}
+
+PruneResult prune_and_report(Repository& repo, bool dry_run) {
+    PruneOptions o;
+    o.dry_run = dry_run;
+    o.on_progress = [](const std::string& msg) {
+        if (!g_json) status("Prune: " + msg + "...");
+    };
+    o.on_warning = [](const std::string& msg) { warning(msg); };
+    PruneResult r = run_prune(repo, o);
+    if (!g_json) clear_status();
+    return r;
+}
+
+std::uint64_t space_freed(const PruneResult& r) {
+    return r.bytes_deleted > r.bytes_written ? r.bytes_deleted - r.bytes_written : 0;
+}
+
 struct SnapshotRef {
     Id id{};
     Snapshot snapshot;
@@ -467,6 +553,7 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
 int cmd_backup(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik backup -r <repo> <path>...");
     auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "backup", lock_wait(a));
 
     BackupOptions o;
     o.paths = a.positional;
@@ -515,6 +602,40 @@ int cmd_schedule(const Args& a, bool install) {
     return kExitOk;
 }
 
+// After a job's backup: removes its snapshots beyond its retention, then the data nothing uses any
+// more. Never fails the run; a problem becomes a warning and a note for the history.
+std::string clean_up(Repository& repo, const jobs::Job& job) {
+    try {
+        // Exclusive, without waiting: if another run is busy, cleaning up can wait for next time.
+        RepoLock lock(repo, RepoLock::Mode::Exclusive, "cleanup (job " + job.id + ")");
+        if (!g_json) status("Removing old snapshots...");
+        ForgetOptions fo;
+        fo.policy = job.retention;
+        fo.tags = {"job:" + job.id};
+        const ForgetResult fr = run_forget(repo, fo);
+        if (!g_json) clear_status();
+        if (fr.removed == 0) return {};
+        const PruneResult pr = prune_and_report(repo, false);
+        const std::string note = "removed " + std::to_string(fr.removed) + " old snapshot(s), freed " +
+                                 format_bytes(space_freed(pr));
+        if (g_json) {
+            emit({{"event", "cleanup"}, {"removed", fr.removed}, {"freed", space_freed(pr)}, {"message", note}});
+        } else {
+            out("Cleanup: " + note + " (keeping " + describe(job.retention) + ")\n");
+        }
+        return note;
+    } catch (const LockedError&) {
+        const std::string note = "old snapshots were not removed this time: another run is using the repository";
+        warning(note);
+        return note;
+    } catch (const std::exception& e) {
+        if (!g_json) clear_status();
+        const std::string note = std::string("removing old snapshots failed: ") + e.what();
+        warning(note);
+        return note;
+    }
+}
+
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
     const jobs::JobStore store;
@@ -550,7 +671,16 @@ int cmd_run_job(const Args& a) {
         o.excludes = job->excludes;
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
-        code = backup_and_report(*repo, std::move(o), job->repository, record);
+        {
+            // A scheduled run waits a while for a prune of the same repository to finish.
+            RepoLock lock(*repo, RepoLock::Mode::Shared, "backup (job " + job->id + ")",
+                          lock_wait(a, std::chrono::minutes(10)));
+            code = backup_and_report(*repo, std::move(o), job->repository, record);
+        }
+        if (!job->retention.empty()) {
+            const std::string note = clean_up(*repo, *job);
+            if (!note.empty()) record.message += (record.message.empty() ? "" : "; ") + note;
+        }
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the backup started
             record.finished = os::now();
@@ -565,6 +695,79 @@ int cmd_run_job(const Args& a) {
     }
     store.append_history(job->id, record);
     return code;
+}
+
+int cmd_forget(const Args& a) {
+    ForgetOptions fo;
+    fo.policy = retention_arg(a);
+    fo.tags = a.all("--tag");
+    fo.dry_run = a.has("--dry-run");
+    if (fo.policy.empty()) throw Error("give at least one --keep-... rule; forget never removes every snapshot");
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Exclusive, "forget", lock_wait(a));
+    const ForgetResult fr = run_forget(*repo, fo);
+
+    if (g_json) {
+        nlohmann::json list = nlohmann::json::array();
+        for (const ForgetDecision& d : fr.decisions)
+            list.push_back({{"id", id_hex(d.entry.id)}, {"time", d.entry.snapshot.time}, {"keep", d.keep}, {"reason", d.reason}});
+        emit({{"event", "forget"}, {"dry_run", fo.dry_run}, {"removed", fr.removed}, {"snapshots", list}});
+    } else {
+        for (const ForgetDecision& d : fr.decisions) {
+            out(std::string(d.keep ? "keep    " : (fo.dry_run ? "remove? " : "removed ")) + short_id(d.entry.id) + "  " +
+                os::format_time_local(d.entry.snapshot.time) + "  " + d.reason + "\n");
+        }
+        out(std::to_string(fr.removed) + " of " + std::to_string(fr.decisions.size()) + " snapshot(s) " +
+            (fo.dry_run ? "would be removed" : "removed") + " (keeping " + describe(fo.policy) + ")\n");
+    }
+    if (a.has("--prune") && fr.removed > 0 && !fo.dry_run) {
+        const PruneResult pr = prune_and_report(*repo, false);
+        if (g_json) {
+            emit({{"event", "prune"}, {"freed", space_freed(pr)}});
+        } else {
+            out("Prune: freed " + format_bytes(space_freed(pr)) + "\n");
+        }
+    }
+    return kExitOk;
+}
+
+int cmd_prune(const Args& a) {
+    const bool dry = a.has("--dry-run");
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Exclusive, "prune", lock_wait(a));
+    const auto start = std::chrono::steady_clock::now();
+    const PruneResult r = prune_and_report(*repo, dry);
+    if (g_json) {
+        emit({{"event", "done"},
+              {"status", "success"},
+              {"dry_run", dry},
+              {"packs", r.packs},
+              {"packs_deleted", r.packs_deleted},
+              {"packs_repacked", r.packs_repacked},
+              {"bytes_before", r.bytes_before},
+              {"freed", space_freed(r)}});
+        return kExitOk;
+    }
+    out(std::to_string(r.blobs_used) + " chunk(s) in use, " + std::to_string(r.blobs_unused) + " unused, in " +
+        std::to_string(r.packs) + " pack(s) (" + format_bytes(r.bytes_before) + ")\n");
+    if (dry) {
+        out("Would delete " + std::to_string(r.packs_deleted) + " pack(s) and rewrite " +
+            std::to_string(r.packs_repacked) + ", freeing about " + format_bytes(r.bytes_deleted) + "\n");
+        return kExitOk;
+    }
+    out("Deleted " + std::to_string(r.packs_deleted) + " pack(s), rewrote " + std::to_string(r.packs_repacked) +
+        " into " + std::to_string(r.packs_written) + "; freed " + format_bytes(space_freed(r)) + " in " +
+        format_duration(seconds_since(start)) + "\n");
+    return kExitOk;
+}
+
+int cmd_unlock(const Args& a) {
+    auto repo = open_repo(a);
+    const std::size_t removed = remove_locks(*repo, a.has("--all"));
+    out("Removed " + std::to_string(removed) + " lock(s)\n");
+    for (const LockEntry& e : list_locks(*repo))
+        out("still held: " + (e.info ? describe(*e.info) : e.name + " (unreadable)") + "\n");
+    return kExitOk;
 }
 
 int cmd_snapshots(const Args& a) {
@@ -612,6 +815,7 @@ void list_tree(Repository& repo, const Id& tree_id, const std::string& prefix, b
 int cmd_ls(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik ls -r <repo> <snapshot> [path]");
     auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "ls", lock_wait(a));
     const SnapshotRef ref = resolve_snapshot(*repo, a.positional[0]);
     const std::string path = a.positional.size() > 1 ? a.positional[1] : std::string();
     Node node;
@@ -633,6 +837,7 @@ int cmd_restore(const Args& a) {
     const auto target = a.value("--target");
     if (!target) throw Error("restore needs --target <folder>");
     auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "restore", lock_wait(a));
     const SnapshotRef ref = resolve_snapshot(*repo, a.positional[0]);
 
     RestoreOptions o;
@@ -678,6 +883,7 @@ int cmd_restore(const Args& a) {
 
 int cmd_verify(const Args& a) {
     auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "verify", lock_wait(a));
     VerifyOptions o;
     o.read_data = a.has("--read-data");
     o.on_progress = [](const std::string& msg) { status("Checking " + msg); };
@@ -759,6 +965,9 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "restore") return cmd_restore(a);
     if (a.command == "verify") return cmd_verify(a);
     if (a.command == "stats") return cmd_stats(a);
+    if (a.command == "forget") return cmd_forget(a);
+    if (a.command == "prune") return cmd_prune(a);
+    if (a.command == "unlock") return cmd_unlock(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }
 
@@ -785,6 +994,8 @@ int run_main(const std::vector<std::string>& args) {
         return fail("cancelled", "cancelled; no snapshot was saved", kExitCancelled);
     } catch (const vaultik::AuthError& e) {
         return fail("failed", e.what(), kExitAuth);
+    } catch (const vaultik::LockedError& e) {
+        return fail("failed", e.what(), kExitLocked);
     } catch (const vaultik::Error& e) {
         return fail("failed", e.what(), kExitError);
     } catch (const std::bad_alloc&) {

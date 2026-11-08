@@ -78,6 +78,7 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
     tabs->addTab(build_sources(), tr("What to back up"));
     tabs->addTab(build_schedule(), tr("Schedule"));
     tabs->addTab(build_resources(), tr("Resources"));
+    tabs->addTab(build_retention(), tr("Old backups"));
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, this, &JobDialog::accept);
@@ -94,6 +95,7 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
         jobs::Job defaults;
         defaults.schedule.kind = jobs::Schedule::Kind::Daily;
         defaults.resources = priority_preset("low");
+        defaults.retention = jobs::default_retention();
         load(defaults);
     }
 }
@@ -272,6 +274,39 @@ void JobDialog::update_schedule_fields() {
     days_row_->setEnabled(kind == jobs::Schedule::Kind::Weekly);
 }
 
+QWidget* JobDialog::build_retention() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+
+    retention_ = new QGroupBox(tr("Remove old backups automatically"));
+    retention_->setCheckable(true);
+    auto* form = new QFormLayout(retention_);
+    const QString off = tr("off");
+    keep_last_ = spin(0, 1000, QString(), off);
+    keep_hourly_ = spin(0, 1000, QString(), off);
+    keep_daily_ = spin(0, 1000, QString(), off);
+    keep_weekly_ = spin(0, 1000, QString(), off);
+    keep_monthly_ = spin(0, 1000, QString(), off);
+    keep_yearly_ = spin(0, 1000, QString(), off);
+    form->addRow(tr("Keep the newest:"), row({keep_last_, new QLabel(tr("backups"))}));
+    form->addRow(tr("Keep one per hour for:"), row({keep_hourly_, new QLabel(tr("hours"))}));
+    form->addRow(tr("Keep one per day for:"), row({keep_daily_, new QLabel(tr("days"))}));
+    form->addRow(tr("Keep one per week for:"), row({keep_weekly_, new QLabel(tr("weeks"))}));
+    form->addRow(tr("Keep one per month for:"), row({keep_monthly_, new QLabel(tr("months"))}));
+    form->addRow(tr("Keep one per year for:"), row({keep_yearly_, new QLabel(tr("years"))}));
+    layout->addWidget(retention_);
+
+    auto* note = new QLabel(tr(
+        "After each run, backups of this job that no rule keeps are removed, and the space only they "
+        "used is freed. A backup kept by any rule stays. Periods count only those that have a backup, "
+        "so a computer that was switched off for a while does not lose its older backups.\n\n"
+        "With this turned off, every backup is kept and the destination keeps growing."));
+    note->setWordWrap(true);
+    layout->addWidget(note);
+    layout->addStretch();
+    return page;
+}
+
 void JobDialog::load(const jobs::Job& job) {
     name_->setText(qs(job.name));
     repository_->setText(qs(job.repository));
@@ -300,6 +335,16 @@ void JobDialog::load(const jobs::Job& job) {
     max_memory_->setValue(static_cast<int>(r.max_memory >> 20));
     read_limit_->setValue(static_cast<int>(r.read_rate >> 20));
     write_limit_->setValue(static_cast<int>(r.write_rate >> 20));
+
+    // Turned off, the fields still show a sensible starting point for turning it on.
+    const RetentionPolicy& k = job.retention.empty() ? jobs::default_retention() : job.retention;
+    retention_->setChecked(!job.retention.empty());
+    keep_last_->setValue(k.last);
+    keep_hourly_->setValue(k.hourly);
+    keep_daily_->setValue(k.daily);
+    keep_weekly_->setValue(k.weekly);
+    keep_monthly_->setValue(k.monthly);
+    keep_yearly_->setValue(k.yearly);
 }
 
 jobs::Job JobDialog::collect() const {
@@ -331,6 +376,16 @@ jobs::Job JobDialog::collect() const {
     r.max_memory = static_cast<std::uint64_t>(max_memory_->value()) << 20;
     r.read_rate = static_cast<std::uint64_t>(read_limit_->value()) << 20;
     r.write_rate = static_cast<std::uint64_t>(write_limit_->value()) << 20;
+
+    j.retention = RetentionPolicy{};
+    if (retention_->isChecked()) {
+        j.retention.last = keep_last_->value();
+        j.retention.hourly = keep_hourly_->value();
+        j.retention.daily = keep_daily_->value();
+        j.retention.weekly = keep_weekly_->value();
+        j.retention.monthly = keep_monthly_->value();
+        j.retention.yearly = keep_yearly_->value();
+    }
     return j;
 }
 

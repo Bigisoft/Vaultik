@@ -44,10 +44,12 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/pack.cpp
     src/vaultik/repo/index.cpp
     src/vaultik/repo/local_backend.cpp
+    src/vaultik/repo/lock.cpp
     src/vaultik/repo/repository.cpp
     src/vaultik/ops/backup.cpp
     src/vaultik/ops/restore.cpp
     src/vaultik/ops/verify.cpp
+    src/vaultik/ops/prune.cpp
     src/vaultik/platform/os_common.cpp
     src/vaultik/jobs/job.cpp
     src/vaultik/jobs/scheduler.cpp
@@ -135,6 +137,7 @@ add_executable(vaultik_tests
     tests/test_formats.cpp
     tests/test_end_to_end.cpp
     tests/test_jobs.cpp
+    tests/test_prune.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 add_test(NAME vaultik_tests COMMAND vaultik_tests)

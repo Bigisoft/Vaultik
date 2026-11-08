@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "vaultik/ops/prune.hpp"
 #include "vaultik/util/resources.hpp"
 
 namespace vaultik::jobs {
@@ -34,7 +35,13 @@ struct Job {
     std::vector<std::string> tags;
     Schedule schedule;
     ResourcePolicy resources;
+    // Old snapshots of this job to remove after each run (then unused data is pruned). Empty keeps
+    // everything.
+    RetentionPolicy retention;
 };
+
+// The retention a new job starts with: 7 daily, 4 weekly and 12 monthly snapshots.
+RetentionPolicy default_retention();
 
 enum class RunStatus { Success, Partial, Failed, Cancelled };
 

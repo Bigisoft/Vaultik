@@ -66,6 +66,10 @@ Start `vaultik-gui`, then **New backup job**:
   Task Scheduler (Windows, task folder `\Vaultik`) or a systemd user timer (Linux), so Vaultik does
   not need to stay open; a run missed while the computer was off starts at the next chance.
 - **Resources:** a priority preset and optional hard limits (see below).
+- **Old backups:** how many backups to keep, for example one per day for 7 days, one per week
+  for 4 weeks and one per month for 12 months (the default for new jobs). After each run the
+  job's backups that no rule keeps are removed and the space only they used is freed. Turned off,
+  every backup is kept.
 
 The job page shows live progress, the run history (also of scheduled runs), and the snapshots.
 **Restore** opens a snapshot browser: pick a file or folder (or nothing, for everything) and
@@ -88,6 +92,8 @@ vaultik ls        -r E:\Backups\vaultik latest C/Users/me/Documents
 vaultik restore   -r E:\Backups\vaultik latest --target D:\Restore --path C/Users/me/Documents/report.docx
 vaultik verify    -r E:\Backups\vaultik --read-data
 vaultik stats     -r E:\Backups\vaultik
+vaultik forget    -r E:\Backups\vaultik --keep-daily 7 --keep-weekly 4 --keep-monthly 12 --prune
+vaultik prune     -r E:\Backups\vaultik
 vaultik jobs
 vaultik run-job   documents
 vaultik restore   --job documents latest --target D:\Restore
@@ -103,7 +109,26 @@ password from a saved job. Snapshot paths start with the drive letter (`C/...`) 
 a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses this.
 
 Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished but some files
-were skipped (see warnings), `4` cancelled.
+were skipped (see warnings), `4` cancelled, `5` repository in use by another run.
+
+### Old snapshots and space
+
+`forget` removes snapshots by keep rules (`--keep-last`, `--keep-hourly`, `--keep-daily`,
+`--keep-weekly`, `--keep-monthly`, `--keep-yearly`). Each rule keeps the newest snapshot of each
+of the last N periods that have one; a snapshot kept by any rule stays. Rules apply per job, or
+per computer and set of paths for snapshots made without a job; `--tag job:<id>` limits forget
+to one job. `--dry-run` shows the decision without removing anything. Removing snapshots frees
+no space by itself: `prune` (or `forget --prune`) then deletes the data no remaining snapshot
+uses, rewriting packs that are mostly unused.
+
+### Running side by side
+
+Backups, restores and checks of the same repository can run at the same time, also from several
+computers. `forget` and `prune` need the repository to themselves: they wait for nothing by
+default and stop with exit code 5 when another run is active (`--lock-wait 10m` waits instead;
+scheduled jobs wait up to 10 minutes). A run that crashes leaves a lock behind that expires after
+30 minutes, or at once on the same computer; `vaultik unlock` removes expired locks and
+`vaultik unlock --all` every lock.
 
 ## Resource use
 
@@ -145,15 +170,16 @@ Priorities only take effect when something else competes for the resource, so on
   symlinks are kept; extended attributes and ACLs are not. Kernel file systems (`/proc`, `/sys`,
   `/dev`, tmpfs) are skipped.
 - NTFS names that are not valid UTF-16 (unpaired surrogates, very rare) cannot be backed up.
-- No `forget`/`prune` yet, so the repository only grows.
-- No repository lock: do not run two backups into the same repository at the same time.
+- Restores and backups check for links planted in the folders they work on, but a parent folder
+  swapped for a link during the run by someone who can write there is not detected. Run elevated
+  restores into folders only you can write to.
 - Single-threaded; about 140 MB/s on a fresh backup, which is above USB HDD speeds anyway.
 
 ## Roadmap
 
 1. Repository format, file backup/restore/verify, CLI (done)
-2. Saved jobs, scheduling, resource controls, Qt frontend on Windows (done); next: VSS snapshots,
-   retention (`forget`/`prune`), repository lock
+2. Saved jobs, scheduling, resource controls, Qt frontend on Windows, retention
+   (`forget`/`prune`), repository locks (done); next: VSS snapshots
 3. Linux port: build and test the existing POSIX platform layer, systemd timers and the frontend
 4. S3-compatible cloud backend (Cloudflare R2, Backblaze B2, MinIO)
 5. Volume image backup, restore to a volume or `.vhdx`

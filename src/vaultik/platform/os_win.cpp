@@ -570,6 +570,18 @@ std::string username() {
     return user_name();
 }
 
+std::uint32_t process_id() {
+    return GetCurrentProcessId();
+}
+
+bool process_alive(std::uint32_t pid) {
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (h == nullptr) return GetLastError() != ERROR_INVALID_PARAMETER;  // access denied: it exists
+    const bool running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+    CloseHandle(h);
+    return running;
+}
+
 std::uint64_t now() {
     return now_filetime();
 }

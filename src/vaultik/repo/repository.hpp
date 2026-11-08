@@ -77,6 +77,26 @@ public:
     Snapshot load_snapshot(const Id& id);
     std::vector<Id> list_snapshot_ids();
 
+    // Adds an already sealed blob to the pack being built (prune repacking), even when the index
+    // has it elsewhere; the new location replaces the old one once the pack is written.
+    void copy_blob(BlobType type, const Id& id, ByteSpan sealed, std::uint32_t raw_len);
+
+    // Writes pending data, then reads the index files again: other runs may have added data since
+    // the repository was opened (prune does this once it holds its exclusive lock).
+    void reload_index();
+    // Adds a pack that no index file lists to the in-memory index (prune, after reading the
+    // pack's own header), so its blobs can be loaded.
+    void index_pack(const Id& pack_id, const std::vector<BlobEntry>& entries);
+
+    // Index files, for prune: their names ("index/<hex>"), one file's content, and a new file.
+    std::vector<std::string> list_index_files();
+    IndexFileContent read_index_file(const std::string& name);
+    void write_index_file(const IndexFileContent& content);
+
+    // A second cipher with the same key, for lock files: a lock is refreshed from its own thread
+    // while this object is busy, and AesGcm objects are not shared between threads.
+    const AesGcm& lock_aead() const { return *lock_aead_; }
+
     static std::string pack_name(const Id& pack_id);
     static std::string snapshot_name(const Id& id);
 
@@ -93,6 +113,7 @@ private:
     RepoConfig config_;
     FastCdc chunker_;
     std::unique_ptr<AesGcm> aead_;
+    std::unique_ptr<AesGcm> lock_aead_;
     KeyedHasher id_hasher_;
     ZstdCompressor compressor_;
     ZstdDecompressor decompressor_;

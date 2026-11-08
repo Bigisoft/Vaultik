@@ -30,6 +30,7 @@ private:
     QWidget* build_sources();
     QWidget* build_schedule();
     QWidget* build_resources();
+    QWidget* build_retention();
     void load(const vaultik::jobs::Job& job);
     vaultik::jobs::Job collect() const;
     void apply_preset(int index);
@@ -64,4 +65,12 @@ private:
     QSpinBox* max_memory_ = nullptr;
     QSpinBox* read_limit_ = nullptr;
     QSpinBox* write_limit_ = nullptr;
+
+    QGroupBox* retention_ = nullptr;  // checkable: off keeps every backup
+    QSpinBox* keep_last_ = nullptr;
+    QSpinBox* keep_hourly_ = nullptr;
+    QSpinBox* keep_daily_ = nullptr;
+    QSpinBox* keep_weekly_ = nullptr;
+    QSpinBox* keep_monthly_ = nullptr;
+    QSpinBox* keep_yearly_ = nullptr;
 };

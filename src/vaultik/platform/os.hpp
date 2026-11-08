@@ -220,6 +220,9 @@ void enable_restore_privileges();
 
 std::string hostname();
 std::string username();
+std::uint32_t process_id();
+// False only when no process with this id runs on this computer (unknown counts as running).
+bool process_alive(std::uint32_t pid);
 std::uint64_t now();
 // "2026-11-08 14:48:06" in local time; "-" for 0.
 std::string format_time_local(std::uint64_t time);

@@ -280,6 +280,9 @@ void MainWindow::show_job() {
         for (const auto& e : job->excludes) ex << qs(e).toHtmlEscaped();
         details += tr("<br><b>Skips:</b> %1").arg(ex.join(", "));
     }
+    details += tr("<br><b>Old backups:</b> %1")
+                   .arg(job->retention.empty() ? tr("all kept")
+                                               : tr("keeping %1").arg(qs(describe(job->retention))));
     details_->setText(details);
     set_running(runner_->running());
     refresh_history();

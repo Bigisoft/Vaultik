@@ -9,6 +9,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <signal.h>
 #include <unistd.h>
 
 #ifdef __linux__
@@ -551,6 +552,15 @@ std::string username() {
         return pw->pw_name;
     const std::string env = get_env("USER");
     return env.empty() ? "unknown" : env;
+}
+
+std::uint32_t process_id() {
+    return static_cast<std::uint32_t>(::getpid());
+}
+
+bool process_alive(std::uint32_t pid) {
+    if (pid == 0) return true;
+    return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
 }
 
 std::uint64_t now() {

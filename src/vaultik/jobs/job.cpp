@@ -97,6 +97,14 @@ std::string make_id(const std::string& name, const std::vector<std::string>& tak
     return id;
 }
 
+RetentionPolicy default_retention() {
+    RetentionPolicy p;
+    p.daily = 7;
+    p.weekly = 4;
+    p.monthly = 12;
+    return p;
+}
+
 void validate(const Job& job) {
     if (job.name.empty()) throw Error("the job needs a name");
     if (!job.id.empty() && !std::all_of(job.id.begin(), job.id.end(), is_id_char))
@@ -113,6 +121,9 @@ void validate(const Job& job) {
     if (job.resources.cpu_limit_percent > 100) throw Error("CPU limit must be between 1 and 100 percent");
     if (job.resources.max_memory != 0 && job.resources.max_memory < kMinMemoryLimit)
         throw Error("memory limit must be at least 128M");
+    const RetentionPolicy& k = job.retention;
+    for (const int n : {k.last, k.hourly, k.daily, k.weekly, k.monthly, k.yearly})
+        if (n < 0 || n > 10000) throw Error("retention counts must be between 0 and 10000");
 }
 
 std::string to_json(const Job& job) {
@@ -139,6 +150,13 @@ std::string to_json(const Job& job) {
           {"max_memory", r.max_memory},
           {"read_limit", r.read_rate},
           {"write_limit", r.write_rate}}},
+        {"retention",
+         {{"last", job.retention.last},
+          {"hourly", job.retention.hourly},
+          {"daily", job.retention.daily},
+          {"weekly", job.retention.weekly},
+          {"monthly", job.retention.monthly},
+          {"yearly", job.retention.yearly}}},
     };
     return j.dump(2) + "\n";
 }
@@ -171,6 +189,15 @@ Job job_from_json(const std::string& text) {
             job.resources.max_memory = r.value("max_memory", std::uint64_t{0});
             job.resources.read_rate = r.value("read_limit", std::uint64_t{0});
             job.resources.write_rate = r.value("write_limit", std::uint64_t{0});
+        }
+        if (j.contains("retention")) {  // missing in jobs saved before 0.2: keep everything
+            const json& k = j.at("retention");
+            job.retention.last = k.value("last", 0);
+            job.retention.hourly = k.value("hourly", 0);
+            job.retention.daily = k.value("daily", 0);
+            job.retention.weekly = k.value("weekly", 0);
+            job.retention.monthly = k.value("monthly", 0);
+            job.retention.yearly = k.value("yearly", 0);
         }
         validate(job);
         return job;

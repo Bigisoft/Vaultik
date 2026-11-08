@@ -79,6 +79,7 @@ Repository::Repository(std::unique_ptr<Backend> backend, RepoConfig config, cons
       config_(std::move(config)),
       chunker_(config_.chunker),
       aead_(std::make_unique<AesGcm>(key.enc)),
+      lock_aead_(std::make_unique<AesGcm>(key.enc)),
       id_hasher_(key.id),
       compressor_(config_.zstd_level) {}
 
@@ -190,12 +191,50 @@ void Repository::finish_pack() {
 
 void Repository::write_index() {
     if (index_pending_.empty()) return;
+    write_index_file(index_pending_);
+    index_pending_.clear();
+}
+
+void Repository::write_index_file(const IndexFileContent& content) {
     const Id index_id = random_id();
-    const Bytes plain = serialize_index_file(index_pending_);
+    const Bytes plain = serialize_index_file(content);
     const Bytes sealed = seal_object(plain, named_aad(kIndexAadPrefix, index_id), true);
     backend_->put(std::string(kIndexDir) + "/" + id_hex(index_id), sealed);
     write_stats_.stored_bytes_added += sealed.size();
-    index_pending_.clear();
+}
+
+void Repository::reload_index() {
+    flush();
+    index_ = Index();
+    load_indexes();
+}
+
+void Repository::index_pack(const Id& pack_id, const std::vector<BlobEntry>& entries) {
+    const std::uint32_t pos = index_.add_pack(pack_id);
+    for (const BlobEntry& e : entries)
+        if (!index_.contains(e.id)) index_.add(e, pos);
+}
+
+std::vector<std::string> Repository::list_index_files() {
+    std::vector<std::string> names;
+    for (const std::string& name : backend_->list(kIndexDir)) {
+        Id id;
+        if (parse_object_name(name, kIndexDir, id)) names.push_back(name);
+    }
+    return names;
+}
+
+IndexFileContent Repository::read_index_file(const std::string& name) {
+    Id index_id;
+    if (!parse_object_name(name, kIndexDir, index_id)) throw Error("not an index file name: " + name);
+    return parse_index_file(open_object(backend_->get(name), named_aad(kIndexAadPrefix, index_id)));
+}
+
+void Repository::copy_blob(BlobType type, const Id& id, ByteSpan sealed, std::uint32_t raw_len) {
+    if (pack_pending_.contains(id)) return;
+    pack_.add(type, id, sealed, raw_len);
+    pack_pending_.insert(id);
+    if (pack_.size() >= kPackTargetSize) finish_pack();
 }
 
 void Repository::flush() {

@@ -15,11 +15,14 @@ in file names.
   data/<xx>/<pack-id>       pack files (xx = first two hex chars of the pack id)
   index/<index-id>          sealed index files
   snapshots/<snapshot-id>   sealed snapshot manifests
+  locks/<lock-id>           sealed lock files of the runs using the repository
 ```
 
 Files are written to a temporary name and renamed into place, so a reader never sees a partial
 file. Write order during a backup is: packs, then the index files that reference them, then the
-snapshot. A crash leaves at worst unreferenced packs, never a snapshot pointing at missing data.
+snapshot. A crash leaves at worst unreferenced packs, never a snapshot pointing at missing data;
+the next prune removes them. Lock files (see below) were added in Vaultik 0.2 without a format
+version change: older versions ignore them.
 
 ## Keys
 
@@ -71,6 +74,7 @@ AAD values bind each object to its role and name:
 | pack header   | `"VKPKHDR1"`                              |
 | index file    | `"VKINDEX1"` || index id (32)             |
 | snapshot      | `"VKSNAP01"` || snapshot id (32)          |
+| lock          | `"VKLOCK01"` || lock id (32)              |
 
 ## Blobs
 
@@ -171,3 +175,34 @@ has_parent    u8      0 or 1, followed by the parent snapshot id (32) when 1
 tags          varint count, then strings
 stats         varint files, dirs, bytes, new_bytes, stored_bytes, errors, skipped
 ```
+
+## Locks
+
+Every run that reads or writes snapshot data holds a lock file. The lock id is 32 random bytes;
+the file is sealed with AAD `"VKLOCK01" || lock id` (never compressed). Plaintext:
+
+```
+version     u32     1
+exclusive   u8      0 = shared, 1 = exclusive
+time        u64     FILETIME UTC of the last refresh
+pid         u32     process id of the holder
+hostname    string
+username    string
+command     string  "backup", "prune", ...
+```
+
+Backup, restore, ls and verify take a shared lock; forget and prune take an exclusive one,
+because they delete objects. A run writes its own lock first and then lists the others; on a
+conflict it removes its lock again and waits or gives up. Holders rewrite their lock every 5
+minutes. A lock not refreshed for 30 minutes, or held by a process that no longer runs on the
+same computer, is stale: it is ignored and deleted by whoever finds it.
+
+## Prune
+
+Prune holds the exclusive lock and works in this order, so a crash at any point leaves a valid
+repository: (1) collect every blob reachable from any snapshot, stopping without changes if a
+snapshot or folder listing cannot be read; (2) write new packs with the blobs still in use from
+packs that are mostly unused (sealed blobs are copied as they are, after authenticating them);
+(3) write fresh index files for every pack that stays; (4) delete the old index files; (5) delete
+the packs nothing uses any more. Packs that no index file lists are read through their own
+header: kept and indexed again if they hold blobs in use, deleted otherwise.
