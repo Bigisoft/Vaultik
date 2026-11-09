@@ -372,7 +372,8 @@ Priorities only take effect when something else competes for the resource, so on
    - Pause and resume a long backup, and a slower speed during working hours.
    - Bulgarian translation of the frontend.
    - Unlock with Windows Hello or a security key instead of typing the backup password.
-8. Linux port, SteamOS on the Steam Deck first: build and test the existing POSIX platform layer,
+8. Linux port, SteamOS on the Steam Deck first. It starts with an in-depth review of the whole
+   codebase once items 4 to 7 are done, so the Windows version is sound before porting. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
    and the browser sign-in are Windows-only so far). Packaged as in 6.
 9. Volume image backup, restore to a volume or `.vhdx`
