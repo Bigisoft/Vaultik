@@ -338,6 +338,7 @@
  "Normal": "Нормален",
  "Not backed up yet": "Още не е архивирано",
  "Not checked yet": "Още не е проверено",
+ "Not for a job with administrator rights: it would run without them when the drive is connected.": "Не е за задача с права на администратор: при свързване на диска тя би се изпълнила без тях.",
  "Not for a portable copy: install Vaultik on this computer to start it at sign-in.": "Не е за преносимо копие: инсталирайте Vaultik на този компютър, за да се стартира при влизане.",
  "Not on this PC now": "Сега го няма на този компютър",
  "Not signed in": "Не сте влезли",

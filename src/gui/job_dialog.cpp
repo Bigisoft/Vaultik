@@ -320,6 +320,8 @@ void JobDialog::update_on_connect() {
     QString why;
     if (repo.empty()) {
         why = tr("Choose a destination folder first.");
+    } else if (admin_ != nullptr && admin_->isChecked()) {
+        why = tr("Not for a job with administrator rights: it would run without them when the drive is connected.");
     } else if (is_cloud_location(repo) || repo.starts_with("\\\\") || repo.starts_with("//")) {
         why = tr("Only for a destination on a drive connected to this computer.");
     } else {
@@ -400,6 +402,7 @@ QWidget* JobDialog::build_schedule() {
 #ifdef _WIN32
     admin_ = new QCheckBox(tr("Run with administrator rights"));
     form->addRow(QString(), admin_);
+    connect(admin_, &QCheckBox::toggled, this, &JobDialog::update_on_connect);
     auto* admin_note = new QLabel(tr("Lets scheduled runs back up open and locked files through a shadow copy. "
                                      "Windows asks for administrator approval each time the job is saved. "
                                      "Vaultik must be installed in a folder only administrators can change, "

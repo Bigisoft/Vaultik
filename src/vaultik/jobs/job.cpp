@@ -269,6 +269,10 @@ void validate(const Job& job) {
     if (k.max_bytes != 0 && k.max_bytes < (1ull << 30)) throw Error("a size limit must be at least 1 GB");
     if (job.backup_on_connect && (job.repository_volume.empty() || is_cloud_location(job.repository)))
         throw Error("backing up when the drive is connected needs a destination folder on a local or USB drive");
+    // A connected drive starts the run from the user's session, without administrator rights;
+    // such a job would then skip what only an administrator can read and still clean up.
+    if (job.backup_on_connect && job.run_as_admin)
+        throw Error("a job with administrator rights cannot also back up when its drive is connected");
     const WorkHours& w = job.work_hours;
     if (w.start_minute < 0 || w.start_minute >= 24 * 60 || w.end_minute < 0 || w.end_minute >= 24 * 60)
         throw Error("working hours must be times of the day");
@@ -407,7 +411,8 @@ Job job_from_json(const std::string& text) {
             job.repository_volume = j.at("volume").value("id", std::string());
             job.repository_relative = j.at("volume").value("path", std::string());
         }
-        job.backup_on_connect = j.value("backup_on_connect", false);
+        // Saved by 0.5.0 together with administrator rights, which it no longer allows: off.
+        job.backup_on_connect = j.value("backup_on_connect", false) && !job.run_as_admin;
         if (j.contains("second_copy")) {
             const json& c = j.at("second_copy");
             job.second_copy.repository = c.value("repository", std::string());
