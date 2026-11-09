@@ -36,8 +36,12 @@ private:
     OpenFile& open_cached(const std::string& name);
     void drop_cached(const std::string& name);
     void list_into(const std::string& dir_path, const std::string& prefix, std::vector<std::string>& out);
+    // With administrator rights: refuses when the folder, or a folder on the way to `name` in
+    // it, is a link (see the constructor).
+    void check_no_links(const std::string& name) const;
 
     std::string root_;  // absolute
+    bool elevated_ = false;
     std::mutex mu_;
     std::list<std::pair<std::string, std::unique_ptr<OpenFile>>> cache_;  // most recent first
 };

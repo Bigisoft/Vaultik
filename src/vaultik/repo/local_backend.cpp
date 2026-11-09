@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/hex.hpp"
 
@@ -23,6 +24,26 @@ struct LocalBackend::OpenFile {
 LocalBackend::LocalBackend(const std::string& root, bool create) : root_(os::absolute_path(root)) {
     if (create) ensure_parent_dirs(os::join(root_, "x"));
     if (!os::is_directory(root_)) throw Error("repository folder does not exist: " + root_);
+    // A job with administrator rights writes into a folder the user can change: a folder there
+    // swapped for a link to a system folder would let it create and delete files there.
+    elevated_ = os::process_elevated();
+}
+
+void LocalBackend::check_no_links(const std::string& name) const {
+    if (!elevated_) return;
+    constexpr std::uint32_t kReparsePoint = 0x400;  // FILE_ATTRIBUTE_REPARSE_POINT
+    std::string path = root_;
+    std::string rest = name;
+    for (;;) {
+        os::FileInfo info;
+        os::ErrorCode err = 0;
+        if (os::stat(path, info, err) && ((info.attributes & kReparsePoint) != 0 || info.type == os::EntryType::Symlink))
+            throw Error("refusing to write through a link in the backup folder: " + path);
+        const std::size_t slash = rest.find('/');
+        if (slash == std::string::npos) return;  // the folders on the way are checked, not the file
+        path = os::join(path, rest.substr(0, slash));
+        rest = rest.substr(slash + 1);
+    }
 }
 
 LocalBackend::~LocalBackend() = default;
@@ -64,7 +85,9 @@ bool LocalBackend::exists(const std::string& name) {
 
 void LocalBackend::put(const std::string& name, ByteSpan data) {
     const std::string final_path = path_of(name);
+    check_no_links(name);
     ensure_parent_dirs(final_path);
+    check_no_links(name);  // also the folders just created
 
     std::uint8_t rnd[8];
     random_bytes(rnd);
@@ -191,6 +214,7 @@ void LocalBackend::remove(const std::string& name) {
         std::lock_guard lock(mu_);
         drop_cached(name);
     }
+    check_no_links(name);
     const os::ErrorCode err = os::remove_file(path_of(name));
     if (err != 0 && !os::is_not_found(err)) os::throw_error("cannot delete repository file " + name, err);
 }
