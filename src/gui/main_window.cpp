@@ -552,6 +552,41 @@ void MainWindow::update_mounts_button() {
                                       : tr("%1 versions open in Explorer: Close").arg(open));
 }
 
+void MainWindow::show_history_for(const QString& local_path) {
+    bring_to_front();
+    const std::string path = os::absolute_path(u8(QDir::toNativeSeparators(local_path)));
+    const std::string folded = os::fold_case(path);
+    // The job whose source holds the path (the longest source wins when several do).
+    int best = -1;
+    std::size_t best_len = 0;
+    for (std::size_t i = 0; i < jobs_.size(); ++i) {
+        for (const std::string& s : jobs_[i].sources) {
+            const std::string src = os::fold_case(os::absolute_path(s));
+            const bool inside = folded == src || (folded.starts_with(src) && (src.ends_with(std::string(1, os::kSeparator)) ||
+                                                                              folded[src.size()] == os::kSeparator));
+            if (inside && src.size() > best_len) {
+                best = static_cast<int>(i);
+                best_len = src.size();
+            }
+        }
+    }
+    if (best < 0) {
+        plain_warning(this, tr("Earlier versions"),
+                      tr("No backup job here includes %1, so Vaultik has no earlier versions of it.")
+                          .arg(QDir::toNativeSeparators(local_path)));
+        return;
+    }
+    list_->setCurrentRow(best);
+    // The path as the backup stores it: "D:\Pictures\a.jpg" is "D/Pictures/a.jpg".
+    QStringList parts;
+    for (const std::string& c : os::path_components(path)) parts << qs(c);
+    tabs_->setCurrentWidget(find_);
+    // Loading first: giving the Find page its versions clears what it shows. When the backup
+    // still has to be opened, the page keeps the path until it is.
+    load_snapshots(false);
+    find_->show_path(parts.join(QLatin1Char('/')));
+}
+
 void MainWindow::run_job_now(const std::string& id) {
     for (std::size_t i = 0; i < jobs_.size(); ++i) {
         if (jobs_[i].id != id) continue;

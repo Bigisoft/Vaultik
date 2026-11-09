@@ -42,6 +42,9 @@ public:
     void toggle_visible();
     // Selects the job and starts its backup (from the tray menu).
     void run_job_now(const std::string& id);
+    // "Earlier versions in Vaultik" from File Explorer: the history of a file or folder on this
+    // computer, in the job that backs it up.
+    void show_history_for(const QString& local_path);
     void open_settings();
     // Ends Vaultik, also when it lives in the tray.
     void quit_app();

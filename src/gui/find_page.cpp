@@ -272,6 +272,19 @@ void FindPage::set_source(std::shared_ptr<Repository> repo, std::vector<Snapshot
     search_->setEnabled(ready);
     status_->setText(ready ? tr("Searches the names in all %1.").arg(count_of(versions_.size(), tr("version"), tr("versions")))
                            : tr("Open the Versions tab first to load this backup."));
+    if (ready && !pending_path_.isEmpty()) {
+        const QString path = std::exchange(pending_path_, QString());
+        show_path(path);
+    }
+}
+
+void FindPage::show_path(const QString& snapshot_path) {
+    if (!repo_) {
+        pending_path_ = snapshot_path;
+        return;
+    }
+    query_->setText(snapshot_path.section(QLatin1Char('/'), -1));
+    history_->show_item(snapshot_path);
 }
 
 void FindPage::search() {

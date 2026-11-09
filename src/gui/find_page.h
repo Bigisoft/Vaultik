@@ -58,6 +58,8 @@ public:
     // The backup to search; a null repository means it is not open (yet).
     void set_source(std::shared_ptr<vaultik::Repository> repo, std::vector<SnapshotEntry> versions);
     void refresh_icons();
+    // Shows the versions of one item (a snapshot path), now or as soon as the backup is open.
+    void show_path(const QString& snapshot_path);
 
 signals:
     void restore_requested(int snapshot_index, const QString& path);
@@ -72,4 +74,5 @@ private:
     QLabel* status_ = nullptr;
     QTreeWidget* results_ = nullptr;
     ItemHistoryView* history_ = nullptr;
+    QString pending_path_;  // show_path before the backup was open
 };

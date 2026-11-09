@@ -12,6 +12,7 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#include <shellapi.h>  // CommandLineToArgvW
 
 // From uiautomationcoreapi.h (UIAutomationCore.dll), whose header needs the full COM headers.
 extern "C" HRESULT WINAPI UiaDisconnectAllProviders();
@@ -69,22 +70,55 @@ std::wstring instance_name(const wchar_t* base) {
     return std::wstring(base) + suffix;
 }
 
+// The path after "--history", read from the Unicode command line (argv holds the ANSI code page,
+// which cannot spell every file name).
+QString history_argument() {
+    int count = 0;
+    LPWSTR* args = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (args == nullptr) return {};
+    QString path;
+    for (int i = 1; i + 1 < count; ++i)
+        if (std::wstring_view(args[i]) == L"--history") path = QString::fromWCharArray(args[i + 1]);
+    LocalFree(args);
+    return path;
+}
+
 class ShowRequests : public QAbstractNativeEventFilter {
 public:
     explicit ShowRequests(MainWindow& window) : window_(window), message_(RegisterWindowMessageW(instance_name(L"Vaultik.ShowWindow").c_str())) {}
 
-    bool nativeEventFilter(const QByteArray& type, void* message, qintptr*) override {
+    bool nativeEventFilter(const QByteArray& type, void* message, qintptr* result) override {
         if (type != "windows_generic_MSG") return false;
         const MSG* msg = static_cast<const MSG*>(message);
+        if (msg->message == WM_COPYDATA) {
+            // A path from a second start ("--history"), sent to the window marked as this instance's.
+            const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(msg->lParam);
+            if (data == nullptr || data->dwData != kHistoryData || GetPropW(msg->hwnd, instance_name(kWindowProp).c_str()) == nullptr)
+                return false;
+            const QString path = QString::fromWCharArray(static_cast<const wchar_t*>(data->lpData),
+                                                         static_cast<qsizetype>(data->cbData / sizeof(wchar_t)));
+            QMetaObject::invokeMethod(&window_, [w = &window_, path] { w->show_history_for(path); }, Qt::QueuedConnection);
+            if (result != nullptr) *result = TRUE;
+            return true;
+        }
         if (message_ == 0 || msg->message != message_) return false;
         window_.bring_to_front();
         return true;
     }
 
+    static constexpr ULONG_PTR kHistoryData = 0x56484953;  // "VHIS"
+    static constexpr const wchar_t* kWindowProp = L"Vaultik.Window";
+
 private:
     MainWindow& window_;
     UINT message_;
 };
+#else
+QString history_argument() {
+    const QStringList args = QCoreApplication::arguments();
+    const qsizetype at = args.indexOf(QStringLiteral("--history"));
+    return at >= 0 && at + 1 < args.size() ? args[at + 1] : QString();
+}
 #endif
 
 }  // namespace
@@ -96,14 +130,37 @@ int main(int argc, char** argv) {
     bool tray = false;
     for (int i = 1; i < argc; ++i)
         if (QByteArray(argv[i]) == "--tray") tray = true;
+    const QString history = history_argument();  // from File Explorer's right-click menu
 
 #ifdef Q_OS_WIN
     // Released by Windows when this process ends.
     CreateMutexW(nullptr, FALSE, instance_name(L"Local\\Vaultik.Gui").c_str());
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        // Already running: show it (unless this start came from sign-in, which needs nothing).
-        if (!tray) {
-            AllowSetForegroundWindow(ASFW_ANY);
+        AllowSetForegroundWindow(ASFW_ANY);
+        if (!history.isEmpty()) {
+            // Hand the path to the running window, marked with this instance's property.
+            struct Find {
+                std::wstring prop;
+                HWND found = nullptr;
+            } find{instance_name(ShowRequests::kWindowProp)};
+            EnumWindows(
+                [](HWND hwnd, LPARAM p) -> BOOL {
+                    auto* f = reinterpret_cast<Find*>(p);
+                    if (GetPropW(hwnd, f->prop.c_str()) == nullptr) return TRUE;
+                    f->found = hwnd;
+                    return FALSE;
+                },
+                reinterpret_cast<LPARAM>(&find));
+            if (find.found != nullptr) {
+                const std::wstring text = history.toStdWString();
+                COPYDATASTRUCT data{ShowRequests::kHistoryData, static_cast<DWORD>(text.size() * sizeof(wchar_t)),
+                                    const_cast<wchar_t*>(text.data())};
+                DWORD_PTR ignored = 0;
+                SendMessageTimeoutW(find.found, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG, 5000,
+                                    &ignored);
+            }
+        } else if (!tray) {
+            // Already running: show it (unless this start came from sign-in, which needs nothing).
             PostMessageW(HWND_BROADCAST, RegisterWindowMessageW(instance_name(L"Vaultik.ShowWindow").c_str()), 0, 0);
         }
         return 0;
@@ -122,12 +179,17 @@ int main(int argc, char** argv) {
     }
     apply_theme(app);
 
-    MainWindow window(tray);
+    MainWindow window(tray && history.isEmpty());
 #ifdef Q_OS_WIN
     ShowRequests requests(window);
     app.installNativeEventFilter(&requests);
+    // Marks this instance's window, so a second start can hand it a path.
+    SetPropW(reinterpret_cast<HWND>(window.winId()), instance_name(ShowRequests::kWindowProp).c_str(),
+             reinterpret_cast<HANDLE>(1));
 #endif
-    if (!tray) window.show();
+    if (!tray || !history.isEmpty()) window.show();
+    if (!history.isEmpty())
+        QMetaObject::invokeMethod(&window, [&window, history] { window.show_history_for(history); }, Qt::QueuedConnection);
     const int code = QApplication::exec();
 #ifdef Q_OS_WIN
     app.removeNativeEventFilter(&requests);

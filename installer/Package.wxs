@@ -42,6 +42,25 @@
       </Component>
     </ComponentGroup>
 
+    <!-- "Earlier versions in Vaultik" in File Explorer's right-click menu, for files and folders: it
+         opens the item's history in the job that backs it up. -->
+    <Component Id="ExplorerMenu" Directory="INSTALLFOLDER" Guid="5E2A9C14-3B7D-4E60-8F1A-C4D2B97E0A35">
+      <RegistryKey Root="HKLM" Key="Software\Classes\*\shell\Vaultik.History">
+        <RegistryValue Name="MUIVerb" Type="string" Value="Earlier versions in Vaultik" KeyPath="yes" />
+        <RegistryValue Name="Icon" Type="string" Value="[INSTALLFOLDER]vaultik-gui.exe" />
+        <RegistryKey Key="command">
+          <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]vaultik-gui.exe&quot; --history &quot;%1&quot;" />
+        </RegistryKey>
+      </RegistryKey>
+      <RegistryKey Root="HKLM" Key="Software\Classes\Directory\shell\Vaultik.History">
+        <RegistryValue Name="MUIVerb" Type="string" Value="Earlier versions in Vaultik" />
+        <RegistryValue Name="Icon" Type="string" Value="[INSTALLFOLDER]vaultik-gui.exe" />
+        <RegistryKey Key="command">
+          <RegistryValue Type="string" Value="&quot;[INSTALLFOLDER]vaultik-gui.exe&quot; --history &quot;%1&quot;" />
+        </RegistryKey>
+      </RegistryKey>
+    </Component>
+
     <!-- Removing Vaultik (not upgrading it) also removes its scheduled tasks, every account's, as
          they would only fail without the programs. Jobs, history and backups stay. -->
     <CustomAction Id="RemoveScheduledTasks" FileRef="VaultikTaskExe" ExeCommand="uninstall-cleanup"
@@ -54,6 +73,7 @@
     <Feature Id="Main" Title="Vaultik">
       <ComponentGroupRef Id="Programs" />
       <ComponentRef Id="StartMenuShortcut" />
+      <ComponentRef Id="ExplorerMenu" />
     </Feature>
   </Package>
 </Wix>
