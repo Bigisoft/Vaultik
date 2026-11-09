@@ -1,8 +1,13 @@
 // vaultik-gui: the Qt 6 Widgets frontend. It manages saved jobs and their schedules, shows
 // progress and history, and browses snapshots for restores. The backup work itself runs in the
 // vaultik engine process.
+//
+//   vaultik-gui          opens the window (or brings an already running Vaultik to the front)
+//   vaultik-gui --tray   starts behind the notification area icon (used at sign-in)
 
+#include <QAbstractNativeEventFilter>
 #include <QApplication>
+#include <QStringList>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -45,22 +50,67 @@ void enable_leak_report() {
 }
 #endif
 
+#ifdef Q_OS_WIN
+// One Vaultik per signed-in user: a second start asks the first to show its window, through a
+// registered window message, and ends.
+const wchar_t* kShowMessage = L"Vaultik.ShowWindow";
+
+class ShowRequests : public QAbstractNativeEventFilter {
+public:
+    explicit ShowRequests(MainWindow& window) : window_(window), message_(RegisterWindowMessageW(kShowMessage)) {}
+
+    bool nativeEventFilter(const QByteArray& type, void* message, qintptr*) override {
+        if (type != "windows_generic_MSG") return false;
+        const MSG* msg = static_cast<const MSG*>(message);
+        if (message_ == 0 || msg->message != message_) return false;
+        window_.bring_to_front();
+        return true;
+    }
+
+private:
+    MainWindow& window_;
+    UINT message_;
+};
+#endif
+
 }  // namespace
 
 int main(int argc, char** argv) {
 #if defined(_MSC_VER) && defined(_DEBUG)
     enable_leak_report();
 #endif
+    bool tray = false;
+    for (int i = 1; i < argc; ++i)
+        if (QByteArray(argv[i]) == "--tray") tray = true;
+
+#ifdef Q_OS_WIN
+    // Released by Windows when this process ends.
+    CreateMutexW(nullptr, FALSE, L"Local\\Vaultik.Gui");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        // Already running: show it (unless this start came from sign-in, which needs nothing).
+        if (!tray) {
+            AllowSetForegroundWindow(ASFW_ANY);
+            PostMessageW(HWND_BROADCAST, RegisterWindowMessageW(kShowMessage), 0, 0);
+        }
+        return 0;
+    }
+#endif
+
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("Vaultik"));
     QApplication::setOrganizationName(QStringLiteral("Vaultik"));
     QApplication::setApplicationVersion(QStringLiteral("0.4.0"));
     apply_theme(app);
 
-    MainWindow window;
-    window.show();
+    MainWindow window(tray);
+#ifdef Q_OS_WIN
+    ShowRequests requests(window);
+    app.installNativeEventFilter(&requests);
+#endif
+    if (!tray) window.show();
     const int code = QApplication::exec();
 #ifdef Q_OS_WIN
+    app.removeNativeEventFilter(&requests);
     // Screen readers and other UI Automation clients hold references to the accessibility objects
     // of our controls; Microsoft asks providers to release them all before shutting down, so they
     // are freed with the window rather than left behind.

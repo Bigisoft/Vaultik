@@ -124,6 +124,15 @@ version without restoring it, decrypted into memory only:
 Small files of a local backup open as soon as they are selected; large files and cloud backups
 wait for **Show preview**, since they have to be downloaded first.
 
+**Settings** (in the sidebar) can start Vaultik in the notification area when you sign in. From
+there it watches every job, including scheduled runs, and shows a Windows notification when a
+backup fails or skips files, or when a job has not backed up for too long (about twice its
+interval: two days for a daily job; a set number of days for jobs without a schedule). The icon
+turns red while something needs attention; its menu opens Vaultik, starts a job's backup, opens
+Settings or quits. Closing the window keeps Vaultik in the notification area, and starting it
+again brings the running one to the front. With Windows' Do Not Disturb on, the notifications
+go quietly to the notification centre.
+
 **Restore from a backup location** in the toolbar opens any Vaultik backup, in a folder or in
 cloud storage, with its password, without a saved job: the way to get files back on another
 computer. Copy `vaultik-gui.exe`, `vaultik.exe` and `vaultik-task.exe` there (they need nothing
@@ -316,9 +325,7 @@ Priorities only take effect when something else competes for the resource, so on
    - A start page per job: last result, next run, size, a warning when backups stopped, and a
      calendar of backup days.
 5. Knowing backups work, and protecting them (next):
-   - Notifications and a tray icon: a Windows notification when a backup fails, is skipped or
-     has not run for a set number of days; a small tray icon with the status and "Back up now".
-     No service: the tray part runs only while signed in.
+   - Notifications and a tray icon (done).
    - Health checks: a scheduled verify that reads a sample of the stored data weekly and all of
      it monthly, so a failing drive is noticed before a restore needs it.
    - Back up when the drive is plugged in: a job whose destination is a removable drive runs when

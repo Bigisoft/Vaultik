@@ -24,6 +24,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QTabWidget>
@@ -39,8 +40,11 @@
 #include "job_dialog.h"
 #include "key_dialog.h"
 #include "restore_dialog.h"
+#include "app_settings.h"
 #include "runner.h"
+#include "settings_dialog.h"
 #include "theme.h"
+#include "tray.h"
 #include "versions_view.h"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/scheduler.hpp"
@@ -99,8 +103,9 @@ QFrame* card() {
 
 }  // namespace
 
-MainWindow::MainWindow() {
+MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     setWindowTitle(QStringLiteral("Vaultik"));
+    setWindowIcon(icon(QStringLiteral("shield_checkmark_20_filled"), theme().accent));
     resize(1180, 760);
     setMinimumSize(900, 560);
 
@@ -169,6 +174,53 @@ MainWindow::MainWindow() {
 
     refresh_icons();
     reload_jobs();
+    update_tray();
+}
+
+void MainWindow::update_tray() {
+    const bool want = (started_in_tray_ || starts_with_windows()) && Tray::available();
+    if (want && tray_ == nullptr) {
+        tray_ = new Tray(this, store_);
+    } else if (!want && tray_ != nullptr) {
+        delete tray_;
+        tray_ = nullptr;
+    }
+    // With the tray, closing the window keeps Vaultik running there.
+    QApplication::setQuitOnLastWindowClosed(tray_ == nullptr);
+}
+
+void MainWindow::bring_to_front() {
+    if (isMinimized()) showNormal();
+    show();
+    raise();
+    activateWindow();
+}
+
+void MainWindow::run_job_now(const std::string& id) {
+    for (std::size_t i = 0; i < jobs_.size(); ++i) {
+        if (jobs_[i].id != id) continue;
+        list_->setCurrentRow(static_cast<int>(i));
+        bring_to_front();
+        if (!runner_->running()) run_job();
+        return;
+    }
+}
+
+void MainWindow::open_settings() {
+    bring_to_front();
+    SettingsDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    update_tray();
+    if (tray_ != nullptr) tray_->check();
+}
+
+void MainWindow::quit_app() {
+    quitting_ = true;
+    if (close()) {
+        QApplication::quit();
+    } else {
+        quitting_ = false;  // a running backup was kept
+    }
 }
 
 QWidget* MainWindow::build_sidebar() {
@@ -214,6 +266,12 @@ QWidget* MainWindow::build_sidebar() {
     keys_->setToolTip(tr("Change a backup's password, or set a new one with the recovery key"));
     connect(keys_, &QPushButton::clicked, this, &MainWindow::open_keys);
     l->addWidget(keys_);
+
+    settings_ = new QPushButton(tr("Settings..."));
+    settings_->setProperty("role", "flat");
+    settings_->setToolTip(tr("Notifications, and starting Vaultik in the notification area"));
+    connect(settings_, &QPushButton::clicked, this, &MainWindow::open_settings);
+    l->addWidget(settings_);
     return side;
 }
 
@@ -379,6 +437,9 @@ void MainWindow::refresh_icons() {
     new_job_->setIcon(icon(QStringLiteral("add_20_regular"), t.accent_text));
     open_backup_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
     keys_->setIcon(icon(QStringLiteral("key_20_regular")));
+    settings_->setIcon(icon(QStringLiteral("settings_20_regular")));
+    setWindowIcon(icon(QStringLiteral("shield_checkmark_20_filled"), t.accent));
+    if (tray_ != nullptr) tray_->refresh_icons();
     restore_->setIcon(icon(QStringLiteral("arrow_counterclockwise_20_regular")));
     more_->setIcon(icon(QStringLiteral("more_horizontal_20_regular")));
     empty_icon_->setPixmap(icon(QStringLiteral("shield_checkmark_20_regular"), t.accent).pixmap(64, 64));
@@ -765,6 +826,17 @@ void MainWindow::set_running(bool running) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
+    if (tray_ != nullptr && !quitting_) {
+        // Keep watching from the tray; a running backup goes on too.
+        hide();
+        event->ignore();
+        QSettings settings;
+        if (!settings.value(QStringLiteral("tray/explained"), false).toBool()) {
+            settings.setValue(QStringLiteral("tray/explained"), true);
+            tray_->explain_hidden();
+        }
+        return;
+    }
     if (runner_->running()) {
         const auto answer = QMessageBox::question(this, windowTitle(), tr("A backup is running. Stop it and quit?"));
         if (answer != QMessageBox::Yes) {

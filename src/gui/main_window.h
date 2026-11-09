@@ -23,13 +23,23 @@ class QTabWidget;
 class QToolButton;
 class QTreeWidget;
 class Runner;
+class Tray;
 class VersionsView;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    MainWindow();
+    // With `in_tray`, the window starts hidden behind the tray icon (Vaultik started at sign-in).
+    explicit MainWindow(bool in_tray = false);
+
+    // Shows the window in front (from the tray, or when Vaultik is started a second time).
+    void bring_to_front();
+    // Selects the job and starts its backup (from the tray menu).
+    void run_job_now(const std::string& id);
+    void open_settings();
+    // Ends Vaultik, also when it lives in the tray.
+    void quit_app();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -58,6 +68,8 @@ private:
     // Pin, note and delete on the open repository of the current job.
     void change_version(int index, bool pin, bool note);
     void delete_version(int index);
+    // Creates or removes the tray icon to match the settings.
+    void update_tray();
 
     vaultik::jobs::JobStore store_;
     std::vector<vaultik::jobs::Job> jobs_;
@@ -67,6 +79,11 @@ private:
     QPushButton* new_job_ = nullptr;
     QPushButton* open_backup_ = nullptr;
     QPushButton* keys_ = nullptr;
+    QPushButton* settings_ = nullptr;
+
+    Tray* tray_ = nullptr;  // child of this window, while the tray is on
+    bool started_in_tray_ = false;
+    bool quitting_ = false;
 
     // Job page
     QStackedWidget* stack_ = nullptr;
