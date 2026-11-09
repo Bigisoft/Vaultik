@@ -454,8 +454,10 @@ bool MainWindow::unlock() {
 }
 
 void MainWindow::relock() {
-    if (!AppSettings::load().require_hello || !unlocked_) return;
+    // Whatever unlocked_ says: backups may have been opened before the option was turned on.
+    if (!AppSettings::load().require_hello) return;
     unlocked_ = false;
+    ++lock_generation_;  // a backup still being opened is dropped when it arrives
     close_mounts();
     repos_.clear();  // the opened repositories (and their keys) go
     find_->set_source(nullptr, {});
@@ -633,8 +635,11 @@ void MainWindow::run_job_now(const std::string& id) {
 
 void MainWindow::open_settings() {
     bring_to_front();
+    const bool hello_before = AppSettings::load().require_hello;
     SettingsDialog dialog(this);
     if (dialog.exec() != QDialog::Accepted) return;
+    // Turning Windows Hello on asked for it just now, so this window counts as unlocked.
+    if (!hello_before && AppSettings::load().require_hello) unlocked_ = true;
     update_tray();
     if (tray_ != nullptr) tray_->check();
 }
@@ -1069,8 +1074,11 @@ void MainWindow::load_snapshots(bool force) {
         return;
     }
     RepoHandle::open_async(this, job->repository, std::move(pw), std::move(cloud),
-                           [this, id](std::shared_ptr<Repository> repo, std::vector<SnapshotEntry> list, QString error) {
+                           [this, id, generation = lock_generation_](std::shared_ptr<Repository> repo,
+                                                                     std::vector<SnapshotEntry> list, QString error) {
                                loading_job_.clear();
+                               // Locked again while it opened: it is not kept.
+                               if (generation != lock_generation_) return;
                                const jobs::Job* cur = current_job();
                                if (!error.isEmpty()) {
                                    if (cur && cur->id == id) versions_->set_message(error);

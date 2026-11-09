@@ -153,6 +153,7 @@ private:
     // Hidden again: forgets the opened backups and closes Explorer views, so the next look asks again.
     void relock();
     bool unlocked_ = false;
+    int lock_generation_ = 0;  // counts relocks, to drop backups opened before one
     void explore_version(int index);
     void compare_versions(int a, int b);
     // Makes sure the job's password is saved (on another computer a portable copy cannot read the
