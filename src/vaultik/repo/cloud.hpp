@@ -49,10 +49,13 @@ struct CloudCredentials {
     std::string key_id;
     std::string secret;
     std::string region;  // S3 only; empty: worked out from the endpoint
-    // S3 only: upload repository files with Object Lock (governance mode) for this many days, so
-    // they cannot be deleted or overwritten for good meanwhile, not even with these keys. The
-    // bucket must have Object Lock turned on. 0: no lock.
+    // S3 only: upload repository files with Object Lock for this many days, so they cannot be
+    // deleted or overwritten for good meanwhile. The bucket must have Object Lock turned on. 0: no
+    // lock. Governance mode (the default) stops these keys only if they lack the
+    // s3:BypassGovernanceRetention permission (and the right to change the bucket's lock
+    // settings); compliance mode stops everyone, the account owner too, until the date passes.
     int lock_days = 0;
+    bool lock_compliance = false;
     // Called with the new secret when a service hands out a new sign-in token (OneDrive renews its
     // refresh token on every use), so the caller can store it. May be empty.
     std::function<void(const std::string& secret)> on_secret_changed;

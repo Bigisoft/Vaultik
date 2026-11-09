@@ -219,6 +219,7 @@ std::string to_json(const Job& job) {
         {"cloud_key_id", job.cloud_key_id},
         {"cloud_region", job.cloud_region},
         {"cloud_lock_days", job.cloud_lock_days},
+        {"cloud_lock_mode", job.cloud_lock_compliance ? "compliance" : "governance"},
         {"sources", job.sources},
         {"excludes", job.excludes},
         {"tags", job.tags},
@@ -269,6 +270,7 @@ Job job_from_json(const std::string& text) {
         job.cloud_key_id = j.value("cloud_key_id", std::string());
         job.cloud_region = j.value("cloud_region", std::string());
         job.cloud_lock_days = j.value("cloud_lock_days", 0);
+        job.cloud_lock_compliance = j.value("cloud_lock_mode", std::string("governance")) == "compliance";
         job.sources = strings(j, "sources");
         job.excludes = strings(j, "excludes");
         job.tags = strings(j, "tags");
@@ -570,6 +572,7 @@ CloudCredentials JobStore::cloud_credentials(const Job& job) const {
     if (!is_cloud_location(job.repository) || job.id.empty()) return {};
     CloudCredentials c{job.cloud_key_id, cloud_secret(job.id), job.cloud_region};
     c.lock_days = job.cloud_lock_days;
+    c.lock_compliance = job.cloud_lock_compliance;
     // A renewed sign-in token is stored right away, so the next run starts from it.
     c.on_secret_changed = [dir = dir_, id = job.id](const std::string& secret) {
         try {

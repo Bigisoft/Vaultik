@@ -198,10 +198,10 @@ std::string iso_time(std::int64_t unix_seconds) {
     return buf;
 }
 
-std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std::int64_t until) {
+std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std::int64_t until, bool compliance) {
     const auto digest = md5(body);
     return {{"content-md5", base64_encode(ByteSpan(digest.data(), digest.size()))},
-            {"x-amz-object-lock-mode", "GOVERNANCE"},
+            {"x-amz-object-lock-mode", compliance ? "COMPLIANCE" : "GOVERNANCE"},
             {"x-amz-object-lock-retain-until-date", iso_time(until)}};
 }
 
@@ -359,7 +359,8 @@ void S3Backend::put(const std::string& name, ByteSpan data) {
         const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
                                      std::chrono::system_clock::now().time_since_epoch())
                                      .count();
-        headers = s3::lock_headers(data, now + static_cast<std::int64_t>(credentials_.lock_days) * 86400);
+        headers = s3::lock_headers(data, now + static_cast<std::int64_t>(credentials_.lock_days) * 86400,
+                                   credentials_.lock_compliance);
     }
     const Result r = request("PUT", key_of(name), {}, std::move(headers), data);
     if (r.status == 400 && lock) {

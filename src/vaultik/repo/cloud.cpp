@@ -91,6 +91,8 @@ CloudCredentials CloudCredentials::from_environment() {
     c.region = os::get_env("AWS_REGION");
     if (c.region.empty()) c.region = os::get_env("AWS_DEFAULT_REGION");
     c.lock_days = std::atoi(os::get_env("VAULTIK_S3_LOCK_DAYS").c_str());
+    c.lock_compliance = os::get_env("VAULTIK_S3_LOCK_MODE") == "compliance";
+    c.lock_compliance = os::get_env("VAULTIK_S3_LOCK_MODE") == "compliance";
     return c;
 }
 

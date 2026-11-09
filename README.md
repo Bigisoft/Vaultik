@@ -267,10 +267,14 @@ version or is already running), then says when the drive can be unplugged.
 ### Locked cloud copies (S3 Object Lock)
 
 For S3-compatible storage, the cloud settings of a job have "Lock uploads for N days" (on the
-command line: `VAULTIK_S3_LOCK_DAYS`). Every repository file except the short-lived lock files is
-then uploaded with Object Lock in governance mode until that date, so neither Vaultik nor anyone
-holding its keys can destroy it meanwhile: a delete only hides it behind a delete marker, and an
-overwrite only adds a newer version. The bucket must have Object Lock turned on (most providers
+command line: `VAULTIK_S3_LOCK_DAYS`, and `VAULTIK_S3_LOCK_MODE=compliance`). Every repository
+file except the short-lived lock files is then uploaded with Object Lock until that date: a
+delete only hides it behind a delete marker, and an overwrite only adds a newer version. In
+governance mode (the default) that stops Vaultik's keys only if they lack
+`s3:BypassGovernanceRetention`, `s3:PutObjectRetention` and the right to change the bucket's lock
+settings, so give Vaultik a key limited to reading, listing, writing and deleting. Compliance
+mode cannot be lifted early by anyone, the account owner included, so the data is also billed
+until its date. The bucket must have Object Lock turned on (most providers
 only offer that when the bucket is created; Vaultik checks before saving). Data removed by
 cleanup stays billed until its lock ends, so a lock a little longer than the oldest kept version
 is enough.

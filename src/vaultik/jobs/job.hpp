@@ -50,6 +50,7 @@ struct Job {
     // S3 only: keep uploaded data locked (Object Lock) for this many days; 0 for none. See
     // CloudCredentials::lock_days.
     int cloud_lock_days = 0;
+    bool cloud_lock_compliance = false;  // compliance mode instead of governance (see there)
     std::vector<std::string> sources;
     std::vector<std::string> excludes;
     std::vector<std::string> tags;

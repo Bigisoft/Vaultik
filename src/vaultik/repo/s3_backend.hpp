@@ -133,9 +133,9 @@ VersionPage parse_versions(std::string_view xml);
 
 // "2026-12-09T20:00:00Z" for a time in seconds since 1970 (UTC).
 std::string iso_time(std::int64_t unix_seconds);
-// The headers that upload `body` with Object Lock in governance mode until `until` (seconds since
-// 1970): the mode, the date, and the Content-MD5 that S3 requires with them.
-std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std::int64_t until);
+// The headers that upload `body` with Object Lock (governance or compliance mode) until `until`
+// (seconds since 1970): the mode, the date, and the Content-MD5 that S3 requires with them.
+std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std::int64_t until, bool compliance);
 
 }  // namespace s3
 

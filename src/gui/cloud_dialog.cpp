@@ -129,6 +129,7 @@ QString run_signin_busy(QWidget* parent, const QString& text,
 CloudCredentials CloudTarget::credentials() const {
     CloudCredentials c{u8(key_id), u8(secret), u8(region)};
     c.lock_days = lock_days;
+    c.lock_compliance = lock_compliance;
     return c;
 }
 
@@ -160,9 +161,17 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     lock_days_->setSuffix(tr(" days"));
     lock_days_->setSpecialValueText(tr("Off"));
     lock_days_->setToolTip(tr("Object Lock: uploaded backup data cannot be deleted or overwritten for good during "
-                              "this time, not even with these keys, so ransomware cannot destroy it. The bucket "
-                              "must have Object Lock turned on, and deleted data is still billed until its lock "
-                              "ends. Choose more days than the oldest version you keep is old."));
+                              "this time, so ransomware cannot destroy it. The bucket must have Object Lock turned "
+                              "on, and deleted data is still billed until its lock ends. Choose more days than the "
+                              "oldest version you keep is old."));
+    lock_mode_ = new QComboBox;
+    lock_mode_->addItems({tr("Governance: these keys cannot remove it (if they lack the bypass permission)"),
+                          tr("Compliance: nobody can remove it early, not even the account owner")});
+    lock_mode_->setToolTip(tr("Governance mode protects against these keys only when they do not have "
+                              "s3:BypassGovernanceRetention, s3:PutObjectRetention or the right to change the "
+                              "bucket's lock settings: give Vaultik a key limited to reading, listing, writing "
+                              "and deleting. Compliance mode cannot be lifted by anyone until the date passes, "
+                              "so you also pay for the data until then."));
 
     drive_folder_ = new QLineEdit;
     drive_folder_->setPlaceholderText(tr("e.g. Backups/my-pc"));
@@ -192,6 +201,9 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     form_->addRow(tr("Secret access key:"), secret_);
     form_->addRow(tr("Region:"), region_);
     form_->addRow(tr("Lock uploads for:"), lock_days_);
+    form_->addRow(tr("Lock mode:"), lock_mode_);
+    lock_mode_->setEnabled(false);
+    connect(lock_days_, &QSpinBox::valueChanged, lock_mode_, [this](int days) { lock_mode_->setEnabled(days > 0); });
     form_->addRow(tr("Folder:"), drive_folder_);
     form_->addRow(tr("App client ID:"), app_id_);
     form_->addRow(tr("App client secret:"), app_secret_);
@@ -214,6 +226,7 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
         key_id_->setText(initial.key_id);
         region_->setText(initial.region);
         lock_days_->setValue(initial.lock_days);
+        lock_mode_->setCurrentIndex(initial.lock_compliance ? 1 : 0);
         try {
             const S3Location l = parse_s3_location(u8(initial.location));
             endpoint_->setText(qs(l.endpoint));
@@ -295,7 +308,7 @@ void CloudDialog::provider_changed(int index) {
     const bool drive = index >= kPCloud;
     for (QWidget* w : {static_cast<QWidget*>(endpoint_), static_cast<QWidget*>(bucket_), static_cast<QWidget*>(folder_),
                        static_cast<QWidget*>(key_id_), static_cast<QWidget*>(secret_), static_cast<QWidget*>(region_),
-                       static_cast<QWidget*>(lock_days_)})
+                       static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_)})
         form_->setRowVisible(w, !drive);
     form_->setRowVisible(drive_folder_, drive);
     form_->setRowVisible(sign_in_->parentWidget(), drive);
@@ -478,6 +491,7 @@ CloudTarget CloudDialog::target() const {
     t.secret = secret_->text().isEmpty() ? stored_secret_ : secret_->text();
     t.region = region_->text().trimmed();
     t.lock_days = lock_days_->value();
+    t.lock_compliance = lock_mode_->currentIndex() == 1;
     return t;
 }
 

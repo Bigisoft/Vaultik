@@ -124,12 +124,13 @@ TEST_CASE("MD5 and Object Lock headers") {
     CHECK(s3::iso_time(0) == "1970-01-01T00:00:00Z");
     CHECK(s3::iso_time(1788984000) == "2026-09-09T20:00:00Z");
     const std::string abc = "abc";
-    const auto h = s3::lock_headers(ByteSpan(reinterpret_cast<const std::uint8_t*>(abc.data()), abc.size()), 0);
+    const auto h = s3::lock_headers(ByteSpan(reinterpret_cast<const std::uint8_t*>(abc.data()), abc.size()), 0, false);
     REQUIRE(h.size() == 3);
     CHECK(h[0].first == "content-md5");
     CHECK(h[0].second == "kAFQmDzST7DWlj99KOF/cg==");
     CHECK(h[1].second == "GOVERNANCE");
     CHECK(h[2].second == "1970-01-01T00:00:00Z");
+    CHECK(s3::lock_headers({}, 0, true)[1].second == "COMPLIANCE");
 }
 
 TEST_CASE("S3 version listings") {
