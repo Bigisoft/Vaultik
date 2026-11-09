@@ -315,7 +315,20 @@ Priorities only take effect when something else competes for the resource, so on
      System, built into Windows, no third-party driver).
    - A start page per job: last result, next run, size, a warning when backups stopped, and a
      calendar of backup days.
-5. Portable version and installer, so Vaultik is easy to use on another computer (next):
+5. Knowing backups work, and protecting them (next):
+   - Notifications and a tray icon: a Windows notification when a backup fails, is skipped or
+     has not run for a set number of days; a small tray icon with the status and "Back up now".
+     No service: the tray part runs only while signed in.
+   - Health checks: a scheduled verify that reads a sample of the stored data weekly and all of
+     it monthly, so a failing drive is noticed before a restore needs it.
+   - Back up when the drive is plugged in: a job whose destination is a removable drive runs when
+     that drive connects (recognised by its volume ID, not its letter), then says it can be
+     unplugged.
+   - Ransomware warning: when a backup sees an unusual share of files changed or renamed at
+     once, it warns and pauses cleanup, so older clean versions are never removed automatically.
+   - Locked cloud copies: S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded data
+     undeletable for a set time, even with the keys.
+6. Portable version and installer, so Vaultik is easy to use on another computer:
    - Portable: the programs in one folder; a `portable` marker file next to them keeps jobs and
      settings in that folder instead of the user profile.
    - A copy on the backup drive: backups to a disk or USB drive keep `<drive>\Vaultik\` up to date
@@ -324,9 +337,20 @@ Priorities only take effect when something else competes for the resource, so on
    - Windows installer: Program Files, a Start menu entry, upgrades in place, and an uninstaller
      that also removes the scheduled tasks.
    - Linux: the same as an AppImage (portable: runs from the backup drive and on SteamOS) and a
-     Flatpak, put on the backup drive next to the Windows programs once the Linux port (6) works.
-6. Linux port, SteamOS on the Steam Deck first: build and test the existing POSIX platform layer,
+     Flatpak, put on the backup drive next to the Windows programs once the Linux port (8) works.
+7. More convenience and security:
+   - A second copy (3-2-1): copy a backup to another destination after each run (USB drive to
+     cloud or back), so one job keeps two independent copies.
+   - A size and time estimate before the first backup.
+   - Compare two versions: files added, changed and removed, with a side-by-side diff for text.
+   - "Restore previous version" in File Explorer's right-click menu, opening the file's history.
+   - Ready-made exclusions: temporary files, browser caches, `node_modules`, Windows clutter and
+     the recycle bin, each one tick.
+   - Pause and resume a long backup, and a slower speed during working hours.
+   - Bulgarian translation of the frontend.
+   - Unlock with Windows Hello or a security key instead of typing the backup password.
+8. Linux port, SteamOS on the Steam Deck first: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
-   and the browser sign-in are Windows-only so far). Packaged as in 5.
-7. Volume image backup, restore to a volume or `.vhdx`
-8. Bare-metal restore from a recovery USB (WinPE on Windows)
+   and the browser sign-in are Windows-only so far). Packaged as in 6.
+9. Volume image backup, restore to a volume or `.vhdx`
+10. Bare-metal restore from a recovery USB (WinPE on Windows)
