@@ -155,6 +155,26 @@ recovery key (which replaces the old one, and gives older backups one). Saved jo
 backup get the new password. A changed password does not re-encrypt the backup: a copy of the
 backup folder made before the change still opens with the old password.
 
+## Packages
+
+`powershell -File tools\package.ps1` builds the release programs and makes, in `dist\`:
+
+- `Vaultik-<version>.msi`: installs into Program Files (the folder jobs with administrator rights
+  need), adds a Start menu entry and puts `vaultik` on PATH; a newer version replaces an older
+  one, and removing Vaultik also removes its scheduled tasks (jobs, history and backups stay).
+- `Vaultik-<version>-portable.zip`: a Vaultik folder to unzip anywhere, e.g. on an external
+  drive. The file `portable` next to the programs keeps jobs, history, passwords and settings in
+  `Settings` there, so nothing is written to the PC. Passwords are sealed for the Windows account
+  that saved them, so on another PC Vaultik asks once for each backup's password.
+
+After each backup to an external drive (USB, FireWire, memory card), Vaultik also keeps
+`<drive>\Vaultik\` with these portable programs and a "How to restore" note, so any Windows PC
+can restore from the drive with nothing installed. It only replaces an older copy.
+
+The version is set in `project()` in CMakeLists.txt. The program icon is drawn from
+`src/gui/app_icon.svg`; after changing it, build `vaultik-make-icon` and run
+`vaultik-make-icon src\gui\app_icon.svg src\gui\vaultik.ico`.
+
 ## Command line
 
 ```
@@ -401,16 +421,11 @@ Priorities only take effect when something else competes for the resource, so on
      last clean version is never removed automatically.
    - Locked cloud copies (done): S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded
      data undeletable for a set time, even with the keys, and `cloud-rollback` brings it back.
-6. Portable version and installer, so Vaultik is easy to use on another computer:
-   - Portable: the programs in one folder; a `portable` marker file next to them keeps jobs and
-     settings in that folder instead of the user profile.
-   - A copy on the backup drive: backups to a disk or USB drive keep `<drive>\Vaultik\` up to date
-     with the portable programs and a short how-to-restore note, so another computer can restore
-     with nothing installed.
-   - Windows installer: Program Files, a Start menu entry, upgrades in place, and an uninstaller
-     that also removes the scheduled tasks.
-   - Linux: the same as an AppImage (portable: runs from the backup drive and on SteamOS) and a
-     Flatpak, put on the backup drive next to the Windows programs once the Linux port (8) works.
+6. Portable version and installer (done for Windows): a portable folder that keeps its own
+   settings, a copy of it kept on external backup drives with a how-to-restore note, and an MSI
+   installer whose uninstall also removes the scheduled tasks. Still to come with the Linux port
+   (8): an AppImage (portable: runs from the backup drive and on SteamOS) and a Flatpak, put on
+   the backup drive next to the Windows programs.
 7. More convenience and security:
    - A second copy (3-2-1): copy a backup to another destination after each run (USB drive to
      cloud or back), so one job keeps two independent copies.

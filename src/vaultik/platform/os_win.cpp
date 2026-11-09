@@ -13,6 +13,7 @@
 // After <windows.h> (pulled in by win_handle.hpp).
 #include <dpapi.h>
 #include <shellapi.h>
+#include <winioctl.h>
 
 namespace vaultik::os {
 
@@ -455,6 +456,30 @@ VolumeLocation volume_of(const std::string& path) {
     wchar_t windows[MAX_PATH] = {};
     const UINT n = GetSystemWindowsDirectoryW(windows, MAX_PATH);
     loc.system = n >= 3 && _wcsnicmp(windows, root.c_str(), root.size()) == 0;
+
+    // External: by how the disk is attached (a USB hard disk reports itself as fixed, not removable).
+    loc.external = GetDriveTypeW(root.c_str()) == DRIVE_REMOVABLE;
+    std::wstring device(name);
+    if (!device.empty() && device.back() == L'\\') device.pop_back();  // the volume itself, not its root folder
+    const HANDLE h = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        STORAGE_PROPERTY_QUERY query{};
+        query.PropertyId = StorageDeviceProperty;
+        query.QueryType = PropertyStandardQuery;
+        STORAGE_DEVICE_DESCRIPTOR desc{};
+        DWORD got = 0;
+        if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof query, &desc, sizeof desc, &got, nullptr)) {
+            switch (desc.BusType) {
+                case BusTypeUsb:
+                case BusType1394:
+                case BusTypeSd:
+                case BusTypeMmc: loc.external = true; break;
+                default: break;
+            }
+            if (desc.RemovableMedia) loc.external = true;
+        }
+        CloseHandle(h);
+    }
     return loc;
 }
 

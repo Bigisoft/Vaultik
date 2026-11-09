@@ -1,6 +1,7 @@
 // Vaultik command-line interface.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -869,6 +870,95 @@ std::string clean_up(Repository& repo, const jobs::Job& job) {
     }
 }
 
+// "1.10.2" -> {1, 10, 2}; missing or bad parts are 0.
+std::array<int, 3> version_parts(const std::string& v) {
+    std::array<int, 3> out{};
+    const char* p = v.c_str();
+    for (int& part : out) {
+        char* end = nullptr;
+        part = static_cast<int>(std::strtol(p, &end, 10));
+        if (end == p || *end != '.') break;
+        p = end + 1;
+    }
+    return out;
+}
+
+// After a backup to an external drive: keeps <drive>\Vaultik\ with the portable programs and a
+// note on restoring, so another computer can restore from the drive with nothing installed. Only
+// replaces an older copy. Never fails the run.
+void refresh_drive_copy(const jobs::Job& job) {
+#ifdef _WIN32
+    if (is_cloud_location(job.repository)) return;
+    try {
+        const os::VolumeLocation loc = os::volume_of(job.repository);
+        if (loc.volume.empty() || loc.system || !loc.external) return;
+        const std::string target = os::join(loc.root, "Vaultik");
+        const std::string from = os::parent_of(os::executable_path());
+        if (os::fold_case(from) == os::fold_case(os::absolute_path(target))) return;  // running from that copy
+        const std::string stamp = os::join(target, "version");
+        std::string there;
+        try {
+            const Bytes b = os::read_file(stamp, 64);
+            there.assign(b.begin(), b.end());
+        } catch (const Error&) {
+        }
+        if (!there.empty() && version_parts(there) >= version_parts(VAULTIK_VERSION)) return;
+
+        os::make_dirs(target);
+        const auto fs_path = [](const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); };
+        for (const char* exe : {"vaultik.exe", "vaultik-gui.exe", "vaultik-task.exe"}) {
+            const std::string src = os::join(from, exe);
+            if (!os::exists(src)) continue;
+            std::filesystem::copy_file(fs_path(src), fs_path(os::join(target, exe)),
+                                       std::filesystem::copy_options::overwrite_existing);
+        }
+        const auto write = [&](const char* name, const std::string& text) {
+            os::write_file_atomic(os::join(target, name),
+                                  ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+        };
+        write("portable",
+              "This file makes this copy of Vaultik portable: its settings are kept in the Settings folder next to "
+              "it, and nothing is written to the computer it runs on.\r\n");
+        const std::string where = loc.relative.empty() ? std::string("the top of this drive") : loc.relative;
+        write("How to restore.txt",
+              "Restoring files from this drive on any Windows PC\r\n\r\n"
+              "1. Start vaultik-gui.exe in this folder (nothing needs to be installed).\r\n"
+              "2. Choose \"Restore from another backup...\" and select the folder " + where + " on this drive.\r\n"
+              "3. Enter the backup's password (or use its recovery key), pick a version and restore.\r\n\r\n"
+              "Vaultik keeps this folder up to date after each backup to this drive.\r\n");
+        write("version", VAULTIK_VERSION);
+        if (!g_json) out("Updated the Vaultik copy on the backup drive (" + target + ").\n");
+    } catch (const std::exception& e) {
+        warning(std::string("could not update the Vaultik copy on the backup drive: ") + e.what());
+    }
+#else
+    (void)job;
+#endif
+}
+
+// "uninstall-cleanup": run by the installer when Vaultik is removed; deletes every Vaultik task
+// from Task Scheduler (all accounts' jobs; it runs with administrator rights). Jobs, history and
+// backups stay.
+int cmd_uninstall_cleanup() {
+#ifdef _WIN32
+    std::string list;
+    os::run_command({"schtasks.exe", "/Query", "/FO", "CSV", "/NH"}, &list);
+    std::set<std::string> tasks;
+    std::size_t pos = 0;
+    while ((pos = list.find("\"\\Vaultik\\", pos)) != std::string::npos) {
+        const std::size_t end = list.find('"', pos + 1);
+        if (end == std::string::npos) break;
+        tasks.insert(list.substr(pos + 1, end - pos - 1));
+        pos = end + 1;
+    }
+    for (const std::string& t : tasks) {
+        std::string ignored;
+        if (os::run_command({"schtasks.exe", "/Delete", "/TN", t, "/F"}, &ignored) == 0) out("removed " + t + "\n");
+    }
+#endif
+    return kExitOk;
+}
+
 // The approved step behind saving or removing a job with administrator rights (see
 // admin_jobs.hpp): "admin-job install|remove <id> --user <sid> [--from <config dir>]". Started by
 // the frontend or `schedule` through a Windows approval prompt, without a visible console, so a
@@ -1253,6 +1343,7 @@ int cmd_run_job(const Args& a) {
                                      vss_arg(a, job->vss ? kDefaultVss : VssMode::Off),
                                      !(job->vss_skip_sql || a.has("--vss-skip-sql")));
         }
+        refresh_drive_copy(*job);
         if (!record.alert.empty()) {
             // Never thin out the versions from before a possible attack.
             if (!job->retention.empty())
@@ -1766,6 +1857,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
     if (a.command == "mount") return cmd_mount(a);
     if (a.command == "admin-job") return cmd_admin_job(a);
+    if (a.command == "uninstall-cleanup") return cmd_uninstall_cleanup();
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);
 

@@ -196,6 +196,7 @@ struct VolumeLocation {
     std::string root;
     std::string relative;
     bool system = false;
+    bool external = false;  // a USB, FireWire or memory card drive (not an internal disk)
 };
 VolumeLocation volume_of(const std::string& path);
 // The current mount path of a volume named by volume_of ("F:\"), or empty when it is not connected.

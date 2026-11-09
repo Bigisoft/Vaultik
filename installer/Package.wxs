@@ -33,7 +33,7 @@
         <File Source="$(var.BinDir)\vaultik-gui.exe" KeyPath="yes" />
       </Component>
       <Component>
-        <File Source="$(var.BinDir)\vaultik-task.exe" KeyPath="yes" />
+        <File Id="VaultikTaskExe" Source="$(var.BinDir)\vaultik-task.exe" KeyPath="yes" />
       </Component>
       <Component Id="PathEntry" Guid="3D1B6E42-8C7A-4F15-A0D9-52E7C4B19F63">
         <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last"
@@ -41,6 +41,15 @@
         <CreateFolder />
       </Component>
     </ComponentGroup>
+
+    <!-- Removing Vaultik (not upgrading it) also removes its scheduled tasks, every account's, as
+         they would only fail without the programs. Jobs, history and backups stay. -->
+    <CustomAction Id="RemoveScheduledTasks" FileRef="VaultikTaskExe" ExeCommand="uninstall-cleanup"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RemoveScheduledTasks" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
 
     <Feature Id="Main" Title="Vaultik">
       <ComponentGroupRef Id="Programs" />
