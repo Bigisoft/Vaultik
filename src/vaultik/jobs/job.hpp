@@ -36,6 +36,8 @@ struct Job {
     // Windows: read from a Volume Shadow Copy when the run has administrator rights, so open and
     // locked files are backed up too. Without the rights the files are read live.
     bool vss = true;
+    // Leave SQL Server out of the shadow copy, so it is not paused (see os::ShadowCopy::create).
+    bool vss_skip_sql = false;
     Schedule schedule;
     // Windows: the scheduled task runs with administrator rights (so the shadow copy above works).
     // Registering such a task asks for administrator approval each time the schedule is saved.

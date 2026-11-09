@@ -48,6 +48,7 @@ private:
     QListWidget* sources_ = nullptr;
     QListWidget* excludes_ = nullptr;
     QCheckBox* vss_ = nullptr;    // Windows only
+    QCheckBox* skip_sql_ = nullptr;  // Windows only
     QCheckBox* admin_ = nullptr;  // Windows only
 
     QComboBox* schedule_kind_ = nullptr;

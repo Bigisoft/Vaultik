@@ -63,7 +63,10 @@ Start `vaultik-gui`, then **New backup job**:
   opened with its password.
 - **What to back up:** folders and files, name patterns to skip (`*.tmp`, `node_modules`), and
   whether to use a Volume Shadow Copy for open and locked files (on by default; it needs
-  administrator rights, see "Current limits").
+  administrator rights, see "Current limits"). For the shadow copy, Windows briefly pauses the
+  writes of programs that take part in it, such as SQL Server. "Do not pause SQL Server" leaves
+  SQL Server running; its database files are then saved as they would be after a power cut,
+  which SQL Server recovers from when the files are attached again.
 - **Schedule:** manually, every few hours, daily, or on selected weekdays. Schedules are kept by
   Task Scheduler (Windows, task folder `\Vaultik`) or a systemd user timer (Linux), so Vaultik does
   not need to stay open; a run missed while the computer was off starts at the next chance.
@@ -131,6 +134,7 @@ checking the current one (or, with `--recovery-key`, the recovery key from a pro
 
 On Windows, `backup` reads from a Volume Shadow Copy when it runs as administrator
 (`--vss auto`, the default); `--vss on` makes that required and `--vss off` always reads live.
+`--vss-skip-sql` keeps SQL Server from being paused for the shadow copy.
 
 `--json` turns the output into one JSON event per line (`progress`, `warning`, `done`); with it,
 a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses this.

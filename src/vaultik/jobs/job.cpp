@@ -137,6 +137,7 @@ std::string to_json(const Job& job) {
         {"excludes", job.excludes},
         {"tags", job.tags},
         {"vss", job.vss},
+        {"vss_skip_sql", job.vss_skip_sql},
         {"run_as_admin", job.run_as_admin},
         {"schedule",
          {{"kind", to_string(job.schedule.kind)},
@@ -175,6 +176,7 @@ Job job_from_json(const std::string& text) {
         job.excludes = strings(j, "excludes");
         job.tags = strings(j, "tags");
         job.vss = j.value("vss", true);
+        job.vss_skip_sql = j.value("vss_skip_sql", false);
         job.run_as_admin = j.value("run_as_admin", false);
         if (j.contains("schedule")) {
             const json& s = j.at("schedule");

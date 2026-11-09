@@ -185,6 +185,13 @@ QWidget* JobDialog::build_sources() {
     vss_ = new QCheckBox(tr("Back up open and locked files too (Volume Shadow Copy; only when Vaultik "
                             "runs with administrator rights, otherwise such files are skipped)"));
     layout->addWidget(vss_);
+    skip_sql_ = new QCheckBox(tr("Do not pause SQL Server during the shadow copy (its database files are then "
+                                 "saved as after a power cut, which SQL Server recovers from)"));
+    auto* skip_row = new QHBoxLayout;
+    skip_row->addSpacing(20);
+    skip_row->addWidget(skip_sql_, 1);
+    layout->addLayout(skip_row);
+    connect(vss_, &QCheckBox::toggled, skip_sql_, &QWidget::setEnabled);
 #endif
     return page;
 }
@@ -333,6 +340,10 @@ void JobDialog::load(const jobs::Job& job) {
     excludes_->clear();
     for (const auto& e : job.excludes) excludes_->addItem(qs(e));
     if (vss_ != nullptr) vss_->setChecked(job.vss);
+    if (skip_sql_ != nullptr) {
+        skip_sql_->setChecked(job.vss_skip_sql);
+        skip_sql_->setEnabled(job.vss);
+    }
     if (admin_ != nullptr) admin_->setChecked(job.run_as_admin);
 
     schedule_kind_->setCurrentIndex(static_cast<int>(job.schedule.kind));
@@ -376,6 +387,7 @@ jobs::Job JobDialog::collect() const {
     j.excludes.clear();
     for (const QString& e : items_of(excludes_)) j.excludes.push_back(u8(e));
     if (vss_ != nullptr) j.vss = vss_->isChecked();
+    if (skip_sql_ != nullptr) j.vss_skip_sql = skip_sql_->isChecked();
     if (admin_ != nullptr) j.run_as_admin = admin_->isChecked();
 
     j.schedule.kind = static_cast<jobs::Schedule::Kind>(schedule_kind_->currentIndex());

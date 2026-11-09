@@ -60,8 +60,10 @@ TEST_CASE("job JSON round trip") {
     Job j = sample();
     j.id = "my-documents";
     j.run_as_admin = true;
+    j.vss_skip_sql = true;
     const Job back = job_from_json(to_json(j));
     CHECK(back.run_as_admin);
+    CHECK(back.vss_skip_sql);
     CHECK(back.id == j.id);
     CHECK(back.name == j.name);
     CHECK(back.sources == j.sources);

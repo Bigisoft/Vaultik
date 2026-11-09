@@ -14,7 +14,10 @@ public:
     // Shadow copies of every local volume holding one of `paths` (network paths are skipped).
     // Needs administrator rights. Throws Error with a readable reason when it cannot be done;
     // on POSIX it always throws (not supported).
-    static std::unique_ptr<ShadowCopy> create(const std::vector<std::string>& paths);
+    // With `pause_sql_server` false the SQL Server writer is left out: SQL Server keeps working
+    // during the snapshot instead of pausing its writes, and its database files are captured as
+    // they would be after a power cut (SQL Server recovers them when they are attached).
+    static std::unique_ptr<ShadowCopy> create(const std::vector<std::string>& paths, bool pause_sql_server = true);
 
     // Deletes the shadow copies.
     ~ShadowCopy();

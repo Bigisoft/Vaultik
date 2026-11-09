@@ -71,6 +71,9 @@ Commands:
                                moment. auto (default): when running as administrator,
                                otherwise read live with a warning; on: required;
                                off: never. run-job follows the job's setting
+      --vss-skip-sql           Do not pause SQL Server for the shadow copy; its
+                               database files are then copied as they would be
+                               after a power cut (SQL Server recovers them)
   snapshots                    List snapshots
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
   restore <snapshot>           Restore files
@@ -171,7 +174,7 @@ const std::set<std::string> kValueOptions = {
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
-                                              "--recovery-key"};
+                                              "--recovery-key", "--vss-skip-sql"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -512,14 +515,14 @@ constexpr VssMode kDefaultVss = VssMode::Off;
 
 // Makes shadow copies of the source volumes and points the backup's reads at them. The returned
 // object must outlive the backup. Auto falls back to reading live with a warning.
-std::unique_ptr<os::ShadowCopy> prepare_shadow_copy(VssMode mode, BackupOptions& o) {
+std::unique_ptr<os::ShadowCopy> prepare_shadow_copy(VssMode mode, bool pause_sql_server, BackupOptions& o) {
     if (mode == VssMode::Off) return nullptr;
     std::vector<std::string> full;
     for (const std::string& p : o.paths) full.push_back(os::absolute_path(p));
     if (!g_json) status("Creating a shadow copy...");
     std::unique_ptr<os::ShadowCopy> sc;
     try {
-        sc = os::ShadowCopy::create(full);
+        sc = os::ShadowCopy::create(full, pause_sql_server);
     } catch (const Error& e) {
         if (!g_json) clear_status();
         if (mode == VssMode::On) throw;
@@ -543,7 +546,7 @@ std::unique_ptr<os::ShadowCopy> prepare_shadow_copy(VssMode mode, BackupOptions&
 // Runs a backup with console or JSON reporting. Fills `record` with the outcome (also on failure,
 // before rethrowing) and returns the exit code. `lock` is the shared lock held for it.
 int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
-                      RepoLock& lock, VssMode vss) {
+                      RepoLock& lock, VssMode vss, bool pause_sql_server) {
     // Never back up the repository into itself.
     const std::string repo_full = os::absolute_path(repo_location);
     o.excludes.push_back(repo_full);
@@ -575,7 +578,7 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
     BackupResult r;
     std::unique_ptr<os::ShadowCopy> shadow;
     try {
-        shadow = prepare_shadow_copy(vss, o);
+        shadow = prepare_shadow_copy(vss, pause_sql_server, o);
         r = run_backup(repo, o);
     } catch (const Cancelled&) {
         record.finished = os::now();
@@ -649,7 +652,8 @@ int cmd_backup(const Args& a) {
     o.use_parent = !a.has("--no-parent");
     if (auto p = a.value("--parent")) o.parent = resolve_snapshot(*repo, *p).id;
     jobs::RunRecord record;
-    return backup_and_report(*repo, std::move(o), repo_path(a), record, lock, vss_arg(a, kDefaultVss));
+    return backup_and_report(*repo, std::move(o), repo_path(a), record, lock, vss_arg(a, kDefaultVss),
+                             !a.has("--vss-skip-sql"));
 }
 
 int cmd_jobs(const Args& /*a*/) {
@@ -764,7 +768,8 @@ int cmd_run_job(const Args& a) {
                           lock_wait(a, std::chrono::minutes(10)));
             repo->reload_index();  // a prune may have finished before the lock was granted
             code = backup_and_report(*repo, std::move(o), job->repository, record, lock,
-                                     vss_arg(a, job->vss ? kDefaultVss : VssMode::Off));
+                                     vss_arg(a, job->vss ? kDefaultVss : VssMode::Off),
+                                     !(job->vss_skip_sql || a.has("--vss-skip-sql")));
         }
         if (!job->retention.empty()) {
             const std::string note = clean_up(*repo, *job);

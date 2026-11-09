@@ -95,7 +95,7 @@ struct ShadowCopy::Impl {
     }
 };
 
-std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& paths) {
+std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& paths, bool pause_sql_server) {
     std::unique_ptr<ShadowCopy> sc(new ShadowCopy());
     sc->impl_ = std::make_unique<Impl>();
     Impl& im = *sc->impl_;
@@ -135,6 +135,14 @@ std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& p
     check(im.backup->SetContext(VSS_CTX_BACKUP), "setting the context");
     // A copy backup: application writers see it as an extra copy and do not truncate their logs.
     check(im.backup->SetBackupState(false, false, VSS_BT_COPY, false), "setting the backup type");
+    if (!pause_sql_server) {
+        // Must come before GatherWriterMetadata. SqlServerWriter, and the old MSDE writer.
+        static const VSS_ID sql_writers[] = {
+            {0xa65faa63, 0x5ea8, 0x4ebc, {0x9d, 0xbd, 0xa0, 0xc4, 0xdb, 0x26, 0x91, 0x2a}},
+            {0xf8544ac1, 0x0611, 0x4fa5, {0xb0, 0x4b, 0xf7, 0xee, 0x00, 0xb0, 0x32, 0x77}},
+        };
+        check(im.backup->DisableWriterClasses(sql_writers, 2), "leaving SQL Server out");
+    }
     IVssAsync* async = nullptr;
     check(im.backup->GatherWriterMetadata(&async), "asking applications to prepare");
     wait(async, "asking applications to prepare");
@@ -195,7 +203,7 @@ namespace vaultik::os {
 
 struct ShadowCopy::Impl {};
 
-std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& /*paths*/) {
+std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& /*paths*/, bool /*pause_sql_server*/) {
     throw Error("shadow copies are only available on Windows");
 }
 
