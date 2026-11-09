@@ -468,7 +468,9 @@ jobs::Job JobDialog::collect() const {
 bool JobDialog::prepare_repository(const jobs::Job& job, const std::string& password) {
     const bool cloud = is_cloud_location(job.repository);
     const std::string root = cloud ? job.repository : os::absolute_path(job.repository);
-    const CloudCredentials keys = cloud_.credentials();
+    CloudCredentials keys = cloud_.credentials();
+    // OneDrive hands out a new sign-in token on use: the newest is what gets stored.
+    keys.on_secret_changed = [this](const std::string& s) { cloud_.secret = qs(s); };
     std::unique_ptr<Backend> backend;
     bool has_repo = false;
     if (cloud) {

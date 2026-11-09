@@ -22,7 +22,9 @@ in file names.
 Files are written to a temporary name and renamed into place, so a reader never sees a partial
 file. In S3-compatible cloud storage (`s3:https://<endpoint>/<bucket>[/<folder>]`) each file is
 one object named `<folder>/<path>` with the same layout; object uploads are atomic, so there are no
-temporary names. A repository folder copied to or from a bucket stays valid. Write order during a backup is: packs, then the index files that reference them, then the
+temporary names. The cloud drives (`pcloud:`, `onedrive:`, `gdrive:`, `mega:` followed by a
+folder) hold the same layout as real folders and files; an upload either replaces a file whole or
+leaves it as it was. A repository folder copied to or from a bucket or drive stays valid. Write order during a backup is: packs, then the index files that reference them, then the
 snapshot. A crash leaves at worst unreferenced packs, never a snapshot pointing at missing data;
 the next prune removes them. Lock files (see below) were added in Vaultik 0.2 without a format
 version change: older versions ignore them.

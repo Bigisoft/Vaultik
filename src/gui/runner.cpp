@@ -50,11 +50,14 @@ void Runner::start(const QStringList& args, const QString& password, const vault
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.remove(QStringLiteral("VAULTIK_PASSWORD"));
     if (!password.isEmpty()) env.insert(QStringLiteral("VAULTIK_PASSWORD"), password);
-    for (const char* name : {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION"})
+    for (const char* name :
+         {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION", "VAULTIK_CLOUD_SECRET"})
         env.remove(QString::fromLatin1(name));
     if (!cloud.empty()) {
         env.insert(QStringLiteral("AWS_ACCESS_KEY_ID"), QString::fromStdString(cloud.key_id));
+        // S3 reads the secret key from either; the drives take their sign-in token from the second.
         env.insert(QStringLiteral("AWS_SECRET_ACCESS_KEY"), QString::fromStdString(cloud.secret));
+        env.insert(QStringLiteral("VAULTIK_CLOUD_SECRET"), QString::fromStdString(cloud.secret));
         if (!cloud.region.empty()) env.insert(QStringLiteral("AWS_REGION"), QString::fromStdString(cloud.region));
     }
     process_->setProcessEnvironment(env);

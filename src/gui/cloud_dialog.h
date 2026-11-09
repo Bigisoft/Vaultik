@@ -2,25 +2,27 @@
 
 #include <QDialog>
 
-#include "vaultik/repo/s3_backend.hpp"
+#include "vaultik/repo/cloud.hpp"
 
 class QComboBox;
+class QFormLayout;
 class QLabel;
 class QLineEdit;
+class QPushButton;
 
 // A cloud storage destination as entered in CloudDialog.
 struct CloudTarget {
-    QString location;  // "s3:https://<endpoint>/<bucket>[/<folder>]"
-    QString key_id;
-    QString secret;
-    QString region;  // empty: automatic
+    QString location;  // "s3:https://<endpoint>/<bucket>[/<folder>]", "pcloud:<folder>", ...
+    QString key_id;    // S3 access key ID, or the signed-in account of a drive
+    QString secret;    // S3 secret key, or a drive's sign-in token (JSON)
+    QString region;    // S3 only; empty: automatic
 
     vaultik::CloudCredentials credentials() const;
     void wipe();
 };
 
-// Asks for S3-compatible cloud storage: provider, endpoint, bucket, folder and access key, with a
-// connection test.
+// Asks for cloud storage: S3-compatible storage (provider, endpoint, bucket, folder, access key),
+// or a drive (pCloud, OneDrive, Google Drive, MEGA: folder and a sign-in). Has a connection test.
 class CloudDialog : public QDialog {
     Q_OBJECT
 
@@ -36,16 +38,34 @@ public:
 private:
     void provider_changed(int index);
     void test_connection();
+    void sign_in();
+    bool is_drive() const;
+    vaultik::CloudKind drive_kind() const;
     // The location from the fields, or empty with the problem in `error`.
     QString build_location(QString* error) const;
+    void load_app();
+    void save_app();
+    void show_account();
 
     QString stored_secret_;
     QComboBox* provider_ = nullptr;
+    QFormLayout* form_ = nullptr;
+    // S3
     QLineEdit* endpoint_ = nullptr;
     QLineEdit* bucket_ = nullptr;
     QLineEdit* folder_ = nullptr;
     QLineEdit* key_id_ = nullptr;
     QLineEdit* secret_ = nullptr;
     QLineEdit* region_ = nullptr;
+    // Drives
+    QLineEdit* drive_folder_ = nullptr;
+    QLineEdit* app_id_ = nullptr;
+    QLineEdit* app_secret_ = nullptr;
+    QPushButton* sign_in_ = nullptr;
+    QLabel* account_ = nullptr;
+    QString drive_account_;
+    QString drive_secret_;
+    vaultik::CloudKind signed_kind_ = vaultik::CloudKind::None;
+
     QLabel* hint_ = nullptr;
 };

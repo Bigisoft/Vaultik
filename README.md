@@ -18,9 +18,10 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
 - **Verifiable.** `verify --read-data` decrypts and checks every stored chunk.
 - **Portable repositories.** A repository written on Windows restores on Linux and the other way
   round (same format, same crypto).
-- **Local or cloud.** Back up to a disk, a USB drive, a network share, or S3-compatible cloud
-  storage (Cloudflare R2, Backblaze B2, Amazon S3, MinIO, ...). The cloud only ever sees encrypted
-  chunks.
+- **Local or cloud.** Back up to a disk, a USB drive, a network share, S3-compatible cloud
+  storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2, MinIO, ...), or a cloud drive
+  (pCloud, OneDrive, Google Drive, MEGA), each through its own API with no extra software. The
+  cloud only ever sees encrypted chunks.
 
 The on-disk format is specified in [docs/FORMAT.md](docs/FORMAT.md).
 
@@ -64,8 +65,9 @@ Start `vaultik-gui`, then **New backup job**:
 - **General:** a name, the destination (a folder on a USB drive, other disk or network share, or
   **Cloud storage...**) and the repository password. A new destination gets a new encrypted
   repository; an existing one is opened with its password. Cloud storage asks for the provider,
-  endpoint, an existing bucket, an optional folder in it and an access key; **Test connection**
-  checks them. The secret key is stored like the password.
+  then for S3-compatible storage the endpoint, an existing bucket, an optional folder in it and an
+  access key, or for a cloud drive a folder and a sign-in; **Test connection** checks them. The
+  secret key or sign-in token is stored like the password (see "Cloud drives" below).
 - **What to back up:** folders and files, name patterns to skip (`*.tmp`, `node_modules`), and
   whether to use a Volume Shadow Copy for open and locked files (on by default; it needs
   administrator rights, see "Current limits"). For the shadow copy, Windows briefly pauses the
@@ -155,6 +157,39 @@ keys are used. Each repository file is one object; requests are retried with bac
 errors, throttling and server errors, and `--write-limit` / `--read-limit` cap uploads and
 downloads. Browsing a cloud snapshot in the frontend downloads the folders it shows, so it is
 slower than browsing a local one.
+
+### Cloud drives
+
+Locations `pcloud:<folder>`, `onedrive:<folder>`, `gdrive:<folder>` and `mega:<folder>` back up
+to a folder in that drive. Sign in once in the frontend's **Cloud storage** dialog; the job then
+keeps a sign-in token (never the password), sealed like the job password, and scheduled runs use
+it. On the command line use `--job`, or put a token in `VAULTIK_CLOUD_SECRET`.
+
+pCloud, OneDrive and Google Drive only let registered apps sign in, so each needs a free, one-time
+registration of your own "Vaultik" app; its client ID (and secret) go into the dialog and are
+remembered:
+
+- **pCloud:** at [docs.pcloud.com](https://docs.pcloud.com), "My applications", create an app and
+  add the redirect URI `http://localhost:53682/`. Enter its client ID and client secret. The
+  folder is from the top of your pCloud; the token does not expire.
+- **OneDrive:** in [portal.azure.com](https://portal.azure.com), **App registrations**, **New
+  registration**: accounts "in any organizational directory and personal Microsoft accounts",
+  platform **Mobile and desktop applications** with the redirect URI `http://localhost`, then
+  **Authentication**, "Allow public client flows" on. Enter its Application (client) ID. Vaultik
+  asks only for its own app folder (`OneDrive\Apps\<app name>`), and the folder is inside it.
+  Files deleted by `prune` go to the OneDrive recycle bin, which counts against the quota until it
+  is emptied.
+- **Google Drive:** in [console.cloud.google.com](https://console.cloud.google.com), a project
+  with the **Google Drive API** enabled, the **OAuth consent screen** set to External and
+  **published** (in "Testing" the sign-in lapses after 7 days), and an **OAuth client ID** of type
+  **Desktop app**. Enter its client ID and client secret. Vaultik asks only for the files it
+  creates (`drive.file`), so it makes its own folders; one of the same name made by hand is not
+  used. The folder is from the top of My Drive.
+- **MEGA:** no registration: sign in with the email and password (and the two-factor code if the
+  account has one). Vaultik stores the MEGA session and the account key, not the password;
+  "close all other sessions" in MEGA's settings signs it out. MEGA encrypts files with its own
+  scheme, which Vaultik does itself (on top of its own encryption). Free accounts have a download
+  transfer limit, which large restores can reach.
 
 `init` prints the new repository's recovery key. `key passwd` sets a new password after
 checking the current one (or, with `--recovery-key`, the recovery key from a prompt or
