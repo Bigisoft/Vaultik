@@ -22,6 +22,8 @@
 #include <QVBoxLayout>
 
 #include "common.h"
+#include "key_dialog.h"
+#include "vaultik/repo/keys.hpp"
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/os.hpp"
@@ -443,6 +445,10 @@ bool JobDialog::prepare_repository(const jobs::Job& job, const std::string& pass
     }
     LocalBackend backend(root, /*create=*/true);
     Repository::init(backend, password);
+    const std::string key = create_recovery_key(backend, {password});
+    QApplication::restoreOverrideCursor();
+    show_recovery_key(this, qs(key), qs(root));
+    QApplication::setOverrideCursor(Qt::WaitCursor);
     return true;
 }
 

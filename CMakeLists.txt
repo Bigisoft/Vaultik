@@ -45,6 +45,7 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/index.cpp
     src/vaultik/repo/local_backend.cpp
     src/vaultik/repo/lock.cpp
+    src/vaultik/repo/keys.cpp
     src/vaultik/repo/repository.cpp
     src/vaultik/ops/backup.cpp
     src/vaultik/ops/restore.cpp
@@ -112,6 +113,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/repo_handle.cpp
             src/gui/job_dialog.cpp
             src/gui/restore_dialog.cpp
+            src/gui/key_dialog.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)
@@ -139,6 +141,7 @@ add_executable(vaultik_tests
     tests/test_end_to_end.cpp
     tests/test_jobs.cpp
     tests/test_prune.cpp
+    tests/test_keys.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 add_test(NAME vaultik_tests COMMAND vaultik_tests)

@@ -81,12 +81,23 @@ The job page shows live progress, the run history (also of scheduled runs), and 
 **Restore** opens a snapshot browser: pick a file or folder (or nothing, for everything) and
 restore it to another folder or to its original location.
 
+**Restore from a backup folder** in the toolbar opens any Vaultik backup with its password,
+without a saved job: the way to get files back on another computer. Copy `vaultik-gui.exe`,
+`vaultik.exe` and `vaultik-task.exe` there (they need nothing else), connect the backup drive,
+pick the backup folder and enter the password.
+
 The password is stored for scheduled runs, readable only by your user account: encrypted with
 DPAPI on Windows, in a file with mode 0600 on Linux. Job files live in `%LOCALAPPDATA%\Vaultik`
 or `~/.config/vaultik` (override with `VAULTIK_CONFIG_DIR`).
 
-**Keep the password safe elsewhere too.** Without it the backups cannot be decrypted; there is no
-recovery.
+**Keep the password safe elsewhere too.** Without it the backups cannot be decrypted, and nobody
+can reset it. What helps is the **recovery key**: a new backup shows one once (8 groups of 4
+characters, with buttons to copy it or save it to a file). Keep it apart from the computer. If
+the password is forgotten, **Password and recovery key** in the toolbar sets a new password with
+the recovery key; the same dialog changes the password with the current one, or makes a new
+recovery key (which replaces the old one, and gives older backups one). Saved jobs that use the
+backup get the new password. A changed password does not re-encrypt the backup: a copy of the
+backup folder made before the change still opens with the old password.
 
 ## Command line
 
@@ -103,6 +114,9 @@ vaultik prune     -r E:\Backups\vaultik
 vaultik jobs
 vaultik run-job   documents
 vaultik restore   --job documents latest --target D:\Restore
+vaultik key passwd   -r E:\Backups\vaultik
+vaultik key passwd   -r E:\Backups\vaultik --recovery-key XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
+vaultik key recovery -r E:\Backups\vaultik
 ```
 
 The repository can be any folder: an internal disk, a USB drive or a network share
@@ -110,6 +124,10 @@ The repository can be any folder: an internal disk, a USB drive or a network sha
 (or use `--password-file`) for unattended runs, or use `--job` to take the repository and stored
 password from a saved job. Snapshot paths start with the drive letter (`C/...`) or
 `UNC/server/share/...` on Windows, and with the top-level folder (`home/...`) on Linux.
+
+`init` prints the new repository's recovery key. `key passwd` sets a new password after
+checking the current one (or the recovery key; the new one comes from a prompt or
+`VAULTIK_NEW_PASSWORD`), and `key recovery` makes a new recovery key.
 
 On Windows, `backup` reads from a Volume Shadow Copy when it runs as administrator
 (`--vss auto`, the default); `--vss on` makes that required and `--vss off` always reads live.

@@ -30,6 +30,7 @@
 
 #include "common.h"
 #include "job_dialog.h"
+#include "key_dialog.h"
 #include "restore_dialog.h"
 #include "runner.h"
 #include "vaultik/jobs/scheduler.hpp"
@@ -84,6 +85,14 @@ MainWindow::MainWindow() {
         toolbar->addAction(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("Restore from a backup folder..."));
     open_backup->setToolTip(tr("Open any Vaultik backup with its password, e.g. one made on another computer"));
     connect(open_backup, &QAction::triggered, this, &MainWindow::restore_from_folder);
+    QAction* keys = toolbar->addAction(style()->standardIcon(QStyle::SP_DialogApplyButton), tr("Password and recovery key..."));
+    keys->setToolTip(tr("Change a backup's password, or set a new one with the recovery key"));
+    connect(keys, &QAction::triggered, this, [this] {
+        const jobs::Job* job = current_job();
+        KeyDialog dialog(store_, job ? QDir::toNativeSeparators(qs(job->repository)) : QString(), this);
+        dialog.exec();
+        repos_.clear();  // reopen with the saved password, which may have changed
+    });
     QAction* refresh = toolbar->addAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Refresh"));
     connect(refresh, &QAction::triggered, this, [this] {
         repos_.clear();

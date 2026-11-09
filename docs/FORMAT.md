@@ -12,6 +12,7 @@ in file names.
 ```
 <repo>/
   config                    plaintext header + password-wrapped master key
+  recovery                  optional: the master key wrapped with the recovery key
   data/<xx>/<pack-id>       pack files (xx = first two hex chars of the pack id)
   index/<index-id>          sealed index files
   snapshots/<snapshot-id>   sealed snapshot manifests
@@ -32,6 +33,30 @@ BLAKE3). It never touches disk in plaintext.
 The password is stretched with PBKDF2-HMAC-SHA256 (`kdf_iterations`, 32-byte `salt`) into a
 32-byte key-encryption key, which seals the master key with AES-256-GCM. The AAD of that seal is
 the full config header (everything before the wrapped key), so tampering with any parameter fails
+authentication.
+
+Changing the password rewrites only `config`, with a new salt; the master key, and with it every
+other file, stays the same.
+
+The optional `recovery` file (added in Vaultik 0.3 without a format version change; older
+versions ignore it) wraps the same master key with a recovery key: 20 random bytes, shown to the
+user as 32 characters of Crockford base32 (`0-9 A-Z` without `I L O U`) in groups of 4. Input is
+read case-insensitively with `O` as `0` and `I`/`L` as `1`. The raw 20 bytes go through
+PBKDF2-HMAC-SHA256 (`iterations`, `salt` below) to the key-encryption key. Making a new recovery
+key replaces the file.
+
+```
+magic            8 bytes  "VKRECOV\0"
+version          u32      1
+repo_id          16 bytes the repo_id from config
+iterations       u32      100000
+salt             32 bytes
+--- end of header (AAD) ---
+wrapped_len      u32      92
+wrapped_key      nonce(12) || ciphertext(64) || tag(16)
+```
+
+The AAD binds the file to its repository: a recovery file copied from another repository fails
 authentication.
 
 ## config

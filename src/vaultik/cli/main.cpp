@@ -26,6 +26,7 @@
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/verify.hpp"
+#include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/lock.hpp"
 #include "vaultik/crypto/crypto.hpp"
@@ -42,7 +43,7 @@ namespace vaultik::cli {
 
 namespace {
 
-constexpr char kVersion[] = "0.2.0";
+constexpr char kVersion[] = "0.3.0";
 
 // Exit codes.
 constexpr int kExitOk = 0;
@@ -94,6 +95,13 @@ Commands:
   prune                        Delete data no snapshot uses any more
       --dry-run                Only show what would be deleted
   unlock                       Remove locks left by runs that ended abnormally
+  key passwd                   Set a new password (asks for the current one, or
+                               use --recovery-key); saved jobs using this
+                               repository get the new password too
+  key recovery                 Make a new recovery key, which can set a new
+                               password when the old one is forgotten (an older
+                               recovery key stops working)
+      --recovery-key <key>     Unlock with the recovery key instead of the password
       --all                    Remove every lock (only when no other run is active)
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
@@ -159,7 +167,7 @@ const std::set<std::string> kValueOptions = {
     "--repo",     "--tag", "--exclude", "--target",    "--path",       "--password-file",
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
-    "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
+    "--recovery-key", "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all"};
 
@@ -472,9 +480,13 @@ int cmd_init(const Args& a) {
     std::string pw = get_password(a, true);
     status("Creating repository...");
     Repository::init(backend, pw);
+    const std::string recovery = create_recovery_key(backend, {pw});
     secure_wipe(pw.data(), pw.size());
     out("Created repository at " + backend.location() + "\n");
-    out("Keep the password safe: without it these backups cannot be restored.\n");
+    out("Recovery key: " + recovery + "\n");
+    out("Keep the password safe: without it these backups cannot be restored. Write the\n"
+        "recovery key down and keep it apart from this computer: it can set a new password\n"
+        "if the password is forgotten.\n");
     return kExitOk;
 }
 
@@ -845,6 +857,70 @@ int cmd_unlock(const Args& a) {
     return kExitOk;
 }
 
+// What unlocks the repository for `key`: --recovery-key, or the password from the usual places.
+Credential key_credential(const Args& a) {
+    if (auto k = a.value("--recovery-key")) return {*k, true};
+    return {get_password(a, false), false};
+}
+
+bool same_location(const std::string& a, const std::string& b) {
+    std::string x = os::absolute_path(a);
+    std::string y = os::absolute_path(b);
+#ifdef _WIN32
+    for (auto* s : {&x, &y})
+        for (char& c : *s)
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+#endif
+    while (x.size() > 1 && (x.back() == '\\' || x.back() == '/')) x.pop_back();
+    while (y.size() > 1 && (y.back() == '\\' || y.back() == '/')) y.pop_back();
+    return x == y;
+}
+
+int cmd_key(const Args& a) {
+    const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
+    if (sub != "passwd" && sub != "recovery") throw Error("usage: vaultik key passwd|recovery -r <repository>");
+    const std::string location = repo_path(a);
+    LocalBackend backend(location);
+    Credential credential = key_credential(a);
+
+    if (sub == "recovery") {
+        status("Making a recovery key...");
+        const std::string key = create_recovery_key(backend, credential);
+        secure_wipe(credential.secret.data(), credential.secret.size());
+        out("Recovery key: " + key + "\n");
+        out("Write it down and keep it apart from this computer. Any older recovery key no longer works.\n");
+        return kExitOk;
+    }
+
+    // Check the current password or recovery key before asking for the new password.
+    { const MasterKey check = unlock_master_key(backend, credential); }
+    std::string pw = os::get_env("VAULTIK_NEW_PASSWORD");
+    if (pw.empty()) {
+        pw = read_password("New password: ");
+        std::string again = read_password("Repeat new password: ");
+        const bool same = again == pw;
+        secure_wipe(again.data(), again.size());
+        if (!same) throw Error("passwords do not match");
+    }
+    status("Setting the new password...");
+    change_password(backend, credential, pw);
+    secure_wipe(credential.secret.data(), credential.secret.size());
+    out("The password of " + backend.location() + " is changed.\n");
+
+    const jobs::JobStore store;
+    for (const jobs::Job& job : store.list()) {
+        if (!same_location(job.repository, location)) continue;
+        try {
+            store.set_password(job.id, pw);
+            out("Saved job \"" + job.name + "\" uses the new password.\n");
+        } catch (const Error& e) {
+            warning("cannot update the password of job \"" + job.name + "\": " + e.what());
+        }
+    }
+    secure_wipe(pw.data(), pw.size());
+    return kExitOk;
+}
+
 int cmd_snapshots(const Args& a) {
     auto repo = open_repo(a);
     const auto all = load_all_snapshots(*repo);
@@ -1046,6 +1122,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "forget") return cmd_forget(a);
     if (a.command == "prune") return cmd_prune(a);
     if (a.command == "unlock") return cmd_unlock(a);
+    if (a.command == "key") return cmd_key(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }
 
