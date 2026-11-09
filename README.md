@@ -115,7 +115,7 @@ vaultik jobs
 vaultik run-job   documents
 vaultik restore   --job documents latest --target D:\Restore
 vaultik key passwd   -r E:\Backups\vaultik
-vaultik key passwd   -r E:\Backups\vaultik --recovery-key XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX
+vaultik key passwd   -r E:\Backups\vaultik --recovery-key
 vaultik key recovery -r E:\Backups\vaultik
 ```
 
@@ -126,8 +126,8 @@ password from a saved job. Snapshot paths start with the drive letter (`C/...`) 
 `UNC/server/share/...` on Windows, and with the top-level folder (`home/...`) on Linux.
 
 `init` prints the new repository's recovery key. `key passwd` sets a new password after
-checking the current one (or the recovery key; the new one comes from a prompt or
-`VAULTIK_NEW_PASSWORD`), and `key recovery` makes a new recovery key.
+checking the current one (or, with `--recovery-key`, the recovery key from a prompt or
+`VAULTIK_RECOVERY_KEY`; the new password comes from a prompt or `VAULTIK_NEW_PASSWORD`), and `key recovery` makes a new recovery key.
 
 On Windows, `backup` reads from a Volume Shadow Copy when it runs as administrator
 (`--vss auto`, the default); `--vss on` makes that required and `--vss off` always reads live.

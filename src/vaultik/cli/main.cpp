@@ -101,7 +101,8 @@ Commands:
   key recovery                 Make a new recovery key, which can set a new
                                password when the old one is forgotten (an older
                                recovery key stops working)
-      --recovery-key <key>     Unlock with the recovery key instead of the password
+      --recovery-key           Unlock with the recovery key instead of the password
+                               (asked for, or set VAULTIK_RECOVERY_KEY)
       --all                    Remove every lock (only when no other run is active)
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
@@ -167,9 +168,10 @@ const std::set<std::string> kValueOptions = {
     "--repo",     "--tag", "--exclude", "--target",    "--path",       "--password-file",
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
-    "--recovery-key", "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
+    "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
-                                              "--help",    "--version",   "--dry-run",   "--prune",     "--all"};
+                                              "--help",    "--version",   "--dry-run",   "--prune",     "--all",
+                                              "--recovery-key"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -859,7 +861,12 @@ int cmd_unlock(const Args& a) {
 
 // What unlocks the repository for `key`: --recovery-key, or the password from the usual places.
 Credential key_credential(const Args& a) {
-    if (auto k = a.value("--recovery-key")) return {*k, true};
+    // Never taken from the command line, where other programs and the shell history can see it.
+    if (a.has("--recovery-key")) {
+        std::string key = os::get_env("VAULTIK_RECOVERY_KEY");
+        if (key.empty()) key = read_password("Recovery key: ");
+        return {std::move(key), true};
+    }
     return {get_password(a, false), false};
 }
 
@@ -879,6 +886,9 @@ bool same_location(const std::string& a, const std::string& b) {
 int cmd_key(const Args& a) {
     const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
     if (sub != "passwd" && sub != "recovery") throw Error("usage: vaultik key passwd|recovery -r <repository>");
+    if (a.positional.size() > 1)
+        throw Error("unexpected \"" + a.positional[1] +
+                    "\": --recovery-key asks for the key (or reads VAULTIK_RECOVERY_KEY); keep it off the command line");
     const std::string location = repo_path(a);
     LocalBackend backend(location);
     Credential credential = key_credential(a);
