@@ -761,6 +761,17 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
     record.errors = s.errors;
     record.message = s.errors > 0 ? std::to_string(s.errors) + " item(s) could not be read" : "";
     if (r.alarm.raised()) raise_alarm(repo, r, record);
+    // A source that is gone (a detached disk, a locked volume, an unreachable share) or a sharp
+    // drop in files makes a near-empty version; removing old versions by count or by day would
+    // then throw away the good ones.
+    if (!r.missing_sources.empty()) {
+        record.hold = std::to_string(r.missing_sources.size()) + " backup path(s) could not be read at all (" +
+                      r.missing_sources.front() + ")";
+    } else if (r.alarm.parent_files >= 20 && s.files * 2 < r.alarm.parent_files) {
+        record.hold = "only " + std::to_string(s.files) + " files were found, " + std::to_string(r.alarm.parent_files) +
+                      " the time before";
+    }
+    if (!record.hold.empty()) warning(record.hold + "; old versions are kept this time");
 
     if (g_json) {
         emit({{"event", "done"},
@@ -1361,7 +1372,7 @@ private:
 // repository there on first use, with the job's password), then removes copies beyond the job's
 // retention there. Fills `record` (kind Copy) whatever happens; returns kExitOk or kExitError.
 int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job, Repository& source,
-                jobs::RunRecord& record) {
+                jobs::RunRecord& record, bool keep_old = false) {
     record.kind = jobs::RunKind::Copy;
     record.started = os::now();
     const std::string& where = job.second_copy.repository;
@@ -1401,8 +1412,10 @@ int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job
             r = copy_snapshots(source, *target, co);
         }
         if (!g_json) clear_status();
+        // The copy is what a user falls back on: never thin it out after a warning on the source.
         std::string note;
-        if (!job.retention.empty()) note = clean_up(*target, job);
+        if (keep_old) note = "old versions in the copy were not removed because of the warning";
+        else if (!job.retention.empty()) note = clean_up(*target, job);
         record.finished = os::now();
         record.status = jobs::RunStatus::Success;
         record.files = r.copied;
@@ -1530,8 +1543,8 @@ int cmd_run_job(const Args& a) {
                                      !(job->vss_skip_sql || a.has("--vss-skip-sql")));
         }
         refresh_drive_copy(*job);
-        if (!record.alert.empty()) {
-            // Never thin out the versions from before a possible attack.
+        if (!record.alert.empty() || !record.hold.empty()) {
+            // Never thin out the versions from before a possible attack or a missing source.
             if (!job->retention.empty())
                 record.message += std::string(record.message.empty() ? "" : "; ") +
                                   "old versions were not removed because of the warning";
@@ -1556,7 +1569,7 @@ int cmd_run_job(const Args& a) {
     // The second copy, after a backup that saved a version. Its result is its own history entry.
     if (!job->second_copy.repository.empty() && !g_cancel.load() && record.status != jobs::RunStatus::Failed) {
         jobs::RunRecord copy;
-        second_copy(a, store, *job, *repo, copy);
+        second_copy(a, store, *job, *repo, copy, !record.alert.empty() || !record.hold.empty());
         try {
             store.append_history(job->id, copy);
         } catch (const Error& e) {

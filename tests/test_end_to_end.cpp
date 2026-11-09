@@ -429,6 +429,21 @@ TEST_CASE("a second copy of a backup") {
     r = copy_snapshots(*a, *b, co);
     CHECK(r.copied == 0);
     CHECK(r.present == 2);
+
+    // A pin added to the original later reaches the copy.
+    Snapshot pinned = a->load_snapshot(second.snapshot_id);
+    pinned.pinned = true;
+    pinned.note = "kept";
+    a->update_snapshot(second.snapshot_id, pinned);
+    r = copy_snapshots(*a, *b, co);
+    CHECK(r.updated == 1);
+    bool copy_pinned = false;
+    for (const Id& id : b->list_snapshot_ids()) {
+        const Snapshot s = b->load_snapshot(id);
+        if (s.copy_of && *s.copy_of == second.snapshot_id) copy_pinned = s.pinned && s.note == "kept";
+    }
+    CHECK(copy_pinned);
+    CHECK(copy_snapshots(*a, *b, co).updated == 0);
     write_file(src / "three.txt", random_data(500, 34));
     run_backup(*a, options);
     r = copy_snapshots(*a, *b, co);

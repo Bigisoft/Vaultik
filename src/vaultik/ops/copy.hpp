@@ -27,6 +27,7 @@ struct CopyOptions {
 struct CopyResult {
     std::size_t copied = 0;   // snapshots copied now
     std::size_t present = 0;  // already in the target
+    std::size_t updated = 0;  // copies that took over a pin or note added to the original since
     std::uint64_t blobs = 0;  // chunks and listings stored in the target now
     std::uint64_t bytes = 0;  // their size before compression
 };

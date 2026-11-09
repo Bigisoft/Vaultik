@@ -156,6 +156,9 @@ struct RunRecord {
     // Set when the backup saw signs of ransomware (see ChangeAlarm in ops/backup.hpp); the version
     // before it was pinned and old versions were not removed.
     std::string alert;
+    // Set when old versions must not be removed after this backup for another reason: a backup
+    // path could not be read at all, or far fewer files were found than before.
+    std::string hold;
 };
 
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file

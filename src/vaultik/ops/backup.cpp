@@ -132,6 +132,7 @@ private:
     Bytes buffer_;
     SnapshotStats stats_;
     ChangeAlarm alarm_;
+    std::vector<std::string> missing_sources_;
     BackupProgress progress_;
 
     void suspicious(const std::string& path) {
@@ -441,6 +442,7 @@ BackupResult BackupEngine::run() {
         os::ErrorCode err = 0;
         if (!os::stat(io(s.full), info, err)) {
             warn("cannot back up " + s.full + ": " + os::error_message(err));
+            missing_sources_.push_back(s.full);
             continue;
         }
         // A source named explicitly is followed even if it is a link to a folder.
@@ -478,6 +480,7 @@ BackupResult BackupEngine::run() {
     result.snapshot_id = repo_.save_snapshot(snap);
     result.snapshot = std::move(snap);
     result.alarm = std::move(alarm_);
+    result.missing_sources = std::move(missing_sources_);
     return result;
 }
 

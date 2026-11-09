@@ -63,6 +63,7 @@ struct BackupResult {
     Id snapshot_id{};
     Snapshot snapshot;
     ChangeAlarm alarm;
+    std::vector<std::string> missing_sources;  // backup paths that could not be read at all
 };
 
 // What a backup of `paths` would read: files, folders and bytes, after the exclusions, walked as a

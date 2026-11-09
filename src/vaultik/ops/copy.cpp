@@ -68,18 +68,34 @@ public:
         }
         std::sort(wanted.begin(), wanted.end(), [](const Entry& a, const Entry& b) { return a.snapshot.time < b.snapshot.time; });
 
-        // What the target already has: original id -> copy id.
+        // What the target already has: original id -> copy id (and the copy itself).
         IdMap copies;
+        std::unordered_map<Id, Snapshot, IdHash> copy_snapshots;
         for (const Id& id : to_.list_snapshot_ids()) {
-            const Snapshot s = to_.load_snapshot(id);
-            if (s.copy_of) copies.emplace(*s.copy_of, id);
+            Snapshot s = to_.load_snapshot(id);
+            if (s.copy_of) {
+                copies.emplace(*s.copy_of, id);
+                copy_snapshots.emplace(id, std::move(s));
+            }
         }
 
         std::size_t n = 0;
         for (const Entry& e : wanted) {
             ++n;
-            if (copies.contains(e.id)) {
+            if (const auto have = copies.find(e.id); have != copies.end()) {
                 ++result_.present;
+                // A pin or note added to the original later (an automatic pin after a ransomware
+                // alert, say) reaches the copy too, so the copy's rules keep the same versions.
+                // Only added, never taken away: a pin made on the copy itself stays.
+                Snapshot& copy = copy_snapshots.at(have->second);
+                const bool pin = e.snapshot.pinned && !copy.pinned;
+                const bool note = !e.snapshot.note.empty() && copy.note.empty();
+                if (pin || note) {
+                    if (pin) copy.pinned = true;
+                    if (note) copy.note = e.snapshot.note;
+                    to_.update_snapshot(have->second, copy);
+                    ++result_.updated;
+                }
                 continue;
             }
             label_ = "version " + std::to_string(n) + " of " + std::to_string(wanted.size());
