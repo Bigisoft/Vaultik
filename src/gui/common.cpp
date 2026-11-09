@@ -111,9 +111,18 @@ QString run_busy(QWidget* parent, const QString& text,
     QProgressDialog dialog(text, QObject::tr("Cancel"), 0, 0, parent);
     dialog.setWindowModality(Qt::WindowModal);
     dialog.setMinimumDuration(400);  // quick work finishes without a flash of a dialog
+    // Cancel only asks: the dialog stays up (and the window blocked) until the work has really
+    // stopped, as it may still be using a repository nothing else may touch meanwhile.
+    dialog.setAutoClose(false);
+    dialog.setAutoReset(false);
     QEventLoop loop;
     QObject::connect(thread, &QThread::finished, &loop, &QEventLoop::quit);
-    QObject::connect(&dialog, &QProgressDialog::canceled, &dialog, [&] { cancel = true; });
+    QObject::connect(&dialog, &QProgressDialog::canceled, &dialog, [&] {
+        cancel = true;
+        dialog.setLabelText(QObject::tr("Stopping..."));
+        dialog.setCancelButton(nullptr);
+        dialog.show();  // a canceled dialog hides itself: keep it showing
+    });
     thread->start();
     loop.exec();
     thread->wait();

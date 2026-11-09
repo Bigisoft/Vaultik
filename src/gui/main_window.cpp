@@ -24,6 +24,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
@@ -305,7 +306,8 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     // Scheduled runs happen outside this window; pick up their results.
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, [this] {
-        if (!runner_->running()) refresh_sidebar();
+        // Not under a dialog: the code that opened it may hold on to the jobs or versions.
+        if (!runner_->running() && QApplication::activeModalWidget() == nullptr) refresh_sidebar();
     });
     timer->start(30000);
 
@@ -442,10 +444,11 @@ void MainWindow::compare_versions(int a, int b) {
     if (it == repos_.end()) return;
     const auto& snaps = it->second.snapshots;
     if (a < 0 || b < 0 || a >= static_cast<int>(snaps.size()) || b >= static_cast<int>(snaps.size()) || a == b) return;
-    const SnapshotEntry& x = snaps[static_cast<std::size_t>(a)];
-    const SnapshotEntry& y = snaps[static_cast<std::size_t>(b)];
-    const SnapshotEntry& older = x.snapshot.time <= y.snapshot.time ? x : y;
-    const SnapshotEntry& newer = x.snapshot.time <= y.snapshot.time ? y : x;
+    // Copies: the open backups may change (a finished run, a relock) while the work goes on.
+    const SnapshotEntry x = snaps[static_cast<std::size_t>(a)];
+    const SnapshotEntry y = snaps[static_cast<std::size_t>(b)];
+    const SnapshotEntry older = x.snapshot.time <= y.snapshot.time ? x : y;
+    const SnapshotEntry newer = x.snapshot.time <= y.snapshot.time ? y : x;
     const std::shared_ptr<Repository> repo = it->second.repo;
     DiffResult diff;
     const QString error = run_busy(this, tr("Comparing the versions..."), [&](const std::function<bool()>& cancelled) {
@@ -527,8 +530,11 @@ bool MainWindow::ensure_password(const jobs::Job& job) {
 }
 
 void MainWindow::explore_version(int index) {
-    const jobs::Job* job = current_job();
-    if (!job || !ensure_password(*job)) return;
+    const jobs::Job* current = current_job();
+    if (!current) return;
+    const jobs::Job copy = *current;  // ensure_password may show a dialog
+    const jobs::Job* job = &copy;
+    if (!ensure_password(copy)) return;
     const auto it = repos_.find(job->id);
     if (it == repos_.end() || index < 0 || index >= static_cast<int>(it->second.snapshots.size())) return;
     const std::string snapshot = id_hex(it->second.snapshots[static_cast<std::size_t>(index)].id);
@@ -602,8 +608,13 @@ void MainWindow::explore_version(int index) {
 
 void MainWindow::close_mounts() {
     // Each one removes its folder; give them a moment, so nothing is left behind.
-    for (const Mount& m : mounts_) m.process->write("cancel\n");
-    for (const Mount& m : mounts_) m.process->waitForFinished(5000);
+    // A copy of the list: each one that ends removes itself from mounts_ meanwhile.
+    std::vector<QPointer<QProcess>> processes;
+    for (const Mount& m : mounts_) processes.emplace_back(m.process);
+    for (const auto& p : processes)
+        if (p) p->write("cancel\n");
+    for (const auto& p : processes)
+        if (p) p->waitForFinished(5000);
 }
 
 void MainWindow::update_mounts_button() {
@@ -1261,9 +1272,11 @@ void MainWindow::refresh_overview() {
 void MainWindow::change_version(int index, bool pin, bool note) {
     const jobs::Job* job = current_job();
     if (!job) return;
-    auto it = repos_.find(job->id);
+    const std::string job_id = job->id;
+    auto it = repos_.find(job_id);
     if (it == repos_.end() || index < 0 || index >= static_cast<int>(it->second.snapshots.size())) return;
-    SnapshotEntry& entry = it->second.snapshots[static_cast<std::size_t>(index)];
+    // A copy: the open backups may change while the dialogs below are open.
+    const SnapshotEntry entry = it->second.snapshots[static_cast<std::size_t>(index)];
     Snapshot updated = entry.snapshot;
     if (note) {
         bool ok = false;
@@ -1282,17 +1295,21 @@ void MainWindow::change_version(int index, bool pin, bool note) {
         repo->update_snapshot(id, updated);
     });
     if (!error.isEmpty()) {
-        QMessageBox::warning(this, windowTitle(), error);
+        plain_warning(this, windowTitle(), error);
         return;
     }
-    entry.snapshot = updated;
+    // Found again by id: the list may have been reloaded or dropped meanwhile.
+    if (const auto again = repos_.find(job_id); again != repos_.end())
+        for (SnapshotEntry& e : again->second.snapshots)
+            if (e.id == id) e.snapshot = updated;
     show_versions();
 }
 
 void MainWindow::delete_version(int index) {
     const jobs::Job* job = current_job();
     if (!job) return;
-    auto it = repos_.find(job->id);
+    const std::string job_id = job->id;
+    auto it = repos_.find(job_id);
     if (it == repos_.end() || index < 0 || index >= static_cast<int>(it->second.snapshots.size())) return;
     const SnapshotEntry entry = it->second.snapshots[static_cast<std::size_t>(index)];
     if (entry.snapshot.pinned) return;
@@ -1302,6 +1319,8 @@ void MainWindow::delete_version(int index) {
            "the next cleanup.")
             .arg(QLocale().toString(to_datetime(entry.snapshot.time), QLocale::LongFormat)));
     if (answer != QMessageBox::Yes) return;
+    it = repos_.find(job_id);  // the question ran the event loop
+    if (it == repos_.end()) return;
     const std::shared_ptr<Repository> repo = it->second.repo;
     const QString error = run_busy(this, tr("Deleting the version..."), [&](const std::function<bool()>&) {
         RepoLock lock(*repo, RepoLock::Mode::Exclusive, "delete a version", std::chrono::seconds(10));
@@ -1310,12 +1329,15 @@ void MainWindow::delete_version(int index) {
         run_forget(*repo, fo);
     });
     if (!error.isEmpty()) {
-        QMessageBox::warning(this, windowTitle(), error);
+        plain_warning(this, windowTitle(), error);
         return;
     }
-    auto& list = it->second.snapshots;
-    list.erase(std::remove_if(list.begin(), list.end(), [&](const SnapshotEntry& e) { return e.id == entry.id; }),
-               list.end());
+    it = repos_.find(job_id);  // the work ran the event loop
+    if (it != repos_.end()) {
+        auto& list = it->second.snapshots;
+        list.erase(std::remove_if(list.begin(), list.end(), [&](const SnapshotEntry& e) { return e.id == entry.id; }),
+                   list.end());
+    }
     show_versions();
     statusBar()->showMessage(tr("Version deleted."), 8000);
 }
@@ -1366,10 +1388,15 @@ void MainWindow::restore_from_folder() {
     statusBar()->showMessage(tr("Opening the backup..."));
     RepoHandle::open_async(
         this, source.repository, u8(password), keys,
-        [this, source, password, keys](std::shared_ptr<Repository> repo, std::vector<SnapshotEntry> list,
-                                       QString error) mutable {
+        [this, source, password, keys, generation = lock_generation_](std::shared_ptr<Repository> repo,
+                                                                      std::vector<SnapshotEntry> list, QString error) mutable {
             QApplication::restoreOverrideCursor();
             statusBar()->clearMessage();
+            if (generation != lock_generation_) {
+                // Locked again while it opened: nothing of it is shown.
+                password.fill(QChar(0));
+                return;
+            }
             if (!error.isEmpty()) {
                 QMessageBox::warning(this, windowTitle(), error);
             } else if (list.empty()) {
@@ -1434,15 +1461,16 @@ void MainWindow::edit_job() {
 }
 
 void MainWindow::delete_job() {
-    const jobs::Job* job = current_job();
-    if (!job || runner_->running()) return;
+    const jobs::Job* current = current_job();
+    if (!current || runner_->running()) return;
+    const jobs::Job job = *current;  // the list may change while the question is open
     const auto answer = QMessageBox::question(
         this, windowTitle(),
         tr("Delete the job \"%1\"? Its schedule, stored password and history are removed. The backups "
            "in %2 are kept.")
-            .arg(qs(job->name), location_text(job->repository)));
+            .arg(qs(job.name), location_text(job.repository)));
     if (answer != QMessageBox::Yes) return;
-    const std::string id = job->id;
+    const std::string id = job.id;
     jobs::remove_schedule(id);
     store_.remove(id);
     repos_.erase(id);
@@ -1462,8 +1490,10 @@ void MainWindow::run_job() {
 }
 
 void MainWindow::check_job(bool full) {
-    const jobs::Job* job = current_job();
-    if (!job || runner_->running()) return;
+    const jobs::Job* current = current_job();
+    if (!current || runner_->running()) return;
+    const jobs::Job copy = *current;  // the list may change while the question is open
+    const jobs::Job* job = &copy;
     if (full && is_cloud_location(job->repository)) {
         const auto answer = QMessageBox::question(
             this, tr("Full health check"),
@@ -1478,8 +1508,11 @@ void MainWindow::check_job(bool full) {
 }
 
 void MainWindow::start_run(const QStringList& args, bool check) {
-    const jobs::Job* job = current_job();
-    if (!job || !ensure_password(*job)) return;
+    const jobs::Job* current = current_job();
+    if (!current) return;
+    const jobs::Job copy = *current;  // ensure_password may show a dialog
+    const jobs::Job* job = &copy;
+    if (!ensure_password(copy) || runner_->running()) return;
     running_job_ = job->id;
     check_run_ = check;
     check_result_.clear();

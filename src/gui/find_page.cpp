@@ -159,6 +159,9 @@ void ItemHistoryView::show_item(const QString& path) {
         location_->setText(error);
         return;
     }
+    // The backup may have been closed or switched while this ran: the results then point into
+    // a list that is gone.
+    if (repo_ != repo) return;
     history_ = std::move(found);
     all_->setEnabled(true);
     fill();
@@ -304,6 +307,7 @@ void FindPage::search() {
         status_->setText(error);
         return;
     }
+    if (repo_ != repo) return;  // closed or switched while the search ran
     const QLocale locale;
     for (const FoundItem& f : found) {
         auto* item = new QTreeWidgetItem(results_);
