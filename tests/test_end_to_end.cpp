@@ -278,7 +278,19 @@ TEST_CASE("damaged pack data is detected") {
     auto repo = open_repo(repo_dir);
     VerifyOptions vo;
     vo.read_data = true;
-    CHECK(run_verify(*repo, vo).errors > 0);
+    const VerifyResult all = run_verify(*repo, vo);
+    CHECK(all.errors > 0);
+    CHECK(all.packs_read == all.packs);
+
+    // A sampled check reads only its share of the packs, but always at least one.
+    vo.read_share = 1e-6;
+    vo.sample_seed = 1;
+    const VerifyResult some = run_verify(*repo, vo);
+    CHECK(some.packs_read == 1);
+    CHECK(some.packs_read <= some.packs);
+
+    vo.should_cancel = [] { return true; };
+    CHECK_THROWS_AS(run_verify(*repo, vo), Cancelled);
 
     RestoreOptions ro;
     ro.target = u8(tmp.path / "out");

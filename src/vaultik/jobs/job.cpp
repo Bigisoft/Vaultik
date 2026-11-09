@@ -105,6 +105,27 @@ RetentionPolicy default_retention() {
     return p;
 }
 
+HealthPolicy default_health(std::string_view repository) {
+    HealthPolicy h;
+    h.monthly = !is_cloud_location(repository);
+    return h;
+}
+
+std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
+                                 std::uint64_t now) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
+    std::uint64_t last_full = 0, last_any = 0;
+    for (const RunRecord& r : history) {
+        if (r.kind == RunKind::Backup || r.status == RunStatus::Cancelled) continue;
+        last_any = std::max(last_any, r.finished);
+        if (r.kind == RunKind::FullCheck) last_full = std::max(last_full, r.finished);
+    }
+    const auto older_than = [now](std::uint64_t at, std::uint64_t age) { return at == 0 || at + age <= now; };
+    if (policy.monthly && older_than(last_full, 30 * kDay)) return RunKind::FullCheck;
+    if (policy.weekly && older_than(last_any, 7 * kDay)) return RunKind::Check;
+    return std::nullopt;
+}
+
 void validate(const Job& job) {
     if (job.name.empty()) throw Error("the job needs a name");
     if (!job.id.empty() && !std::all_of(job.id.begin(), job.id.end(), is_id_char))
@@ -137,6 +158,8 @@ void validate(const Job& job) {
     for (const int n : {k.last, k.hourly, k.daily, k.weekly, k.monthly, k.yearly, k.within_days})
         if (n < 0 || n > 10000) throw Error("retention counts must be between 0 and 10000");
     if (k.max_bytes != 0 && k.max_bytes < (1ull << 30)) throw Error("a size limit must be at least 1 GB");
+    if (job.health.sample_percent < 1 || job.health.sample_percent > 100)
+        throw Error("the weekly check must read between 1% and 100% of the data");
 }
 
 std::string to_json(const Job& job) {
@@ -177,6 +200,10 @@ std::string to_json(const Job& job) {
           {"yearly", job.retention.yearly},
           {"within_days", job.retention.within_days},
           {"max_bytes", job.retention.max_bytes}}},
+        {"health",
+         {{"weekly", job.health.weekly},
+          {"sample_percent", job.health.sample_percent},
+          {"monthly", job.health.monthly}}},
     };
     return j.dump(2) + "\n";
 }
@@ -226,6 +253,13 @@ Job job_from_json(const std::string& text) {
             job.retention.within_days = k.value("within_days", 0);
             job.retention.max_bytes = k.value("max_bytes", std::uint64_t{0});
         }
+        job.health = default_health(job.repository);  // missing in jobs saved before 0.5
+        if (j.contains("health")) {
+            const json& h = j.at("health");
+            job.health.weekly = h.value("weekly", job.health.weekly);
+            job.health.sample_percent = h.value("sample_percent", job.health.sample_percent);
+            job.health.monthly = h.value("monthly", job.health.monthly);
+        }
         validate(job);
         return job;
     } catch (const json::exception& e) {
@@ -234,12 +268,13 @@ Job job_from_json(const std::string& text) {
 }
 
 std::string to_json(const RunRecord& r) {
-    const json j = {
+    json j = {
         {"started", r.started},     {"finished", r.finished},       {"status", to_string(r.status)},
         {"snapshot", r.snapshot},   {"files", r.files},             {"bytes", r.bytes},
         {"new_bytes", r.new_bytes}, {"stored_bytes", r.stored_bytes}, {"errors", r.errors},
         {"message", r.message},
     };
+    if (r.kind != RunKind::Backup) j["kind"] = to_string(r.kind);
     return j.dump();
 }
 
@@ -247,6 +282,8 @@ RunRecord record_from_json(const std::string& text) {
     try {
         const json j = json::parse(text);
         RunRecord r;
+        const std::string kind = j.value("kind", std::string("backup"));  // missing before 0.5
+        r.kind = kind == "full_check" ? RunKind::FullCheck : kind == "check" ? RunKind::Check : RunKind::Backup;
         r.started = j.value("started", std::uint64_t{0});
         r.finished = j.value("finished", std::uint64_t{0});
         r.status = status_from(j.value("status", std::string("failed")));
@@ -261,6 +298,27 @@ RunRecord record_from_json(const std::string& text) {
     } catch (const json::exception& e) {
         throw Error(std::string("invalid run record: ") + e.what());
     }
+}
+
+const RunRecord* last_backup(const std::vector<RunRecord>& history) {
+    for (auto it = history.rbegin(); it != history.rend(); ++it)
+        if (it->kind == RunKind::Backup) return &*it;
+    return nullptr;
+}
+
+const RunRecord* last_check(const std::vector<RunRecord>& history) {
+    for (auto it = history.rbegin(); it != history.rend(); ++it)
+        if (it->kind != RunKind::Backup) return &*it;
+    return nullptr;
+}
+
+const char* to_string(RunKind kind) {
+    switch (kind) {
+        case RunKind::Backup: return "backup";
+        case RunKind::Check: return "check";
+        case RunKind::FullCheck: return "full_check";
+    }
+    return "backup";
 }
 
 const char* to_string(RunStatus status) {

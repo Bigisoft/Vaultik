@@ -28,6 +28,16 @@ struct Schedule {
     int every_hours = 1;  // Hourly: 1-23
 };
 
+// Health checks run after a scheduled backup when they are due: a weekly check reads a share of
+// the stored data back and compares it with its hashes, a monthly full check reads all of it.
+// Both also check that every version's structure is complete. Reading from cloud storage costs
+// downloads, so a cloud job starts without the monthly full check.
+struct HealthPolicy {
+    bool weekly = true;
+    int sample_percent = 10;  // 1..100: the share of stored data the weekly check reads
+    bool monthly = true;
+};
+
 struct Job {
     std::string id;    // file-name safe, derived from the name when created
     std::string name;  // shown in the UI
@@ -53,14 +63,23 @@ struct Job {
     // Old snapshots of this job to remove after each run (then unused data is pruned). Empty keeps
     // everything.
     RetentionPolicy retention;
+    HealthPolicy health;
 };
 
 // The retention a new job starts with: 7 daily, 4 weekly and 12 monthly snapshots.
 RetentionPolicy default_retention();
 
+// The health checks a job saving to `repository` starts with: weekly 10%, and the monthly full
+// check only for a folder (a full check of cloud storage downloads everything).
+HealthPolicy default_health(std::string_view repository);
+
 enum class RunStatus { Success, Partial, Failed, Cancelled };
 
+// What a run did: a backup, a health check that read a sample of the data, or one that read all.
+enum class RunKind { Backup, Check, FullCheck };
+
 struct RunRecord {
+    RunKind kind = RunKind::Backup;
     std::uint64_t started = 0;   // FILETIME ticks
     std::uint64_t finished = 0;
     RunStatus status = RunStatus::Success;
@@ -88,8 +107,24 @@ Job job_from_json(const std::string& text);
 std::string to_json(const RunRecord& record);
 RunRecord record_from_json(const std::string& text);
 
+// The newest backup run, or the newest health check, in a history (oldest first); null if none.
+const RunRecord* last_backup(const std::vector<RunRecord>& history);
+const RunRecord* last_check(const std::vector<RunRecord>& history);
+// A health check that found damaged or missing data (not one that could not run).
+inline bool found_damage(const RunRecord& r) {
+    return r.kind != RunKind::Backup && r.status == RunStatus::Failed && r.errors > 0;
+}
+
 const char* to_string(RunStatus status);
+const char* to_string(RunKind kind);
 const char* to_string(Schedule::Kind kind);
+
+// The health check due now (FILETIME ticks), judged from the job's history (oldest first): a full
+// check when the monthly one is on and no full check finished in the last 30 days, otherwise a
+// sampled check when the weekly one is on and no check of either kind finished in the last 7
+// days. A cancelled check does not count, so it is tried again after the next backup.
+std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
+                                 std::uint64_t now);
 // "Daily at 02:00", "Mon, Wed at 21:30", "Every 4 hours at :15", "Manual".
 std::string describe(const Schedule& schedule);
 

@@ -64,6 +64,9 @@ private:
     void edit_job();
     void delete_job();
     void run_job();
+    // A health check of the current job now: its weekly share of the data, or all of it.
+    void check_job(bool full);
+    void start_run(const QStringList& args, bool check);
     void open_restore(int snapshot_index, const QString& select_path = {});
     void restore_from_folder();
     void open_keys();
@@ -98,6 +101,7 @@ private:
     QPushButton* restore_ = nullptr;
     QToolButton* more_ = nullptr;
     QWidget* progress_box_ = nullptr;
+    QLabel* running_label_ = nullptr;
     QProgressBar* bar_ = nullptr;
     QLabel* progress_text_ = nullptr;
     QLabel* current_file_ = nullptr;
@@ -115,6 +119,8 @@ private:
     Runner* runner_ = nullptr;
     std::string running_job_;
     std::chrono::steady_clock::time_point run_started_{};
+    bool check_run_ = false;  // the running job is a health check on its own (check-job)
+    QString check_result_;    // what the health check after a backup found
 
     // Opened repositories per job id, with the job's versions (newest first).
     struct OpenRepo {

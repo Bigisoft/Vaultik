@@ -83,7 +83,7 @@ void Runner::read_output() {
         if (line.isEmpty()) continue;
         const QJsonObject ev = QJsonDocument::fromJson(line).object();
         const QString type = ev.value("event").toString();
-        if (type == "progress") {
+        if (type == "progress" || type == "check_progress" || type == "check") {
             emit progress(ev);
         } else if (type == "warning") {
             emit warning(ev.value("message").toString());

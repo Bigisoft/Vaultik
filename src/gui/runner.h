@@ -29,6 +29,7 @@ public:
     void cancel();
 
 signals:
+    // A "progress" event of a backup, or "check_progress" and the final "check" of a health check.
     void progress(const QJsonObject& event);
     void warning(const QString& message);
     // status: success, partial, failed or cancelled. `event` is the engine's "done" event.

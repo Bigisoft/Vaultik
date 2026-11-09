@@ -15,7 +15,8 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
 - **Fast incremental runs.** Files whose size and timestamps match the previous snapshot are not
   even read.
 - **Polite.** Priorities and hard limits for CPU, disk, memory and bandwidth, per job.
-- **Verifiable.** `verify --read-data` decrypts and checks every stored chunk.
+- **Verifiable.** `verify --read-data` decrypts and checks every stored chunk, and jobs run
+  health checks on their own (see below).
 - **Portable repositories.** A repository written on Windows restores on Linux and the other way
   round (same format, same crypto).
 - **Local or cloud.** Back up to a disk, a USB drive, a network share, S3-compatible cloud
@@ -168,6 +169,7 @@ vaultik forget    -r E:\Backups\vaultik --keep-daily 7 --keep-weekly 4 --keep-mo
 vaultik prune     -r E:\Backups\vaultik
 vaultik jobs
 vaultik run-job   documents
+vaultik check-job documents --full
 vaultik restore   --job documents latest --target D:\Restore
 vaultik key passwd   -r E:\Backups\vaultik
 vaultik key passwd   -r E:\Backups\vaultik --recovery-key
@@ -253,6 +255,18 @@ to one job. `--dry-run` shows the decision without removing anything. Removing s
 no space by itself: `prune` (or `forget --prune`) then deletes the data no remaining snapshot
 uses, rewriting packs that are mostly unused.
 
+### Health checks
+
+After `run-job` saves a version, it runs the job's health check when one is due (`--no-check`
+skips it). The weekly check reads a share of the stored packs back (10% by default, a different
+share each week, always at least one pack), checks their hashes and decrypts every chunk in
+them; the monthly check reads everything. Both also check that every version's folders and
+files point at data that exists. A check is its own entry in the job's history (`"kind":
+"check"` or `"full_check"`), so a damaged drive turns the tray icon red and shows a
+notification. `check-job <job> [--full]` runs one now; `verify --read-data --read-share 10` does
+the same on any repository. New cloud jobs skip the monthly full check, since it downloads the
+whole backup.
+
 ### Running side by side
 
 Backups, restores and checks of the same repository can run at the same time, also from several
@@ -328,8 +342,8 @@ Priorities only take effect when something else competes for the resource, so on
      calendar of backup days.
 5. Knowing backups work, and protecting them (next):
    - Notifications and a tray icon (done).
-   - Health checks: a scheduled verify that reads a sample of the stored data weekly and all of
-     it monthly, so a failing drive is noticed before a restore needs it.
+   - Health checks (done): after a backup, a check reads a sample of the stored data weekly and
+     all of it monthly, so a failing drive is noticed before a restore needs it.
    - Back up when the drive is plugged in: a job whose destination is a removable drive runs when
      that drive connects (recognised by its volume ID, not its letter), then says it can be
      unplugged.

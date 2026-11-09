@@ -86,15 +86,22 @@ void Tray::check() {
     const std::uint64_t now = vaultik::os::now();
     QStringList problems;
     for (const jobs::Job& job : list) {
-        const auto records = jobs::combined_history(store_, job.id, 20);
+        const auto records = jobs::combined_history(store_, job.id, 100);  // a week of hourly runs, so the last check is in it
         const QString name = qs(job.name);
 
         // Runs that ended badly since the last look (at the first look: only the latest run).
         std::uint64_t& seen = seen_[job.id];
         for (const jobs::RunRecord& r : records) {
             if (r.started <= seen) continue;
-            const bool fresh = !first_check_ || &r == &records.back();
-            if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed) {
+            const bool fresh = !first_check_ || &r == jobs::last_backup(records) || &r == jobs::last_check(records);
+            if (r.kind != jobs::RunKind::Backup) {
+                // A check that could not run is not news: the backup before it failed the same way.
+                if (fresh && settings.notify_failures && jobs::found_damage(r))
+                    icon_->showMessage(tr("Health check of %1 found problems").arg(name),
+                                       tr("Some backed-up data could not be read back. Open Vaultik to see "
+                                          "what is affected, and back up again soon."),
+                                       QSystemTrayIcon::Critical, 15000);
+            } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed) {
                 icon_->showMessage(tr("Backup failed: %1").arg(name), qs(r.message).left(200), QSystemTrayIcon::Critical,
                                    15000);
             } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Partial) {
@@ -105,7 +112,10 @@ void Tray::check() {
             }
         }
         if (!records.empty()) seen = std::max(seen, records.back().started);
-        if (!records.empty() && records.back().status == jobs::RunStatus::Failed) problems << name;
+        const jobs::RunRecord* backup = jobs::last_backup(records);
+        const jobs::RunRecord* checked = jobs::last_check(records);
+        if ((backup && backup->status == jobs::RunStatus::Failed) || (checked && jobs::found_damage(*checked)))
+            problems << name;
 
         // Too long without a saved version; reported once a day.
         const int days = overdue_after_days(job, settings.remind_after_days);

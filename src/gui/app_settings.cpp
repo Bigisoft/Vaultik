@@ -94,6 +94,8 @@ int overdue_after_days(const jobs::Job& job, int remind_after_days) {
 std::uint64_t last_saved(const jobs::JobStore& store, const jobs::Job& job) {
     const auto records = jobs::combined_history(store, job.id, 200);
     for (auto it = records.rbegin(); it != records.rend(); ++it)
-        if (it->status == jobs::RunStatus::Success || it->status == jobs::RunStatus::Partial) return it->started;
+        if (it->kind == jobs::RunKind::Backup &&
+            (it->status == jobs::RunStatus::Success || it->status == jobs::RunStatus::Partial))
+            return it->started;
     return 0;
 }

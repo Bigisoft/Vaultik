@@ -242,6 +242,27 @@ QWidget* JobDialog::build_schedule() {
     dl->addStretch();
     form->addRow(tr("Days:"), days_row_);
 
+    // Health checks: after a scheduled or manual backup, when one is due.
+    check_weekly_ = new QCheckBox(tr("Once a week, read back"));
+    check_percent_ = spin(1, 100, QStringLiteral("%"), QString());
+    form->addRow(tr("Check:"), row({check_weekly_, check_percent_, new QLabel(tr("of the stored data"))}));
+    check_monthly_ = new QCheckBox(tr("Once a month, read back all of it"));
+    form->addRow(QString(), check_monthly_);
+    auto* check_note = new QLabel(tr("A check runs after a backup when it is due. It reads stored data back and "
+                                     "compares it with what was saved, so a failing disk or damaged files are "
+                                     "found while the originals still exist. Each week reads a different part. "
+                                     "From cloud storage, checks are downloads; the monthly one downloads "
+                                     "everything."));
+    check_note->setWordWrap(true);
+    check_note->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(QString(), check_note);
+    connect(check_weekly_, &QCheckBox::toggled, check_percent_, &QWidget::setEnabled);
+    connect(check_monthly_, &QCheckBox::clicked, this, [this] { check_monthly_touched_ = true; });
+    connect(repository_, &QLineEdit::textChanged, this, [this](const QString& text) {
+        if (!editing_ && !check_monthly_touched_)
+            check_monthly_->setChecked(jobs::default_health(u8(text.trimmed())).monthly);
+    });
+
 #ifdef _WIN32
     admin_ = new QCheckBox(tr("Run with administrator rights"));
     form->addRow(QString(), admin_);
@@ -468,6 +489,10 @@ void JobDialog::load(const jobs::Job& job) {
         skip_sql_->setEnabled(job.vss);
     }
     if (admin_ != nullptr) admin_->setChecked(job.run_as_admin);
+    check_weekly_->setChecked(job.health.weekly);
+    check_percent_->setValue(job.health.sample_percent);
+    check_percent_->setEnabled(job.health.weekly);
+    check_monthly_->setChecked(job.health.monthly);
 
     schedule_kind_->setCurrentIndex(static_cast<int>(job.schedule.kind));
     time_->setTime(QTime(job.schedule.hour, job.schedule.minute));
@@ -555,6 +580,9 @@ jobs::Job JobDialog::collect() const {
     r.write_rate = static_cast<std::uint64_t>(write_limit_->value()) << 20;
 
     j.retention = collect_retention();
+    j.health.weekly = check_weekly_->isChecked();
+    j.health.sample_percent = check_percent_->value();
+    j.health.monthly = check_monthly_->isChecked();
     return j;
 }
 

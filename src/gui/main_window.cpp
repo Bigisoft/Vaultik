@@ -128,6 +128,32 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
 
     runner_ = new Runner(this);
     connect(runner_, &Runner::progress, this, [this](const QJsonObject& ev) {
+        const QString type = ev.value("event").toString();
+        if (type == "check") {
+            const bool damage = ev.value("errors").toInteger() > 0;
+            check_result_ = damage ? tr("The health check found problems: %1").arg(ev.value("message").toString())
+                                   : tr("Health check: no problems.");
+            log_->appendPlainText(check_result_);
+            return;
+        }
+        if (type == "check_progress") {
+            running_label_->setText(tr("Checking the backup..."));
+            // "pack 3/120" while the stored data is read, then the versions' structure.
+            const QString current = ev.value("current").toString();
+            static const QRegularExpression packs(QStringLiteral("^pack (\\d+)/(\\d+)$"));
+            const QRegularExpressionMatch m = packs.match(current);
+            if (m.hasMatch()) {
+                bar_->setRange(0, m.captured(2).toInt());
+                bar_->setValue(m.captured(1).toInt());
+                progress_text_->setText(tr("Reading stored data back: part %1 of %2").arg(m.captured(1), m.captured(2)));
+                current_file_->clear();
+            } else {
+                bar_->setRange(0, 0);
+                progress_text_->setText(tr("Checking every version's folders and files"));
+                current_file_->setText(current);
+            }
+            return;
+        }
         const double secs = std::max(
             std::chrono::duration<double>(std::chrono::steady_clock::now() - run_started_).count(), 0.001);
         const auto bytes = static_cast<std::uint64_t>(ev.value("bytes").toInteger());
@@ -143,8 +169,19 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     connect(runner_, &Runner::finished, this, [this](const QString& result, const QJsonObject& ev) {
         const std::string id = running_job_;
         running_job_.clear();
+        const bool check = check_run_;
+        check_run_ = false;
         set_running(false);
         QString msg;
+        if (check) {
+            msg = result == "success"   ? tr("Health check: no problems.")
+                  : result == "cancelled" ? tr("Health check cancelled.")
+                                          : tr("Health check failed: %1").arg(ev.value("message").toString());
+            log_->appendPlainText(msg);
+            statusBar()->showMessage(msg, 15000);
+            reload_jobs(current_job() ? current_job()->id : id);
+            return;
+        }
         if (result == "success" || result == "partial") {
             msg = tr("Backup finished: %1, %2 new, %3 stored")
                       .arg(count_of(static_cast<std::uint64_t>(ev.value("files").toInteger()), tr("file"), tr("files")))
@@ -157,6 +194,8 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             msg = tr("Backup failed: %1").arg(ev.value("message").toString());
             log_->appendPlainText(msg);
         }
+        if (!check_result_.isEmpty()) msg += "  " + check_result_;
+        check_result_.clear();
         statusBar()->showMessage(msg, 15000);
         repos_.erase(id);  // a new version: reload the list when it is shown
         reload_jobs(current_job() ? current_job()->id : id);
@@ -374,6 +413,10 @@ QWidget* MainWindow::build_job_page() {
     more_->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(more_);  // owned by the button
     menu->addAction(tr("Edit job..."), this, &MainWindow::edit_job);
+    menu->addAction(tr("Check the backup now"), this, [this] { check_job(false); })
+        ->setToolTip(tr("Read part of the stored data back and check every version"));
+    menu->addAction(tr("Full health check..."), this, [this] { check_job(true); });
+    menu->setToolTipsVisible(true);
     menu->addAction(tr("Refresh"), this, [this] {
         repos_.clear();
         reload_jobs(current_job() ? current_job()->id : std::string());
@@ -396,8 +439,8 @@ QWidget* MainWindow::build_job_page() {
     progress_box_ = progress_card;
     auto* pl = new QVBoxLayout(progress_card);
     pl->setContentsMargins(14, 12, 14, 12);
-    auto* running_label = new QLabel(tr("Backing up..."));
-    running_label->setProperty("role", "heading");
+    running_label_ = new QLabel(tr("Backing up..."));
+    running_label_->setProperty("role", "heading");
     bar_ = new QProgressBar;
     bar_->setRange(0, 0);
     bar_->setTextVisible(false);
@@ -406,7 +449,7 @@ QWidget* MainWindow::build_job_page() {
     current_file_->setTextFormat(Qt::PlainText);
     current_file_->setProperty("role", "faint");
     current_file_->setMinimumWidth(10);
-    pl->addWidget(running_label);
+    pl->addWidget(running_label_);
     pl->addWidget(bar_);
     pl->addWidget(progress_text_);
     pl->addWidget(current_file_);
@@ -431,8 +474,8 @@ QWidget* MainWindow::build_job_page() {
     history_ = new QTreeWidget;
     history_->setRootIsDecorated(false);
     history_->setIndentation(0);
-    history_->setHeaderLabels({tr("Started"), tr("Result"), tr("Files"), tr("Size"), tr("New"), tr("Stored"),
-                               tr("Duration"), tr("Details")});
+    history_->setHeaderLabels({tr("Started"), tr("What"), tr("Result"), tr("Files"), tr("Size"), tr("New"),
+                               tr("Stored"), tr("Duration"), tr("Details")});
     history_->header()->setStretchLastSection(true);
     auto* activity = new QWidget;
     auto* al = new QVBoxLayout(activity);
@@ -494,13 +537,18 @@ void MainWindow::reload_jobs(const std::string& select_id) {
 
 void MainWindow::fill_card(QListWidgetItem* item, const jobs::Job& j) {
     item->setText(qs(j.name));
-    const auto h = jobs::combined_history(store_, j.id, 1);
-    if (h.empty()) {
+    const auto h = jobs::combined_history(store_, j.id, 100);
+    const jobs::RunRecord* backup = jobs::last_backup(h);
+    const jobs::RunRecord* check = jobs::last_check(h);
+    if (check && jobs::found_damage(*check)) {
+        item->setData(JobCardDelegate::StatusRole, static_cast<int>(jobs::RunStatus::Failed));
+        item->setData(JobCardDelegate::StatusTextRole, tr("Health check found problems, %1").arg(when_text(check->started)));
+    } else if (!backup) {
         item->setData(JobCardDelegate::StatusRole, -1);
         item->setData(JobCardDelegate::StatusTextRole, tr("Not backed up yet"));
     } else {
-        item->setData(JobCardDelegate::StatusRole, static_cast<int>(h.back().status));
-        item->setData(JobCardDelegate::StatusTextRole, status_text(h.back().status) + ", " + when_text(h.back().started));
+        item->setData(JobCardDelegate::StatusRole, static_cast<int>(backup->status));
+        item->setData(JobCardDelegate::StatusTextRole, status_text(backup->status) + ", " + when_text(backup->started));
     }
     item->setData(JobCardDelegate::DetailRole, qs(jobs::describe(j.schedule)) + "  ·  " + location_text(j.repository));
 }
@@ -546,30 +594,50 @@ void MainWindow::refresh_history() {
     history_->clear();
     for (auto it = records.rbegin(); it != records.rend(); ++it) {
         const jobs::RunRecord& r = *it;
+        const bool backup = r.kind == jobs::RunKind::Backup;
         auto* item = new QTreeWidgetItem(history_);
         item->setText(0, format_time(r.started));
-        item->setIcon(1, status_icon(r.status));
-        item->setText(1, status_text(r.status));
-        item->setText(2, QLocale().toString(static_cast<qulonglong>(r.files)));
-        item->setText(3, format_bytes(r.bytes));
-        item->setText(4, format_bytes(r.new_bytes));
-        item->setText(5, format_bytes(r.stored_bytes));
-        if (r.finished > r.started) item->setText(6, format_duration(static_cast<double>(r.finished - r.started) / 1e7));
-        item->setText(7, qs(r.message));
-        for (int c = 2; c < 7; ++c) item->setTextAlignment(c, Qt::AlignRight | Qt::AlignVCenter);
+        item->setText(1, backup ? tr("Backup") : r.kind == jobs::RunKind::FullCheck ? tr("Full check") : tr("Health check"));
+        item->setIcon(2, status_icon(r.status));
+        if (backup) {
+            item->setText(2, status_text(r.status));
+            item->setText(3, QLocale().toString(static_cast<qulonglong>(r.files)));
+            item->setText(4, format_bytes(r.bytes));
+            item->setText(5, format_bytes(r.new_bytes));
+            item->setText(6, format_bytes(r.stored_bytes));
+        } else {
+            // For a check: how much was read back.
+            item->setText(2, jobs::found_damage(r) ? tr("Problems found") : status_text(r.status));
+            item->setText(4, format_bytes(r.bytes));
+            item->setToolTip(4, tr("Read back and checked"));
+        }
+        if (r.finished > r.started) item->setText(7, format_duration(static_cast<double>(r.finished - r.started) / 1e7));
+        item->setText(8, qs(r.message));
+        for (int c = 3; c < 8; ++c) item->setTextAlignment(c, Qt::AlignRight | Qt::AlignVCenter);
     }
-    for (int c = 0; c < 7; ++c) history_->resizeColumnToContents(c);
+    for (int c = 0; c < 8; ++c) history_->resizeColumnToContents(c);
 
     QString next = qs(jobs::describe(job->schedule));
-    if (records.empty()) {
+    const jobs::RunRecord* backup = jobs::last_backup(records);
+    const jobs::RunRecord* check = jobs::last_check(records);
+    QString text;
+    if (!backup) {
         status_icon_->clear();
-        status_text_->setText(tr("Not backed up yet  ·  Schedule: %1").arg(next));
+        text = tr("Not backed up yet");
     } else {
-        const jobs::RunRecord& r = records.back();
-        status_icon_->setPixmap(status_icon(r.status).pixmap(16, 16));
-        status_text_->setText(tr("Last backup %1: %2  ·  Schedule: %3")
-                                  .arg(when_text(r.started), status_text(r.status).toLower(), next));
+        status_icon_->setPixmap(status_icon(backup->status).pixmap(16, 16));
+        text = tr("Last backup %1: %2").arg(when_text(backup->started), status_text(backup->status).toLower());
     }
+    if (check) {
+        const bool damage = jobs::found_damage(*check);
+        if (damage) status_icon_->setPixmap(status_icon(jobs::RunStatus::Failed).pixmap(16, 16));
+        text += "  ·  " + tr("Checked %1: %2")
+                              .arg(when_text(check->started),
+                                   damage                                        ? tr("problems found")
+                                   : check->status == jobs::RunStatus::Success ? tr("no problems")
+                                                                                 : status_text(check->status).toLower());
+    }
+    status_text_->setText(text + "  ·  " + tr("Schedule: %1").arg(next));
 }
 
 void MainWindow::load_snapshots(bool force) {
@@ -829,13 +897,40 @@ void MainWindow::run_job() {
     }
     const jobs::Job* job = current_job();
     if (!job) return;
+    start_run({"run-job", qs(job->id)}, false);
+}
+
+void MainWindow::check_job(bool full) {
+    const jobs::Job* job = current_job();
+    if (!job || runner_->running()) return;
+    if (full && is_cloud_location(job->repository)) {
+        const auto answer = QMessageBox::question(
+            this, tr("Full health check"),
+            tr("A full check downloads everything this backup has stored in %1, which can take long and may "
+               "count against your plan's download allowance. Check it now?")
+                .arg(location_text(job->repository)));
+        if (answer != QMessageBox::Yes) return;
+    }
+    QStringList args{"check-job", qs(job->id)};
+    if (full) args << "--full";
+    start_run(args, true);
+}
+
+void MainWindow::start_run(const QStringList& args, bool check) {
+    const jobs::Job* job = current_job();
+    if (!job) return;
     running_job_ = job->id;
+    check_run_ = check;
+    check_result_.clear();
     run_started_ = std::chrono::steady_clock::now();
-    log_->appendPlainText(tr("--- %1: backup started").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm")));
+    log_->appendPlainText((check ? tr("--- %1: health check started") : tr("--- %1: backup started"))
+                              .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm")));
+    running_label_->setText(check ? tr("Checking the backup...") : tr("Backing up..."));
+    bar_->setRange(0, 0);
     progress_text_->setText(tr("Starting..."));
     current_file_->clear();
     set_running(true);
-    runner_->start({"run-job", qs(job->id)});
+    runner_->start(args);
 }
 
 void MainWindow::set_running(bool running) {

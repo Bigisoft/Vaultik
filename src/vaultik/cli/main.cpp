@@ -89,6 +89,8 @@ Commands:
       --overwrite              Replace existing files in the target
   verify                       Check repository structure and snapshots
       --read-data              Also read and decrypt every stored chunk
+      --read-share <percent>   With --read-data, only this share of the packs,
+                               a different one each time, e.g. 10
   stats                        Repository size and deduplication summary
   forget [<snapshot>...]       Remove the given snapshots, or old snapshots by a
                                keep policy; each rule keeps the newest snapshot of
@@ -130,7 +132,12 @@ Commands:
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
                                sources, destination, password and resource
-                               settings; the run is added to the job's history
+                               settings; the run is added to the job's history.
+                               Then runs the job's health check when one is due
+      --no-check               Skip the health check this time
+  check-job <job>              Read the job's share of its stored data back and
+                               check every version now (added to its history)
+      --full                   Read all of the stored data
   schedule <job>               Register the job's schedule with the system
                                scheduler (Task Scheduler or a systemd user timer)
   unschedule <job>             Remove it again (the job itself is kept)
@@ -194,10 +201,11 @@ const std::set<std::string> kValueOptions = {
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
-    "--user", "--from", "--keep-within"};
+    "--user", "--from", "--keep-within", "--read-share"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
-                                              "--recovery-key", "--vss-skip-sql", "--admin", "--force"};
+                                              "--recovery-key", "--vss-skip-sql", "--admin", "--force",
+                                              "--full", "--no-check"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -849,11 +857,144 @@ int cmd_admin_job(const Args& a) {
     return kExitOk;
 }
 
+// Reads a job's stored data back (all of it for a full check, else the job's weekly share) and
+// checks every version's structure, under a shared lock so backups of other jobs can go on.
+// Fills `record` (kind, times, status, packs read as files, bytes read, problems as errors).
+// Returns kExitOk, or kExitAuth when damage was found; throws on cancel or when the check could
+// not run, after filling the record.
+int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record) {
+    record.kind = kind;
+    record.started = os::now();
+    const bool full = kind == jobs::RunKind::FullCheck;
+    std::vector<std::string> problems;
+    VerifyResult r;
+    try {
+        RepoLock lock(repo, RepoLock::Mode::Shared, "check (job " + job.id + ")");
+        repo.reload_index();  // a prune may have finished before the lock was granted
+        VerifyOptions o;
+        o.read_data = true;
+        o.read_share = full ? 1.0 : job.health.sample_percent / 100.0;
+        o.sample_seed = record.started;  // a different share each time
+        o.should_cancel = [&lock] { return g_cancel.load() || lock.lost(); };
+        o.on_progress = [](const std::string& msg) {
+            if (g_json) emit({{"event", "check_progress"}, {"current", msg}});
+            else status("Checking " + msg);
+        };
+        o.on_error = [&problems](const std::string& msg) {
+            if (problems.size() < 3) problems.push_back(msg);
+            warning(msg);
+        };
+        if (!g_json)
+            out(std::string(full ? "Full health check: reading all stored data back...\n"
+                                 : "Health check: reading " + std::to_string(job.health.sample_percent) +
+                                       "% of the stored data back...\n"));
+        r = run_verify(repo, o);
+    } catch (const Cancelled&) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Cancelled;
+        record.message = "cancelled";
+        throw;
+    } catch (const std::exception& e) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Failed;
+        record.message = std::string("the check could not run: ") + e.what();
+        throw;
+    }
+    record.finished = os::now();
+    record.files = r.packs_read;
+    record.bytes = r.bytes_read;
+    record.errors = r.errors;
+    record.status = r.errors > 0 ? jobs::RunStatus::Failed : jobs::RunStatus::Success;
+    if (r.errors > 0) {
+        record.message = std::to_string(r.errors) + " problem(s) found: ";
+        for (std::size_t i = 0; i < problems.size(); ++i) record.message += (i ? "; " : "") + problems[i];
+    } else {
+        record.message = "read " + format_bytes(r.bytes_read) + " in " + std::to_string(r.packs_read) + " of " +
+                         std::to_string(r.packs) + " pack(s), checked " + std::to_string(r.snapshots) +
+                         " version(s); no problems";
+    }
+    if (g_json) {
+        emit({{"event", "check"},
+              {"kind", jobs::to_string(kind)},
+              {"status", jobs::to_string(record.status)},
+              {"packs", r.packs},
+              {"packs_read", r.packs_read},
+              {"bytes_read", r.bytes_read},
+              {"snapshots", r.snapshots},
+              {"errors", r.errors},
+              {"message", record.message}});
+    } else {
+        clear_status();
+        out(std::string(r.errors > 0 ? "Health check FAILED: " : "Health check: ") + record.message + "\n");
+    }
+    return r.errors > 0 ? kExitAuth : kExitOk;
+}
+
+// The job's store: with --admin (the scheduled task of a job with administrator rights) only the
+// admin-only copy of the job is trusted, never the user's own settings.
+jobs::JobStore job_store(const Args& a) {
+    return a.has("--admin") ? jobs::open_admin_store() : jobs::JobStore();
+}
+
+std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& store, const jobs::Job& job) {
+    std::string pw = store.password(job.id);
+    if (pw.empty()) pw = get_password(a, false);
+    status("Opening repository...");
+    std::unique_ptr<Repository> repo;
+    try {
+        const CloudCredentials cloud = store.cloud_credentials(job);
+        repo = Repository::open(open_backend(job.repository, &cloud), pw);
+    } catch (...) {
+        secure_wipe(pw.data(), pw.size());
+        clear_status();
+        throw;
+    }
+    secure_wipe(pw.data(), pw.size());
+    clear_status();
+    return repo;
+}
+
+// "check-job <job> [--full]": a health check of the job's backup now, recorded in its history.
+int cmd_check_job(const Args& a) {
+    if (a.positional.empty()) throw Error("usage: vaultik check-job <job id or name> [--full]");
+    const jobs::JobStore store = job_store(a);
+    const auto job = store.find(a.positional[0]);
+    if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
+    apply_resource_policy(resource_policy(a, job->resources));
+    jobs::RunRecord record;
+    record.kind = a.has("--full") ? jobs::RunKind::FullCheck : jobs::RunKind::Check;
+    record.started = os::now();
+    int code = kExitError;
+    try {
+        const auto repo = open_job_repo(a, store, *job);
+        code = health_check(*repo, *job, record.kind, record);
+    } catch (const LockedError&) {
+        throw;  // nothing was checked; not a result for the history
+    } catch (const std::exception& e) {
+        if (record.finished == 0) {  // failed before the check started
+            record.finished = os::now();
+            record.status = jobs::RunStatus::Failed;
+            record.message = std::string("the check could not run: ") + e.what();
+        }
+        try {
+            store.append_history(job->id, record);
+        } catch (const Error&) {
+        }
+        if (record.status != jobs::RunStatus::Cancelled) throw;
+        if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", "health check cancelled"}});
+        else err("health check cancelled\n");
+        return kExitCancelled;
+    }
+    store.append_history(job->id, record);
+    if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
+    return code;
+}
+
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
-    // --admin (the scheduled task of a job with administrator rights): only the admin-only copy of
-    // the job is trusted, never the user's own settings.
-    const jobs::JobStore store = a.has("--admin") ? jobs::open_admin_store() : jobs::JobStore();
+    const jobs::JobStore store = job_store(a);
     const auto job = store.find(a.positional[0]);
     if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
 
@@ -865,21 +1006,9 @@ int cmd_run_job(const Args& a) {
     jobs::RunRecord record;
     record.started = os::now();
     int code = kExitError;
+    std::unique_ptr<Repository> repo;
     try {
-        std::string pw = store.password(job->id);
-        if (pw.empty()) pw = get_password(a, false);
-        status("Opening repository...");
-        std::unique_ptr<Repository> repo;
-        try {
-            const CloudCredentials cloud = store.cloud_credentials(*job);
-            repo = Repository::open(open_backend(job->repository, &cloud), pw);
-        } catch (...) {
-            secure_wipe(pw.data(), pw.size());
-            clear_status();
-            throw;
-        }
-        secure_wipe(pw.data(), pw.size());
-        clear_status();
+        repo = open_job_repo(a, store, *job);
         if (!g_json) out("Job \"" + job->name + "\": backing up to " + job->repository + "\n");
 
         BackupOptions o;
@@ -913,6 +1042,28 @@ int cmd_run_job(const Args& a) {
         throw;
     }
     store.append_history(job->id, record);
+
+    // Then the health check, when one is due. It never changes the backup's result: a problem
+    // it finds is its own entry in the history (and a notification from the tray).
+    if (a.has("--no-check") || g_cancel.load()) return code;
+    const auto due = jobs::due_check(job->health, jobs::combined_history(store, job->id, 500), os::now());
+    if (!due) return code;
+    jobs::RunRecord check;
+    try {
+        health_check(*repo, *job, *due, check);
+    } catch (const LockedError&) {
+        // Another run is using the repository: try again after the next backup.
+        if (!g_json) clear_status();
+        warning("the health check was skipped this time: another run is using the repository");
+        return code;
+    } catch (const std::exception&) {
+        // Cancelled or could not run: the record says which.
+    }
+    try {
+        store.append_history(job->id, check);
+    } catch (const Error& e) {
+        warning(std::string("could not record the health check: ") + e.what());
+    }
     return code;
 }
 
@@ -1301,6 +1452,16 @@ int cmd_verify(const Args& a) {
     repo->reload_index();  // a prune may have finished before the lock was granted
     VerifyOptions o;
     o.read_data = a.has("--read-data");
+    if (const auto share = a.value("--read-share")) {
+        if (!o.read_data) throw Error("--read-share needs --read-data");
+        char* end = nullptr;
+        const double pct = std::strtod(share->c_str(), &end);
+        if (end == share->c_str() || (*end != '\0' && std::string_view(end) != "%") || !(pct > 0 && pct <= 100))
+            throw Error("--read-share takes a percentage from 1 to 100");
+        o.read_share = pct / 100.0;
+        o.sample_seed = os::now();
+    }
+    o.should_cancel = [] { return g_cancel.load(); };
     o.on_progress = [](const std::string& msg) { status("Checking " + msg); };
     o.on_error = [](const std::string& msg) { err("error: " + msg + "\n"); };
     const auto start = std::chrono::steady_clock::now();
@@ -1308,13 +1469,15 @@ int cmd_verify(const Args& a) {
     clear_status();
     out("Checked " + std::to_string(r.packs) + " packs, " + std::to_string(r.blobs) + " blobs, " +
         std::to_string(r.snapshots) + " snapshots, " + std::to_string(r.trees) + " folders" +
-        (o.read_data ? ", read " + format_bytes(r.bytes_read) : std::string()) + " in " +
+        (o.read_data ? ", read " + format_bytes(r.bytes_read) + " (" + std::to_string(r.packs_read) + " packs)"
+                     : std::string()) +
+        " in " +
         format_duration(seconds_since(start)) + "\n");
     if (r.errors > 0) {
         out(std::to_string(r.errors) + " problem(s) found\n");
         return kExitAuth;
     }
-    out(o.read_data ? "No problems found; all data is readable.\n"
+    out(o.read_data ? (o.read_share < 1.0 ? "No problems found in the data read.\n" : "No problems found; all data is readable.\n")
                     : "No problems found. Run with --read-data to also check every stored chunk.\n");
     return kExitOk;
 }
@@ -1366,6 +1529,7 @@ int run(const std::vector<std::string>& argv) {
 
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
+    if (a.command == "check-job") return cmd_check_job(a);
     if (a.command == "admin-job") return cmd_admin_job(a);
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);

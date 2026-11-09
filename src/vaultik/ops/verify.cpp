@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "vaultik/model/tree.hpp"
+#include "vaultik/ops/backup.hpp"  // Cancelled
 
 namespace vaultik {
 
@@ -23,6 +24,18 @@ private:
     }
     void progress(const std::string& message) {
         if (options_.on_progress) options_.on_progress(message);
+    }
+
+    // Whether a pack belongs to this check's sample: a mix of its id and the seed, compared with
+    // the share to read.
+    // One pack (picked by the seed) is always in it, so a small repository is never left unread.
+    bool in_sample(const Id& pack_id, std::size_t index, std::size_t count) const {
+        if (options_.read_share >= 1.0) return true;
+        if (count > 0 && index == options_.sample_seed % count) return true;
+        std::uint64_t x = options_.sample_seed * 0x9E3779B97F4A7C15ull;
+        for (int i = 0; i < 8; ++i) x = (x ^ pack_id[static_cast<std::size_t>(i)]) * 0x100000001B3ull;
+        x ^= x >> 33;
+        return static_cast<double>(x % 1000000) < options_.read_share * 1000000.0;
     }
 
     void check_packs();
@@ -46,6 +59,7 @@ void VerifyEngine::check_packs() {
         const Id& pack_id = index.packs()[p];
         const std::string name = Repository::pack_name(pack_id);
         progress("pack " + std::to_string(p + 1) + "/" + std::to_string(index.packs().size()));
+        if (options_.should_cancel && options_.should_cancel()) throw Cancelled();
         ++result_.packs;
         try {
             if (!repo_.backend().exists(name)) {
@@ -54,9 +68,11 @@ void VerifyEngine::check_packs() {
             }
             std::vector<BlobEntry> entries;
             Bytes pack;
-            if (options_.read_data) {
+            const bool read = options_.read_data && in_sample(pack_id, p, index.packs().size());
+            if (read) {
                 pack = repo_.backend().get(name);
                 result_.bytes_read += pack.size();
+                ++result_.packs_read;
                 if (blake3(pack) != pack_id) {
                     error("pack content does not match its id: " + name);
                     continue;
@@ -73,7 +89,7 @@ void VerifyEngine::check_packs() {
                     (it->second.offset != e.offset || it->second.length != e.length || it->second.type != e.type)) {
                     error("index entry disagrees with pack header for blob " + id_hex(e.id) + " in " + name);
                 }
-                if (options_.read_data) {
+                if (read) {
                     try {
                         const Bytes plain = repo_.decode_blob(e.type, e.id, ByteSpan(pack).subspan(e.offset, e.length));
                         if (plain.size() != e.raw_len) error("blob has an unexpected size: " + id_hex(e.id));

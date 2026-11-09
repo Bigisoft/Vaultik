@@ -65,6 +65,11 @@ private:
     QWidget* time_row_ = nullptr;
     QWidget* hourly_row_ = nullptr;
     QWidget* days_row_ = nullptr;
+    // Health checks after scheduled backups.
+    QCheckBox* check_weekly_ = nullptr;
+    QSpinBox* check_percent_ = nullptr;
+    QCheckBox* check_monthly_ = nullptr;
+    bool check_monthly_touched_ = false;  // otherwise a new job follows its destination's default
 
     QComboBox* preset_ = nullptr;
     QComboBox* cpu_ = nullptr;

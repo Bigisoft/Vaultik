@@ -2,6 +2,8 @@
 
 #include <filesystem>
 
+#include <nlohmann/json.hpp>
+
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/job.hpp"
@@ -79,6 +81,77 @@ TEST_CASE("job JSON round trip") {
     CHECK(back.resources.write_rate == (20ull << 20));
     CHECK(describe(back.schedule) == "Mon, Wed at 21:30");
     CHECK_THROWS_AS(job_from_json("{not json"), Error);
+}
+
+TEST_CASE("health checks: settings and when they are due") {
+    Job j = sample();
+    j.id = "docs";
+    j.health.sample_percent = 25;
+    j.health.monthly = false;
+    Job back = job_from_json(to_json(j));
+    CHECK(back.health.weekly);
+    CHECK(back.health.sample_percent == 25);
+    CHECK_FALSE(back.health.monthly);
+
+    // Jobs saved before health checks get the defaults: no monthly full check of cloud storage.
+    auto old = nlohmann::json::parse(to_json(j));
+    old.erase("health");
+    back = job_from_json(old.dump());
+    CHECK(back.health.weekly);
+    CHECK(back.health.sample_percent == 10);
+    CHECK(back.health.monthly);
+    old["repository"] = "s3:https://s3.example.com/bucket";
+    old["cloud_key_id"] = "AKIDEXAMPLE";
+    CHECK_FALSE(job_from_json(old.dump()).health.monthly);
+
+    j.health.sample_percent = 0;
+    CHECK_THROWS_AS(validate(j), Error);
+
+    // Records keep their kind; old records without one are backups.
+    RunRecord r;
+    r.kind = RunKind::FullCheck;
+    r.started = 5;
+    CHECK(record_from_json(to_json(r)).kind == RunKind::FullCheck);
+    CHECK(record_from_json(R"({"started":1,"finished":2,"status":"success"})").kind == RunKind::Backup);
+
+    constexpr std::uint64_t day = 864'000'000'000ull;
+    const std::uint64_t now = 1000 * day;
+    const auto run = [](RunKind kind, std::uint64_t at, RunStatus status = RunStatus::Success) {
+        RunRecord rec;
+        rec.kind = kind;
+        rec.started = at - 10;
+        rec.finished = at;
+        rec.status = status;
+        return rec;
+    };
+    HealthPolicy h;  // weekly and monthly
+    CHECK(due_check(h, {}, now) == RunKind::FullCheck);
+    std::vector<RunRecord> history = {run(RunKind::FullCheck, now - 20 * day), run(RunKind::Backup, now - day)};
+    CHECK(due_check(h, history, now) == RunKind::Check);  // full check recent, no check this week
+    history.push_back(run(RunKind::Check, now - 2 * day));
+    CHECK_FALSE(due_check(h, history, now).has_value());
+    history.push_back(run(RunKind::Check, now - day, RunStatus::Failed));  // problems found still count
+    CHECK_FALSE(due_check(h, history, now + 5 * day).has_value());
+    CHECK(due_check(h, history, now + 11 * day) == RunKind::FullCheck);  // 31 days after the full check
+    h.monthly = false;
+    CHECK(due_check(h, history, now + 11 * day) == RunKind::Check);
+    h.weekly = false;
+    CHECK_FALSE(due_check(h, history, now + 11 * day).has_value());
+
+    // A cancelled check is tried again.
+    h = HealthPolicy{};
+    history = {run(RunKind::FullCheck, now - day, RunStatus::Cancelled)};
+    CHECK(due_check(h, history, now) == RunKind::FullCheck);
+
+    history = {run(RunKind::Backup, 1), run(RunKind::Check, 2), run(RunKind::Backup, 3)};
+    REQUIRE(last_backup(history) != nullptr);
+    CHECK(last_backup(history)->finished == 3);
+    CHECK(last_check(history)->finished == 2);
+    CHECK(last_check({run(RunKind::Backup, 1)}) == nullptr);
+    RunRecord damaged = run(RunKind::Check, 4, RunStatus::Failed);
+    CHECK_FALSE(found_damage(damaged));  // could not run
+    damaged.errors = 2;
+    CHECK(found_damage(damaged));
 }
 
 TEST_CASE("job validation") {
