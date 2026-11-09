@@ -29,13 +29,21 @@ std::map<std::string, std::string> browser_sign_in(int port, const std::string& 
     os::LoopbackServer server(port);
     const std::string redirect_uri = "http://" + host + ":" + std::to_string(server.port()) + "/";
     os::open_in_browser(authorize_url(redirect_uri));
-    auto params = server.wait(std::chrono::minutes(10), cancelled,
-                              "You are signed in. You can close this tab and go back to Vaultik.");
+    // Only the answer that carries this sign-in's state counts: anything else that calls the
+    // address meanwhile (another page or program on this computer) is ignored, not taken for
+    // the answer and not allowed to end the sign-in.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+    std::map<std::string, std::string> params;
+    for (;;) {
+        const auto left = std::chrono::duration_cast<std::chrono::seconds>(deadline - std::chrono::steady_clock::now());
+        if (left.count() <= 0) throw Error("signing in failed: no answer came within 10 minutes");
+        params = server.wait(left, cancelled, "You are signed in. You can close this tab and go back to Vaultik.");
+        if (params["state"] == state) break;
+    }
     if (params.contains("error")) {
         const std::string desc = params["error_description"];
         throw Error("signing in failed: " + params["error"] + (desc.empty() ? "" : " (" + desc + ")"));
     }
-    if (params["state"] != state) throw Error("signing in failed: the answer did not come from this sign-in");
     if (params["code"].empty()) throw Error("signing in failed: no sign-in code came back");
     params["redirect_uri"] = redirect_uri;
     return params;

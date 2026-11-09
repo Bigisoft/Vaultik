@@ -21,6 +21,13 @@ void plain_warning(QWidget* parent, const QString& title, const QString& text) {
     box.exec();
 }
 
+bool plain_question(QWidget* parent, const QString& title, const QString& text) {
+    QMessageBox box(QMessageBox::Question, title, QString(), QMessageBox::Yes | QMessageBox::No, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
+    return box.exec() == QMessageBox::Yes;
+}
+
 QString format_bytes(std::uint64_t bytes) {
     static const char* kUnits[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
     double v = static_cast<double>(bytes);

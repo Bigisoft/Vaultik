@@ -245,8 +245,12 @@ void apply_schedule(const Job& job, const std::string& program_dir) {
         run_admin_step(program_dir, "install", job.id);
         return;
     }
-    // Replacing an administrator task, or dropping the admin copy of the job, needs the rights.
-    if (task_is_elevated(job.id) || has_admin_copy(job.id)) run_admin_step(program_dir, "remove", job.id);
+    // Replacing an administrator task, or dropping the admin copy of the job, needs the rights,
+    // and the program run with them must come from a folder only administrators can change.
+    if (task_is_elevated(job.id) || has_admin_copy(job.id)) {
+        check_program_dir(program_dir);
+        run_admin_step(program_dir, "remove", job.id);
+    }
     std::string output;
     if (create_task(job, program_dir, config_dir(), &output) != 0)
         throw Error("Task Scheduler refused the schedule: " + trim(output));
@@ -255,7 +259,9 @@ void apply_schedule(const Job& job, const std::string& program_dir) {
 void remove_schedule(const std::string& job_id) {
     try {
         if (task_is_elevated(job_id) || has_admin_copy(job_id)) {
-            run_admin_step(os::parent_of(os::executable_path()), "remove", job_id);
+            const std::string program_dir = os::parent_of(os::executable_path());
+            check_program_dir(program_dir);  // the program run with the rights: admin-only folder
+            run_admin_step(program_dir, "remove", job_id);
         } else {
             delete_task(job_id);
         }

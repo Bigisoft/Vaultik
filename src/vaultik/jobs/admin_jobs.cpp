@@ -190,6 +190,11 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
 void remove_admin_job(const std::string& id, const std::string& user_sid) {
 #ifdef _WIN32
     check_elevated_caller(user_sid);
+    // The id names the task and files: only an id a job can have, before anything is done.
+    const bool valid = !id.empty() && id.size() <= 64 && std::all_of(id.begin(), id.end(), [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+    });
+    if (!valid) throw Error("not a job id: " + id);
     delete_task(id);
     const std::string dir = admin_store_dir(user_sid);
     if (!os::exists(dir)) return;

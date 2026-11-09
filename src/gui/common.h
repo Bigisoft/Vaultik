@@ -22,6 +22,8 @@ class QWidget;
 // A warning box whose text is shown as plain text, never as markup: for messages that carry file
 // names or text from a server.
 void plain_warning(QWidget* parent, const QString& title, const QString& text);
+// The same for a Yes/No question; true for Yes.
+bool plain_question(QWidget* parent, const QString& title, const QString& text);
 
 inline QString qs(const std::string& s) {
     return QString::fromStdString(s);

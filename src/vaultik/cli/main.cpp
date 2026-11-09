@@ -972,8 +972,12 @@ void refresh_drive_copy(const jobs::Job& job) {
         for (const char* exe : {"vaultik.exe", "vaultik-gui.exe", "vaultik-task.exe"}) {
             const std::string src = os::join(from, exe);
             if (!os::exists(src)) continue;
-            std::filesystem::copy_file(fs_path(src), fs_path(os::join(target, exe)),
-                                       std::filesystem::copy_options::overwrite_existing);
+            // Deleted first, then created: overwriting would write through a hard link someone
+            // put there in place of the old file, into whatever file it is linked to.
+            const std::string dest = os::join(target, exe);
+            const os::ErrorCode gone = os::remove_file(dest);
+            if (gone != 0 && !os::is_not_found(gone)) os::throw_error("cannot replace " + dest, gone);
+            std::filesystem::copy_file(fs_path(src), fs_path(dest), std::filesystem::copy_options::none);
         }
         const auto write = [&](const char* name, const std::string& text) {
             os::write_file_atomic(os::join(target, name),

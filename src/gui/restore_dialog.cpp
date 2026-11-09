@@ -83,6 +83,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     bar_->setRange(0, 0);
     bar_->hide();
     status_ = new QLabel(tr("Pick a file or folder, or restore everything in this version."));
+    status_->setTextFormat(Qt::PlainText);  // it shows names from the backup
     status_->setWordWrap(true);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
@@ -342,12 +343,12 @@ void RestoreDialog::start_restore() {
     if (to_original_->isChecked()) {
         const QString original = original_of(path);
         target = QDir::toNativeSeparators(QFileInfo(original).path());
-        const auto answer = QMessageBox::question(
+        const bool yes = plain_question(
             this, windowTitle(),
             overwrite_->isChecked()
                 ? tr("Restore %1 to its original location and REPLACE the files that are there now?").arg(original)
                 : tr("Restore %1 to its original location? Files that exist already are left alone.").arg(original));
-        if (answer != QMessageBox::Yes) return;
+        if (!yes) return;
     } else {
         target = target_->text().trimmed();
         if (target.isEmpty()) {
