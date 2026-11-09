@@ -3,6 +3,7 @@
 #include <string>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/crypto/md5.hpp"
 #include "vaultik/platform/http.hpp"
 #include "vaultik/repo/s3_backend.hpp"
 #include "vaultik/util/hex.hpp"
@@ -105,4 +106,49 @@ TEST_CASE("S3 list responses") {
 
     CHECK(s3::xml_value("<Error><Code>NoSuchKey</Code></Error>", "Code") == "NoSuchKey");
     CHECK(s3::xml_value("<a/>", "Code").empty());
+}
+
+TEST_CASE("MD5 and Object Lock headers") {
+    const auto hex = [](std::string_view s) {
+        const auto d = md5(ByteSpan(reinterpret_cast<const std::uint8_t*>(s.data()), s.size()));
+        return to_hex(ByteSpan(d.data(), d.size()));
+    };
+    CHECK(hex("") == "d41d8cd98f00b204e9800998ecf8427e");
+    CHECK(hex("abc") == "900150983cd24fb0d6963f7d28e17f72");
+    CHECK(hex("The quick brown fox jumps over the lazy dog") == "9e107d9d372bb6826bd81d3542a419d6");
+    // Lengths around the 56-byte padding boundary.
+    CHECK(hex(std::string(55, 'a')) == "ef1772b6dff9a122358552954ad0df65");
+    CHECK(hex(std::string(56, 'a')) == "3b0c8ac703f828b04c6c197006d17218");
+    CHECK(hex(std::string(64, 'a')) == "014842d480b571495a4a0363793f7367");
+
+    CHECK(s3::iso_time(0) == "1970-01-01T00:00:00Z");
+    CHECK(s3::iso_time(1788984000) == "2026-09-09T20:00:00Z");
+    const std::string abc = "abc";
+    const auto h = s3::lock_headers(ByteSpan(reinterpret_cast<const std::uint8_t*>(abc.data()), abc.size()), 0);
+    REQUIRE(h.size() == 3);
+    CHECK(h[0].first == "content-md5");
+    CHECK(h[0].second == "kAFQmDzST7DWlj99KOF/cg==");
+    CHECK(h[1].second == "GOVERNANCE");
+    CHECK(h[2].second == "1970-01-01T00:00:00Z");
+}
+
+TEST_CASE("S3 version listings") {
+    const char* xml =
+        "<ListVersionsResult><IsTruncated>true</IsTruncated><NextKeyMarker>b</NextKeyMarker>"
+        "<NextVersionIdMarker>v9</NextVersionIdMarker>"
+        "<DeleteMarker><Key>repo/data/a</Key><VersionId>m1</VersionId><IsLatest>true</IsLatest>"
+        "<LastModified>2026-11-10T10:00:00.000Z</LastModified></DeleteMarker>"
+        "<Version><Key>repo/data/a</Key><VersionId>v1</VersionId><IsLatest>false</IsLatest>"
+        "<LastModified>2026-11-01T10:00:00.000Z</LastModified><Size>5</Size></Version>"
+        "</ListVersionsResult>";
+    const s3::VersionPage page = s3::parse_versions(xml);
+    REQUIRE(page.versions.size() == 2);
+    CHECK(page.versions[0].delete_marker);
+    CHECK(page.versions[0].latest);
+    CHECK(page.versions[0].version_id == "m1");
+    CHECK_FALSE(page.versions[1].delete_marker);
+    CHECK(page.versions[1].last_modified == "2026-11-01T10:00:00.000Z");
+    CHECK(page.truncated);
+    CHECK(page.next_key_marker == "b");
+    CHECK(page.next_version_marker == "v9");
 }

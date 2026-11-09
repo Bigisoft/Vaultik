@@ -9,6 +9,7 @@ class QFormLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QSpinBox;
 
 // A cloud storage destination as entered in CloudDialog.
 struct CloudTarget {
@@ -16,6 +17,7 @@ struct CloudTarget {
     QString key_id;    // S3 access key ID, or the signed-in account of a drive
     QString secret;    // S3 secret key, or a drive's sign-in token (JSON)
     QString region;    // S3 only; empty: automatic
+    int lock_days = 0;  // S3 only: Object Lock on uploads for this many days; 0 for none
 
     vaultik::CloudCredentials credentials() const;
     void wipe();
@@ -57,6 +59,7 @@ private:
     QLineEdit* key_id_ = nullptr;
     QLineEdit* secret_ = nullptr;
     QLineEdit* region_ = nullptr;
+    QSpinBox* lock_days_ = nullptr;
     // Drives
     QLineEdit* drive_folder_ = nullptr;
     QLineEdit* app_id_ = nullptr;

@@ -264,6 +264,23 @@ connected" (Schedule tab), the running frontend or tray icon starts the job as s
 is plugged in (`run-job <job> --on-connect`, which does nothing when the job just saved a
 version or is already running), then says when the drive can be unplugged.
 
+### Locked cloud copies (S3 Object Lock)
+
+For S3-compatible storage, the cloud settings of a job have "Lock uploads for N days" (on the
+command line: `VAULTIK_S3_LOCK_DAYS`). Every repository file except the short-lived lock files is
+then uploaded with Object Lock in governance mode until that date, so neither Vaultik nor anyone
+holding its keys can destroy it meanwhile: a delete only hides it behind a delete marker, and an
+overwrite only adds a newer version. The bucket must have Object Lock turned on (most providers
+only offer that when the bucket is created; Vaultik checks before saving). Data removed by
+cleanup stays billed until its lock ends, so a lock a little longer than the oldest kept version
+is enough.
+
+After an attack, `vaultik cloud-rollback --job <job> --to "2026-11-09 20:30" --dry-run` lists
+the files that were deleted or overwritten since that time, and without `--dry-run` brings them
+back: later delete markers and versions are removed, or the old version is copied over a later
+one that is itself locked. Files added later stay; old lock files never come back. Then run
+`vaultik verify`.
+
 ### Ransomware warning
 
 While backing up, Vaultik compares each changed file with its previous version. A document,
@@ -370,8 +387,8 @@ Priorities only take effect when something else competes for the resource, so on
    - Ransomware warning (done): when a backup sees many files that look encrypted or were renamed
      with an added extension, it warns, pins the version before it and skips cleanup, so the
      last clean version is never removed automatically.
-   - Locked cloud copies: S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded data
-     undeletable for a set time, even with the keys.
+   - Locked cloud copies (done): S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded
+     data undeletable for a set time, even with the keys, and `cloud-rollback` brings it back.
 6. Portable version and installer, so Vaultik is easy to use on another computer:
    - Portable: the programs in one folder; a `portable` marker file next to them keeps jobs and
      settings in that folder instead of the user profile.

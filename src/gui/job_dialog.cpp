@@ -502,6 +502,7 @@ void JobDialog::load(const jobs::Job& job) {
         cloud_.location = qs(job.repository);
         cloud_.key_id = qs(job.cloud_key_id);
         cloud_.region = qs(job.cloud_region);
+        cloud_.lock_days = job.cloud_lock_days;
         if (!job.id.empty()) {
             try {
                 std::string secret = store_.cloud_secret(job.id);
@@ -581,9 +582,11 @@ jobs::Job JobDialog::collect() const {
     if (is_cloud_location(j.repository)) {
         j.cloud_key_id = u8(cloud_.key_id);
         j.cloud_region = u8(cloud_.region);
+        j.cloud_lock_days = cloud_kind(j.repository) == CloudKind::S3 ? cloud_.lock_days : 0;
     } else {
         j.cloud_key_id.clear();
         j.cloud_region.clear();
+        j.cloud_lock_days = 0;
     }
     j.sources.clear();
     for (const QString& s : items_of(sources_)) j.sources.push_back(u8(s));

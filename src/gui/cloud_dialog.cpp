@@ -10,6 +10,7 @@
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QThread>
 #include <QVBoxLayout>
 
@@ -26,6 +27,7 @@
 #include "vaultik/repo/mega_backend.hpp"
 #include "vaultik/repo/onedrive_backend.hpp"
 #include "vaultik/repo/pcloud_backend.hpp"
+#include "vaultik/repo/s3_backend.hpp"
 
 using namespace vaultik;
 
@@ -125,7 +127,9 @@ QString run_signin_busy(QWidget* parent, const QString& text,
 }  // namespace
 
 CloudCredentials CloudTarget::credentials() const {
-    return {u8(key_id), u8(secret), u8(region)};
+    CloudCredentials c{u8(key_id), u8(secret), u8(region)};
+    c.lock_days = lock_days;
+    return c;
 }
 
 void CloudTarget::wipe() {
@@ -151,6 +155,14 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     secret_->setEchoMode(QLineEdit::Password);
     region_ = new QLineEdit;
     region_->setPlaceholderText(tr("automatic"));
+    lock_days_ = new QSpinBox;
+    lock_days_->setRange(0, 3650);
+    lock_days_->setSuffix(tr(" days"));
+    lock_days_->setSpecialValueText(tr("Off"));
+    lock_days_->setToolTip(tr("Object Lock: uploaded backup data cannot be deleted or overwritten for good during "
+                              "this time, not even with these keys, so ransomware cannot destroy it. The bucket "
+                              "must have Object Lock turned on, and deleted data is still billed until its lock "
+                              "ends. Choose more days than the oldest version you keep is old."));
 
     drive_folder_ = new QLineEdit;
     drive_folder_->setPlaceholderText(tr("e.g. Backups/my-pc"));
@@ -179,6 +191,7 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     form_->addRow(tr("Access key ID:"), key_id_);
     form_->addRow(tr("Secret access key:"), secret_);
     form_->addRow(tr("Region:"), region_);
+    form_->addRow(tr("Lock uploads for:"), lock_days_);
     form_->addRow(tr("Folder:"), drive_folder_);
     form_->addRow(tr("App client ID:"), app_id_);
     form_->addRow(tr("App client secret:"), app_secret_);
@@ -200,6 +213,7 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
         stored_secret_ = initial.secret;
         key_id_->setText(initial.key_id);
         region_->setText(initial.region);
+        lock_days_->setValue(initial.lock_days);
         try {
             const S3Location l = parse_s3_location(u8(initial.location));
             endpoint_->setText(qs(l.endpoint));
@@ -280,7 +294,8 @@ void CloudDialog::show_account() {
 void CloudDialog::provider_changed(int index) {
     const bool drive = index >= kPCloud;
     for (QWidget* w : {static_cast<QWidget*>(endpoint_), static_cast<QWidget*>(bucket_), static_cast<QWidget*>(folder_),
-                       static_cast<QWidget*>(key_id_), static_cast<QWidget*>(secret_), static_cast<QWidget*>(region_)})
+                       static_cast<QWidget*>(key_id_), static_cast<QWidget*>(secret_), static_cast<QWidget*>(region_),
+                       static_cast<QWidget*>(lock_days_)})
         form_->setRowVisible(w, !drive);
     form_->setRowVisible(drive_folder_, drive);
     form_->setRowVisible(sign_in_->parentWidget(), drive);
@@ -462,6 +477,7 @@ CloudTarget CloudDialog::target() const {
     t.key_id = key_id_->text().trimmed();
     t.secret = secret_->text().isEmpty() ? stored_secret_ : secret_->text();
     t.region = region_->text().trimmed();
+    t.lock_days = lock_days_->value();
     return t;
 }
 
@@ -479,6 +495,29 @@ void CloudDialog::accept() {
     } else if (key_id_->text().trimmed().isEmpty() || (secret_->text().isEmpty() && stored_secret_.isEmpty())) {
         QMessageBox::warning(this, windowTitle(), tr("Enter the access key ID and the secret access key."));
         return;
+    }
+    if (!is_drive() && lock_days_->value() > 0) {
+        // Locked uploads fail on a bucket without Object Lock: find out now, not at the first backup.
+        CloudTarget t = target();
+        const std::string location = u8(t.location);
+        CloudCredentials keys = t.credentials();
+        t.wipe();
+        bool enabled = false;
+        error = run_signin_busy(this, tr("Checking the bucket..."), [&](const std::function<bool()>&) {
+            S3Backend backend(location, keys);
+            enabled = backend.object_lock_enabled();
+        });
+        if (!error.isEmpty()) {
+            plain_warning(this, windowTitle(), error);
+            return;
+        }
+        if (!enabled) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("This bucket does not have Object Lock turned on, so uploads cannot be locked. "
+                                    "Most providers only offer it when a bucket is created: create a new bucket "
+                                    "with Object Lock, or set the lock to Off."));
+            return;
+        }
     }
     QDialog::accept();
 }

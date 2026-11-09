@@ -7,6 +7,7 @@
 #include <iostream>
 #include <thread>
 #include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -28,6 +29,7 @@
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/backends.hpp"
+#include "vaultik/repo/s3_backend.hpp"
 #include "vaultik/ops/history.hpp"
 #include "vaultik/repo/lock.hpp"
 #include "vaultik/crypto/crypto.hpp"
@@ -129,6 +131,11 @@ Commands:
       --recovery-key           Unlock with the recovery key instead of the password
                                (asked for, or set VAULTIK_RECOVERY_KEY)
       --all                    Remove every lock (only when no other run is active)
+  cloud-rollback               S3 with Object Lock: bring every repository file
+                               back as it was at a time, from the bucket's old
+                               versions (after files were deleted or overwritten)
+      --to <time>              Local time, e.g. "2026-11-09 20:30"
+      --dry-run                Only list what would be brought back
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
                                sources, destination, password and resource
@@ -205,7 +212,7 @@ const std::set<std::string> kValueOptions = {
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
-    "--user", "--from", "--keep-within", "--read-share"};
+    "--user", "--from", "--keep-within", "--read-share", "--to"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -1013,6 +1020,74 @@ bool backup_running(Repository& repo, const jobs::Job& job) {
     return false;
 }
 
+// "2026-11-09 20:30" (or with seconds, or only a date) in local time, as seconds since 1970.
+std::int64_t parse_local_time(const std::string& text) {
+    int v[6] = {0, 0, 0, 0, 0, 0};
+    const char* p = text.c_str();
+    const char seps[] = {'-', '-', ' ', ':', ':'};
+    int n = 0;
+    for (; n < 6; ++n) {
+        char* end = nullptr;
+        const long x = std::strtol(p, &end, 10);
+        if (end == p) break;
+        v[n] = static_cast<int>(x);
+        p = end;
+        if (*p == '\0') {
+            ++n;
+            break;
+        }
+        if (n >= 5 || (*p != seps[n] && !(n == 2 && *p == 'T'))) throw Error("give the time as YYYY-MM-DD HH:MM");
+        ++p;
+    }
+    if (n != 3 && n != 5 && n != 6) throw Error("give the time as YYYY-MM-DD HH:MM");
+    std::tm tm{};
+    tm.tm_year = v[0] - 1900;
+    tm.tm_mon = v[1] - 1;
+    tm.tm_mday = v[2];
+    tm.tm_hour = v[3];
+    tm.tm_min = v[4];
+    tm.tm_sec = v[5];
+    tm.tm_isdst = -1;
+    const std::time_t t = std::mktime(&tm);
+    if (t == static_cast<std::time_t>(-1) || v[1] < 1 || v[1] > 12 || v[2] < 1 || v[2] > 31)
+        throw Error("not a valid time: " + text);
+    return static_cast<std::int64_t>(t);
+}
+
+// "cloud-rollback --to <time> [--dry-run]": brings an S3 repository's files back as they were at
+// that time, from the bucket's old versions (after ransomware deleted or overwrote them).
+int cmd_cloud_rollback(const Args& a) {
+    const auto to = a.value("--to");
+    if (!to) throw Error("usage: vaultik cloud-rollback -r s3:... --to \"YYYY-MM-DD HH:MM\" [--dry-run]");
+    const std::int64_t when = parse_local_time(*to);
+    auto backend = backend_for(a);
+    auto* s3 = dynamic_cast<S3Backend*>(backend.get());
+    if (s3 == nullptr) throw Error("cloud-rollback works on S3-compatible storage with versioning (Object Lock)");
+    const bool dry = a.has("--dry-run");
+    status("Reading the bucket's old versions...");
+    const auto r = s3->roll_back(when, dry, [dry](const std::string& name) {
+        if (g_json) emit({{"event", "file"}, {"name", name}});
+        else out(std::string(dry ? "would restore " : "restoring ") + name + "\n");
+    });
+    clear_status();
+    if (g_json) {
+        emit({{"event", "done"},
+              {"status", r.failed.empty() ? "success" : "partial"},
+              {"checked", r.files_checked},
+              {"restored", r.restored},
+              {"unchanged", r.unchanged},
+              {"newer", r.newer},
+              {"failed", r.failed}});
+    } else {
+        for (const std::string& f : r.failed) err("error: " + f + "\n");
+        out(std::to_string(r.restored) + " file(s) " + (dry ? "would be" : "were") + " brought back, " +
+            std::to_string(r.unchanged) + " unchanged, " + std::to_string(r.newer) + " added later (left alone)" +
+            (r.failed.empty() ? std::string() : ", " + std::to_string(r.failed.size()) + " failed") + ".\n");
+        if (!dry && r.restored > 0) out("Run \"vaultik verify\" next, then restore from the versions you need.\n");
+    }
+    return r.failed.empty() ? kExitOk : kExitPartial;
+}
+
 // "check-job <job> [--full]": a health check of the job's backup now, recorded in its history.
 int cmd_check_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik check-job <job id or name> [--full]");
@@ -1602,6 +1677,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
+    if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
     if (a.command == "admin-job") return cmd_admin_job(a);
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);
