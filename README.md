@@ -280,7 +280,20 @@ Priorities only take effect when something else competes for the resource, so on
 1. Repository format, file backup/restore/verify, CLI (done)
 2. Saved jobs, scheduling, resource controls, Qt frontend on Windows, retention
    (`forget`/`prune`), repository locks, Volume Shadow Copy (done)
-3. Linux port: build and test the existing POSIX platform layer, systemd timers and the frontend
-4. S3-compatible cloud backend (Cloudflare R2, Backblaze B2, MinIO) (done, Windows)
-5. Volume image backup, restore to a volume or `.vhdx`
-6. Bare-metal restore from a recovery USB (WinPE on Windows)
+3. Cloud storage: S3-compatible storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2,
+   MinIO) and cloud drives (pCloud, OneDrive, Google Drive, MEGA) (done, Windows)
+4. Portable version and installer, so Vaultik is easy to use on another computer (next):
+   - Portable: the programs in one folder; a `portable` marker file next to them keeps jobs and
+     settings in that folder instead of the user profile.
+   - A copy on the backup drive: backups to a disk or USB drive keep `<drive>\Vaultik\` up to date
+     with the portable programs and a short how-to-restore note, so another computer can restore
+     with nothing installed.
+   - Windows installer: Program Files, a Start menu entry, upgrades in place, and an uninstaller
+     that also removes the scheduled tasks.
+   - Linux: the same as an AppImage (portable: runs from the backup drive and on SteamOS) and a
+     Flatpak, put on the backup drive next to the Windows programs once the Linux port (5) works.
+5. Linux port, SteamOS on the Steam Deck first: build and test the existing POSIX platform layer,
+   systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
+   and the browser sign-in are Windows-only so far). Packaged as in 4.
+6. Volume image backup, restore to a volume or `.vhdx`
+7. Bare-metal restore from a recovery USB (WinPE on Windows)
