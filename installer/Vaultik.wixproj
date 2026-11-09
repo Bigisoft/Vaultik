@@ -1,0 +1,12 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <!-- The Windows installer (MSI). Built by tools/package.ps1, which passes Version and BinDir
+       (the folder with the release programs). WiX 5 is open source (MS-RL). -->
+  <PropertyGroup>
+    <OutputName>Vaultik</OutputName>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <!-- ICE57 takes the Start menu folder for a per-user one; in this per-machine package
+         (ALLUSERS=1) it is the all-users Start menu, which the HKMU key path follows. -->
+    <SuppressIces>ICE57</SuppressIces>
+    <DefineConstants>Version=$(Version);BinDir=$(BinDir);IconFile=$(MSBuildThisFileDirectory)..\src\gui\vaultik.ico</DefineConstants>
+  </PropertyGroup>
+</Project>

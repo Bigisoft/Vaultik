@@ -1,0 +1,50 @@
+<!-- Vaultik's installer: the three programs in Program Files\Vaultik (an administrator-only folder,
+     which jobs with administrator rights require), a Start menu entry, and the folder on PATH so
+     "vaultik" works in any terminal. A newer version replaces an older one. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Vaultik" Manufacturer="Vaultik" Version="$(var.Version)" Scope="perMachine"
+           UpgradeCode="7F3C2B1E-5A4D-4C8E-9B21-6D0E8F4A3C57" Compressed="yes">
+    <SummaryInformation Description="Vaultik: encrypted, versioned backups" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Vaultik is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="VaultikIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="VaultikIcon" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Vaultik" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <!-- For all users; a machine-wide value marks it installed. -->
+      <Component Id="StartMenuShortcut" Guid="9B4E1C27-6F03-4A8D-B5E2-7C19D0A36F84">
+        <Shortcut Id="StartMenuShortcut" Name="Vaultik" Description="Back up your files and restore them"
+                  Target="[INSTALLFOLDER]vaultik-gui.exe" WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue Root="HKMU" Key="Software\Vaultik" Name="StartMenuShortcut" Type="integer" Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <ComponentGroup Id="Programs" Directory="INSTALLFOLDER">
+      <Component>
+        <File Source="$(var.BinDir)\vaultik.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(var.BinDir)\vaultik-gui.exe" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Source="$(var.BinDir)\vaultik-task.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="PathEntry" Guid="3D1B6E42-8C7A-4F15-A0D9-52E7C4B19F63">
+        <Environment Id="PathEntry" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last"
+                     System="yes" Permanent="no" />
+        <CreateFolder />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="Vaultik">
+      <ComponentGroupRef Id="Programs" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+  </Package>
+</Wix>

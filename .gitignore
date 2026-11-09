@@ -7,3 +7,6 @@
 compile_commands.json
 .clangd
 /build-*.log
+/dist/
+/installer/bin/
+/installer/obj/
