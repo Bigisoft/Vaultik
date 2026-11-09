@@ -53,26 +53,8 @@ std::string amz_now() {
 
 // ---- credentials and locations ---------------------------------------------------------------
 
-CloudCredentials::~CloudCredentials() {
-    secure_wipe(secret.data(), secret.size());
-}
-
-CloudCredentials CloudCredentials::from_environment() {
-    CloudCredentials c;
-    c.key_id = os::get_env("AWS_ACCESS_KEY_ID");
-    c.secret = os::get_env("AWS_SECRET_ACCESS_KEY");
-    c.region = os::get_env("AWS_REGION");
-    if (c.region.empty()) c.region = os::get_env("AWS_DEFAULT_REGION");
-    return c;
-}
-
-bool is_cloud_location(std::string_view location) {
-    return location.size() >= 3 && (location[0] == 's' || location[0] == 'S') && location[1] == '3' &&
-           location[2] == ':';
-}
-
 S3Location parse_s3_location(const std::string& location) {
-    if (!is_cloud_location(location)) throw Error("not a cloud storage location: " + location);
+    if (cloud_kind(location) != CloudKind::S3) throw Error("not an S3 storage location: " + location);
     const std::string url = location.substr(3);
     const http::Url u = http::parse_url(url);
     S3Location l;

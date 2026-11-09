@@ -31,9 +31,10 @@ struct Schedule {
 struct Job {
     std::string id;    // file-name safe, derived from the name when created
     std::string name;  // shown in the UI
-    std::string repository;  // a folder, or cloud storage "s3:https://<endpoint>/<bucket>[/<folder>]"
-    // Cloud storage: the access key ID and signing region (empty: from the endpoint). The secret
-    // key is stored like the password (JobStore::set_cloud_secret).
+    std::string repository;  // a folder, or cloud storage (see repo/cloud.hpp for the forms)
+    // Cloud storage: for S3 the access key ID and signing region (empty: from the endpoint); for
+    // the other services the signed-in account. The secret key or sign-in token is stored like the
+    // password (JobStore::set_cloud_secret).
     std::string cloud_key_id;
     std::string cloud_region;
     std::vector<std::string> sources;

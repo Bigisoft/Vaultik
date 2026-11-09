@@ -8,6 +8,7 @@
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
 
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -74,6 +75,62 @@ Key32 pbkdf2_sha256(std::string_view password, ByteSpan salt, std::uint32_t iter
                             static_cast<int>(iterations), EVP_sha256(), to_int(out.size()), out.data()),
           "PKCS5_PBKDF2_HMAC");
     return out;
+}
+
+Bytes pbkdf2_sha512(std::string_view password, ByteSpan salt, std::uint32_t iterations, std::size_t length) {
+    if (iterations == 0) throw Error("PBKDF2 iteration count must be positive");
+    Bytes out(length);
+    check(PKCS5_PBKDF2_HMAC(password.data(), to_int(password.size()), salt.data(), to_int(salt.size()),
+                            static_cast<int>(iterations), EVP_sha512(), to_int(out.size()), out.data()),
+          "PKCS5_PBKDF2_HMAC(SHA512)");
+    return out;
+}
+
+namespace {
+
+void aes128_raw(const void* key, const EVP_CIPHER* mode, const std::uint8_t* iv, std::uint8_t* data, std::size_t size,
+                bool encrypt) {
+    if (size % 16 != 0) throw Error("AES block data must be a multiple of 16 bytes");
+    if (size == 0) return;
+    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
+    if (!ctx) throw Error("EVP_CIPHER_CTX_new failed");
+    check(EVP_CipherInit_ex(ctx.get(), mode, nullptr, static_cast<const unsigned char*>(key), iv, encrypt ? 1 : 0),
+          "EVP_CipherInit_ex(AES-128)");
+    EVP_CIPHER_CTX_set_padding(ctx.get(), 0);
+    int len = 0;
+    check(EVP_CipherUpdate(ctx.get(), data, &len, data, to_int(size)), "EVP_CipherUpdate(AES-128)");
+}
+
+}  // namespace
+
+Aes128::Aes128(ByteSpan key) {
+    if (key.size() != 16) throw Error("AES-128 needs a 16-byte key");
+    auto* copy = new std::uint8_t[16];
+    std::memcpy(copy, key.data(), 16);
+    ecb_ = copy;
+}
+
+Aes128::~Aes128() {
+    if (ecb_ != nullptr) {
+        OPENSSL_cleanse(ecb_, 16);
+        delete[] static_cast<std::uint8_t*>(ecb_);
+    }
+}
+
+void Aes128::ecb_encrypt(std::uint8_t* data, std::size_t size) const {
+    aes128_raw(ecb_, EVP_aes_128_ecb(), nullptr, data, size, true);
+}
+
+void Aes128::ecb_decrypt(std::uint8_t* data, std::size_t size) const {
+    aes128_raw(ecb_, EVP_aes_128_ecb(), nullptr, data, size, false);
+}
+
+void Aes128::cbc_encrypt(const std::uint8_t* iv, std::uint8_t* data, std::size_t size) const {
+    aes128_raw(ecb_, EVP_aes_128_cbc(), iv, data, size, true);
+}
+
+void Aes128::cbc_decrypt(const std::uint8_t* iv, std::uint8_t* data, std::size_t size) const {
+    aes128_raw(ecb_, EVP_aes_128_cbc(), iv, data, size, false);
 }
 
 AesGcm::AesGcm(const Key32& key) {

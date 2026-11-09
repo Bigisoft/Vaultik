@@ -110,9 +110,17 @@ void validate(const Job& job) {
     if (!job.id.empty() && !std::all_of(job.id.begin(), job.id.end(), is_id_char))
         throw Error("invalid job id \"" + job.id + "\"");
     if (job.repository.empty()) throw Error("the job needs a backup destination (repository)");
-    if (is_cloud_location(job.repository)) {
-        parse_s3_location(job.repository);  // throws with what is wrong
-        if (job.cloud_key_id.empty()) throw Error("cloud storage needs an access key ID");
+    switch (cloud_kind(job.repository)) {
+        case CloudKind::None:
+            break;
+        case CloudKind::S3:
+            parse_s3_location(job.repository);  // throws with what is wrong
+            if (job.cloud_key_id.empty()) throw Error("cloud storage needs an access key ID");
+            break;
+        default:
+            cloud_folder(job.repository);
+            if (job.cloud_key_id.empty())
+                throw Error(std::string("sign in to ") + cloud_kind_name(cloud_kind(job.repository)) + " first");
     }
     if (job.sources.empty()) throw Error("the job needs at least one folder or file to back up");
     for (const std::string& s : job.sources)
@@ -435,7 +443,16 @@ std::string JobStore::cloud_secret(const std::string& id) const {
 
 CloudCredentials JobStore::cloud_credentials(const Job& job) const {
     if (!is_cloud_location(job.repository) || job.id.empty()) return {};
-    return {job.cloud_key_id, cloud_secret(job.id), job.cloud_region};
+    CloudCredentials c{job.cloud_key_id, cloud_secret(job.id), job.cloud_region};
+    // A renewed sign-in token is stored right away, so the next run starts from it.
+    c.on_secret_changed = [dir = dir_, id = job.id](const std::string& secret) {
+        try {
+            JobStore(dir).set_cloud_secret(id, secret);
+        } catch (const Error&) {
+            // the old token keeps working for a while; the next renewal tries again
+        }
+    };
+    return c;
 }
 
 void JobStore::append_history(const std::string& id, const RunRecord& record) const {

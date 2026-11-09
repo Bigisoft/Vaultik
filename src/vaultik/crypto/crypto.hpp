@@ -24,6 +24,29 @@ Key32 hmac_sha256(ByteSpan key, ByteSpan data);
 // PBKDF2-HMAC-SHA256 with a 32-byte output.
 Key32 pbkdf2_sha256(std::string_view password, ByteSpan salt, std::uint32_t iterations);
 
+// PBKDF2-HMAC-SHA512 with an output of `length` bytes (MEGA sign-in).
+Bytes pbkdf2_sha512(std::string_view password, ByteSpan salt, std::uint32_t iterations, std::size_t length);
+
+// Raw AES-128 without padding, for protocols that define their own modes (MEGA). Lengths must be
+// multiples of 16. Operates in place.
+class Aes128 {
+public:
+    explicit Aes128(ByteSpan key);  // 16 bytes
+    ~Aes128();
+    Aes128(const Aes128&) = delete;
+    Aes128& operator=(const Aes128&) = delete;
+
+    void ecb_encrypt(std::uint8_t* data, std::size_t size) const;
+    void ecb_decrypt(std::uint8_t* data, std::size_t size) const;
+    // `iv` is 16 bytes; it is not changed.
+    void cbc_encrypt(const std::uint8_t* iv, std::uint8_t* data, std::size_t size) const;
+    void cbc_decrypt(const std::uint8_t* iv, std::uint8_t* data, std::size_t size) const;
+
+private:
+    void* ecb_ = nullptr;
+    void* cbc_ = nullptr;
+};
+
 // AES-256-GCM (CNG on Windows, OpenSSL elsewhere). Output layout: nonce(12) || ciphertext || tag(16).
 class AesGcm {
 public:

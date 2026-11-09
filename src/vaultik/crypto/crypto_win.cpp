@@ -4,6 +4,7 @@
 #include <bcrypt.h>
 
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <string>
 
@@ -73,6 +74,76 @@ Key32 pbkdf2_sha256(std::string_view password, ByteSpan salt, std::uint32_t iter
     BCryptCloseAlgorithmProvider(alg, 0);
     check(status, "BCryptDeriveKeyPBKDF2");
     return out;
+}
+
+Bytes pbkdf2_sha512(std::string_view password, ByteSpan salt, std::uint32_t iterations, std::size_t length) {
+    if (iterations == 0) throw Error("PBKDF2 iteration count must be positive");
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    check(BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA512_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG),
+          "BCryptOpenAlgorithmProvider(SHA512)");
+    Bytes out(length);
+    const NTSTATUS status =
+        BCryptDeriveKeyPBKDF2(alg, ptr_or_dummy(reinterpret_cast<const std::uint8_t*>(password.data())),
+                              to_ulong(password.size()), ptr_or_dummy(salt.data()), to_ulong(salt.size()),
+                              iterations, out.data(), to_ulong(out.size()), 0);
+    BCryptCloseAlgorithmProvider(alg, 0);
+    check(status, "BCryptDeriveKeyPBKDF2");
+    return out;
+}
+
+Aes128::Aes128(ByteSpan key) {
+    if (key.size() != 16) throw Error("AES-128 needs a 16-byte key");
+    BCRYPT_KEY_HANDLE ecb = nullptr;
+    BCRYPT_KEY_HANDLE cbc = nullptr;
+    check(BCryptGenerateSymmetricKey(BCRYPT_AES_ECB_ALG_HANDLE, &ecb, nullptr, 0, const_cast<PUCHAR>(key.data()), 16, 0),
+          "BCryptGenerateSymmetricKey(ECB)");
+    const NTSTATUS st =
+        BCryptGenerateSymmetricKey(BCRYPT_AES_CBC_ALG_HANDLE, &cbc, nullptr, 0, const_cast<PUCHAR>(key.data()), 16, 0);
+    if (!BCRYPT_SUCCESS(st)) {
+        BCryptDestroyKey(ecb);
+        check(st, "BCryptGenerateSymmetricKey(CBC)");
+    }
+    ecb_ = ecb;
+    cbc_ = cbc;
+}
+
+Aes128::~Aes128() {
+    if (ecb_ != nullptr) BCryptDestroyKey(static_cast<BCRYPT_KEY_HANDLE>(ecb_));
+    if (cbc_ != nullptr) BCryptDestroyKey(static_cast<BCRYPT_KEY_HANDLE>(cbc_));
+}
+
+namespace {
+
+void aes_raw(void* key, const std::uint8_t* iv, std::uint8_t* data, std::size_t size, bool encrypt) {
+    if (size % 16 != 0) throw Error("AES block data must be a multiple of 16 bytes");
+    if (size == 0) return;
+    UCHAR ivbuf[16];
+    if (iv != nullptr) std::memcpy(ivbuf, iv, 16);
+    ULONG written = 0;
+    const auto h = static_cast<BCRYPT_KEY_HANDLE>(key);
+    const NTSTATUS st = encrypt ? BCryptEncrypt(h, data, to_ulong(size), nullptr, iv ? ivbuf : nullptr, iv ? 16 : 0,
+                                                data, to_ulong(size), &written, 0)
+                                : BCryptDecrypt(h, data, to_ulong(size), nullptr, iv ? ivbuf : nullptr, iv ? 16 : 0,
+                                                data, to_ulong(size), &written, 0);
+    check(st, encrypt ? "BCryptEncrypt(AES)" : "BCryptDecrypt(AES)");
+}
+
+}  // namespace
+
+void Aes128::ecb_encrypt(std::uint8_t* data, std::size_t size) const {
+    aes_raw(ecb_, nullptr, data, size, true);
+}
+
+void Aes128::ecb_decrypt(std::uint8_t* data, std::size_t size) const {
+    aes_raw(ecb_, nullptr, data, size, false);
+}
+
+void Aes128::cbc_encrypt(const std::uint8_t* iv, std::uint8_t* data, std::size_t size) const {
+    aes_raw(cbc_, iv, data, size, true);
+}
+
+void Aes128::cbc_decrypt(const std::uint8_t* iv, std::uint8_t* data, std::size_t size) const {
+    aes_raw(cbc_, iv, data, size, false);
 }
 
 AesGcm::AesGcm(const Key32& key) {

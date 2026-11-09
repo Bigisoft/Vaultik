@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "vaultik/repo/backend.hpp"
+#include "vaultik/repo/cloud.hpp"
 
 namespace vaultik {
 
@@ -24,27 +25,6 @@ namespace http {
 class Client;
 }
 
-// Keys for cloud storage. The secret is wiped when the object goes away.
-struct CloudCredentials {
-    std::string key_id;
-    std::string secret;
-    std::string region;  // empty: worked out from the endpoint ("auto" for R2, "us-east-1" otherwise)
-
-    CloudCredentials() = default;
-    CloudCredentials(std::string id, std::string s, std::string r = {})
-        : key_id(std::move(id)), secret(std::move(s)), region(std::move(r)) {}
-    CloudCredentials(const CloudCredentials&) = default;
-    CloudCredentials& operator=(const CloudCredentials&) = default;
-    ~CloudCredentials();
-
-    bool empty() const { return key_id.empty() && secret.empty(); }
-
-    // AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_REGION (or AWS_DEFAULT_REGION).
-    static CloudCredentials from_environment();
-};
-
-// Whether `location` names cloud storage ("s3:...") rather than a folder.
-bool is_cloud_location(std::string_view location);
 
 struct S3Location {
     std::string endpoint;  // "https://host[:port]"
