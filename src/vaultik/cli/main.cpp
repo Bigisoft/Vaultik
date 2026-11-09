@@ -890,9 +890,27 @@ void refresh_drive_copy(const jobs::Job& job) {
 #ifdef _WIN32
     if (is_cloud_location(job.repository)) return;
     try {
+        // Never with administrator rights: anyone can prepare an external drive, e.g. with
+        // "Vaultik" as a link into Windows' own folders, and an elevated run would write there.
+        if (os::process_elevated()) return;
         const os::VolumeLocation loc = os::volume_of(job.repository);
         if (loc.volume.empty() || loc.system || !loc.external) return;
         const std::string target = os::join(loc.root, "Vaultik");
+        // Only a real folder and real files there (or none yet): links lead somewhere else.
+        const auto plain = [](const std::string& path, os::EntryType want) {
+            os::FileInfo info;
+            os::ErrorCode err = 0;
+            if (!os::stat(path, info, err)) return os::is_not_found(err);
+            return info.type == want;
+        };
+        const char* const names[] = {"vaultik.exe", "vaultik-gui.exe", "vaultik-task.exe", "portable",
+                                     "How to restore.txt", "version"};
+        bool safe = plain(target, os::EntryType::Dir);
+        for (const char* name : names) safe = safe && plain(os::join(target, name), os::EntryType::File);
+        if (!safe) {
+            warning(target + " on the backup drive is not a plain folder of Vaultik's files, so it was left alone");
+            return;
+        }
         const std::string from = os::parent_of(os::executable_path());
         if (os::fold_case(from) == os::fold_case(os::absolute_path(target))) return;  // running from that copy
         const std::string stamp = os::join(target, "version");
