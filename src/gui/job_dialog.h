@@ -2,6 +2,7 @@
 
 #include <QDialog>
 
+#include "cloud_dialog.h"
 #include "vaultik/jobs/job.hpp"
 
 class QCheckBox;
@@ -20,6 +21,7 @@ class JobDialog : public QDialog {
 
 public:
     JobDialog(const vaultik::jobs::JobStore& store, const vaultik::jobs::Job* existing, QWidget* parent = nullptr);
+    ~JobDialog() override;
 
     const vaultik::jobs::Job& job() const { return job_; }
 
@@ -40,6 +42,7 @@ private:
     const vaultik::jobs::JobStore& store_;
     bool editing_ = false;
     vaultik::jobs::Job job_;
+    CloudTarget cloud_;  // the cloud destination's keys, when the destination is cloud storage
 
     QLineEdit* name_ = nullptr;
     QLineEdit* repository_ = nullptr;

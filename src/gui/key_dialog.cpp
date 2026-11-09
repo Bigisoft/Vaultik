@@ -23,7 +23,7 @@
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/repo/keys.hpp"
-#include "vaultik/repo/local_backend.hpp"
+#include "vaultik/repo/backends.hpp"
 
 using namespace vaultik;
 
@@ -35,6 +35,13 @@ void wipe(std::string& s) {
 }
 
 bool same_location(const QString& a, const QString& b) {
+    if (is_cloud_location(u8(a)) || is_cloud_location(u8(b))) {
+        QString x = a.trimmed();
+        QString y = b.trimmed();
+        while (x.endsWith('/')) x.chop(1);
+        while (y.endsWith('/')) y.chop(1);
+        return x == y;
+    }
     const QString x = QDir::cleanPath(QFileInfo(a).absoluteFilePath());
     const QString y = QDir::cleanPath(QFileInfo(b).absoluteFilePath());
 #ifdef Q_OS_WIN
@@ -101,9 +108,22 @@ KeyDialog::KeyDialog(const jobs::JobStore& store, const QString& location, QWidg
         const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the backup folder"), location_->text());
         if (!dir.isEmpty()) location_->setText(QDir::toNativeSeparators(dir));
     });
+    auto* cloud = new QPushButton(tr("Cloud storage..."));
+    connect(cloud, &QPushButton::clicked, this, [this] {
+        CloudTarget initial = cloud_;
+        const QString current = location_->text().trimmed();
+        if (is_cloud_location(u8(current))) initial.location = current;
+        CloudDialog dialog(initial, this);
+        initial.wipe();
+        if (dialog.exec() != QDialog::Accepted) return;
+        cloud_.wipe();
+        cloud_ = dialog.target();
+        location_->setText(cloud_.location);
+    });
     auto* loc_row = new QHBoxLayout;
     loc_row->addWidget(location_, 1);
     loc_row->addWidget(browse);
+    loc_row->addWidget(cloud);
 
     use_password_ = new QRadioButton(tr("Current password"));
     use_recovery_ = new QRadioButton(tr("Recovery key (password forgotten)"));
@@ -162,10 +182,36 @@ KeyDialog::KeyDialog(const jobs::JobStore& store, const QString& location, QWidg
 
 KeyDialog::~KeyDialog() {
     for (QLineEdit* e : {secret_, new_password_, new_password2_}) e->clear();
+    cloud_.wipe();
+}
+
+std::unique_ptr<Backend> KeyDialog::open_location(const QString& location) const {
+    const std::string loc = u8(location);
+    if (!is_cloud_location(loc)) return open_backend(loc);
+    // Keys from the cloud dialog, else from a saved job with this destination, else the environment.
+    if (!cloud_.key_id.isEmpty() && same_location(cloud_.location, location)) {
+        const CloudCredentials keys = cloud_.credentials();
+        return open_backend(loc, &keys);
+    }
+    for (const jobs::Job& job : store_.list()) {
+        if (!same_location(qs(job.repository), location)) continue;
+        const CloudCredentials keys = store_.cloud_credentials(job);
+        return open_backend(loc, &keys);
+    }
+    return open_backend(loc);
 }
 
 bool KeyDialog::check_location() {
     const QString dir = location_->text().trimmed();
+    if (is_cloud_location(u8(dir))) {
+        if (secret_->text().isEmpty()) {
+            QMessageBox::warning(this, windowTitle(),
+                                 use_recovery_->isChecked() ? tr("Enter the recovery key.")
+                                                            : tr("Enter the current password."));
+            return false;
+        }
+        return true;
+    }
     if (dir.isEmpty() || !QFileInfo::exists(QDir(dir).filePath(QStringLiteral("config")))) {
         QMessageBox::warning(this, windowTitle(), tr("Choose a folder that holds a Vaultik backup."));
         return false;
@@ -189,8 +235,8 @@ void KeyDialog::change_password() {
     std::string pw = u8(new_password_->text());
     QApplication::setOverrideCursor(Qt::WaitCursor);
     try {
-        LocalBackend backend(u8(dir));
-        vaultik::change_password(backend, credential, pw);
+        const std::unique_ptr<Backend> backend = open_location(dir);
+        vaultik::change_password(*backend, credential, pw);
     } catch (const Error& e) {
         QApplication::restoreOverrideCursor();
         wipe(credential.secret);
@@ -245,7 +291,8 @@ void KeyDialog::make_recovery_key() {
     std::string key;
     QApplication::setOverrideCursor(Qt::WaitCursor);
     try {
-        LocalBackend backend(u8(dir));
+        const std::unique_ptr<Backend> owned = open_location(dir);
+        Backend& backend = *owned;
         if (has_recovery_key(backend)) {
             QApplication::restoreOverrideCursor();
             const auto answer = QMessageBox::question(

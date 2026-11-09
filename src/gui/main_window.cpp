@@ -30,6 +30,7 @@
 
 #include "common.h"
 #include "job_dialog.h"
+#include "cloud_dialog.h"
 #include "key_dialog.h"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "restore_dialog.h"
@@ -83,7 +84,7 @@ MainWindow::MainWindow() {
     QAction* add = toolbar->addAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder), tr("New backup job"));
     connect(add, &QAction::triggered, this, &MainWindow::new_job);
     QAction* open_backup =
-        toolbar->addAction(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("Restore from a backup folder..."));
+        toolbar->addAction(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("Restore from a backup location..."));
     open_backup->setToolTip(tr("Open any Vaultik backup with its password, e.g. one made on another computer"));
     connect(open_backup, &QAction::triggered, this, &MainWindow::restore_from_folder);
     QAction* keys = toolbar->addAction(style()->standardIcon(QStyle::SP_DialogApplyButton), tr("Password and recovery key..."));
@@ -371,14 +372,16 @@ void MainWindow::load_snapshots(bool force) {
     snapshots_->clear();
     snapshots_status_->setText(tr("Opening the repository..."));
     std::string pw;
+    CloudCredentials cloud;
     try {
         pw = store_.password(id);
+        cloud = store_.cloud_credentials(*job);
     } catch (const Error& e) {
         snapshots_status_->setText(QString::fromUtf8(e.what()));
         loading_job_.clear();
         return;
     }
-    RepoHandle::open_async(this, job->repository, std::move(pw),
+    RepoHandle::open_async(this, job->repository, std::move(pw), std::move(cloud),
                            [this, id, fill](std::shared_ptr<Repository> repo, std::vector<SnapshotEntry> list,
                                             QString error) {
                                loading_job_.clear();
@@ -393,27 +396,52 @@ void MainWindow::load_snapshots(bool force) {
 }
 
 void MainWindow::restore_from_folder() {
-    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the backup folder"));
-    if (dir.isEmpty()) return;
-    if (!QFileInfo::exists(QDir(dir).filePath(QStringLiteral("config")))) {
-        QMessageBox::warning(this, windowTitle(), tr("%1 does not hold a Vaultik backup.").arg(QDir::toNativeSeparators(dir)));
+    // A folder (USB drive, disk, network share) or cloud storage.
+    QMessageBox where(QMessageBox::Question, tr("Restore from a backup location"),
+                      tr("Where is the backup?"), QMessageBox::Cancel, this);
+    QPushButton* folder_button = where.addButton(tr("In a folder..."), QMessageBox::AcceptRole);
+    QPushButton* cloud_button = where.addButton(tr("In cloud storage..."), QMessageBox::AcceptRole);
+    where.exec();
+
+    QString location;
+    CloudTarget cloud;
+    if (where.clickedButton() == folder_button) {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the backup folder"));
+        if (dir.isEmpty()) return;
+        if (!QFileInfo::exists(QDir(dir).filePath(QStringLiteral("config")))) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("%1 does not hold a Vaultik backup.").arg(QDir::toNativeSeparators(dir)));
+            return;
+        }
+        location = QDir::toNativeSeparators(dir);
+    } else if (where.clickedButton() == cloud_button) {
+        CloudDialog dialog(CloudTarget{}, this);
+        if (dialog.exec() != QDialog::Accepted) return;
+        cloud = dialog.target();
+        location = cloud.location;
+    } else {
         return;
     }
+
     bool ok = false;
-    QString password = QInputDialog::getText(this, tr("Backup password"),
-                                             tr("Password of the backup in %1:").arg(QDir::toNativeSeparators(dir)),
+    QString password = QInputDialog::getText(this, tr("Backup password"), tr("Password of the backup in %1:").arg(location),
                                              QLineEdit::Password, QString(), &ok);
-    if (!ok || password.isEmpty()) return;
+    if (!ok || password.isEmpty()) {
+        cloud.wipe();
+        return;
+    }
 
     jobs::Job source;
-    source.name = u8(QDir::toNativeSeparators(dir));
+    source.name = u8(location);
     source.repository = source.name;
+    const CloudCredentials keys = cloud.credentials();
+    cloud.wipe();
     QApplication::setOverrideCursor(Qt::WaitCursor);
     statusBar()->showMessage(tr("Opening the backup..."));
     RepoHandle::open_async(
-        this, source.repository, u8(password),
-        [this, source, password](std::shared_ptr<Repository> repo, std::vector<SnapshotEntry> list,
-                                 QString error) mutable {
+        this, source.repository, u8(password), keys,
+        [this, source, password, keys](std::shared_ptr<Repository> repo, std::vector<SnapshotEntry> list,
+                                       QString error) mutable {
             QApplication::restoreOverrideCursor();
             statusBar()->clearMessage();
             if (!error.isEmpty()) {
@@ -421,7 +449,7 @@ void MainWindow::restore_from_folder() {
             } else if (list.empty()) {
                 QMessageBox::information(this, windowTitle(), tr("This backup has no snapshots to restore from."));
             } else {
-                RestoreDialog dialog(source, std::move(repo), std::move(list), 0, this, password);
+                RestoreDialog dialog(source, std::move(repo), std::move(list), 0, this, password, keys);
                 dialog.exec();
             }
             password.fill(QChar(0));

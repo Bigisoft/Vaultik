@@ -10,6 +10,7 @@
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/model/snapshot.hpp"
 #include "vaultik/repo/repository.hpp"
+#include "vaultik/repo/s3_backend.hpp"
 
 struct SnapshotEntry {
     vaultik::Id id{};
@@ -25,6 +26,8 @@ class RepoHandle : public QObject {
 public:
     using Done = std::function<void(std::shared_ptr<vaultik::Repository>, std::vector<SnapshotEntry>, QString error)>;
 
-    // Calls `done` on the UI thread. `context` going away cancels the callback.
-    static void open_async(QObject* context, std::string repository, std::string password, Done done);
+    // Calls `done` on the UI thread. `context` going away cancels the callback. `cloud` holds the
+    // keys for a cloud storage location.
+    static void open_async(QObject* context, std::string repository, std::string password,
+                           vaultik::CloudCredentials cloud, Done done);
 };

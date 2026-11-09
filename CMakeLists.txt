@@ -119,6 +119,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/job_dialog.cpp
             src/gui/restore_dialog.cpp
             src/gui/key_dialog.cpp
+            src/gui/cloud_dialog.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)

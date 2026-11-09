@@ -5,6 +5,8 @@
 #include <QProcess>
 #include <QStringList>
 
+#include "vaultik/repo/s3_backend.hpp"
+
 // Runs the vaultik command-line engine as a child process with --json and turns its event
 // lines into signals. Backups and restores run out of process so their resource limits (CPU
 // cap, memory cap, priorities) never apply to the UI, and a crash cannot take the UI down.
@@ -20,8 +22,9 @@ public:
 
     bool running() const;
     // `password`, when given, reaches the engine as VAULTIK_PASSWORD (for a repository opened
-    // without a saved job).
-    void start(const QStringList& args, const QString& password = {});
+    // without a saved job), and `cloud` keys as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
+    // AWS_REGION. Inherited values of these are always dropped.
+    void start(const QStringList& args, const QString& password = {}, const vaultik::CloudCredentials& cloud = {});
     // Asks the engine to stop cleanly; kills it if it has not exited after a grace period.
     void cancel();
 

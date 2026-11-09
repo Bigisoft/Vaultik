@@ -27,7 +27,7 @@ bool Runner::running() const {
     return process_ != nullptr && process_->state() != QProcess::NotRunning;
 }
 
-void Runner::start(const QStringList& args, const QString& password) {
+void Runner::start(const QStringList& args, const QString& password, const vaultik::CloudCredentials& cloud) {
     if (running()) return;
     if (process_ != nullptr) process_->deleteLater();
     buffer_.clear();
@@ -50,6 +50,13 @@ void Runner::start(const QStringList& args, const QString& password) {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.remove(QStringLiteral("VAULTIK_PASSWORD"));
     if (!password.isEmpty()) env.insert(QStringLiteral("VAULTIK_PASSWORD"), password);
+    for (const char* name : {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION"})
+        env.remove(QString::fromLatin1(name));
+    if (!cloud.empty()) {
+        env.insert(QStringLiteral("AWS_ACCESS_KEY_ID"), QString::fromStdString(cloud.key_id));
+        env.insert(QStringLiteral("AWS_SECRET_ACCESS_KEY"), QString::fromStdString(cloud.secret));
+        if (!cloud.region.empty()) env.insert(QStringLiteral("AWS_REGION"), QString::fromStdString(cloud.region));
+    }
     process_->setProcessEnvironment(env);
     process_->start(engine_path(), QStringList(args) << QStringLiteral("--json"));
 }

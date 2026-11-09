@@ -28,7 +28,7 @@
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/config.hpp"
-#include "vaultik/repo/local_backend.hpp"
+#include "vaultik/repo/backends.hpp"
 #include "vaultik/repo/repository.hpp"
 #include "runner.h"
 
@@ -102,6 +102,10 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
     }
 }
 
+JobDialog::~JobDialog() {
+    cloud_.wipe();
+}
+
 QWidget* JobDialog::build_general() {
     auto* page = new QWidget;
     auto* form = new QFormLayout(page);
@@ -111,17 +115,30 @@ QWidget* JobDialog::build_general() {
     form->addRow(tr("Name:"), name_);
 
     repository_ = new QLineEdit;
-    repository_->setPlaceholderText(tr("Folder on a USB drive, another disk or a network share"));
+    repository_->setPlaceholderText(tr("Folder on a USB drive, another disk or a network share, or cloud storage"));
     auto* browse = new QPushButton(tr("Browse..."));
     connect(browse, &QPushButton::clicked, this, [this] {
-        const QString dir = QFileDialog::getExistingDirectory(this, tr("Backup destination"), repository_->text());
+        const QString start = is_cloud_location(u8(repository_->text())) ? QString() : repository_->text();
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Backup destination"), start);
         if (!dir.isEmpty()) repository_->setText(QDir::toNativeSeparators(dir));
+    });
+    auto* cloud = new QPushButton(tr("Cloud storage..."));
+    connect(cloud, &QPushButton::clicked, this, [this] {
+        CloudTarget initial = cloud_;
+        initial.location = is_cloud_location(u8(repository_->text())) ? repository_->text().trimmed() : QString();
+        CloudDialog dialog(initial, this);
+        initial.wipe();
+        if (dialog.exec() != QDialog::Accepted) return;
+        cloud_.wipe();
+        cloud_ = dialog.target();
+        repository_->setText(cloud_.location);
     });
     auto* repo_row = new QWidget;
     auto* rl = new QHBoxLayout(repo_row);
     rl->setContentsMargins(0, 0, 0, 0);
     rl->addWidget(repository_, 1);
     rl->addWidget(browse);
+    rl->addWidget(cloud);
     form->addRow(tr("Destination:"), repo_row);
 
     password_ = new QLineEdit;
@@ -337,6 +354,22 @@ QWidget* JobDialog::build_retention() {
 void JobDialog::load(const jobs::Job& job) {
     name_->setText(qs(job.name));
     repository_->setText(qs(job.repository));
+    cloud_.wipe();
+    cloud_ = CloudTarget{};
+    if (is_cloud_location(job.repository)) {
+        cloud_.location = qs(job.repository);
+        cloud_.key_id = qs(job.cloud_key_id);
+        cloud_.region = qs(job.cloud_region);
+        if (!job.id.empty()) {
+            try {
+                std::string secret = store_.cloud_secret(job.id);
+                cloud_.secret = qs(secret);
+                secure_wipe(secret.data(), secret.size());
+            } catch (const Error&) {
+                // asked for again when the job is saved
+            }
+        }
+    }
     sources_->clear();
     for (const auto& s : job.sources) sources_->addItem(qs(s));
     excludes_->clear();
@@ -384,6 +417,13 @@ jobs::Job JobDialog::collect() const {
     jobs::Job j = job_;  // keeps id and tags
     j.name = u8(name_->text().trimmed());
     j.repository = u8(repository_->text().trimmed());
+    if (is_cloud_location(j.repository)) {
+        j.cloud_key_id = u8(cloud_.key_id);
+        j.cloud_region = u8(cloud_.region);
+    } else {
+        j.cloud_key_id.clear();
+        j.cloud_region.clear();
+    }
     j.sources.clear();
     for (const QString& s : items_of(sources_)) j.sources.push_back(u8(s));
     j.excludes.clear();
@@ -426,13 +466,22 @@ jobs::Job JobDialog::collect() const {
 }
 
 bool JobDialog::prepare_repository(const jobs::Job& job, const std::string& password) {
-    const std::string root = os::absolute_path(job.repository);
-    const bool exists = os::exists(os::join(root, "config"));
-    if (exists) {
+    const bool cloud = is_cloud_location(job.repository);
+    const std::string root = cloud ? job.repository : os::absolute_path(job.repository);
+    const CloudCredentials keys = cloud_.credentials();
+    std::unique_ptr<Backend> backend;
+    bool has_repo = false;
+    if (cloud) {
+        backend = open_backend(root, &keys);
+        has_repo = backend->exists("config");
+    } else {
+        has_repo = os::exists(os::join(root, "config"));
+        if (has_repo) backend = open_backend(root);
+    }
+    if (has_repo) {
         // Check the password against the stored key without loading the whole index.
         try {
-            LocalBackend backend(root);
-            const RepoConfig config = parse_config(backend.get("config"));
+            const RepoConfig config = parse_config(backend->get("config"));
             unwrap_master_key(config, password);
         } catch (const AuthError&) {
             QMessageBox::warning(this, windowTitle(), tr("The password does not match the repository in %1.")
@@ -441,7 +490,7 @@ bool JobDialog::prepare_repository(const jobs::Job& job, const std::string& pass
         }
         return true;
     }
-    if (os::exists(root) && os::is_directory(root)) {
+    if (!cloud && os::exists(root) && os::is_directory(root)) {
         os::DirReader reader(root);
         std::string name;
         os::FileInfo info;
@@ -457,9 +506,9 @@ bool JobDialog::prepare_repository(const jobs::Job& job, const std::string& pass
         QMessageBox::warning(this, windowTitle(), tr("Use a password of at least 8 characters."));
         return false;
     }
-    LocalBackend backend(root, /*create=*/true);
-    Repository::init(backend, password);
-    const std::string key = create_recovery_key(backend, {password});
+    if (!cloud) backend = open_backend(root, nullptr, /*create=*/true);
+    Repository::init(*backend, password);
+    const std::string key = create_recovery_key(*backend, {password});
     QApplication::restoreOverrideCursor();
     show_recovery_key(this, qs(key), qs(root));
     QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -490,6 +539,11 @@ void JobDialog::accept() {
         }
         store_.save(j);
         if (!pw.empty()) store_.set_password(j.id, pw);
+        {
+            std::string secret = is_cloud_location(j.repository) ? u8(cloud_.secret) : std::string();
+            store_.set_cloud_secret(j.id, secret);
+            secure_wipe(secret.data(), secret.size());
+        }
         const QString dir = QFileInfo(Runner::engine_path()).absolutePath();
         try {
             jobs::apply_schedule(j, u8(QDir::toNativeSeparators(dir)));

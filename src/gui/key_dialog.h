@@ -2,7 +2,11 @@
 
 #include <QDialog>
 
+#include <memory>
+
+#include "cloud_dialog.h"
 #include "vaultik/jobs/job.hpp"
+#include "vaultik/repo/backend.hpp"
 
 class QLineEdit;
 class QRadioButton;
@@ -23,6 +27,8 @@ private:
     void change_password();
     void make_recovery_key();
     bool check_location();
+    // The storage at `location`, with cloud keys from the cloud dialog or a saved job.
+    std::unique_ptr<vaultik::Backend> open_location(const QString& location) const;
 
     const vaultik::jobs::JobStore& store_;
     QLineEdit* location_ = nullptr;
@@ -31,4 +37,5 @@ private:
     QLineEdit* secret_ = nullptr;
     QLineEdit* new_password_ = nullptr;
     QLineEdit* new_password2_ = nullptr;
+    CloudTarget cloud_;
 };

@@ -18,6 +18,9 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
 - **Verifiable.** `verify --read-data` decrypts and checks every stored chunk.
 - **Portable repositories.** A repository written on Windows restores on Linux and the other way
   round (same format, same crypto).
+- **Local or cloud.** Back up to a disk, a USB drive, a network share, or S3-compatible cloud
+  storage (Cloudflare R2, Backblaze B2, Amazon S3, MinIO, ...). The cloud only ever sees encrypted
+  chunks.
 
 The on-disk format is specified in [docs/FORMAT.md](docs/FORMAT.md).
 
@@ -58,9 +61,11 @@ README describe the intended behavior.
 
 Start `vaultik-gui`, then **New backup job**:
 
-- **General:** a name, the destination folder (USB drive, other disk, network share) and the
-  repository password. A new destination gets a new encrypted repository; an existing one is
-  opened with its password.
+- **General:** a name, the destination (a folder on a USB drive, other disk or network share, or
+  **Cloud storage...**) and the repository password. A new destination gets a new encrypted
+  repository; an existing one is opened with its password. Cloud storage asks for the provider,
+  endpoint, an existing bucket, an optional folder in it and an access key; **Test connection**
+  checks them. The secret key is stored like the password.
 - **What to back up:** folders and files, name patterns to skip (`*.tmp`, `node_modules`), and
   whether to use a Volume Shadow Copy for open and locked files (on by default; it needs
   administrator rights, see "Current limits"). For the shadow copy, Windows briefly pauses the
@@ -90,10 +95,11 @@ The job page shows live progress, the run history (also of scheduled runs), and 
 **Restore** opens a snapshot browser: pick a file or folder (or nothing, for everything) and
 restore it to another folder or to its original location.
 
-**Restore from a backup folder** in the toolbar opens any Vaultik backup with its password,
-without a saved job: the way to get files back on another computer. Copy `vaultik-gui.exe`,
-`vaultik.exe` and `vaultik-task.exe` there (they need nothing else), connect the backup drive,
-pick the backup folder and enter the password.
+**Restore from a backup location** in the toolbar opens any Vaultik backup, in a folder or in
+cloud storage, with its password, without a saved job: the way to get files back on another
+computer. Copy `vaultik-gui.exe`, `vaultik.exe` and `vaultik-task.exe` there (they need nothing
+else), connect the backup drive (or have the cloud storage keys at hand), pick the location and
+enter the password.
 
 The password is stored for scheduled runs, readable only by your user account: encrypted with
 DPAPI on Windows, in a file with mode 0600 on Linux. Job files live in `%LOCALAPPDATA%\Vaultik`
@@ -133,6 +139,22 @@ The repository can be any folder: an internal disk, a USB drive or a network sha
 (or use `--password-file`) for unattended runs, or use `--job` to take the repository and stored
 password from a saved job. Snapshot paths start with the drive letter (`C/...`) or
 `UNC/server/share/...` on Windows, and with the top-level folder (`home/...`) on Linux.
+
+It can also be S3-compatible cloud storage, written `s3:https://<endpoint>/<bucket>[/<folder>]`:
+
+```
+set AWS_ACCESS_KEY_ID=...
+set AWS_SECRET_ACCESS_KEY=...
+vaultik init   -r s3:https://<account id>.r2.cloudflarestorage.com/backups/my-pc
+vaultik backup -r s3:https://s3.eu-central-003.backblazeb2.com/my-bucket/vaultik C:\Users\me\Documents
+```
+
+The bucket must exist. The signing region is worked out from the endpoint (`auto` for R2,
+`us-east-1` when it cannot be); set `AWS_REGION` to override it. With `--job`, the job's stored
+keys are used. Each repository file is one object; requests are retried with backoff on network
+errors, throttling and server errors, and `--write-limit` / `--read-limit` cap uploads and
+downloads. Browsing a cloud snapshot in the frontend downloads the folders it shows, so it is
+slower than browsing a local one.
 
 `init` prints the new repository's recovery key. `key passwd` sets a new password after
 checking the current one (or, with `--recovery-key`, the recovery key from a prompt or
@@ -224,6 +246,6 @@ Priorities only take effect when something else competes for the resource, so on
 2. Saved jobs, scheduling, resource controls, Qt frontend on Windows, retention
    (`forget`/`prune`), repository locks, Volume Shadow Copy (done)
 3. Linux port: build and test the existing POSIX platform layer, systemd timers and the frontend
-4. S3-compatible cloud backend (Cloudflare R2, Backblaze B2, MinIO)
+4. S3-compatible cloud backend (Cloudflare R2, Backblaze B2, MinIO) (done, Windows)
 5. Volume image backup, restore to a volume or `.vhdx`
 6. Bare-metal restore from a recovery USB (WinPE on Windows)

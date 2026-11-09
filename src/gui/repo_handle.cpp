@@ -6,20 +6,21 @@
 #include <algorithm>
 
 #include "vaultik/crypto/crypto.hpp"
-#include "vaultik/repo/local_backend.hpp"
+#include "vaultik/repo/backends.hpp"
 
 using namespace vaultik;
 
-void RepoHandle::open_async(QObject* context, std::string repository, std::string password, Done done) {
+void RepoHandle::open_async(QObject* context, std::string repository, std::string password, CloudCredentials cloud,
+                            Done done) {
     struct Result {
         std::shared_ptr<Repository> repo;
         std::vector<SnapshotEntry> snapshots;
         QString error;
     };
     auto result = std::make_shared<Result>();
-    QThread* thread = QThread::create([result, repository, password]() mutable {
+    QThread* thread = QThread::create([result, repository, password, cloud]() mutable {
         try {
-            std::unique_ptr<Repository> repo = Repository::open(std::make_unique<LocalBackend>(repository), password);
+            std::unique_ptr<Repository> repo = Repository::open(open_backend(repository, &cloud), password);
             for (const Id& id : repo->list_snapshot_ids()) {
                 try {
                     result->snapshots.push_back({id, repo->load_snapshot(id)});

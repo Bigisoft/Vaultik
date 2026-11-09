@@ -55,12 +55,14 @@ QString snapshot_label(const SnapshotEntry& e) {
 }  // namespace
 
 RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> repo,
-                             std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent, QString password)
+                             std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent, QString password,
+                             CloudCredentials cloud)
     : QDialog(parent),
       job_(job),
       repo_(std::move(repo)),
       snapshots_(std::move(snapshots)),
-      password_(std::move(password)) {
+      password_(std::move(password)),
+      cloud_(std::move(cloud)) {
     setWindowTitle(tr("Restore from \"%1\"").arg(qs(job.name)));
     resize(760, 600);
 
@@ -268,7 +270,7 @@ void RestoreDialog::start_restore() {
     restore_->setEnabled(false);
     snapshot_->setEnabled(false);
     status_->setText(tr("Starting..."));
-    runner_->start(args, password_);
+    runner_->start(args, password_, cloud_);
 }
 
 RestoreDialog::~RestoreDialog() {
