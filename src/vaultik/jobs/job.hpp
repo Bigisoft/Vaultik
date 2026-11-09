@@ -9,6 +9,7 @@
 //   history/<id>.jsonl    one line per run, newest last
 
 #include <cstdint>
+#include <utility>
 #include <optional>
 #include <string>
 #include <vector>
@@ -38,6 +39,24 @@ struct HealthPolicy {
     bool monthly = true;
 };
 
+// Lower speed limits while people work: on the given days (bit 0 = Monday) from start_minute to
+// end_minute (minutes after local midnight), a run reads and writes at most these rates (bytes
+// per second; 0 keeps the job's normal limit for that direction).
+struct WorkHours {
+    bool enabled = false;
+    std::uint8_t weekdays = 0x1F;  // Monday to Friday
+    int start_minute = 9 * 60;
+    int end_minute = 17 * 60;
+    std::uint64_t read_rate = 0;
+    std::uint64_t write_rate = 0;
+};
+
+// Whether a local time (weekday 0 = Monday, minute after midnight) falls in the working hours.
+bool in_work_hours(const WorkHours& w, int weekday, int minute);
+// The speed limits that apply at the current local time: the lower of the job's own and, during
+// working hours, the working-hours ones (0 means no limit).
+std::pair<std::uint64_t, std::uint64_t> rate_limits_now(const ResourcePolicy& normal, const WorkHours& w);
+
 struct Job {
     std::string id;    // file-name safe, derived from the name when created
     std::string name;  // shown in the UI
@@ -64,6 +83,7 @@ struct Job {
     // Registering such a task asks for administrator approval each time the schedule is saved.
     bool run_as_admin = false;
     ResourcePolicy resources;
+    WorkHours work_hours;
     // Old snapshots of this job to remove after each run (then unused data is pruned). Empty keeps
     // everything.
     RetentionPolicy retention;

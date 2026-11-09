@@ -107,6 +107,8 @@ private:
     QToolButton* more_ = nullptr;
     QWidget* progress_box_ = nullptr;
     QLabel* running_label_ = nullptr;
+    QPushButton* pause_ = nullptr;
+    bool paused_ = false;
     QProgressBar* bar_ = nullptr;
     QLabel* progress_text_ = nullptr;
     QLabel* current_file_ = nullptr;

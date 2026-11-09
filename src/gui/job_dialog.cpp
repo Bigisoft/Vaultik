@@ -415,6 +415,25 @@ QWidget* JobDialog::build_resources() {
     lf->addRow(tr("Read speed at most:"), read_limit_);
     lf->addRow(tr("Write speed at most:"), write_limit_);
     layout->addWidget(limits);
+
+    // Slower while people work: weekdays between two times.
+    work_box_ = new QGroupBox(tr("Slower during working hours"));
+    work_box_->setCheckable(true);
+    auto* wf = new QFormLayout(work_box_);
+    work_start_ = new QTimeEdit;
+    work_end_ = new QTimeEdit;
+    for (QTimeEdit* t : {work_start_, work_end_}) t->setDisplayFormat(QStringLiteral("HH:mm"));
+    wf->addRow(tr("On weekdays from:"), row({work_start_, new QLabel(tr("to")), work_end_}));
+    work_read_ = spin(0, 10000, tr(" MB/s"), tr("No change"));
+    work_write_ = spin(0, 10000, tr(" MB/s"), tr("No change"));
+    wf->addRow(tr("Read speed at most:"), work_read_);
+    wf->addRow(tr("Write and upload speed at most:"), work_write_);
+    auto* work_note = new QLabel(tr("A backup that runs into these hours slows down, and speeds up again "
+                                    "when they end."));
+    work_note->setWordWrap(true);
+    work_note->setForegroundRole(QPalette::PlaceholderText);
+    wf->addRow(work_note);
+    layout->addWidget(work_box_);
     layout->addStretch();
 
     connect(preset_, &QComboBox::activated, this, &JobDialog::apply_preset);
@@ -627,6 +646,12 @@ void JobDialog::load(const jobs::Job& job) {
     max_memory_->setValue(static_cast<int>(r.max_memory >> 20));
     read_limit_->setValue(static_cast<int>(r.read_rate >> 20));
     write_limit_->setValue(static_cast<int>(r.write_rate >> 20));
+    const jobs::WorkHours& w = job.work_hours;
+    work_box_->setChecked(w.enabled);
+    work_start_->setTime(QTime(w.start_minute / 60, w.start_minute % 60));
+    work_end_->setTime(QTime(w.end_minute / 60, w.end_minute % 60));
+    work_read_->setValue(static_cast<int>(w.read_rate >> 20));
+    work_write_->setValue(static_cast<int>(w.write_rate >> 20));
 
     // The preset that matches the rules; the custom fields start from the rules (or the default).
     const RetentionPolicy& k = job.retention;
@@ -700,6 +725,12 @@ jobs::Job JobDialog::collect() const {
     r.max_memory = static_cast<std::uint64_t>(max_memory_->value()) << 20;
     r.read_rate = static_cast<std::uint64_t>(read_limit_->value()) << 20;
     r.write_rate = static_cast<std::uint64_t>(write_limit_->value()) << 20;
+    jobs::WorkHours& w = j.work_hours;
+    w.enabled = work_box_->isChecked();
+    w.start_minute = work_start_->time().hour() * 60 + work_start_->time().minute();
+    w.end_minute = work_end_->time().hour() * 60 + work_end_->time().minute();
+    w.read_rate = static_cast<std::uint64_t>(work_read_->value()) << 20;
+    w.write_rate = static_cast<std::uint64_t>(work_write_->value()) << 20;
 
     j.retention = collect_retention();
     j.backup_on_connect = on_connect_->isChecked();

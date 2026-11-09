@@ -12,6 +12,8 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <condition_variable>
+#include <mutex>
 #include <new>
 #include <optional>
 #include <set>
@@ -191,7 +193,8 @@ Options:
   --job <job>                  Use a saved job's repository and stored password
   --password-file <file>       Read the password from a file (or set VAULTIK_PASSWORD)
   --json                       Machine-readable output: one JSON event per line;
-                               a line "cancel" on stdin stops a backup or restore
+                               a line "cancel" on stdin stops a backup or restore,
+                               "pause" and "resume" pause and continue it
   --lock-wait <time>           When another run holds the repository (prune holds
                                it alone), wait this long for it, e.g. 30s, 10m
                                (default: do not wait; run-job: 10m)
@@ -275,10 +278,22 @@ Args parse_args(const std::vector<std::string>& argv) {
 bool g_json = false;
 std::atomic<bool> g_cancel{false};
 std::atomic<bool> g_stdin_closed{false};  // the program that started this one went away (--json)
+std::atomic<bool> g_paused{false};        // "pause" on stdin (--json) until "resume"
+
+// Polled between files and chunks: waits while paused, then tells whether to stop.
+bool stop_requested() {
+    while (g_paused.load() && !g_cancel.load() && !g_stdin_closed.load())
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    return g_cancel.load();
+}
 
 // One JSON object per line on stdout; the frontend parses these.
 void emit(const nlohmann::json& event) {
-    out(event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n");
+    // Whole lines only: the stdin watcher reports pauses from its own thread.
+    static std::mutex mu;
+    const std::string line = event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+    std::lock_guard<std::mutex> lock(mu);
+    out(line);
 }
 
 void warning(const std::string& msg) {
@@ -298,6 +313,10 @@ void start_cancel_watcher() {
             if (line == "cancel") {
                 g_cancel = true;
                 return;
+            }
+            if (line == "pause" || line == "resume") {
+                g_paused = line == "pause";
+                emit({{"event", g_paused ? "paused" : "resumed"}});
             }
         }
         g_stdin_closed = true;
@@ -701,7 +720,7 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
                format_bytes(p.new_bytes) + "  " + p.current);
     };
     o.on_warning = [](const std::string& msg) { warning(msg); };
-    o.should_cancel = [&lock] { return g_cancel.load() || lock.lost(); };
+    o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
     o.before_save = [&lock] {
         if (!lock.held()) throw LockedError(kLockLost);
     };
@@ -1058,7 +1077,7 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         o.read_data = true;
         o.read_share = full ? 1.0 : job.health.sample_percent / 100.0;
         o.sample_seed = record.started;  // a different share each time
-        o.should_cancel = [&lock] { return g_cancel.load() || lock.lost(); };
+        o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
         o.on_progress = [](const std::string& msg) {
             if (g_json) emit({{"event", "check_progress"}, {"current", msg}});
             else status("Checking " + msg);
@@ -1293,6 +1312,47 @@ int cmd_cloud_rollback(const Args& a) {
     return r.failed.empty() ? kExitOk : kExitPartial;
 }
 
+// While a job runs: switches to the working-hours speed limits when they start, and back when they
+// end (checked every 30 seconds). Does nothing for a job without working hours.
+class SpeedSchedule {
+public:
+    SpeedSchedule(const ResourcePolicy& normal, const jobs::WorkHours& hours) {
+        if (!hours.enabled) return;
+        apply(normal, hours);
+        thread_ = std::thread([this, normal, hours] {
+            std::unique_lock<std::mutex> lock(mu_);
+            while (!cv_.wait_for(lock, std::chrono::seconds(30), [this] { return stop_; })) apply(normal, hours);
+        });
+    }
+    ~SpeedSchedule() {
+        if (!thread_.joinable()) return;
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        thread_.join();
+    }
+    SpeedSchedule(const SpeedSchedule&) = delete;
+    SpeedSchedule& operator=(const SpeedSchedule&) = delete;
+
+private:
+    void apply(const ResourcePolicy& normal, const jobs::WorkHours& hours) {
+        const auto [read, write] = jobs::rate_limits_now(normal, hours);
+        if (read == read_ && write == write_) return;
+        read_ = read;
+        write_ = write;
+        set_rate_limits(read, write);
+        if (g_json) emit({{"event", "speed"}, {"read_limit", read}, {"write_limit", write}});
+    }
+
+    std::uint64_t read_ = ~0ull, write_ = ~0ull;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool stop_ = false;
+    std::thread thread_;
+};
+
 // "check-job <job> [--full]": a health check of the job's backup now, recorded in its history.
 int cmd_check_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik check-job <job id or name> [--full]");
@@ -1342,6 +1402,7 @@ int cmd_run_job(const Args& a) {
     const ResourcePolicy policy = resource_policy(a, job->resources);
     apply_resource_policy(policy);
     if (!policy.is_default() && !g_json) err("Resources: " + describe(policy) + "\n");
+    const SpeedSchedule speed(policy, job->work_hours);
 
     jobs::RunRecord record;
     record.on_connect = on_connect;
@@ -1850,7 +1911,7 @@ int cmd_restore(const Args& a) {
                format_bytes(static_cast<std::uint64_t>(static_cast<double>(p.bytes) / secs)) + "/s)  " + p.current);
     };
     o.on_warning = [](const std::string& msg) { warning(msg); };
-    o.should_cancel = [] { return g_cancel.load(); };
+    o.should_cancel = [] { return stop_requested(); };
 
     const RestoreResult r = run_restore(*repo, ref.snapshot, o);
     if (g_json) {
@@ -1891,7 +1952,7 @@ int cmd_verify(const Args& a) {
         o.read_share = pct / 100.0;
         o.sample_seed = os::now();
     }
-    o.should_cancel = [] { return g_cancel.load(); };
+    o.should_cancel = [] { return stop_requested(); };
     o.on_progress = [](const std::string& msg) { status("Checking " + msg); };
     o.on_error = [](const std::string& msg) { err("error: " + msg + "\n"); };
     const auto start = std::chrono::steady_clock::now();

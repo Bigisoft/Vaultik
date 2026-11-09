@@ -51,6 +51,9 @@ const ResourcePolicy& current_resource_policy();
 // systems (for example network shares) do not support priority hints.
 void apply_io_priority(void* handle);
 
+// Changes only the read and write speed limits, e.g. while a run goes on (0 = unlimited).
+void set_rate_limits(std::uint64_t read_rate, std::uint64_t write_rate);
+
 // Account for bytes read or written; sleeps as needed to honor the rate limits.
 void throttle_read(std::size_t bytes);
 void throttle_write(std::size_t bytes);

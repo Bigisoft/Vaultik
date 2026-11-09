@@ -279,6 +279,7 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         ByteSpan chunk;
         while (reader.next(chunk)) {
             if (total == 0) random_start = byte_entropy(chunk.first(std::min<std::size_t>(chunk.size(), 65536))) > 7.9;
+            check_cancel();  // also inside a large file: a pause or stop does not wait for its end
             Id id;
             if (repo_.save_blob(BlobType::Data, chunk, id)) stats_.new_bytes += chunk.size();
             node.content.push_back(id);

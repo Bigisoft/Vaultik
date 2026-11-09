@@ -206,6 +206,34 @@ TEST_CASE("jobs find their drive under another letter") {
 }
 #endif
 
+TEST_CASE("working hours") {
+    WorkHours w;
+    CHECK_FALSE(in_work_hours(w, 0, 10 * 60));  // off
+    w.enabled = true;                            // Monday to Friday, 09:00 to 17:00
+    CHECK(in_work_hours(w, 0, 9 * 60));
+    CHECK(in_work_hours(w, 4, 16 * 60 + 59));
+    CHECK_FALSE(in_work_hours(w, 4, 17 * 60));
+    CHECK_FALSE(in_work_hours(w, 2, 8 * 60 + 59));
+    CHECK_FALSE(in_work_hours(w, 5, 10 * 60));  // Saturday
+    w.start_minute = 22 * 60;                    // a night shift across midnight
+    w.end_minute = 6 * 60;
+    CHECK(in_work_hours(w, 1, 23 * 60));
+    CHECK(in_work_hours(w, 1, 5 * 60));
+    CHECK_FALSE(in_work_hours(w, 1, 12 * 60));
+
+    Job j = sample();
+    j.id = "w";
+    j.work_hours = w;
+    j.work_hours.read_rate = 5ull << 20;
+    const Job back = job_from_json(to_json(j));
+    CHECK(back.work_hours.enabled);
+    CHECK(back.work_hours.start_minute == 22 * 60);
+    CHECK(back.work_hours.end_minute == 6 * 60);
+    CHECK(back.work_hours.read_rate == (5ull << 20));
+    j.work_hours.weekdays = 0;
+    CHECK_THROWS_AS(validate(j), Error);
+}
+
 TEST_CASE("job validation") {
     Job j = sample();
     j.sources.clear();

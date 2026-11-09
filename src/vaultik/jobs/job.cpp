@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <ctime>
 
 #include <nlohmann/json.hpp>
 
@@ -155,6 +156,26 @@ void record_volume(Job& job) {
 
 }  // namespace
 
+bool in_work_hours(const WorkHours& w, int weekday, int minute) {
+    if (!w.enabled || weekday < 0 || weekday > 6 || (w.weekdays & (1u << weekday)) == 0) return false;
+    if (w.start_minute <= w.end_minute) return minute >= w.start_minute && minute < w.end_minute;
+    return minute >= w.start_minute || minute < w.end_minute;  // across midnight
+}
+
+std::pair<std::uint64_t, std::uint64_t> rate_limits_now(const ResourcePolicy& normal, const WorkHours& w) {
+    const std::time_t t = std::time(nullptr);
+    std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+    const int weekday = (tm.tm_wday + 6) % 7;  // tm: 0 = Sunday
+    if (!in_work_hours(w, weekday, tm.tm_hour * 60 + tm.tm_min)) return {normal.read_rate, normal.write_rate};
+    const auto lower = [](std::uint64_t a, std::uint64_t b) { return a == 0 ? b : b == 0 ? a : std::min(a, b); };
+    return {lower(normal.read_rate, w.read_rate), lower(normal.write_rate, w.write_rate)};
+}
+
 const std::vector<ExclusionPreset>& exclusion_presets() {
     static const std::vector<ExclusionPreset> presets = {
         {"temp", {"*.tmp", "*.temp", "~$*", "*/AppData/Local/Temp", "*/Windows/Temp"}, true},
@@ -227,6 +248,10 @@ void validate(const Job& job) {
     if (k.max_bytes != 0 && k.max_bytes < (1ull << 30)) throw Error("a size limit must be at least 1 GB");
     if (job.backup_on_connect && (job.repository_volume.empty() || is_cloud_location(job.repository)))
         throw Error("backing up when the drive is connected needs a destination folder on a local or USB drive");
+    const WorkHours& w = job.work_hours;
+    if (w.start_minute < 0 || w.start_minute >= 24 * 60 || w.end_minute < 0 || w.end_minute >= 24 * 60)
+        throw Error("working hours must be times of the day");
+    if (w.enabled && (w.weekdays & 0x7F) == 0) throw Error("working hours need at least one day");
     if (job.cloud_lock_days < 0 || job.cloud_lock_days > 3650)
         throw Error("the lock must be between 0 and 3650 days");
     if (job.cloud_lock_days > 0 && cloud_kind(job.repository) != CloudKind::S3)
@@ -277,6 +302,13 @@ std::string to_json(const Job& job) {
           {"max_bytes", job.retention.max_bytes}}},
         {"volume", {{"id", job.repository_volume}, {"path", job.repository_relative}}},
         {"backup_on_connect", job.backup_on_connect},
+        {"work_hours",
+         {{"enabled", job.work_hours.enabled},
+          {"weekdays", job.work_hours.weekdays},
+          {"start", job.work_hours.start_minute},
+          {"end", job.work_hours.end_minute},
+          {"read_limit", job.work_hours.read_rate},
+          {"write_limit", job.work_hours.write_rate}}},
         {"health",
          {{"weekly", job.health.weekly},
           {"sample_percent", job.health.sample_percent},
@@ -337,6 +369,15 @@ Job job_from_json(const std::string& text) {
             job.repository_relative = j.at("volume").value("path", std::string());
         }
         job.backup_on_connect = j.value("backup_on_connect", false);
+        if (j.contains("work_hours")) {
+            const json& w = j.at("work_hours");
+            job.work_hours.enabled = w.value("enabled", false);
+            job.work_hours.weekdays = w.value("weekdays", static_cast<std::uint8_t>(0x1F));
+            job.work_hours.start_minute = w.value("start", 9 * 60);
+            job.work_hours.end_minute = w.value("end", 17 * 60);
+            job.work_hours.read_rate = w.value("read_limit", std::uint64_t{0});
+            job.work_hours.write_rate = w.value("write_limit", std::uint64_t{0});
+        }
         job.health = default_health(job.repository);  // missing in jobs saved before 0.5
         if (j.contains("health")) {
             const json& h = j.at("health");

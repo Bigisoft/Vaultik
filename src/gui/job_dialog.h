@@ -86,6 +86,11 @@ private:
     QSpinBox* max_memory_ = nullptr;
     QSpinBox* read_limit_ = nullptr;
     QSpinBox* write_limit_ = nullptr;
+    QGroupBox* work_box_ = nullptr;  // working hours (checkable)
+    QTimeEdit* work_start_ = nullptr;
+    QTimeEdit* work_end_ = nullptr;
+    QSpinBox* work_read_ = nullptr;
+    QSpinBox* work_write_ = nullptr;
 
     // Old backups: a preset, its one setting, the custom rules, and a size limit.
     QComboBox* keep_mode_ = nullptr;

@@ -188,6 +188,11 @@ void apply_resource_policy(const ResourcePolicy& p) {
     g_policy = p;
 }
 
+void set_rate_limits(std::uint64_t read_rate, std::uint64_t write_rate) {
+    g_read_limiter.set_rate(read_rate);
+    g_write_limiter.set_rate(write_rate);
+}
+
 const ResourcePolicy& current_resource_policy() {
     return g_policy;
 }

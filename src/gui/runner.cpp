@@ -64,6 +64,10 @@ void Runner::start(const QStringList& args, const QString& password, const vault
     process_->start(engine_path(), QStringList(args) << QStringLiteral("--json"));
 }
 
+void Runner::set_paused(bool paused) {
+    if (running()) process_->write(paused ? "pause\n" : "resume\n");
+}
+
 void Runner::cancel() {
     if (!running()) return;
     process_->write("cancel\n");

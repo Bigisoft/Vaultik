@@ -27,6 +27,8 @@ public:
     void start(const QStringList& args, const QString& password = {}, const vaultik::CloudCredentials& cloud = {});
     // Asks the engine to stop cleanly; kills it if it has not exited after a grace period.
     void cancel();
+    // Pauses the running backup between two pieces of data, or lets it go on.
+    void set_paused(bool paused);
 
 signals:
     // A "progress" event of a backup, or "check_progress" and the final "check" of a health check.

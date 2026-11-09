@@ -742,7 +742,22 @@ QWidget* MainWindow::build_job_page() {
     current_file_->setTextFormat(Qt::PlainText);
     current_file_->setProperty("role", "faint");
     current_file_->setMinimumWidth(10);
-    pl->addWidget(running_label_);
+    // The heading with a Pause button on the right.
+    pause_ = new QPushButton(tr("Pause"));
+    pause_->setProperty("role", "flat");
+    pause_->setToolTip(tr("Pause the backup; it goes on where it stopped when you resume it"));
+    connect(pause_, &QPushButton::clicked, this, [this] {
+        paused_ = !paused_;
+        runner_->set_paused(paused_);
+        pause_->setText(paused_ ? tr("Resume") : tr("Pause"));
+        pause_->setIcon(icon(paused_ ? QStringLiteral("play_20_regular") : QStringLiteral("stop_20_regular")));
+        running_label_->setText(paused_ ? tr("Paused") : check_run_ ? tr("Checking the backup...") : tr("Backing up..."));
+        bar_->setEnabled(!paused_);
+    });
+    auto* head = new QHBoxLayout;
+    head->addWidget(running_label_, 1);
+    head->addWidget(pause_);
+    pl->addLayout(head);
     pl->addWidget(bar_);
     pl->addWidget(progress_text_);
     pl->addWidget(current_file_);
@@ -1354,6 +1369,10 @@ void MainWindow::start_run(const QStringList& args, bool check) {
 }
 
 void MainWindow::set_running(bool running) {
+    if (!running) paused_ = false;  // a new run starts unpaused
+    pause_->setText(paused_ ? tr("Resume") : tr("Pause"));
+    pause_->setIcon(icon(paused_ ? QStringLiteral("play_20_regular") : QStringLiteral("stop_20_regular")));
+    bar_->setEnabled(!paused_);
     const jobs::Job* job = current_job();
     const bool this_job = running && job && job->id == running_job_;
     progress_box_->setVisible(this_job);
