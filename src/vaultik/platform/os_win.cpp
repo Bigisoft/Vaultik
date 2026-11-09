@@ -12,6 +12,7 @@
 
 // After <windows.h> (pulled in by win_handle.hpp).
 #include <dpapi.h>
+#include <shellapi.h>
 
 namespace vaultik::os {
 
@@ -488,6 +489,45 @@ std::wstring quote_arg(const std::wstring& arg) {
 
 }  // namespace
 
+// A bare program name is taken from the system folder only. Letting Windows search would look in
+// the program's own folder and the current folder first, where a planted schtasks.exe could run
+// instead.
+static std::wstring program_path(const std::string& name) {
+    std::wstring program = widen(name);
+    if (program.find_first_of(L"\\/") == std::wstring::npos) {
+        wchar_t sys[MAX_PATH];
+        const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+        if (n == 0 || n >= MAX_PATH) throw_last_error("cannot find the system folder");
+        program = std::wstring(sys, n) + L"\\" + program;
+    }
+    return program;
+}
+
+int run_command_elevated(const std::vector<std::string>& argv) {
+    if (argv.empty()) throw Error("run_command_elevated: no program");
+    const std::wstring program = program_path(argv[0]);
+    std::wstring params;
+    for (std::size_t i = 1; i < argv.size(); ++i) params += (params.empty() ? L"" : L" ") + quote_arg(widen(argv[i]));
+
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof info;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = L"runas";
+    info.lpFile = program.c_str();
+    info.lpParameters = params.c_str();
+    info.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&info)) {
+        if (GetLastError() == ERROR_CANCELLED) throw Error("administrator approval was declined");
+        throw_last_error("cannot start " + argv[0] + " as administrator");
+    }
+    if (info.hProcess == nullptr) throw Error("cannot start " + argv[0] + " as administrator");
+    UniqueHandle process(info.hProcess);
+    WaitForSingleObject(process.get(), INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(process.get(), &code);
+    return static_cast<int>(code);
+}
+
 int run_command(const std::vector<std::string>& argv, std::string* output) {
     if (argv.empty()) throw Error("run_command: no program");
     std::wstring cmdline;
@@ -511,16 +551,7 @@ int run_command(const std::vector<std::string>& argv, std::string* output) {
         si.hStdOutput = w.get();
         si.hStdError = w.get();
     }
-    // A bare program name is taken from the system folder only. Letting CreateProcess search would
-    // look in the program's own folder and the current folder first, where a planted schtasks.exe
-    // could run instead.
-    std::wstring program = widen(argv[0]);
-    if (program.find_first_of(L"\\/") == std::wstring::npos) {
-        wchar_t sys[MAX_PATH];
-        const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
-        if (n == 0 || n >= MAX_PATH) throw_last_error("cannot find the system folder");
-        program = std::wstring(sys, n) + L"\\" + program;
-    }
+    const std::wstring program = program_path(argv[0]);
 
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, output != nullptr, CREATE_NO_WINDOW, nullptr,

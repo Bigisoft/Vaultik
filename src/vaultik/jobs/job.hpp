@@ -37,6 +37,9 @@ struct Job {
     // locked files are backed up too. Without the rights the files are read live.
     bool vss = true;
     Schedule schedule;
+    // Windows: the scheduled task runs with administrator rights (so the shadow copy above works).
+    // Registering such a task asks for administrator approval each time the schedule is saved.
+    bool run_as_admin = false;
     ResourcePolicy resources;
     // Old snapshots of this job to remove after each run (then unused data is pruned). Empty keeps
     // everything.

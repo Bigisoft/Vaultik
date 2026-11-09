@@ -67,6 +67,10 @@ Start `vaultik-gui`, then **New backup job**:
 - **Schedule:** manually, every few hours, daily, or on selected weekdays. Schedules are kept by
   Task Scheduler (Windows, task folder `\Vaultik`) or a systemd user timer (Linux), so Vaultik does
   not need to stay open; a run missed while the computer was off starts at the next chance.
+  On Windows a job can also run with administrator rights, so scheduled runs use a shadow copy
+  for open and locked files. Windows then asks for administrator approval each time the job (or
+  its schedule) is saved or removed. Without the option, the task runs with normal rights and
+  needs no approval.
 - **Resources:** a priority preset and optional hard limits (see below).
 - **Old backups:** how many backups to keep, for example one per day for 7 days, one per week
   for 4 weeks and one per month for 12 months (the default for new jobs). After each run the
@@ -171,8 +175,10 @@ Priorities only take effect when something else competes for the resource, so on
   backed up when Vaultik runs with administrator rights: it then reads from a Volume Shadow Copy,
   a frozen view of each source volume made at the start of the backup. Without those rights, and
   on Linux, files are read live: locked files are skipped with a warning, and a file being
-  written during the backup may be captured mid-change. Scheduled jobs run without
-  administrator rights for now.
+  written during the backup may be captured mid-change. Scheduled jobs get those rights only
+  with the job's "Run with administrator rights" option. Such a task runs the Vaultik programs
+  and reads the job settings from places your normal account can change, so keep Vaultik in a
+  folder only administrators can write to (such as Program Files) when you use it.
 - Windows: file content, attributes, creation and modification times are kept. ACLs, alternate
   data streams and symlink/junction targets are not (links are recorded without content).
   Linux: content, permissions, owner (restored when running as root), modification time and

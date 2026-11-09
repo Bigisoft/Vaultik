@@ -210,6 +210,11 @@ Bytes unprotect_secret(ByteSpan sealed);  // throws Error when it cannot be decr
 // OsError when it cannot be started.
 int run_command(const std::vector<std::string>& argv, std::string* output = nullptr);
 
+// Windows: like run_command, but with administrator rights, so the user sees an approval (UAC)
+// prompt unless the process already has them. Output is not captured. Throws Error when the
+// approval is declined or the program cannot start; on POSIX it always throws.
+int run_command_elevated(const std::vector<std::string>& argv);
+
 // Full path of the running executable.
 std::string executable_path();
 

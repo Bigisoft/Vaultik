@@ -494,6 +494,10 @@ Bytes unprotect_secret(ByteSpan sealed) {
 
 // ---- process ------------------------------------------------------------------------------
 
+int run_command_elevated(const std::vector<std::string>&) {
+    throw Error("running as administrator is only supported on Windows");
+}
+
 int run_command(const std::vector<std::string>& argv, std::string* output) {
     if (argv.empty()) throw Error("run_command: no program");
     int pipefd[2] = {-1, -1};

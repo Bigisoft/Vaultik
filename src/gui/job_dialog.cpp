@@ -215,6 +215,16 @@ QWidget* JobDialog::build_schedule() {
     dl->addStretch();
     form->addRow(tr("Days:"), days_row_);
 
+#ifdef _WIN32
+    admin_ = new QCheckBox(tr("Run with administrator rights"));
+    form->addRow(QString(), admin_);
+    auto* admin_note = new QLabel(tr("Lets scheduled runs back up open and locked files through a shadow copy. "
+                                     "Windows asks for administrator approval each time the job is saved."));
+    admin_note->setWordWrap(true);
+    admin_note->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(QString(), admin_note);
+#endif
+
     auto* note = new QLabel(tr("Scheduled runs use the system scheduler, so Vaultik does not need to stay "
                                "open. A run missed while the computer was off starts at the next chance."));
     note->setWordWrap(true);
@@ -321,6 +331,7 @@ void JobDialog::load(const jobs::Job& job) {
     excludes_->clear();
     for (const auto& e : job.excludes) excludes_->addItem(qs(e));
     if (vss_ != nullptr) vss_->setChecked(job.vss);
+    if (admin_ != nullptr) admin_->setChecked(job.run_as_admin);
 
     schedule_kind_->setCurrentIndex(static_cast<int>(job.schedule.kind));
     time_->setTime(QTime(job.schedule.hour, job.schedule.minute));
@@ -363,6 +374,7 @@ jobs::Job JobDialog::collect() const {
     j.excludes.clear();
     for (const QString& e : items_of(excludes_)) j.excludes.push_back(u8(e));
     if (vss_ != nullptr) j.vss = vss_->isChecked();
+    if (admin_ != nullptr) j.run_as_admin = admin_->isChecked();
 
     j.schedule.kind = static_cast<jobs::Schedule::Kind>(schedule_kind_->currentIndex());
     if (j.schedule.kind == jobs::Schedule::Kind::Hourly) {

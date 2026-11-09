@@ -59,7 +59,9 @@ TEST_CASE("job ids are file-name safe and unique") {
 TEST_CASE("job JSON round trip") {
     Job j = sample();
     j.id = "my-documents";
+    j.run_as_admin = true;
     const Job back = job_from_json(to_json(j));
+    CHECK(back.run_as_admin);
     CHECK(back.id == j.id);
     CHECK(back.name == j.name);
     CHECK(back.sources == j.sources);
@@ -113,6 +115,10 @@ TEST_CASE("scheduler definitions") {
     CHECK(xml.find("<Command>C:\\Program Files\\Vaultik\\vaultik-task.exe</Command>") != std::string::npos);
     CHECK(xml.find("<Arguments>run-job docs</Arguments>") != std::string::npos);
     CHECK(xml.find("<StartWhenAvailable>true</StartWhenAvailable>") != std::string::npos);
+    CHECK(xml.find("<RunLevel>LeastPrivilege</RunLevel>") != std::string::npos);
+    j.run_as_admin = true;
+    CHECK(schedule_definition(j, "C:\\x").find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos);
+    j.run_as_admin = false;
     j.schedule.kind = Schedule::Kind::Hourly;
     j.schedule.every_hours = 6;
     CHECK(schedule_definition(j, "C:\\x").find("<Interval>PT6H</Interval>") != std::string::npos);

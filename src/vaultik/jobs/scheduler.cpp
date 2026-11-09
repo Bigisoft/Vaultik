@@ -108,6 +108,13 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
         }
     }
     const std::string launcher = os::join(program_dir, "vaultik-task.exe");
+    // The task runs as the user who registers it, while they are logged on. HighestAvailable gives
+    // it the user's full administrator token, LeastPrivilege (the default) the filtered one.
+    const std::string principals =
+        std::string("  <Principals>\n    <Principal id=\"Author\">\n      <LogonType>InteractiveToken</LogonType>\n"
+                    "      <RunLevel>") +
+        (job.run_as_admin ? "HighestAvailable" : "LeastPrivilege") +
+        "</RunLevel>\n    </Principal>\n  </Principals>\n";
     return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
            "  <RegistrationInfo><Description>Vaultik backup job: " +
@@ -124,7 +131,8 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
            "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
            "    <Priority>7</Priority>\n"
            "    <Enabled>true</Enabled>\n"
-           "  </Settings>\n"
+           "  </Settings>\n" +
+           principals +
            "  <Actions Context=\"Author\">\n"
            "    <Exec><Command>" +
            xml_escape(launcher) + "</Command><Arguments>run-job " + xml_escape(job.id) +
@@ -154,6 +162,22 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
 
 #ifdef _WIN32
 
+namespace {
+
+// Whether the job's current task runs with administrator rights. Changing or deleting such a task
+// needs those rights too.
+bool task_is_elevated(const std::string& job_id) {
+    std::string xml;
+    try {
+        if (os::run_command({"schtasks.exe", "/Query", "/TN", task_name(job_id), "/XML"}, &xml) != 0) return false;
+    } catch (const Error&) {
+        return false;
+    }
+    return xml.find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos;
+}
+
+}  // namespace
+
 void apply_schedule(const Job& job, const std::string& program_dir) {
     if (job.schedule.kind == Schedule::Kind::Manual) {
         remove_schedule(job.id);
@@ -170,22 +194,34 @@ void apply_schedule(const Job& job, const std::string& program_dir) {
     random_bytes(rnd);
     const std::string tmp = os::join(config_dir(), "task-" + to_hex(rnd) + ".xml");
     os::write_file_atomic(tmp, data);
+    const std::vector<std::string> create = {"schtasks.exe", "/Create", "/TN", task_name(job.id), "/XML", tmp, "/F"};
+    // Replacing a task that runs as administrator needs the rights as well, also when the new one
+    // does not.
+    const bool elevated = job.run_as_admin || task_is_elevated(job.id);
     std::string output;
     int code = -1;
     try {
-        code = os::run_command({"schtasks.exe", "/Create", "/TN", task_name(job.id), "/XML", tmp, "/F"}, &output);
+        code = elevated ? os::run_command_elevated(create) : os::run_command(create, &output);
     } catch (...) {
         os::remove_file(tmp);
         throw;
     }
     os::remove_file(tmp);
-    if (code != 0) throw Error("Task Scheduler refused the schedule: " + trim(output));
+    if (code != 0) {
+        if (elevated) throw Error("Task Scheduler refused the schedule (schtasks exit code " + std::to_string(code) + ")");
+        throw Error("Task Scheduler refused the schedule: " + trim(output));
+    }
 }
 
 void remove_schedule(const std::string& job_id) {
+    const std::vector<std::string> remove = {"schtasks.exe", "/Delete", "/TN", task_name(job_id), "/F"};
     try {
-        std::string ignored;
-        os::run_command({"schtasks.exe", "/Delete", "/TN", task_name(job_id), "/F"}, &ignored);
+        if (task_is_elevated(job_id)) {
+            os::run_command_elevated(remove);
+        } else {
+            std::string ignored;
+            os::run_command(remove, &ignored);
+        }
     } catch (const Error&) {
     }
 }

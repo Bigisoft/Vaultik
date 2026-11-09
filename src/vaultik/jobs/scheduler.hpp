@@ -14,10 +14,12 @@ namespace vaultik::jobs {
 
 // Creates, replaces or (for a Manual schedule) removes the job's OS schedule. `program_dir` is
 // the folder holding vaultik (and vaultik-task on Windows). Throws Error with the scheduler's
-// message on failure.
+// message on failure. On Windows, a job with run_as_admin (or replacing a task that had it) asks
+// for administrator approval, and a declined approval throws Error.
 void apply_schedule(const Job& job, const std::string& program_dir);
 
-// Removes the job's OS schedule if there is one. Never throws.
+// Removes the job's OS schedule if there is one; one that runs as administrator asks for approval.
+// Never throws.
 void remove_schedule(const std::string& job_id);
 
 // The scheduler definition for a job, exposed for tests: Task Scheduler XML on Windows, the
