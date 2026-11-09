@@ -66,6 +66,10 @@ struct SecondCopy {
     std::string cloud_region;
     int cloud_lock_days = 0;
     bool cloud_lock_compliance = false;
+    // A folder copy's drive, recorded like Job::repository_volume, so the copy is found under
+    // another letter and never created on a different drive that took the letter meanwhile.
+    std::string volume;
+    std::string relative;
 };
 
 struct Job {
@@ -114,6 +118,10 @@ struct Job {
 void relocate(Job& job);
 // Whether the job's recorded drive is connected; true when none was recorded.
 bool drive_connected(const Job& job);
+// The same for the second copy's drive.
+bool copy_drive_connected(const Job& job);
+// Records the drive of the second copy's folder now (after it was created there).
+void record_copy_volume(Job& job);
 
 // The retention a new job starts with: 7 daily, 4 weekly and 12 monthly snapshots.
 RetentionPolicy default_retention();

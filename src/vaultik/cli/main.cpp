@@ -1377,6 +1377,7 @@ int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job
     record.started = os::now();
     const std::string& where = job.second_copy.repository;
     try {
+        if (!jobs::copy_drive_connected(job)) throw Error("the drive of the second copy is not connected (" + where + ")");
         std::string pw = store.password(job.id);
         if (pw.empty()) pw = get_password(a, false);
         std::unique_ptr<Repository> target;
@@ -1388,6 +1389,17 @@ int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job
                 Repository::init(*backend, pw);
             }
             target = Repository::open(std::move(backend), pw);
+            // Remember the drive once the copy is there, so a different drive that gets this
+            // letter later is never taken for it.
+            if (!is_cloud_location(where) && job.second_copy.volume.empty()) {
+                try {
+                    jobs::Job updated = job;
+                    jobs::record_copy_volume(updated);
+                    if (!updated.second_copy.volume.empty()) store.save(updated);
+                } catch (const Error& e) {
+                    warning(std::string("could not record the second copy's drive: ") + e.what());
+                }
+            }
         } catch (...) {
             secure_wipe(pw.data(), pw.size());
             throw;

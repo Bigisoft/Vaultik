@@ -115,46 +115,67 @@ RetentionPolicy default_retention() {
     return p;
 }
 
-void relocate(Job& job) {
-    if (job.repository_volume.empty() || is_cloud_location(job.repository)) return;
-    const std::string root = os::volume_root(job.repository_volume);
-    if (root.empty()) return;
-    const std::string now = job.repository_relative.empty() ? root : os::join(root, job.repository_relative);
-    if (os::fold_case(now) != os::fold_case(os::absolute_path(job.repository))) job.repository = now;
-}
-
-bool drive_connected(const Job& job) {
-    return job.repository_volume.empty() || is_cloud_location(job.repository) ||
-           !os::volume_root(job.repository_volume).empty();
-}
-
 namespace {
 
-// Records the drive of a folder destination (see Job::repository_volume).
-void record_volume(Job& job) {
-    if (is_cloud_location(job.repository) || job.repository.starts_with("\\\\") || job.repository.starts_with("//")) {
-        job.repository_volume.clear();
-        job.repository_relative.clear();
+// A folder location on the drive it was recorded on, wherever that drive is connected now.
+void relocate_one(std::string& location, const std::string& volume, const std::string& relative) {
+    if (volume.empty() || location.empty() || is_cloud_location(location)) return;
+    const std::string root = os::volume_root(volume);
+    if (root.empty()) return;
+    const std::string now = relative.empty() ? root : os::join(root, relative);
+    if (os::fold_case(now) != os::fold_case(os::absolute_path(location))) location = now;
+}
+
+bool connected_one(const std::string& location, const std::string& volume) {
+    return volume.empty() || location.empty() || is_cloud_location(location) || !os::volume_root(volume).empty();
+}
+
+// Records the drive of a folder location (see Job::repository_volume).
+void record_one(const std::string& location, std::string& volume, std::string& relative) {
+    if (location.empty() || is_cloud_location(location) || location.starts_with("\\\\") || location.starts_with("//")) {
+        volume.clear();
+        relative.clear();
         return;
     }
     // Only a folder that is there: the letter may belong to another drive while this one is away.
-    const os::VolumeLocation loc = os::is_directory(job.repository) ? os::volume_of(job.repository) : os::VolumeLocation{};
+    const os::VolumeLocation loc = os::is_directory(location) ? os::volume_of(location) : os::VolumeLocation{};
     if (!loc.volume.empty()) {
-        job.repository_volume = loc.volume;
-        job.repository_relative = loc.relative;
+        volume = loc.volume;
+        relative = loc.relative;
         return;
     }
     // Otherwise the drive is not connected now: keep what was recorded when it was, unless the
-    // destination now names another folder ("X:\" plus the recorded folder is still the same one).
-    const std::string& r = job.repository;
-    const bool drive_form = r.size() >= 3 && r[1] == ':' && (r[2] == '\\' || r[2] == '/');
-    if (!drive_form || os::fold_case(r.substr(3)) != os::fold_case(job.repository_relative)) {
-        job.repository_volume.clear();
-        job.repository_relative.clear();
+    // location now names another folder ("X:\" plus the recorded folder is still the same one).
+    const bool drive_form = location.size() >= 3 && location[1] == ':' && (location[2] == '\\' || location[2] == '/');
+    if (!drive_form || os::fold_case(location.substr(3)) != os::fold_case(relative)) {
+        volume.clear();
+        relative.clear();
     }
 }
 
+void record_volume(Job& job) {
+    record_one(job.repository, job.repository_volume, job.repository_relative);
+    record_one(job.second_copy.repository, job.second_copy.volume, job.second_copy.relative);
+}
+
 }  // namespace
+
+void relocate(Job& job) {
+    relocate_one(job.repository, job.repository_volume, job.repository_relative);
+    relocate_one(job.second_copy.repository, job.second_copy.volume, job.second_copy.relative);
+}
+
+bool drive_connected(const Job& job) {
+    return connected_one(job.repository, job.repository_volume);
+}
+
+bool copy_drive_connected(const Job& job) {
+    return connected_one(job.second_copy.repository, job.second_copy.volume);
+}
+
+void record_copy_volume(Job& job) {
+    record_one(job.second_copy.repository, job.second_copy.volume, job.second_copy.relative);
+}
 
 bool in_work_hours(const WorkHours& w, int weekday, int minute) {
     if (!w.enabled || weekday < 0 || weekday > 6 || (w.weekdays & (1u << weekday)) == 0) return false;
@@ -317,7 +338,9 @@ std::string to_json(const Job& job) {
           {"cloud_key_id", job.second_copy.cloud_key_id},
           {"cloud_region", job.second_copy.cloud_region},
           {"cloud_lock_days", job.second_copy.cloud_lock_days},
-          {"cloud_lock_mode", job.second_copy.cloud_lock_compliance ? "compliance" : "governance"}}},
+          {"cloud_lock_mode", job.second_copy.cloud_lock_compliance ? "compliance" : "governance"},
+          {"volume", job.second_copy.volume},
+          {"path", job.second_copy.relative}}},
         {"work_hours",
          {{"enabled", job.work_hours.enabled},
           {"weekdays", job.work_hours.weekdays},
@@ -392,6 +415,8 @@ Job job_from_json(const std::string& text) {
             job.second_copy.cloud_region = c.value("cloud_region", std::string());
             job.second_copy.cloud_lock_days = c.value("cloud_lock_days", 0);
             job.second_copy.cloud_lock_compliance = c.value("cloud_lock_mode", std::string()) == "compliance";
+            job.second_copy.volume = c.value("volume", std::string());
+            job.second_copy.relative = c.value("path", std::string());
         }
         if (j.contains("work_hours")) {
             const json& w = j.at("work_hours");
