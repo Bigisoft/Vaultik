@@ -375,13 +375,12 @@ Priorities only take effect when something else competes for the resource, so on
    (`forget`/`prune`), repository locks, Volume Shadow Copy (done)
 3. Cloud storage: S3-compatible storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2,
    MinIO) and cloud drives (pCloud, OneDrive, Google Drive, MEGA) (done, Windows)
-4. Friendlier versions (done for the timeline, pins, notes, file history, search and cleanup
-   presets); still to come:
+4. Friendlier versions (done for the timeline, pins, notes, file history, search, cleanup
+   presets, and a start page per job with the last result, next run, size, warnings and a
+   calendar of backup days); still to come:
    - Browse a version in File Explorer as a folder or drive letter (Windows Projected File
      System, built into Windows, no third-party driver).
-   - A start page per job: last result, next run, size, a warning when backups stopped, and a
-     calendar of backup days.
-5. Knowing backups work, and protecting them (next):
+5. Knowing backups work, and protecting them (done):
    - Notifications and a tray icon (done).
    - Health checks (done): after a backup, a check reads a sample of the stored data weekly and
      all of it monthly, so a failing drive is noticed before a restore needs it.
