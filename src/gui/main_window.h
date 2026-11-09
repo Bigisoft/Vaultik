@@ -35,6 +35,8 @@ public:
 
     // Shows the window in front (from the tray, or when Vaultik is started a second time).
     void bring_to_front();
+    // Hides the window to the tray, or shows it (a click on the tray icon).
+    void toggle_visible();
     // Selects the job and starts its backup (from the tray menu).
     void run_job_now(const std::string& id);
     void open_settings();
@@ -43,6 +45,7 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* event) override;
+    void changeEvent(QEvent* event) override;
 
 private:
     QWidget* build_sidebar();

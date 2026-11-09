@@ -124,8 +124,10 @@ version without restoring it, decrypted into memory only:
 Small files of a local backup open as soon as they are selected; large files and cloud backups
 wait for **Show preview**, since they have to be downloaded first.
 
-**Settings** (in the sidebar) can start Vaultik in the notification area when you sign in. From
-there it watches every job, including scheduled runs, and shows a Windows notification when a
+**Settings** (in the sidebar) has, like System Informer: start Vaultik when you sign in, optionally
+hidden in the notification area; show its icon there; turn the icon red when a backup needs
+attention; close and/or minimize to the notification area; and a single click on the icon to show
+or hide the window. From the notification area it watches every job, including scheduled runs, and shows a Windows notification when a
 backup fails or skips files, or when a job has not backed up for too long (about twice its
 interval: two days for a daily job; a set number of days for jobs without a schedule). The icon
 turns red while something needs attention; its menu opens Vaultik, starts a job's backup, opens

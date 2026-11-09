@@ -178,15 +178,19 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
 }
 
 void MainWindow::update_tray() {
-    const bool want = (started_in_tray_ || starts_with_windows()) && Tray::available();
+    const AppSettings settings = AppSettings::load();
+    // Started hidden, the icon is the only way back to the window, so it is shown regardless.
+    const bool want = (settings.tray_icon || (started_in_tray_ && !isVisible())) && Tray::available();
     if (want && tray_ == nullptr) {
         tray_ = new Tray(this, store_);
     } else if (!want && tray_ != nullptr) {
         delete tray_;
         tray_ = nullptr;
+    } else if (tray_ != nullptr) {
+        tray_->check();  // the icon may change colour with the settings
     }
-    // With the tray, closing the window keeps Vaultik running there.
-    QApplication::setQuitOnLastWindowClosed(tray_ == nullptr);
+    // Closing the window keeps Vaultik running only when it has a tray icon to come back from.
+    QApplication::setQuitOnLastWindowClosed(!(tray_ != nullptr && settings.close_to_tray));
 }
 
 void MainWindow::bring_to_front() {
@@ -194,6 +198,26 @@ void MainWindow::bring_to_front() {
     show();
     raise();
     activateWindow();
+}
+
+void MainWindow::toggle_visible() {
+    if (isVisible() && !isMinimized()) {
+        hide();
+    } else {
+        bring_to_front();
+    }
+}
+
+void MainWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() != QEvent::WindowStateChange || !isMinimized() || tray_ == nullptr) return;
+    if (AppSettings::load().minimize_to_tray) {
+        // Hide once the minimize has finished, so the window comes back in its normal state.
+        QTimer::singleShot(0, this, [this] {
+            hide();
+            setWindowState(windowState() & ~Qt::WindowMinimized);
+        });
+    }
 }
 
 void MainWindow::run_job_now(const std::string& id) {
@@ -826,7 +850,7 @@ void MainWindow::set_running(bool running) {
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (tray_ != nullptr && !quitting_) {
+    if (tray_ != nullptr && !quitting_ && AppSettings::load().close_to_tray) {
         // Keep watching from the tray; a running backup goes on too.
         hide();
         event->ignore();

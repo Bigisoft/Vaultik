@@ -40,7 +40,9 @@ Tray::Tray(MainWindow* window, const jobs::JobStore& store) : QObject(window), w
     icon_ = new QSystemTrayIcon(this);
     icon_->setContextMenu(menu_);
     connect(icon_, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
-        if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) window_->bring_to_front();
+        const bool single = AppSettings::load().single_click_toggle;
+        if (reason == QSystemTrayIcon::Trigger && single) window_->toggle_visible();
+        else if (reason == QSystemTrayIcon::DoubleClick && !single) window_->bring_to_front();
     });
     connect(icon_, &QSystemTrayIcon::messageClicked, this, [this] { window_->bring_to_front(); });
     connect(&timer_, &QTimer::timeout, this, &Tray::check);
@@ -123,9 +125,9 @@ void Tray::check() {
     }
     first_check_ = false;
     problems.removeDuplicates();
-    attention_ = !problems.isEmpty();
+    attention_ = !problems.isEmpty() && settings.tray_status;
     icon_->setIcon(tray_icon(attention_));
-    icon_->setToolTip(attention_ ? tr("Vaultik: %1 need attention").arg(problems.join(", "))
+    icon_->setToolTip(!problems.isEmpty() ? tr("Vaultik: %1 need attention").arg(problems.join(", "))
                       : list.empty() ? tr("Vaultik: no backup jobs yet")
                                      : tr("Vaultik: all backups are fine"));
     rebuild_menu();

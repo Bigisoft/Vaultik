@@ -5,7 +5,8 @@
 class QCheckBox;
 class QSpinBox;
 
-// Vaultik's own preferences: starting in the tray, and which notifications to show.
+// Vaultik's own preferences: starting with Windows, the notification area icon and how the window
+// hides into it, and which notifications to show.
 class SettingsDialog : public QDialog {
     Q_OBJECT
 
@@ -15,7 +16,15 @@ public:
     void accept() override;
 
 private:
+    void update_enabled();
+
     QCheckBox* start_ = nullptr;
+    QCheckBox* start_hidden_ = nullptr;
+    QCheckBox* tray_icon_ = nullptr;
+    QCheckBox* tray_status_ = nullptr;
+    QCheckBox* close_to_tray_ = nullptr;
+    QCheckBox* minimize_to_tray_ = nullptr;
+    QCheckBox* single_click_ = nullptr;
     QCheckBox* failures_ = nullptr;
     QCheckBox* overdue_ = nullptr;
     QSpinBox* remind_ = nullptr;

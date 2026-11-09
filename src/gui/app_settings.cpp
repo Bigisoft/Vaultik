@@ -19,39 +19,52 @@ constexpr const char* kRunKey = "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows
 AppSettings AppSettings::load() {
     QSettings s;
     AppSettings a;
-    a.notify_failures = s.value(QStringLiteral("notify/failures"), a.notify_failures).toBool();
-    a.notify_overdue = s.value(QStringLiteral("notify/overdue"), a.notify_overdue).toBool();
+    const auto flag = [&](const char* key, bool fallback) { return s.value(QString::fromLatin1(key), fallback).toBool(); };
+    a.tray_icon = flag("tray/icon", a.tray_icon);
+    a.tray_status = flag("tray/status", a.tray_status);
+    a.close_to_tray = flag("tray/close", a.close_to_tray);
+    a.minimize_to_tray = flag("tray/minimize", a.minimize_to_tray);
+    a.single_click_toggle = flag("tray/single_click", a.single_click_toggle);
+    a.notify_failures = flag("notify/failures", a.notify_failures);
+    a.notify_overdue = flag("notify/overdue", a.notify_overdue);
     a.remind_after_days = std::clamp(s.value(QStringLiteral("notify/remind_after_days"), a.remind_after_days).toInt(), 0, 365);
     return a;
 }
 
 void AppSettings::save() const {
     QSettings s;
+    s.setValue(QStringLiteral("tray/icon"), tray_icon);
+    s.setValue(QStringLiteral("tray/status"), tray_status);
+    s.setValue(QStringLiteral("tray/close"), close_to_tray);
+    s.setValue(QStringLiteral("tray/minimize"), minimize_to_tray);
+    s.setValue(QStringLiteral("tray/single_click"), single_click_toggle);
     s.setValue(QStringLiteral("notify/failures"), notify_failures);
     s.setValue(QStringLiteral("notify/overdue"), notify_overdue);
     s.setValue(QStringLiteral("notify/remind_after_days"), remind_after_days);
 }
 
-bool starts_with_windows() {
+StartupSetting startup_setting() {
+    StartupSetting out;
 #ifdef Q_OS_WIN
     const QSettings run(QString::fromLatin1(kRunKey), QSettings::NativeFormat);
-    return run.contains(QStringLiteral("Vaultik"));
-#else
-    return false;
+    const QString command = run.value(QStringLiteral("Vaultik")).toString();
+    out.enabled = !command.isEmpty();
+    out.hidden = command.contains(QStringLiteral("--tray"));
 #endif
+    return out;
 }
 
-void set_start_with_windows(bool on) {
+void set_startup_setting(const StartupSetting& setting) {
 #ifdef Q_OS_WIN
     QSettings run(QString::fromLatin1(kRunKey), QSettings::NativeFormat);
-    if (on) {
+    if (setting.enabled) {
         const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-        run.setValue(QStringLiteral("Vaultik"), "\"" + exe + "\" --tray");
+        run.setValue(QStringLiteral("Vaultik"), "\"" + exe + "\"" + (setting.hidden ? QStringLiteral(" --tray") : QString()));
     } else {
         run.remove(QStringLiteral("Vaultik"));
     }
 #else
-    (void)on;
+    (void)setting;
 #endif
 }
 
