@@ -27,6 +27,7 @@ extern "C" HRESULT WINAPI UiaDisconnectAllProviders();
 
 #include "main_window.h"
 #include "theme.h"
+#include "translator.h"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/version.hpp"
@@ -177,6 +178,7 @@ int main(int argc, char** argv) {
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
                            QString::fromUtf8(vaultik::jobs::config_dir()));
     }
+    install_translation(app);
     apply_theme(app);
 
     MainWindow window(tray && history.isEmpty());

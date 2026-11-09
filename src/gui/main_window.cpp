@@ -88,6 +88,33 @@ QString when_text(std::uint64_t filetime) {
     return locale.toString(dt, QStringLiteral("ddd d MMM ")) + time;
 }
 
+// The schedule in words, in the frontend's language (jobs::describe is the engine's English).
+QString schedule_text(const jobs::Schedule& s) {
+    const QString time = QStringLiteral("%1:%2").arg(s.hour, 2, 10, QLatin1Char('0')).arg(s.minute, 2, 10, QLatin1Char('0'));
+    switch (s.kind) {
+        case jobs::Schedule::Kind::Manual:
+            return QObject::tr("Manual");
+        case jobs::Schedule::Kind::Hourly: {
+            const QString minute = QStringLiteral(":%1").arg(s.minute, 2, 10, QLatin1Char('0'));
+            return s.every_hours == 1 ? QObject::tr("Every hour at %1").arg(minute)
+                                      : QObject::tr("Every %1 hours at %2").arg(s.every_hours).arg(minute);
+        }
+        case jobs::Schedule::Kind::Daily:
+            return QObject::tr("Daily at %1").arg(time);
+        case jobs::Schedule::Kind::Weekly: {
+            if ((s.weekdays & 0x7F) == 0x7F) return QObject::tr("Every day at %1").arg(time);
+            if ((s.weekdays & 0x7F) == 0x1F) return QObject::tr("Weekdays at %1").arg(time);
+            const QString names[] = {QObject::tr("Mon"), QObject::tr("Tue"), QObject::tr("Wed"), QObject::tr("Thu"),
+                                     QObject::tr("Fri"), QObject::tr("Sat"), QObject::tr("Sun")};
+            QStringList days;
+            for (int d = 0; d < 7; ++d)
+                if (s.weekdays & (1u << d)) days << names[d];
+            return QObject::tr("%1 at %2").arg(days.join(QStringLiteral(", ")), time);
+        }
+    }
+    return QObject::tr("Manual");
+}
+
 // When Task Scheduler starts the job next (local time); invalid for a manual job. Mirrors the
 // triggers in jobs/scheduler.cpp: an hourly job repeats from 2026-01-01 00:<minute>.
 QDateTime next_run(const jobs::Schedule& s, const QDateTime& now) {
@@ -941,7 +968,7 @@ void MainWindow::fill_card(QListWidgetItem* item, const jobs::Job& j) {
         item->setData(JobCardDelegate::StatusRole, static_cast<int>(backup->status));
         item->setData(JobCardDelegate::StatusTextRole, status_text(backup->status) + ", " + when_text(backup->started));
     }
-    item->setData(JobCardDelegate::DetailRole, qs(jobs::describe(j.schedule)) + "  ·  " + location_text(j.repository));
+    item->setData(JobCardDelegate::DetailRole, schedule_text(j.schedule) + "  ·  " + location_text(j.repository));
 }
 
 void MainWindow::refresh_sidebar() {
@@ -1012,7 +1039,7 @@ void MainWindow::refresh_history() {
     }
     for (int c = 0; c < 8; ++c) history_->resizeColumnToContents(c);
 
-    QString next = qs(jobs::describe(job->schedule));
+    QString next = schedule_text(job->schedule);
     const jobs::RunRecord* backup = jobs::last_backup(records);
     const jobs::RunRecord* check = jobs::last_check(records);
     QString text;
@@ -1145,7 +1172,7 @@ void MainWindow::refresh_overview() {
         if (next.date() == QDate::currentDate().addDays(1))
             d.next_run = tr("tomorrow %1").arg(QLocale().toString(next.time(), QLocale::ShortFormat));
         d.next_run[0] = d.next_run[0].toUpper();
-        d.next_detail = qs(jobs::describe(job->schedule)) + ", " + tr("if the computer is on (otherwise right after)");
+        d.next_detail = schedule_text(job->schedule) + ", " + tr("if the computer is on (otherwise right after)");
     } else {
         d.next_run = tr("When you start it");
         d.next_detail = tr("This job has no schedule.");

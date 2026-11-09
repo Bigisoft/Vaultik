@@ -1,14 +1,17 @@
 #include "settings_dialog.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QSettings>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
 #include "app_settings.h"
 #include "hello.h"
+#include "translator.h"
 #include "theme.h"
 
 namespace {
@@ -131,6 +134,23 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
                                : tr("Confirm it is you to stop protecting Vaultik's backups");
         if (hello::verify(this, why) != hello::Result::Verified) hello_->setChecked(!on);
     });
+    // Language: Windows' own, or one chosen here; used from the next start.
+    language_ = new QComboBox;
+    language_->addItem(tr("Same as Windows"), QStringLiteral("auto"));
+    language_->addItem(QStringLiteral("English"), QStringLiteral("en"));
+    language_->addItem(QStringLiteral("Български"), QStringLiteral("bg"));
+    language_->setCurrentIndex(std::max(0, language_->findData(chosen_language())));
+    auto* language_row = new QWidget;
+    auto* lr = new QHBoxLayout(language_row);
+    lr->setContentsMargins(0, 0, 0, 0);
+    lr->addWidget(new QLabel(tr("Language:")));
+    lr->addWidget(language_);
+    lr->addStretch();
+    layout->addSpacing(12);
+    layout->addWidget(heading(tr("Language")));
+    layout->addWidget(language_row);
+    layout->addWidget(note(tr("Used the next time Vaultik starts."), 0));
+
     layout->addSpacing(12);
     layout->addWidget(heading(tr("Security")));
     layout->addWidget(hello_);
@@ -163,6 +183,7 @@ void SettingsDialog::accept() {
     s.notify_overdue = overdue_->isChecked();
     s.remind_after_days = remind_->value();
     s.require_hello = hello_->isChecked();
+    QSettings().setValue(QStringLiteral("ui/language"), language_->currentData().toString());
     s.save();
 
     if (!vaultik::jobs::is_portable()) {  // never touch the installed copy's entry

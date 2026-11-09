@@ -3,6 +3,7 @@
 #include <QDialog>
 
 class QCheckBox;
+class QComboBox;
 class QSpinBox;
 
 // Vaultik's own preferences: starting with Windows, the notification area icon and how the window
@@ -29,4 +30,5 @@ private:
     QCheckBox* overdue_ = nullptr;
     QSpinBox* remind_ = nullptr;
     QCheckBox* hello_ = nullptr;
+    QComboBox* language_ = nullptr;
 };

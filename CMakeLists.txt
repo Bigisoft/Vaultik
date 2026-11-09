@@ -175,6 +175,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/overview.cpp
             src/gui/compare_dialog.cpp
             src/gui/hello.cpp
+            src/gui/translator.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)
@@ -182,6 +183,9 @@ if(VAULTIK_BUILD_GUI)
         file(GLOB VAULTIK_ICONS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS src/gui/icons/*.svg)
         list(APPEND VAULTIK_ICONS src/gui/app_icon.svg)  # :/app_icon.svg
         qt_add_resources(vaultik-gui "icons" PREFIX "/" BASE src/gui FILES ${VAULTIK_ICONS})
+        # Translations (English text -> translation), as :/translations/<lang>.json
+        file(GLOB VAULTIK_TRANSLATIONS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS translations/*.json)
+        qt_add_resources(vaultik-gui "translations" PREFIX "/" FILES ${VAULTIK_TRANSLATIONS})
         target_link_libraries(vaultik-gui PRIVATE vaultik_core Qt6::Widgets Qt6::Svg)
         vaultik_version_resource(vaultik-gui "Vaultik")
 
