@@ -166,9 +166,19 @@ std::string GoogleDriveBackend::folder_id(const std::string& dir, bool create) {
         name = leaf(dir);
     }
     std::string id;
+    // With several folders of this name (two runs created it at once), every run uses the one
+    // with the smallest id, so they all end up writing to the same folder.
+    const auto first_of = [](const std::vector<json>& folders) {
+        std::string best;
+        for (const json& f : folders) {
+            const std::string fid = f.value("id", std::string());
+            if (!fid.empty() && (best.empty() || fid < best)) best = fid;
+        }
+        return best;
+    };
     const auto found = children_named(parent, name, true);
     if (!found.empty()) {
-        id = found.front().value("id", std::string());
+        id = first_of(found);
     } else {
         if (!create) return {};
         const std::string meta = json{{"name", name}, {"mimeType", kFolderType}, {"parents", {parent}}}.dump();
@@ -176,6 +186,8 @@ std::string GoogleDriveBackend::folder_id(const std::string& dir, bool create) {
                                      {{"Content-Type", "application/json; charset=UTF-8"}});
         if (r.status != 200) fail(location_, "creating folder " + name, r);
         id = json::parse(r.body.begin(), r.body.end()).value("id", std::string());
+        // Another run may have created one too meanwhile: settle on the same one as it will.
+        if (const std::string settled = first_of(children_named(parent, name, true)); !settled.empty()) id = settled;
     }
     if (id.empty()) throw Error(location_ + ": Google Drive gave no folder id");
     std::lock_guard lock(mu_);
@@ -192,7 +204,20 @@ std::optional<GoogleDriveBackend::File> GoogleDriveBackend::lookup(const std::st
     }
     const std::string parent = folder_id(parent_dir(name), false);
     if (parent.empty()) return std::nullopt;
-    const auto found = children_named(parent, leaf(name), false);
+    auto found = children_named(parent, leaf(name), false);
+    if (found.empty() && !parent_dir(name).empty()) {
+        // Files a run put into a duplicate of the folder (made before runs settled on one).
+        const std::string dir = parent_dir(name);
+        const std::string grandparent = folder_id(parent_dir(dir), false);
+        if (!grandparent.empty()) {
+            for (const json& f : children_named(grandparent, leaf(dir), true)) {
+                const std::string other = f.value("id", std::string());
+                if (other == parent || other.empty()) continue;
+                found = children_named(other, leaf(name), false);
+                if (!found.empty()) break;
+            }
+        }
+    }
     if (found.empty()) return std::nullopt;
     File f;
     f.id = found.front().value("id", std::string());

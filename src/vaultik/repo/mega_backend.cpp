@@ -644,11 +644,24 @@ std::string MegaBackend::folder_handle(const std::string& dir, bool create) {
         if (end == std::string::npos) end = path.size();
         const std::string part = path.substr(pos, end - pos);
         pos = end + 1;
-        const auto found = children_named(current, part, true);
+        // With several folders of this name (two runs created it at once), every run uses the
+        // one with the smallest handle, so they all end up writing to the same folder.
+        const auto first_of = [](const std::vector<std::string>& handles) {
+            return *std::min_element(handles.begin(), handles.end());
+        };
+        auto found = children_named(current, part, true);
+        if (found.empty() && create) {
+            catch_up();  // another run may have made it since the tree was loaded
+            found = children_named(current, part, true);
+        }
         if (!found.empty()) {
-            current = found.front();
+            current = first_of(found);
         } else if (create) {
-            current = make_folder(current, part);
+            const std::string parent = current;
+            current = make_folder(parent, part);
+            // Another run may have created one too meanwhile: settle on the same one as it will.
+            catch_up();
+            if (const auto now = children_named(parent, part, true); !now.empty()) current = first_of(now);
         } else {
             return {};
         }
@@ -667,6 +680,19 @@ std::optional<MegaBackend::Node> MegaBackend::find_file(const std::string& name)
         if (!parent.empty()) {
             const auto found = children_named(parent, leaf, false);
             if (!found.empty()) return nodes_.at(found.front());
+            // Files a run put into a duplicate of the folder (made before runs settled on one).
+            if (!dir.empty()) {
+                const std::size_t up = dir.rfind('/');
+                const std::string grand = folder_handle(up == std::string::npos ? std::string() : dir.substr(0, up), false);
+                const std::string name_of_dir = dir.substr(up == std::string::npos ? 0 : up + 1);
+                if (!grand.empty()) {
+                    for (const std::string& other : children_named(grand, name_of_dir, true)) {
+                        if (other == parent) continue;
+                        const auto in_other = children_named(other, leaf, false);
+                        if (!in_other.empty()) return nodes_.at(in_other.front());
+                    }
+                }
+            }
         }
         if (attempt == 0) catch_up();  // maybe another computer just added it
     }

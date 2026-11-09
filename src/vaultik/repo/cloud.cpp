@@ -90,9 +90,20 @@ CloudCredentials CloudCredentials::from_environment() {
     if (c.secret.empty()) c.secret = os::get_env("AWS_SECRET_ACCESS_KEY");
     c.region = os::get_env("AWS_REGION");
     if (c.region.empty()) c.region = os::get_env("AWS_DEFAULT_REGION");
-    c.lock_days = std::atoi(os::get_env("VAULTIK_S3_LOCK_DAYS").c_str());
-    c.lock_compliance = os::get_env("VAULTIK_S3_LOCK_MODE") == "compliance";
-    c.lock_compliance = os::get_env("VAULTIK_S3_LOCK_MODE") == "compliance";
+    // A lock cannot be undone (in compliance mode not even by the account owner): a typo must
+    // not lock data for decades, or in the wrong mode.
+    const std::string days = os::get_env("VAULTIK_S3_LOCK_DAYS");
+    if (!days.empty()) {
+        char* end = nullptr;
+        const long n = std::strtol(days.c_str(), &end, 10);
+        if (end == days.c_str() || *end != '\0' || n < 0 || n > 3650)
+            throw Error("VAULTIK_S3_LOCK_DAYS must be a number of days from 0 to 3650");
+        c.lock_days = static_cast<int>(n);
+    }
+    const std::string mode = os::get_env("VAULTIK_S3_LOCK_MODE");
+    if (!mode.empty() && mode != "governance" && mode != "compliance")
+        throw Error("VAULTIK_S3_LOCK_MODE must be governance or compliance");
+    c.lock_compliance = mode == "compliance";
     return c;
 }
 

@@ -448,8 +448,16 @@ S3Backend::RollbackResult S3Backend::roll_back(std::int64_t time, bool dry_run,
             const std::string source = "/" + s3::uri_encode(where_.bucket, false) + "/" + s3::uri_encode(key, true) +
                                        "?versionId=" + s3::uri_encode(all[then].version_id, false);
             const Result c = request("PUT", key, {}, {{"x-amz-copy-source", source}}, {});
-            if (c.status == 200) done = true;
-            else result.failed.push_back(name + ": the cloud storage refused (" + std::to_string(c.status) + ")");
+            // A copy can fail after S3 has answered 200: then the body holds an <Error> instead
+            // of a <CopyObjectResult>.
+            const std::string_view body(reinterpret_cast<const char*>(c.response.body.data()), c.response.body.size());
+            if (c.status == 200 && body.find("<CopyObjectResult") != std::string_view::npos) {
+                done = true;
+            } else {
+                const std::string code = s3::xml_value(body, "Code");
+                result.failed.push_back(name + ": the cloud storage refused (" + std::to_string(c.status) +
+                                        (code.empty() ? "" : " " + code) + ")");
+            }
             break;
         }
         if (done) ++result.restored;
