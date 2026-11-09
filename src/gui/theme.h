@@ -13,6 +13,7 @@
 #include "vaultik/jobs/job.hpp"
 
 class QApplication;
+class QWidget;
 
 struct Theme {
     bool dark = false;
@@ -61,6 +62,10 @@ signals:
 // A Fluent icon by file name without ".svg" (e.g. "add_20_regular"), in `color` (default: the
 // text colour; disabled: the faint colour).
 QIcon icon(const QString& name, const QColor& color = QColor());
+
+// Gives a widget a style sheet role ("primary", "flat", "muted", ...) and restyles it, which a
+// widget that was already styled (a dialog button box's buttons) needs.
+void set_role(QWidget* widget, const char* role);
 
 // The coloured status icon of a run.
 QIcon status_icon(vaultik::jobs::RunStatus status);

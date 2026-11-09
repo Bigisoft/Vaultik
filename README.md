@@ -111,7 +111,18 @@ jobs with their last result; the job page shows live progress and four tabs:
 
 **Restore** opens a version browser: pick a file or folder (or nothing, for everything) and
 restore it to another folder or to its original location; right-click an item for all its
-versions.
+versions. A **preview** beside the browser (and **Preview** in Find a file) shows a file of any
+version without restoring it, decrypted into memory only:
+
+- Pictures (JPEG, PNG, GIF, BMP, TIFF, ICO, and HEIC or WebP where Windows has the codecs), fitted
+  to the window or at full size, turned the way the camera recorded.
+- Text and code with line numbers and syntax colours (C/C++, C#, Java/Kotlin, JavaScript and
+  TypeScript, Go, Rust, Python, PowerShell, shell and batch files, SQL, Lua, XML/HTML, JSON, YAML,
+  INI/TOML, CSS, Markdown), line wrapping on request, and **Ctrl+F** to find text (all matches
+  highlighted, with next/previous and match case). Files over 8 MB show their beginning.
+
+Small files of a local backup open as soon as they are selected; large files and cloud backups
+wait for **Show preview**, since they have to be downloaded first.
 
 **Restore from a backup location** in the toolbar opens any Vaultik backup, in a folder or in
 cloud storage, with its password, without a saved job: the way to get files back on another

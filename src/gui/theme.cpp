@@ -12,7 +12,9 @@
 #include <QStyleFactory>
 #include <QStyleHints>
 #include <QSvgRenderer>
+#include <QStyle>
 #include <QTemporaryDir>
+#include <QWidget>
 
 #include <memory>
 
@@ -360,6 +362,13 @@ QIcon icon(const QString& name, const QColor& color) {
     QIcon result(new SvgIconEngine(colored_svg(name, c), colored_svg(name, g_theme.text_faint)));  // QIcon owns it
     cache.insert(key, result);
     return result;
+}
+
+void set_role(QWidget* widget, const char* role) {
+    widget->setProperty("role", QString::fromLatin1(role));
+    widget->style()->unpolish(widget);
+    widget->style()->polish(widget);
+    widget->update();
 }
 
 QColor status_color(vaultik::jobs::RunStatus status) {

@@ -16,6 +16,7 @@
 #include <QVBoxLayout>
 
 #include "common.h"
+#include "preview.h"
 #include "theme.h"
 
 using namespace vaultik;
@@ -59,6 +60,8 @@ ItemHistoryView::ItemHistoryView(QWidget* parent) : QWidget(parent) {
     all_ = new QCheckBox(tr("Also show versions where it did not change"), this);
     restore_ = new QPushButton(tr("Restore this version..."), this);
     restore_->setProperty("role", "primary");
+    preview_ = new QPushButton(tr("Preview"), this);
+    preview_->setToolTip(tr("Look inside this version without restoring it"));
 
     tree_ = new QTreeWidget(this);
     tree_->setHeaderLabels({tr("Backed up"), tr("Modified"), tr("Size"), tr("Compared with this PC")});
@@ -72,6 +75,7 @@ ItemHistoryView::ItemHistoryView(QWidget* parent) : QWidget(parent) {
     names->addWidget(title_);
     names->addWidget(location_);
     top->addLayout(names, 1);
+    top->addWidget(preview_, 0, Qt::AlignBottom);
     top->addWidget(restore_, 0, Qt::AlignBottom);
 
     auto* layout = new QVBoxLayout(this);
@@ -81,7 +85,26 @@ ItemHistoryView::ItemHistoryView(QWidget* parent) : QWidget(parent) {
     layout->addWidget(tree_, 1);
 
     connect(all_, &QCheckBox::toggled, this, &ItemHistoryView::fill);
-    connect(tree_, &QTreeWidget::itemSelectionChanged, this, [this] { restore_->setEnabled(selected_version() >= 0); });
+    connect(tree_, &QTreeWidget::itemSelectionChanged, this, [this] {
+        const int i = selected_version();
+        restore_->setEnabled(i >= 0);
+        bool file = false;
+        for (const ItemVersion& v : history_)
+            if (static_cast<int>(v.snapshot) == i) file = v.node.kind == NodeKind::File;
+        preview_->setEnabled(i >= 0 && file);
+    });
+    connect(preview_, &QPushButton::clicked, this, [this] {
+        const int i = selected_version();
+        for (const ItemVersion& v : history_) {
+            if (static_cast<int>(v.snapshot) != i) continue;
+            const int slash = path_.lastIndexOf('/');
+            const QString name = slash >= 0 ? path_.mid(slash + 1) : path_;
+            const QString when = QLocale().toString(to_datetime(versions_[v.snapshot].snapshot.time), QLocale::ShortFormat);
+            PreviewDialog dialog(repo_, v.node, name, tr("backed up %1").arg(when), this);
+            dialog.exec();
+            return;
+        }
+    });
     connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this] {
         if (const int i = selected_version(); i >= 0) emit restore_requested(i, path_);
     });
@@ -94,6 +117,7 @@ ItemHistoryView::ItemHistoryView(QWidget* parent) : QWidget(parent) {
 
 void ItemHistoryView::refresh_icons() {
     restore_->setIcon(icon(QStringLiteral("arrow_counterclockwise_20_regular"), theme().accent_text));
+    preview_->setIcon(icon(QStringLiteral("document_20_regular")));
     if (!history_.empty()) fill();
 }
 
@@ -110,6 +134,7 @@ void ItemHistoryView::clear() {
     title_->setText(tr("Pick a file or folder"));
     location_->setText(tr("Its versions appear here, with when it changed."));
     restore_->setEnabled(false);
+    preview_->setEnabled(false);
     all_->setEnabled(false);
 }
 

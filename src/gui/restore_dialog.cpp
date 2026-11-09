@@ -17,12 +17,14 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSplitter>
 #include <QStyle>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include "common.h"
 #include "find_page.h"
+#include "preview.h"
 #include "runner.h"
 #include "theme.h"
 #include "vaultik/model/tree.hpp"
@@ -31,7 +33,9 @@ using namespace vaultik;
 
 namespace {
 
-enum Role { KindRole = Qt::UserRole, SubtreeRole, PathRole, LoadedRole };
+enum Role { KindRole = Qt::UserRole, SubtreeRole, PathRole, LoadedRole, ParentTreeRole };
+
+constexpr std::uint64_t kAutoPreviewLimit = 20u << 20;  // larger files (and cloud backups) wait for a click
 
 QString original_of(const QString& snapshot_path) {
     return original_path(snapshot_path);
@@ -56,7 +60,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
       password_(std::move(password)),
       cloud_(std::move(cloud)) {
     setWindowTitle(tr("Restore from \"%1\"").arg(qs(job.name)));
-    resize(760, 600);
+    resize(1240, 720);
 
     snapshot_ = new QComboBox;
     for (const auto& e : snapshots_) snapshot_->addItem(snapshot_label(e));
@@ -78,7 +82,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     bar_ = new QProgressBar;
     bar_->setRange(0, 0);
     bar_->hide();
-    status_ = new QLabel(tr("Pick a file or folder, or restore everything in the snapshot."));
+    status_ = new QLabel(tr("Pick a file or folder, or restore everything in this version."));
     status_->setWordWrap(true);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
@@ -92,11 +96,20 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     target_row->addWidget(target_, 1);
     target_row->addWidget(browse_);
 
+    preview_ = new PreviewWidget;
+    auto* split = new QSplitter(Qt::Horizontal);
+    split->addWidget(tree_);
+    split->addWidget(preview_);
+    split->setStretchFactor(0, 1);
+    split->setStretchFactor(1, 1);
+    split->setChildrenCollapsible(false);
+    split->setSizes({560, 640});
+
     auto* layout = new QVBoxLayout(this);
     auto* top = new QFormLayout;
-    top->addRow(tr("Snapshot:"), snapshot_);
+    top->addRow(tr("Version:"), snapshot_);
     layout->addLayout(top);
-    layout->addWidget(tree_, 1);
+    layout->addWidget(split, 1);
     layout->addLayout(target_row);
     layout->addWidget(to_original_);
     layout->addWidget(overwrite_);
@@ -107,6 +120,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     connect(snapshot_, &QComboBox::currentIndexChanged, this, &RestoreDialog::show_snapshot);
     connect(tree_, &QTreeWidget::itemExpanded, this, &RestoreDialog::expand);
     connect(tree_, &QTreeWidget::itemSelectionChanged, this, &RestoreDialog::update_target_state);
+    connect(tree_, &QTreeWidget::itemSelectionChanged, this, &RestoreDialog::preview_selected);
     connect(to_original_, &QRadioButton::toggled, this, &RestoreDialog::update_target_state);
     connect(browse_, &QPushButton::clicked, this, [this] {
         const QString dir = QFileDialog::getExistingDirectory(this, tr("Restore into"), target_->text());
@@ -152,7 +166,8 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
                        &RestoreDialog::show_versions_of_selected);
         menu.exec(tree_->viewport()->mapToGlobal(pos));
     });
-    restore_->setProperty("role", "primary");
+    set_role(restore_, "primary");
+    restore_->setIcon(icon(QStringLiteral("arrow_counterclockwise_20_regular"), theme().accent_text));
     browse_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
 
     show_snapshot(selected >= 0 && selected < static_cast<int>(snapshots_.size()) ? selected : 0);
@@ -162,6 +177,33 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     }
     if (!select_path.isEmpty()) this->select_path(select_path);
     update_target_state();
+}
+
+void RestoreDialog::preview_selected() {
+    const QList<QTreeWidgetItem*> sel = tree_->selectedItems();
+    if (sel.isEmpty()) {
+        preview_->clear();
+        return;
+    }
+    QTreeWidgetItem* item = sel.front();
+    const auto kind = static_cast<NodeKind>(item->data(0, KindRole).toInt());
+    if (kind != NodeKind::File) {
+        preview_->clear();
+        preview_->show_message(item->text(0), kind == NodeKind::Dir ? tr("A folder. Pick a file inside it to preview it.")
+                                                                     : tr("A link: it is stored without content."));
+        return;
+    }
+    // The file's entry, from the listing of the folder that holds it.
+    try {
+        const Id parent = id_from_hex(u8(item->data(0, ParentTreeRole).toString()));
+        const Tree tree = parse_tree(repo_->load_blob(BlobType::Tree, parent));
+        const Node* node = tree.find(u8(item->text(0)));
+        if (node == nullptr) throw Error("not found in its folder");
+        const bool now = !is_cloud_location(job_.repository) && node->size <= kAutoPreviewLimit;
+        preview_->show_file(repo_, *node, item->text(0), now);
+    } catch (const std::exception& e) {
+        preview_->show_message(item->text(0), tr("Cannot read this file: %1").arg(QString::fromUtf8(e.what())));
+    }
 }
 
 void RestoreDialog::select_path(const QString& path) {
@@ -246,6 +288,7 @@ void RestoreDialog::expand(QTreeWidgetItem* item) {
             child->setText(0, qs(n.name));
             child->setData(0, KindRole, static_cast<int>(n.kind));
             child->setData(0, PathRole, base.isEmpty() ? qs(n.name) : base + "/" + qs(n.name));
+            child->setData(0, ParentTreeRole, qs(id_hex(id)));
             child->setText(2, format_time(n.mtime));
             switch (n.kind) {
                 case NodeKind::Dir:

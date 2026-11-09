@@ -133,6 +133,9 @@ if(VAULTIK_BUILD_GUI)
             src/gui/job_card.cpp
             src/gui/versions_view.cpp
             src/gui/find_page.cpp
+            src/gui/syntax.cpp
+            src/gui/preview.cpp
+            src/gui/image_decode.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)
@@ -140,6 +143,9 @@ if(VAULTIK_BUILD_GUI)
         file(GLOB VAULTIK_ICONS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS src/gui/icons/*.svg)
         qt_add_resources(vaultik-gui "icons" PREFIX "/" BASE src/gui FILES ${VAULTIK_ICONS})
         target_link_libraries(vaultik-gui PRIVATE vaultik_core Qt6::Widgets Qt6::Svg)
+        if(WIN32)
+            target_link_libraries(vaultik-gui PRIVATE windowscodecs uiautomationcore)  # previews, accessibility
+        endif()
         # The GUI starts the engine (and the scheduler starts the launcher) from its own folder.
         add_dependencies(vaultik-gui vaultik)
         if(WIN32)

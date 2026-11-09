@@ -44,6 +44,7 @@ private:
     QLabel* location_ = nullptr;
     QCheckBox* all_ = nullptr;
     QTreeWidget* tree_ = nullptr;
+    QPushButton* preview_ = nullptr;
     QPushButton* restore_ = nullptr;
 };
 

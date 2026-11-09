@@ -4,8 +4,14 @@
 
 #include <QApplication>
 
-#if defined(_MSC_VER) && defined(_DEBUG)
+#ifdef Q_OS_WIN
 #include <windows.h>
+
+// From uiautomationcoreapi.h (UIAutomationCore.dll), whose header needs the full COM headers.
+extern "C" HRESULT WINAPI UiaDisconnectAllProviders();
+#endif
+
+#if defined(_MSC_VER) && defined(_DEBUG)
 
 #include <crtdbg.h>
 #include <cstdio>
@@ -53,5 +59,12 @@ int main(int argc, char** argv) {
 
     MainWindow window;
     window.show();
-    return QApplication::exec();
+    const int code = QApplication::exec();
+#ifdef Q_OS_WIN
+    // Screen readers and other UI Automation clients hold references to the accessibility objects
+    // of our controls; Microsoft asks providers to release them all before shutting down, so they
+    // are freed with the window rather than left behind.
+    UiaDisconnectAllProviders();
+#endif
+    return code;
 }

@@ -17,6 +17,7 @@ class QPushButton;
 class QRadioButton;
 class QTreeWidget;
 class QTreeWidgetItem;
+class PreviewWidget;
 class Runner;
 
 // Browse a snapshot and restore a file, a folder or everything, to the original location or to
@@ -43,6 +44,7 @@ private:
     void start_restore();
     QString selected_path() const;
     void select_path(const QString& path);
+    void preview_selected();
     void show_versions_of_selected();
 
     vaultik::jobs::Job job_;
@@ -53,6 +55,7 @@ private:
 
     QComboBox* snapshot_ = nullptr;
     QTreeWidget* tree_ = nullptr;
+    PreviewWidget* preview_ = nullptr;
     QRadioButton* to_original_ = nullptr;
     QRadioButton* to_folder_ = nullptr;
     QLineEdit* target_ = nullptr;
