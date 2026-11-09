@@ -143,6 +143,7 @@ private:
         QString folder;        // empty until it is ready
     };
     void explore_version(int index);
+    void compare_versions(int a, int b);
     // Makes sure the job's password is saved (on another computer a portable copy cannot read the
     // one saved here); asks for it when not. False when the user cancelled.
     bool ensure_password(const vaultik::jobs::Job& job);

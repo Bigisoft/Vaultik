@@ -32,6 +32,7 @@ public:
 signals:
     void restore_requested(int index);
     void explore_requested(int index);  // open the version as a folder in File Explorer
+    void compare_requested(int index, int other);  // what changed between two versions
     void pin_requested(int index, bool pin);
     void note_requested(int index);
     void delete_requested(int index);
@@ -46,6 +47,8 @@ private:
     QLabel* footer_ = nullptr;
     QPushButton* restore_ = nullptr;
     QPushButton* explore_ = nullptr;
+    QPushButton* compare_ = nullptr;
+    void compare_with_other(int index);
     QPushButton* pin_ = nullptr;
     QPushButton* note_ = nullptr;
     QPushButton* delete_ = nullptr;

@@ -2,6 +2,7 @@
 
 #include <QDate>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLocale>
@@ -50,6 +51,8 @@ QString changes_text(const Snapshot& s) {
 VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     restore_ = new QPushButton(tr("Restore..."));
     explore_ = new QPushButton(tr("Open in Explorer"));
+    compare_ = new QPushButton(tr("Compare"));
+    compare_->setToolTip(tr("What changed since the version before this one"));
     explore_->setToolTip(tr("Show this version as a read-only folder in File Explorer; files are read from the "
                             "backup when you open them"));
     pin_ = new QPushButton(tr("Pin"));
@@ -63,6 +66,7 @@ VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     actions->setContentsMargins(0, 0, 0, 0);
     actions->addWidget(restore_);
     actions->addWidget(explore_);
+    actions->addWidget(compare_);
     actions->addWidget(pin_);
     actions->addWidget(note_);
     actions->addStretch();
@@ -110,6 +114,10 @@ VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     connect(explore_, &QPushButton::clicked, this, [this] {
         if (const int i = selected_index(); i >= 0) emit explore_requested(i);
     });
+    connect(compare_, &QPushButton::clicked, this, [this] {
+        const int i = selected_index();
+        if (i >= 0 && i + 1 < static_cast<int>(versions_.size())) emit compare_requested(i, i + 1);
+    });
     connect(pin_, &QPushButton::clicked, this, [this] {
         if (const int i = selected_index(); i >= 0) emit pin_requested(i, !versions_[static_cast<std::size_t>(i)].snapshot.pinned);
     });
@@ -128,6 +136,7 @@ void VersionsView::refresh_icons() {
     explore_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
     pin_->setIcon(icon(QStringLiteral("pin_20_regular")));
     note_->setIcon(icon(QStringLiteral("note_20_regular")));
+    compare_->setIcon(icon(QStringLiteral("history_20_regular")));
     delete_->setIcon(icon(QStringLiteral("delete_20_regular")));
     if (!versions_.empty()) set_versions(std::vector<SnapshotEntry>(versions_), std::set<Id>(leaving_), footer_->text());
 }
@@ -228,11 +237,29 @@ int VersionsView::selected_index() const {
 void VersionsView::update_buttons() {
     const int i = selected_index();
     for (QPushButton* b : {restore_, explore_, pin_, note_, delete_}) b->setEnabled(i >= 0);
+    compare_->setEnabled(i >= 0 && i + 1 < static_cast<int>(versions_.size()));  // the oldest has none before it
     const bool pinned = i >= 0 && versions_[static_cast<std::size_t>(i)].snapshot.pinned;
     pin_->setText(pinned ? tr("Unpin") : tr("Pin"));
     delete_->setEnabled(i >= 0 && !pinned);
     delete_->setToolTip(pinned ? tr("Unpin this version to delete it")
                                : tr("Remove this version now; its space is freed at the next cleanup"));
+}
+
+void VersionsView::compare_with_other(int index) {
+    QStringList labels;
+    std::vector<int> indices;
+    for (int j = 0; j < static_cast<int>(versions_.size()); ++j) {
+        if (j == index) continue;
+        const Snapshot& s = versions_[static_cast<std::size_t>(j)].snapshot;
+        labels << format_time(s.time) + (s.note.empty() ? QString() : "  " + qs(s.note));
+        indices.push_back(j);
+    }
+    bool ok = false;
+    const QString pick = QInputDialog::getItem(this, tr("Compare with"), tr("Compare this version with:"), labels,
+                                               index + 1 < static_cast<int>(versions_.size()) ? index : 0, false, &ok);
+    if (!ok) return;
+    const qsizetype at = labels.indexOf(pick);
+    if (at >= 0) emit compare_requested(index, indices[static_cast<std::size_t>(at)]);
 }
 
 void VersionsView::context_menu(const QPoint& pos) {
@@ -246,6 +273,11 @@ void VersionsView::context_menu(const QPoint& pos) {
                    [this, i] { emit restore_requested(i); });
     menu.addAction(icon(QStringLiteral("folder_open_20_regular")), tr("Open in Explorer"), this,
                    [this, i] { emit explore_requested(i); });
+    QAction* previous = menu.addAction(icon(QStringLiteral("history_20_regular")), tr("Compare with previous version"),
+                                       this, [this, i] { emit compare_requested(i, i + 1); });
+    previous->setEnabled(i + 1 < static_cast<int>(versions_.size()));
+    menu.addAction(tr("Compare with..."), this, [this, i] { compare_with_other(i); })
+        ->setEnabled(versions_.size() > 1);
     menu.addAction(icon(QStringLiteral("pin_20_regular")), pinned ? tr("Unpin") : tr("Pin"), this,
                    [this, i, pinned] { emit pin_requested(i, !pinned); });
     menu.addAction(icon(QStringLiteral("note_20_regular")), tr("Note..."), this, [this, i] { emit note_requested(i); });

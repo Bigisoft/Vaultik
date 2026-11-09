@@ -40,6 +40,7 @@
 
 #include "cloud_dialog.h"
 #include "common.h"
+#include "compare_dialog.h"
 #include "drive_watcher.h"
 #include "find_page.h"
 #include "job_card.h"
@@ -404,6 +405,30 @@ void MainWindow::watch_connect_runs() {
     if (connect_runs_.empty()) connect_timer_->stop();
 }
 
+void MainWindow::compare_versions(int a, int b) {
+    const jobs::Job* job = current_job();
+    if (!job) return;
+    const auto it = repos_.find(job->id);
+    if (it == repos_.end()) return;
+    const auto& snaps = it->second.snapshots;
+    if (a < 0 || b < 0 || a >= static_cast<int>(snaps.size()) || b >= static_cast<int>(snaps.size()) || a == b) return;
+    const SnapshotEntry& x = snaps[static_cast<std::size_t>(a)];
+    const SnapshotEntry& y = snaps[static_cast<std::size_t>(b)];
+    const SnapshotEntry& older = x.snapshot.time <= y.snapshot.time ? x : y;
+    const SnapshotEntry& newer = x.snapshot.time <= y.snapshot.time ? y : x;
+    const std::shared_ptr<Repository> repo = it->second.repo;
+    DiffResult diff;
+    const QString error = run_busy(this, tr("Comparing the versions..."), [&](const std::function<bool()>& cancelled) {
+        diff = diff_snapshots(*repo, older.snapshot, newer.snapshot, 100000, cancelled);
+    });
+    if (!error.isEmpty()) {
+        if (error != tr("Cancelled.")) plain_warning(this, tr("Compare versions"), error);
+        return;
+    }
+    CompareDialog dialog(repo, older, newer, std::move(diff), this);
+    dialog.exec();
+}
+
 bool MainWindow::ensure_password(const jobs::Job& job) {
     try {
         std::string saved = store_.password(job.id);
@@ -738,6 +763,7 @@ QWidget* MainWindow::build_job_page() {
     connect(versions_, &VersionsView::note_requested, this, [this](int i) { change_version(i, false, true); });
     connect(versions_, &VersionsView::delete_requested, this, &MainWindow::delete_version);
     connect(versions_, &VersionsView::explore_requested, this, &MainWindow::explore_version);
+    connect(versions_, &VersionsView::compare_requested, this, &MainWindow::compare_versions);
     tabs_->addTab(versions_, tr("Versions"));
 
     find_ = new FindPage;

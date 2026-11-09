@@ -51,6 +51,7 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/backup.cpp
     src/vaultik/ops/restore.cpp
     src/vaultik/ops/history.cpp
+    src/vaultik/ops/diff.cpp
     src/vaultik/ops/verify.cpp
     src/vaultik/ops/prune.cpp
     src/vaultik/platform/os_common.cpp
@@ -171,6 +172,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/tray.cpp
             src/gui/drive_watcher.cpp
             src/gui/overview.cpp
+            src/gui/compare_dialog.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)

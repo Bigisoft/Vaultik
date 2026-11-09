@@ -55,6 +55,8 @@ bool looks_like_text(const QByteArray& data) {
     return true;
 }
 
+}  // namespace
+
 QString decode_text(const QByteArray& data) {
     if (data.startsWith("\xFF\xFE")) return QStringDecoder(QStringDecoder::Utf16LE)(data.mid(2));
     if (data.startsWith("\xFE\xFF")) return QStringDecoder(QStringDecoder::Utf16BE)(data.mid(2));
@@ -94,6 +96,8 @@ QFont code_font() {
     f.setStyleHint(QFont::Monospace);
     return f;
 }
+
+namespace {
 
 class Gutter : public QWidget {
 public:

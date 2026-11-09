@@ -7,6 +7,7 @@
 
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/ops/backup.hpp"
+#include "vaultik/ops/diff.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/local_backend.hpp"
@@ -347,6 +348,44 @@ TEST_CASE("files that look encrypted by ransomware raise the alarm") {
 
     CHECK(byte_entropy(random_data(65536, 1)) > 7.9);
     CHECK(byte_entropy(text(1)) < 5.0);
+}
+
+TEST_CASE("comparing two versions") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "same.txt", random_data(100, 1));
+    write_file(src / "edit.txt", random_data(100, 2));
+    write_file(src / "gone.txt", random_data(100, 3));
+    write_file(src / "old dir" / "x.txt", random_data(100, 4));
+    write_file(src / "deep" / "inner" / "y.txt", random_data(100, 5));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    const BackupResult first = run_backup(*repo, options);
+
+    write_file(src / "edit.txt", random_data(120, 6));
+    fs::remove(src / "gone.txt");
+    fs::remove_all(src / "old dir");
+    write_file(src / "new.txt", random_data(100, 7));
+    const BackupResult second = run_backup(*repo, options);
+
+    const DiffResult d = diff_snapshots(*repo, first.snapshot, second.snapshot);
+    CHECK(d.added == 1);
+    CHECK(d.removed == 2);  // gone.txt and the folder "old dir" (one change for the folder)
+    CHECK(d.changed == 1);
+    REQUIRE(d.changes.size() == 4);
+    bool saw_edit = false;
+    for (const Change& c : d.changes) {
+        if (c.kind == Change::Kind::Changed) {
+            saw_edit = c.path.ends_with("/edit.txt") && c.old_size == 100 && c.new_size == 120;
+        }
+        if (c.path.ends_with("/old dir")) CHECK(c.node_kind == NodeKind::Dir);
+    }
+    CHECK(saw_edit);
+    CHECK(diff_snapshots(*repo, second.snapshot, second.snapshot).changes.empty());
+    CHECK(diff_snapshots(*repo, first.snapshot, second.snapshot, 2).truncated);
 }
 
 TEST_CASE("ready-made exclusions skip what they say") {

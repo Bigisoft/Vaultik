@@ -5,6 +5,7 @@
 #include <QPlainTextEdit>
 #include <QWidget>
 
+#include <functional>
 #include <memory>
 
 #include "vaultik/model/tree.hpp"
@@ -18,6 +19,14 @@ class QScrollArea;
 class QStackedWidget;
 class QToolButton;
 class SyntaxHighlighter;
+
+// Text from a file's bytes: UTF-8 or UTF-16 with a byte order mark, UTF-8, else the system code page.
+QString decode_text(const QByteArray& data);
+// The first `limit` bytes of a file in a backup version, decrypted in memory.
+QByteArray read_content(vaultik::Repository& repo, const vaultik::Node& node, std::uint64_t limit,
+                        const std::function<bool()>& cancelled);
+// The fixed-width font for code (Cascadia or Consolas when installed).
+QFont code_font();
 
 // A read-only text view with line numbers, used for previews.
 class CodeView : public QPlainTextEdit {

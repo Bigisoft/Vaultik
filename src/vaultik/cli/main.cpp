@@ -31,6 +31,7 @@
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/backends.hpp"
 #include "vaultik/repo/s3_backend.hpp"
+#include "vaultik/ops/diff.hpp"
 #include "vaultik/ops/history.hpp"
 #include "vaultik/ops/mount.hpp"
 #include "vaultik/repo/lock.hpp"
@@ -124,6 +125,9 @@ Commands:
   history <path>               The versions of a file or folder, e.g.
                                C/Users/me/report.docx, where it changed (--all:
                                every snapshot that has it)
+  diff <older> [<newer>]       Files and folders added (+), removed (-) and changed
+                               (M) between two snapshots; with one, since the
+                               snapshot before it
   find <pattern>               Files and folders by name in every snapshot; *
                                and ? wildcards, any case; without them, names
                                containing the text
@@ -1608,6 +1612,50 @@ int cmd_note(const Args& a) {
 }
 
 // history <path>: the versions of one file or folder (only those where it changed, unless --all).
+// "diff <older> [<newer>]": what changed between two snapshots (one: since its parent).
+int cmd_diff(const Args& a) {
+    if (a.positional.empty() || a.positional.size() > 2)
+        throw Error("usage: vaultik diff -r <repo> <older snapshot> [<newer snapshot>]");
+    auto repo = open_repo(a);
+    SnapshotRef older, newer;
+    if (a.positional.size() == 2) {
+        older = resolve_snapshot(*repo, a.positional[0]);
+        newer = resolve_snapshot(*repo, a.positional[1]);
+    } else {
+        newer = resolve_snapshot(*repo, a.positional[0]);
+        if (!newer.snapshot.parent) throw Error("snapshot " + short_id(newer.id) + " has no earlier one to compare with");
+        older = resolve_snapshot(*repo, id_hex(*newer.snapshot.parent));
+    }
+    status("Comparing...");
+    const DiffResult d = diff_snapshots(*repo, older.snapshot, newer.snapshot, 100000, [] { return g_cancel.load(); });
+    clear_status();
+    const auto mark = [](Change::Kind k) { return k == Change::Kind::Added ? "+" : k == Change::Kind::Removed ? "-" : "M"; };
+    for (const Change& c : d.changes) {
+        const bool dir = c.node_kind == NodeKind::Dir;
+        if (g_json) {
+            emit({{"event", "change"},
+                  {"kind", c.kind == Change::Kind::Added ? "added" : c.kind == Change::Kind::Removed ? "removed" : "changed"},
+                  {"path", c.path},
+                  {"dir", dir},
+                  {"old_size", c.old_size},
+                  {"new_size", c.new_size}});
+        } else {
+            std::string line = std::string(mark(c.kind)) + " " + c.path + (dir ? "/" : "");
+            if (c.kind == Change::Kind::Changed) line += "  (" + format_bytes(c.old_size) + " -> " + format_bytes(c.new_size) + ")";
+            out(line + "\n");
+        }
+    }
+    if (g_json) {
+        emit({{"event", "done"}, {"status", "success"}, {"added", d.added}, {"removed", d.removed},
+              {"changed", d.changed}, {"truncated", d.truncated}});
+    } else {
+        out(short_id(older.id) + " -> " + short_id(newer.id) + ": " + std::to_string(d.added) + " added, " +
+            std::to_string(d.removed) + " removed, " + std::to_string(d.changed) + " changed" +
+            (d.truncated ? " (list cut short)" : "") + "\n");
+    }
+    return kExitOk;
+}
+
 int cmd_history(const Args& a) {
     if (a.positional.size() != 1) throw Error("usage: vaultik history -r <repo> <path>   e.g. C/Users/me/report.docx");
     std::string path = a.positional[0];
@@ -1902,6 +1950,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "unpin") return cmd_pin(a, false);
     if (a.command == "note") return cmd_note(a);
     if (a.command == "history") return cmd_history(a);
+    if (a.command == "diff") return cmd_diff(a);
     if (a.command == "find") return cmd_find(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }
