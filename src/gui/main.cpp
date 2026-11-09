@@ -25,6 +25,8 @@ extern "C" HRESULT WINAPI UiaDisconnectAllProviders();
 
 #include "main_window.h"
 #include "theme.h"
+#include "vaultik/jobs/job.hpp"
+#include "vaultik/platform/os.hpp"
 
 namespace {
 
@@ -51,13 +53,23 @@ void enable_leak_report() {
 #endif
 
 #ifdef Q_OS_WIN
-// One Vaultik per signed-in user: a second start asks the first to show its window, through a
-// registered window message, and ends.
-const wchar_t* kShowMessage = L"Vaultik.ShowWindow";
+// One Vaultik per signed-in user and settings folder: a second start asks the first to show its
+// window, through a registered window message, and ends. A copy with other settings (a portable
+// one, or VAULTIK_CONFIG_DIR) is a separate instance with its own names.
+std::wstring instance_name(const wchar_t* base) {
+    std::uint64_t h = 1469598103934665603ull;  // FNV-1a of the settings folder, any case
+    for (const char c : vaultik::os::fold_case(vaultik::jobs::config_dir())) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 1099511628211ull;
+    }
+    wchar_t suffix[24];
+    swprintf(suffix, 24, L".%016llx", static_cast<unsigned long long>(h));
+    return std::wstring(base) + suffix;
+}
 
 class ShowRequests : public QAbstractNativeEventFilter {
 public:
-    explicit ShowRequests(MainWindow& window) : window_(window), message_(RegisterWindowMessageW(kShowMessage)) {}
+    explicit ShowRequests(MainWindow& window) : window_(window), message_(RegisterWindowMessageW(instance_name(L"Vaultik.ShowWindow").c_str())) {}
 
     bool nativeEventFilter(const QByteArray& type, void* message, qintptr*) override {
         if (type != "windows_generic_MSG") return false;
@@ -85,12 +97,12 @@ int main(int argc, char** argv) {
 
 #ifdef Q_OS_WIN
     // Released by Windows when this process ends.
-    CreateMutexW(nullptr, FALSE, L"Local\\Vaultik.Gui");
+    CreateMutexW(nullptr, FALSE, instance_name(L"Local\\Vaultik.Gui").c_str());
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         // Already running: show it (unless this start came from sign-in, which needs nothing).
         if (!tray) {
             AllowSetForegroundWindow(ASFW_ANY);
-            PostMessageW(HWND_BROADCAST, RegisterWindowMessageW(kShowMessage), 0, 0);
+            PostMessageW(HWND_BROADCAST, RegisterWindowMessageW(instance_name(L"Vaultik.ShowWindow").c_str()), 0, 0);
         }
         return 0;
     }
