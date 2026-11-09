@@ -199,6 +199,18 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         }
         if (!check_result_.isEmpty()) msg += "  " + check_result_;
         check_result_.clear();
+        const QString alert = ev.value("alert").toString();
+        if (!alert.isEmpty()) {
+            log_->appendPlainText(tr("WARNING: %1").arg(alert));
+            QMessageBox box(QMessageBox::Warning, tr("Files may be encrypted by ransomware"),
+                            tr("The backup found many files that changed in a way ransomware changes them."),
+                            QMessageBox::Ok, this);
+            box.setInformativeText(alert + "\n\n" +
+                                   tr("If you did not change these files yourself, disconnect the backup drive, do "
+                                      "not trust the newest version, and restore from the pinned one. Old versions "
+                                      "were not removed this time."));
+            box.exec();
+        }
         statusBar()->showMessage(msg, 15000);
         repos_.erase(id);  // a new version: reload the list when it is shown
         reload_jobs(current_job() ? current_job()->id : id);
@@ -320,6 +332,10 @@ void MainWindow::watch_connect_runs() {
         bool warn = false;
         if (r == nullptr) {
             continue;  // it found nothing to do (already backing up, or just backed up)
+        } else if (!r->alert.empty()) {
+            title = tr("%1: files may be encrypted by ransomware").arg(qs(job->name));
+            text = tr("Unplug %1 now and open Vaultik. %2").arg(run.drive, qs(r->alert).left(200));
+            warn = true;
         } else if (r->status == jobs::RunStatus::Success) {
             title = tr("%1 is backed up").arg(qs(job->name));
             text = tr("You can unplug %1 now.").arg(run.drive);
@@ -623,7 +639,10 @@ void MainWindow::fill_card(QListWidgetItem* item, const jobs::Job& j) {
     const auto h = jobs::combined_history(store_, j.id, 100);
     const jobs::RunRecord* backup = jobs::last_backup(h);
     const jobs::RunRecord* check = jobs::last_check(h);
-    if (check && jobs::found_damage(*check)) {
+    if (backup && !backup->alert.empty()) {
+        item->setData(JobCardDelegate::StatusRole, static_cast<int>(jobs::RunStatus::Failed));
+        item->setData(JobCardDelegate::StatusTextRole, tr("Files may be encrypted, %1").arg(when_text(backup->started)));
+    } else if (check && jobs::found_damage(*check)) {
         item->setData(JobCardDelegate::StatusRole, static_cast<int>(jobs::RunStatus::Failed));
         item->setData(JobCardDelegate::StatusTextRole, tr("Health check found problems, %1").arg(when_text(check->started)));
     } else if (!backup) {
@@ -683,7 +702,8 @@ void MainWindow::refresh_history() {
         item->setText(1, backup ? tr("Backup") : r.kind == jobs::RunKind::FullCheck ? tr("Full check") : tr("Health check"));
         item->setIcon(2, status_icon(r.status));
         if (backup) {
-            item->setText(2, status_text(r.status));
+            item->setText(2, r.alert.empty() ? status_text(r.status) : tr("Warning: files may be encrypted"));
+            if (!r.alert.empty()) item->setIcon(2, status_icon(jobs::RunStatus::Failed));
             item->setText(3, QLocale().toString(static_cast<qulonglong>(r.files)));
             item->setText(4, format_bytes(r.bytes));
             item->setText(5, format_bytes(r.new_bytes));
@@ -695,7 +715,7 @@ void MainWindow::refresh_history() {
             item->setToolTip(4, tr("Read back and checked"));
         }
         if (r.finished > r.started) item->setText(7, format_duration(static_cast<double>(r.finished - r.started) / 1e7));
-        item->setText(8, qs(r.message));
+        item->setText(8, qs(r.alert.empty() ? r.message : r.alert + (r.message.empty() ? "" : "; " + r.message)));
         for (int c = 3; c < 8; ++c) item->setTextAlignment(c, Qt::AlignRight | Qt::AlignVCenter);
     }
     for (int c = 0; c < 8; ++c) history_->resizeColumnToContents(c);

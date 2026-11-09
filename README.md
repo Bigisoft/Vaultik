@@ -264,6 +264,17 @@ connected" (Schedule tab), the running frontend or tray icon starts the job as s
 is plugged in (`run-job <job> --on-connect`, which does nothing when the job just saved a
 version or is already running), then says when the drive can be unplugged.
 
+### Ransomware warning
+
+While backing up, Vaultik compares each changed file with its previous version. A document,
+database or text file whose content went from compressible to random-looking is what encryption
+by ransomware looks like (photos and videos look random already and never count), and so is a
+file replaced by its name plus an extension (`report.docx` -> `report.docx.locked`). When at
+least 20 files and 5% of the previous version's files look like that, the backup still saves
+the new version but warns (`"alert"` in the history and the `done` event), pins the version
+before it with a note, and the job skips removing old versions that run. The frontend shows the
+warning and the tray icon turns red.
+
 ### Health checks
 
 After `run-job` saves a version, it runs the job's health check when one is due (`--no-check`
@@ -356,8 +367,9 @@ Priorities only take effect when something else competes for the resource, so on
    - Back up when the drive is plugged in (done): a job whose destination is an external drive
      runs when that drive connects (recognised by its volume ID, not its letter), then says it
      can be unplugged.
-   - Ransomware warning: when a backup sees an unusual share of files changed or renamed at
-     once, it warns and pauses cleanup, so older clean versions are never removed automatically.
+   - Ransomware warning (done): when a backup sees many files that look encrypted or were renamed
+     with an added extension, it warns, pins the version before it and skips cleanup, so the
+     last clean version is never removed automatically.
    - Locked cloud copies: S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded data
      undeletable for a set time, even with the keys.
 6. Portable version and installer, so Vaultik is easy to use on another computer:

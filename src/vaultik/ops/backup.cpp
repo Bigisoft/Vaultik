@@ -1,7 +1,9 @@
 #include "vaultik/ops/backup.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <map>
 
 #include "vaultik/chunker/fastcdc.hpp"
@@ -129,9 +131,27 @@ private:
     Excluder excluder_;
     Bytes buffer_;
     SnapshotStats stats_;
+    ChangeAlarm alarm_;
     BackupProgress progress_;
+
+    void suspicious(const std::string& path) {
+        if (alarm_.examples.size() < 5) alarm_.examples.push_back(path);
+    }
+    // Whether the stored chunks of a file's earlier content compressed well (index sizes).
+    bool was_compressible(const std::vector<Id>& content) const;
     std::chrono::steady_clock::time_point last_report_{};
 };
+
+bool BackupEngine::was_compressible(const std::vector<Id>& content) const {
+    std::uint64_t raw = 0, stored = 0;
+    for (std::size_t i = 0; i < content.size() && i < 4; ++i) {
+        const BlobLocation* loc = repo_.index().find(content[i]);
+        if (loc == nullptr) return false;
+        raw += loc->raw_len;
+        stored += loc->length;
+    }
+    return raw >= 16384 && stored * 10 < raw * 9;  // saved more than 10%
+}
 
 void BackupEngine::warn(const std::string& message) {
     ++stats_.errors;
@@ -254,9 +274,11 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         repo_.chunker(), [&file](std::uint8_t* dst, std::size_t max) { return file.read(dst, max); }, buffer_);
 
     std::uint64_t total = 0;
+    bool random_start = false;  // the file's first chunk looks like encrypted data
     try {
         ByteSpan chunk;
         while (reader.next(chunk)) {
+            if (total == 0) random_start = byte_entropy(chunk.first(std::min<std::size_t>(chunk.size(), 65536))) > 7.9;
             Id id;
             if (repo_.save_blob(BlobType::Data, chunk, id)) stats_.new_bytes += chunk.size();
             node.content.push_back(id);
@@ -269,8 +291,15 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         return false;
     }
     node.size = total;  // the file may have changed size since it was listed
-    if (is_new) ++stats_.files_new;
-    else if (node.content != parent->content) ++stats_.files_changed;  // a touched but identical file is not a change
+    if (is_new) {
+        ++stats_.files_new;
+    } else if (node.content != parent->content) {  // a touched but identical file is not a change
+        ++stats_.files_changed;
+        if (random_start && total >= 16384 && was_compressible(parent->content)) {
+            ++alarm_.became_random;
+            suspicious(path);
+        }
+    }
     return true;
 }
 
@@ -337,9 +366,23 @@ Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, c
     }
     if (!reader.ok()) warn("listing " + dir + " stopped early: " + os::error_message(reader.error()));
     tree.sort();
-    if (parent != nullptr)
+    if (parent != nullptr) {
         for (const Node& old : parent->nodes)
             if (tree.find(old.name) == nullptr) ++stats_.items_removed;
+        // A file gone and a new one with its name plus an extension: "a.docx" -> "a.docx.locked".
+        for (const Node& n : tree.nodes) {
+            if (n.kind != NodeKind::File || parent->find(n.name) != nullptr) continue;
+            const std::size_t dot = n.name.rfind('.');
+            if (dot == std::string::npos || dot == 0) continue;
+            const std::string before = n.name.substr(0, dot);
+            const Node* old = parent->find(before);
+            if (old != nullptr && old->kind == NodeKind::File && tree.find(before) == nullptr &&
+                before.find('.') != std::string::npos) {
+                ++alarm_.renamed;
+                suspicious(os::join(dir, n.name));
+            }
+        }
+    }
     return tree;
 }
 
@@ -381,7 +424,9 @@ BackupResult BackupEngine::run() {
     snap.parent = find_parent(snap.paths);
     if (snap.parent) {
         try {
-            parent_root = load_tree(repo_.load_snapshot(*snap.parent).tree);
+            const Snapshot ps = repo_.load_snapshot(*snap.parent);
+            alarm_.parent_files = ps.stats.files;
+            parent_root = load_tree(ps.tree);
         } catch (const Error& e) {
             if (options_.on_warning) options_.on_warning(std::string("parent snapshot unreadable: ") + e.what());
             snap.parent.reset();
@@ -431,10 +476,25 @@ BackupResult BackupEngine::run() {
     BackupResult result;
     result.snapshot_id = repo_.save_snapshot(snap);
     result.snapshot = std::move(snap);
+    result.alarm = std::move(alarm_);
     return result;
 }
 
 }  // namespace
+
+double byte_entropy(ByteSpan data) {
+    if (data.empty()) return 0;
+    std::array<std::uint32_t, 256> counts{};
+    for (const std::uint8_t b : data) ++counts[b];
+    double h = 0;
+    const double n = static_cast<double>(data.size());
+    for (const std::uint32_t c : counts) {
+        if (c == 0) continue;
+        const double p = c / n;
+        h -= p * std::log2(p);
+    }
+    return h;
+}
 
 BackupResult run_backup(Repository& repo, const BackupOptions& options) {
     BackupEngine engine(repo, options);

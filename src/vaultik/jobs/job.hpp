@@ -104,6 +104,9 @@ struct RunRecord {
     std::uint64_t stored_bytes = 0;
     std::uint64_t errors = 0;
     std::string message;  // error text for Failed, summary otherwise
+    // Set when the backup saw signs of ransomware (see ChangeAlarm in ops/backup.hpp); the version
+    // before it was pinned and old versions were not removed.
+    std::string alert;
 };
 
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests, portable installs).

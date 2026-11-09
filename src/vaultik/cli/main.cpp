@@ -608,6 +608,48 @@ std::unique_ptr<os::ShadowCopy> prepare_shadow_copy(VssMode mode, bool pause_sql
 
 // Runs a backup with console or JSON reporting. Fills `record` with the outcome (also on failure,
 // before rethrowing) and returns the exit code. `lock` is the shared lock held for it.
+// A backup that saw signs of ransomware: the version before it is pinned with a note, so no keep
+// rule can remove the last good copy, and the run says so loudly. (The caller holds a lock.)
+void raise_alarm(Repository& repo, const BackupResult& r, jobs::RunRecord& record) {
+    const ChangeAlarm& a = r.alarm;
+    std::string what = std::to_string(a.suspicious()) + " file(s)";
+    if (a.parent_files > 0) what += " of " + std::to_string(a.parent_files);
+    record.alert = what + " look encrypted or were renamed with an added extension since the previous version";
+    if (!a.examples.empty()) record.alert += ", e.g. " + a.examples.front();
+    std::string kept;
+    if (r.snapshot.parent) {
+        try {
+            Snapshot before = repo.load_snapshot(*r.snapshot.parent);
+            before.pinned = true;
+            if (before.note.empty())
+                before.note = "Kept automatically: the next backup (" + os::format_time_local(r.snapshot.time) +
+                              ") saw many files that look encrypted";
+            repo.update_snapshot(*r.snapshot.parent, before);
+            kept = short_id(*r.snapshot.parent);
+        } catch (const Error& e) {
+            warning(std::string("could not pin the previous version: ") + e.what());
+        }
+    }
+    record.alert += kept.empty() ? "." : ". The previous version " + kept + " is pinned so it stays.";
+    if (g_json) {
+        nlohmann::json examples = nlohmann::json::array();
+        for (const std::string& p : a.examples) examples.push_back(p);
+        emit({{"event", "alert"},
+              {"message", record.alert},
+              {"became_random", a.became_random},
+              {"renamed", a.renamed},
+              {"parent_files", a.parent_files},
+              {"pinned", kept},
+              {"examples", examples}});
+    } else {
+        clear_status();
+        err("WARNING: " + record.alert + "\n");
+        for (const std::string& p : a.examples) err("  " + p + "\n");
+        err("If you did not change these files yourself, your computer may have ransomware. Do not trust the new "
+            "version; restore from the pinned one.\n");
+    }
+}
+
 int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
                       RepoLock& lock, VssMode vss, bool pause_sql_server) {
     // Never back up the repository into itself.
@@ -671,6 +713,7 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
     record.stored_bytes = s.stored_bytes;
     record.errors = s.errors;
     record.message = s.errors > 0 ? std::to_string(s.errors) + " item(s) could not be read" : "";
+    if (r.alarm.raised()) raise_alarm(repo, r, record);
 
     if (g_json) {
         emit({{"event", "done"},
@@ -684,6 +727,7 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
               {"stored_bytes", s.stored_bytes},
               {"skipped", s.skipped},
               {"errors", s.errors},
+              {"alert", record.alert},
               {"seconds", seconds_since(start)}});
         return s.errors > 0 ? kExitPartial : kExitOk;
     }
@@ -1048,7 +1092,12 @@ int cmd_run_job(const Args& a) {
                                      vss_arg(a, job->vss ? kDefaultVss : VssMode::Off),
                                      !(job->vss_skip_sql || a.has("--vss-skip-sql")));
         }
-        if (!job->retention.empty()) {
+        if (!record.alert.empty()) {
+            // Never thin out the versions from before a possible attack.
+            if (!job->retention.empty())
+                record.message += std::string(record.message.empty() ? "" : "; ") +
+                                  "old versions were not removed because of the warning";
+        } else if (!job->retention.empty()) {
             const std::string note = clean_up(*repo, *job);
             if (!note.empty()) record.message += (record.message.empty() ? "" : "; ") + note;
         }

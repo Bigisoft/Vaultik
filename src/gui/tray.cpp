@@ -105,6 +105,10 @@ void Tray::check() {
                                        tr("Some backed-up data could not be read back. Open Vaultik to see "
                                           "what is affected, and back up again soon."),
                                        QSystemTrayIcon::Critical, 15000);
+            } else if (fresh && !r.alert.empty() && !r.on_connect) {  // (a connected-drive run says it itself)
+                // Always shown: this is the one that must not be missed.
+                icon_->showMessage(tr("%1: files may be encrypted by ransomware").arg(name),
+                                   qs(r.alert).left(250), QSystemTrayIcon::Critical, 30000);
             } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed) {
                 icon_->showMessage(tr("Backup failed: %1").arg(name), qs(r.message).left(200), QSystemTrayIcon::Critical,
                                    15000);
@@ -119,7 +123,8 @@ void Tray::check() {
         if (!records.empty()) seen = std::max(seen, records.back().started);
         const jobs::RunRecord* backup = jobs::last_backup(records);
         const jobs::RunRecord* checked = jobs::last_check(records);
-        if ((backup && backup->status == jobs::RunStatus::Failed) || (checked && jobs::found_damage(*checked)))
+        if ((backup && (backup->status == jobs::RunStatus::Failed || !backup->alert.empty())) ||
+            (checked && jobs::found_damage(*checked)))
             problems << name;
 
         // Too long without a saved version; reported once a day.

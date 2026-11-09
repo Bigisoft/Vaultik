@@ -298,6 +298,56 @@ TEST_CASE("damaged pack data is detected") {
     CHECK(rr.errors > 0);  // the damaged file is reported, not silently restored
 }
 
+TEST_CASE("files that look encrypted by ransomware raise the alarm") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    // Documents (compressible text) and photos (random-looking already).
+    const auto text = [](int seed) {
+        std::string s;
+        for (int i = 0; s.size() < 40000; ++i) s += "Line " + std::to_string(i * seed) + " of a quarterly report.\n";
+        return Bytes(s.begin(), s.end());
+    };
+    for (int i = 0; i < 40; ++i) write_file(src / ("doc" + std::to_string(i) + ".txt"), text(i + 1));
+    for (int i = 0; i < 40; ++i) write_file(src / ("photo" + std::to_string(i) + ".jpg"), random_data(40000, 100 + i));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    CHECK_FALSE(run_backup(*repo, options).alarm.raised());
+
+    // Edited photos (new random content) and edited documents are ordinary changes.
+    for (int i = 0; i < 40; ++i) write_file(src / ("photo" + std::to_string(i) + ".jpg"), random_data(40000, 200 + i));
+    for (int i = 0; i < 10; ++i) write_file(src / ("doc" + std::to_string(i) + ".txt"), text(i + 50));
+    BackupResult r = run_backup(*repo, options);
+    CHECK(r.alarm.became_random == 0);
+    CHECK_FALSE(r.alarm.raised());
+
+    // Documents overwritten with random-looking data.
+    for (int i = 0; i < 25; ++i) write_file(src / ("doc" + std::to_string(i) + ".txt"), random_data(40000, 300 + i));
+    r = run_backup(*repo, options);
+    CHECK(r.alarm.became_random == 25);
+    CHECK(r.alarm.parent_files == 80);
+    CHECK(r.alarm.raised());
+    CHECK_FALSE(r.alarm.examples.empty());
+
+    // Files replaced by the same name with an extra extension.
+    for (int i = 25; i < 40; ++i) {
+        const fs::path from = src / ("doc" + std::to_string(i) + ".txt");
+        fs::rename(from, fs::path(from).concat(".locked"));
+    }
+    for (int i = 0; i < 10; ++i) {
+        const fs::path from = src / ("photo" + std::to_string(i) + ".jpg");
+        fs::rename(from, fs::path(from).concat(".locked"));
+    }
+    r = run_backup(*repo, options);
+    CHECK(r.alarm.renamed == 25);
+    CHECK(r.alarm.raised());
+
+    CHECK(byte_entropy(random_data(65536, 1)) > 7.9);
+    CHECK(byte_entropy(text(1)) < 5.0);
+}
+
 TEST_CASE("overlapping backup paths are rejected") {
     TempDir tmp;
     write_file(tmp.path / "a" / "b" / "f.txt", text("x"));

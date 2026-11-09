@@ -44,10 +44,29 @@ struct BackupOptions {
     std::function<void()> before_save;
 };
 
+// Signs that files were encrypted by ransomware since the parent snapshot: changed files whose
+// content went from compressible to random-looking (documents, databases, text; photos and videos
+// are random-looking already and never count), and files replaced by the same name with an extra
+// extension ("report.docx" -> "report.docx.locked").
+struct ChangeAlarm {
+    std::uint64_t parent_files = 0;  // files in the parent snapshot (0 without one)
+    std::uint64_t became_random = 0;
+    std::uint64_t renamed = 0;
+    std::vector<std::string> examples;  // a few affected paths
+
+    std::uint64_t suspicious() const { return became_random + renamed; }
+    // At least 20 such files, and at least 5% of the parent's files.
+    bool raised() const { return suspicious() >= 20 && suspicious() * 20 >= parent_files; }
+};
+
 struct BackupResult {
     Id snapshot_id{};
     Snapshot snapshot;
+    ChangeAlarm alarm;
 };
+
+// Shannon entropy of the bytes, in bits per byte (0-8); encrypted or compressed data is near 8.
+double byte_entropy(ByteSpan data);
 
 // Thrown when a should_cancel callback returns true. No snapshot is saved; data packs already
 // written stay in the repository unreferenced until a prune removes them.

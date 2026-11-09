@@ -326,6 +326,7 @@ std::string to_json(const RunRecord& r) {
     };
     if (r.kind != RunKind::Backup) j["kind"] = to_string(r.kind);
     if (r.on_connect) j["trigger"] = "connect";
+    if (!r.alert.empty()) j["alert"] = r.alert;
     return j.dump();
 }
 
@@ -336,6 +337,7 @@ RunRecord record_from_json(const std::string& text) {
         const std::string kind = j.value("kind", std::string("backup"));  // missing before 0.5
         r.kind = kind == "full_check" ? RunKind::FullCheck : kind == "check" ? RunKind::Check : RunKind::Backup;
         r.on_connect = j.value("trigger", std::string()) == "connect";
+        r.alert = j.value("alert", std::string());
         r.started = j.value("started", std::uint64_t{0});
         r.finished = j.value("finished", std::uint64_t{0});
         r.status = status_from(j.value("status", std::string("failed")));
