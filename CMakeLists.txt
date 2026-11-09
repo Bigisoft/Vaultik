@@ -49,6 +49,7 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/repository.cpp
     src/vaultik/ops/backup.cpp
     src/vaultik/ops/restore.cpp
+    src/vaultik/ops/history.cpp
     src/vaultik/ops/verify.cpp
     src/vaultik/ops/prune.cpp
     src/vaultik/platform/os_common.cpp
@@ -158,6 +159,7 @@ add_executable(vaultik_tests
     tests/test_keys.cpp
     tests/test_s3.cpp
     tests/test_cloud_drives.cpp
+    tests/test_versions.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 add_test(NAME vaultik_tests COMMAND vaultik_tests)

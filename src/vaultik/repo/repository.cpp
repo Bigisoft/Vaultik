@@ -263,6 +263,13 @@ Id Repository::save_snapshot(const Snapshot& snapshot) {
     return id;
 }
 
+void Repository::update_snapshot(const Id& id, const Snapshot& snapshot) {
+    // Never bring back a snapshot that was removed: its data may be pruned already.
+    if (!backend_->exists(snapshot_name(id))) throw Error("this version no longer exists");
+    const Bytes sealed = seal_object(serialize_snapshot(snapshot), named_aad(kSnapshotAadPrefix, id), true);
+    backend_->put(snapshot_name(id), sealed);
+}
+
 Snapshot Repository::load_snapshot(const Id& id) {
     const Bytes plain = open_object(backend_->get(snapshot_name(id)), named_aad(kSnapshotAadPrefix, id));
     return parse_snapshot(plain);

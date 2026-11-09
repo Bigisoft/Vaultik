@@ -205,6 +205,17 @@ tags          varint count, then strings
 stats         varint files, dirs, bytes, new_bytes, stored_bytes, errors, skipped
 ```
 
+Tags starting with `vaultik:` are reserved: they carry fields added after version 1 without a
+format change, so older Vaultik versions still read the snapshot (and show them as tags):
+
+- `vaultik:pinned`: retention and size limits never remove the snapshot.
+- `vaultik:note=<text>`: the user's description of the snapshot.
+- `vaultik:changes=<new>,<changed>,<removed>`: files new and changed since the parent snapshot,
+  and files or folders of the parent that are gone (Vaultik 0.4 and later).
+
+Unknown reserved tags are ignored. Pinning or describing a snapshot rewrites its file under the
+same id while holding a shared lock, and never recreates a snapshot that was removed.
+
 ## Locks
 
 Every run that reads or writes snapshot data holds a lock file. The lock id is 32 random bytes;

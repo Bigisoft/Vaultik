@@ -1,5 +1,8 @@
 #include "vaultik/model/snapshot.hpp"
 
+#include <cstdlib>
+#include <string_view>
+
 namespace vaultik {
 
 namespace {
@@ -8,7 +11,60 @@ constexpr std::uint32_t kSnapshotVersion = 1;
 
 }  // namespace
 
+namespace {
+
+constexpr std::string_view kPinnedTag = "vaultik:pinned";
+constexpr std::string_view kNoteTag = "vaultik:note=";
+constexpr std::string_view kChangesTag = "vaultik:changes=";
+
+// The user's tags plus the reserved ones that carry the newer fields.
+std::vector<std::string> all_tags(const Snapshot& s) {
+    std::vector<std::string> tags;
+    for (const std::string& t : s.tags)
+        if (!t.starts_with(kReservedTagPrefix)) tags.push_back(t);
+    if (s.pinned) tags.emplace_back(kPinnedTag);
+    if (!s.note.empty()) tags.push_back(std::string(kNoteTag) + s.note);
+    if (s.stats.changes_known) {
+        tags.push_back(std::string(kChangesTag) + std::to_string(s.stats.files_new) + "," +
+                       std::to_string(s.stats.files_changed) + "," + std::to_string(s.stats.items_removed));
+    }
+    return tags;
+}
+
+void read_reserved(Snapshot& s, const std::string& tag) {
+    if (tag == kPinnedTag) {
+        s.pinned = true;
+    } else if (tag.starts_with(kNoteTag)) {
+        s.note = tag.substr(kNoteTag.size());
+    } else if (tag.starts_with(kChangesTag)) {
+        // "<new>,<changed>,<removed>"
+        const char* p = tag.c_str() + kChangesTag.size();
+        std::uint64_t v[3] = {0, 0, 0};
+        int got = 0;
+        for (; got < 3; ++got) {
+            char* end = nullptr;
+            v[got] = std::strtoull(p, &end, 10);
+            if (end == p) break;
+            p = end;
+            if (got < 2) {
+                if (*p != ',') break;
+                ++p;
+            }
+        }
+        if (got == 3 && *p == '\0') {
+            s.stats.changes_known = true;
+            s.stats.files_new = v[0];
+            s.stats.files_changed = v[1];
+            s.stats.items_removed = v[2];
+        }
+    }
+    // Unknown reserved tags come from a newer version: ignored.
+}
+
+}  // namespace
+
 Bytes serialize_snapshot(const Snapshot& s) {
+    const std::vector<std::string> tags = all_tags(s);
     ByteWriter w;
     w.u32(kSnapshotVersion);
     w.u64(s.time);
@@ -19,8 +75,8 @@ Bytes serialize_snapshot(const Snapshot& s) {
     w.raw(s.tree);
     w.u8(s.parent ? 1 : 0);
     if (s.parent) w.raw(*s.parent);
-    w.varint(s.tags.size());
-    for (const auto& t : s.tags) w.str(t);
+    w.varint(tags.size());
+    for (const auto& t : tags) w.str(t);
     w.varint(s.stats.files);
     w.varint(s.stats.dirs);
     w.varint(s.stats.bytes);
@@ -49,7 +105,11 @@ Snapshot parse_snapshot(ByteSpan data) {
         s.parent = parent;
     }
     const std::size_t tags = r.count(1);
-    for (std::size_t i = 0; i < tags; ++i) s.tags.push_back(r.str());
+    for (std::size_t i = 0; i < tags; ++i) {
+        std::string tag = r.str();
+        if (tag.starts_with(kReservedTagPrefix)) read_reserved(s, tag);
+        else s.tags.push_back(std::move(tag));
+    }
     s.stats.files = r.varint();
     s.stats.dirs = r.varint();
     s.stats.bytes = r.varint();

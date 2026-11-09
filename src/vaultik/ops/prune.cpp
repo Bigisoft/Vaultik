@@ -1,6 +1,7 @@
 #include "vaultik/ops/prune.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -71,7 +72,14 @@ std::string describe(const RetentionPolicy& p) {
     add(p.weekly, "weekly");
     add(p.monthly, "monthly");
     add(p.yearly, "yearly");
-    return s.empty() ? "keep all" : s;
+    if (p.within_days > 0) s += (s.empty() ? "" : ", ") + std::string("all from the last ") + std::to_string(p.within_days) + " days";
+    if (s.empty()) s = "keep all";
+    if (p.max_bytes > 0) {
+        char buf[48];
+        std::snprintf(buf, sizeof buf, ", under %.1f GB", static_cast<double>(p.max_bytes) / 1e9);
+        s += buf;
+    }
+    return s;
 }
 
 std::vector<ForgetDecision> plan_forget(std::vector<SnapshotRecord> snapshots, const RetentionPolicy& policy) {
@@ -99,6 +107,22 @@ std::vector<ForgetDecision> plan_forget(std::vector<SnapshotRecord> snapshots, c
         for (const SnapshotRecord& e : group) periods.push_back(periods_of(e.snapshot.time));
 
         std::vector<ForgetDecision> decisions(group.size());
+        const auto keep = [&](std::size_t i, const char* why) {
+            decisions[i].keep = true;
+            decisions[i].reason += (decisions[i].reason.empty() ? "" : ", ") + std::string(why);
+        };
+        for (std::size_t i = 0; i < group.size(); ++i) {
+            if (group[i].snapshot.pinned) keep(i, "pinned");
+            if (policy.no_rules()) keep(i, "kept");  // only a size limit applies
+        }
+        if (policy.within_days > 0) {
+            constexpr std::uint64_t kTicksPerDay = 864000000000ull;  // FILETIME ticks
+            const std::uint64_t now = os::now();
+            const std::uint64_t span = static_cast<std::uint64_t>(policy.within_days) * kTicksPerDay;
+            const std::uint64_t cutoff = now > span ? now - span : 0;
+            for (std::size_t i = 0; i < group.size(); ++i)
+                if (group[i].snapshot.time >= cutoff) keep(i, "recent");
+        }
         for (const Rule& rule : rules) {
             if (rule.count <= 0) continue;
             int kept = 0;
@@ -110,8 +134,7 @@ std::vector<ForgetDecision> plan_forget(std::vector<SnapshotRecord> snapshots, c
                 first = false;
                 last_bucket = bucket;
                 ++kept;
-                decisions[i].keep = true;
-                decisions[i].reason += (decisions[i].reason.empty() ? "" : ", ") + std::string(rule.name);
+                keep(i, rule.name);
             }
         }
         for (std::size_t i = 0; i < group.size(); ++i) {
@@ -123,7 +146,24 @@ std::vector<ForgetDecision> plan_forget(std::vector<SnapshotRecord> snapshots, c
 }
 
 ForgetResult run_forget(Repository& repo, const ForgetOptions& options) {
-    if (options.policy.empty())
+    if (!options.ids.empty()) {
+        // Exactly these snapshots: check them all before removing any.
+        ForgetResult result;
+        for (const Id& id : options.ids) {
+            ForgetDecision d;
+            d.entry.id = id;
+            d.entry.snapshot = repo.load_snapshot(id);  // throws for a missing one
+            if (d.entry.snapshot.pinned && !options.force)
+                throw Error("snapshot " + short_hex(id) + " is pinned; unpin it first (or use --force)");
+            result.decisions.push_back(std::move(d));
+        }
+        for (const ForgetDecision& d : result.decisions) {
+            if (!options.dry_run) repo.backend().remove(Repository::snapshot_name(d.entry.id));
+            ++result.removed;
+        }
+        return result;
+    }
+    if (options.policy.no_rules())
         throw Error("no retention rule given (for example --keep-daily 7); refusing to remove every snapshot");
     std::vector<SnapshotRecord> candidates;
     for (const Id& id : repo.list_snapshot_ids()) {
@@ -148,6 +188,114 @@ ForgetResult run_forget(Repository& repo, const ForgetOptions& options) {
         ++result.removed;
     }
     return result;
+}
+
+std::vector<SnapshotRecord> load_snapshot_records(Repository& repo) {
+    std::vector<SnapshotRecord> out;
+    for (const Id& id : repo.list_snapshot_ids()) {
+        SnapshotRecord e;
+        e.id = id;
+        try {
+            e.snapshot = repo.load_snapshot(id);
+        } catch (const Error&) {
+            continue;  // verify reports unreadable snapshots
+        }
+        out.push_back(std::move(e));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const SnapshotRecord& a, const SnapshotRecord& b) { return a.snapshot.time > b.snapshot.time; });
+    return out;
+}
+
+namespace {
+
+// Stored bytes of every blob the given snapshots use (folder listings and file data), each blob
+// counted once. Listings shared between snapshots are read once.
+std::uint64_t used_bytes(Repository& repo, const std::vector<const Snapshot*>& snapshots) {
+    std::unordered_set<Id, IdHash> used;
+    std::vector<Id> pending;
+    for (const Snapshot* s : snapshots)
+        if (used.insert(s->tree).second) pending.push_back(s->tree);
+    while (!pending.empty()) {
+        const Id tree_id = pending.back();
+        pending.pop_back();
+        const Tree tree = parse_tree(repo.load_blob(BlobType::Tree, tree_id));
+        for (const Node& n : tree.nodes) {
+            if (n.kind == NodeKind::Dir) {
+                if (used.insert(n.subtree).second) pending.push_back(n.subtree);
+            } else if (n.kind == NodeKind::File) {
+                used.insert(n.content.begin(), n.content.end());
+            }
+        }
+    }
+    std::uint64_t total = 0;
+    for (const Id& id : used)
+        if (const BlobLocation* loc = repo.index().find(id)) total += loc->length;
+    return total;
+}
+
+}  // namespace
+
+SizePlan plan_size_limit(Repository& repo, const std::vector<SnapshotRecord>& all, const std::string& tag,
+                         std::uint64_t max_bytes) {
+    SizePlan plan;
+    // The job's snapshots, newest first; the newest and pinned ones always stay.
+    std::vector<const SnapshotRecord*> group;
+    for (const SnapshotRecord& r : all)
+        if (std::find(r.snapshot.tags.begin(), r.snapshot.tags.end(), tag) != r.snapshot.tags.end()) group.push_back(&r);
+    std::sort(group.begin(), group.end(),
+              [](const SnapshotRecord* a, const SnapshotRecord* b) { return a->snapshot.time > b->snapshot.time; });
+    std::vector<const SnapshotRecord*> candidates;  // oldest first
+    for (std::size_t i = group.size(); i-- > 1;)
+        if (!group[i]->snapshot.pinned) candidates.push_back(group[i]);
+
+    // The data used when the `k` oldest candidates are gone.
+    const auto size_without = [&](std::size_t k) {
+        std::vector<const Snapshot*> rest;
+        for (const SnapshotRecord& r : all) {
+            const bool removed = std::find(candidates.begin(), candidates.begin() + static_cast<std::ptrdiff_t>(k), &r) !=
+                                 candidates.begin() + static_cast<std::ptrdiff_t>(k);
+            if (!removed) rest.push_back(&r.snapshot);
+        }
+        return used_bytes(repo, rest);
+    };
+
+    plan.size_before = size_without(0);
+    plan.size_after = plan.size_before;
+    if (max_bytes == 0 || plan.size_before <= max_bytes || candidates.empty()) {
+        plan.fits = plan.size_before <= max_bytes || max_bytes == 0;
+        return plan;
+    }
+    // Fewer snapshots never use more data, so the smallest sufficient k is found by bisection.
+    std::size_t lo = 1;
+    std::size_t hi = candidates.size();
+    std::uint64_t at_hi = size_without(hi);
+    if (at_hi > max_bytes) {
+        plan.fits = false;
+        lo = hi;
+    }
+    while (lo < hi) {
+        const std::size_t mid = lo + (hi - lo) / 2;
+        const std::uint64_t s = size_without(mid);
+        if (s <= max_bytes) {
+            hi = mid;
+            at_hi = s;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    plan.size_after = at_hi;
+    for (std::size_t i = 0; i < lo; ++i) plan.remove.push_back(*candidates[i]);
+    return plan;
+}
+
+std::size_t remove_snapshots(Repository& repo, const std::vector<SnapshotRecord>& snapshots) {
+    std::size_t n = 0;
+    for (const SnapshotRecord& r : snapshots) {
+        repo.backend().remove(Repository::snapshot_name(r.id));
+        ++n;
+    }
+    return n;
 }
 
 PruneResult run_prune(Repository& repo, const PruneOptions& o) {

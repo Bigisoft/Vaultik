@@ -246,6 +246,7 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         warn("skipped " + path + ": " + os::error_message(err));
         return false;
     }
+    const bool is_new = parent == nullptr || parent->kind != NodeKind::File;
 
     progress_.current = path;
     report();
@@ -268,6 +269,8 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         return false;
     }
     node.size = total;  // the file may have changed size since it was listed
+    if (is_new) ++stats_.files_new;
+    else if (node.content != parent->content) ++stats_.files_changed;  // a touched but identical file is not a change
     return true;
 }
 
@@ -334,6 +337,9 @@ Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, c
     }
     if (!reader.ok()) warn("listing " + dir + " stopped early: " + os::error_message(reader.error()));
     tree.sort();
+    if (parent != nullptr)
+        for (const Node& old : parent->nodes)
+            if (tree.find(old.name) == nullptr) ++stats_.items_removed;
     return tree;
 }
 
@@ -419,6 +425,7 @@ BackupResult BackupEngine::run() {
     if (options_.before_save) options_.before_save();
     stats_.stored_bytes = repo_.write_stats().stored_bytes_added - before.stored_bytes_added;
     snap.stats = stats_;
+    snap.stats.changes_known = true;
     report(true);
 
     BackupResult result;

@@ -28,6 +28,7 @@
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/backends.hpp"
+#include "vaultik/ops/history.hpp"
 #include "vaultik/repo/lock.hpp"
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -85,11 +86,14 @@ Commands:
   verify                       Check repository structure and snapshots
       --read-data              Also read and decrypt every stored chunk
   stats                        Repository size and deduplication summary
-  forget                       Remove old snapshots by a keep policy; each rule
-                               keeps the newest snapshot of each of the last N
-                               periods (local time), applied per job, or per
-                               computer and paths for snapshots made without one
+  forget [<snapshot>...]       Remove the given snapshots, or old snapshots by a
+                               keep policy; each rule keeps the newest snapshot of
+                               each of the last N periods (local time), applied
+                               per job, or per computer and paths for snapshots
+                               made without one. Pinned snapshots always stay
+                               (--force removes a pinned one given by ID)
       --keep-last <n>          The n newest snapshots
+      --keep-within <days>     Every snapshot of the last n days, e.g. 30d
       --keep-hourly <n>        One per hour   --keep-daily <n>    One per day
       --keep-weekly <n>        One per week   --keep-monthly <n>  One per month
       --keep-yearly <n>        One per year
@@ -97,6 +101,16 @@ Commands:
                                job:documents
       --prune                  Run prune afterwards
       --dry-run                Only show what would be removed
+  pin <snapshot>               Keep a snapshot whatever the keep policy says
+  unpin <snapshot>             Let the keep policy decide again
+  note <snapshot> [text]       Describe a snapshot ("before Windows update");
+                               no text removes the note
+  history <path>               The versions of a file or folder, e.g.
+                               C/Users/me/report.docx, where it changed (--all:
+                               every snapshot that has it)
+  find <pattern>               Files and folders by name in every snapshot; *
+                               and ? wildcards, any case; without them, names
+                               containing the text
   prune                        Delete data no snapshot uses any more
       --dry-run                Only show what would be deleted
   unlock                       Remove locks left by runs that ended abnormally
@@ -176,10 +190,10 @@ const std::set<std::string> kValueOptions = {
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
-    "--user", "--from"};
+    "--user", "--from", "--keep-within"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
-                                              "--recovery-key", "--vss-skip-sql", "--admin"};
+                                              "--recovery-key", "--vss-skip-sql", "--admin", "--force"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -411,6 +425,21 @@ RetentionPolicy retention_arg(const Args& a) {
     count("--keep-weekly", p.weekly);
     count("--keep-monthly", p.monthly);
     count("--keep-yearly", p.yearly);
+    if (auto v = a.value("--keep-within")) {
+        // "30" or "30d"
+        std::string days = *v;
+        if (!days.empty() && (days.back() == 'd' || days.back() == 'D')) days.pop_back();
+        int n = -1;
+        try {
+            std::size_t used = 0;
+            n = std::stoi(days, &used);
+            if (used != days.size()) n = -1;
+        } catch (const std::exception&) {
+            n = -1;
+        }
+        if (n < 0) throw Error("invalid value for --keep-within: " + *v + " (a number of days, e.g. 30d)");
+        p.within_days = n;
+    }
     return p;
 }
 
@@ -720,17 +749,34 @@ std::string clean_up(Repository& repo, const jobs::Job& job) {
         // Exclusive, without waiting: if another run is busy, cleaning up can wait for next time.
         RepoLock lock(repo, RepoLock::Mode::Exclusive, "cleanup (job " + job.id + ")");
         if (!g_json) status("Removing old snapshots...");
-        ForgetOptions fo;
-        fo.policy = job.retention;
-        fo.tags = {"job:" + job.id};
-        const ForgetResult fr = run_forget(repo, fo);
+        std::size_t removed = 0;
+        if (!job.retention.no_rules()) {
+            ForgetOptions fo;
+            fo.policy = job.retention;
+            fo.tags = {"job:" + job.id};
+            removed += run_forget(repo, fo).removed;
+        }
+        std::string size_note;
+        if (job.retention.max_bytes > 0) {
+            // The oldest unpinned versions beyond the size limit (never the newest).
+            if (!g_json) status("Checking the size limit...");
+            const SizePlan plan =
+                plan_size_limit(repo, load_snapshot_records(repo), "job:" + job.id, job.retention.max_bytes);
+            removed += remove_snapshots(repo, plan.remove);
+            if (!plan.fits) {
+                size_note = "the backup is " + format_bytes(plan.size_after) + ", over its " +
+                            format_bytes(job.retention.max_bytes) + " limit even with only the newest and pinned versions";
+                warning(size_note);
+            }
+        }
         if (!g_json) clear_status();
-        if (fr.removed == 0) return {};
+        if (removed == 0) return size_note;
         const PruneResult pr = prune_and_report(repo, lock, false);
-        const std::string note = "removed " + std::to_string(fr.removed) + " old snapshot(s), freed " +
-                                 format_bytes(space_freed(pr));
+        std::string note = "removed " + std::to_string(removed) + " old snapshot(s), freed " +
+                           format_bytes(space_freed(pr));
+        if (!size_note.empty()) note += "; " + size_note;
         if (g_json) {
-            emit({{"event", "cleanup"}, {"removed", fr.removed}, {"freed", space_freed(pr)}, {"message", note}});
+            emit({{"event", "cleanup"}, {"removed", removed}, {"freed", space_freed(pr)}, {"message", note}});
         } else {
             out("Cleanup: " + note + " (keeping " + describe(job.retention) + ")\n");
         }
@@ -871,9 +917,14 @@ int cmd_forget(const Args& a) {
     fo.policy = retention_arg(a);
     fo.tags = a.all("--tag");
     fo.dry_run = a.has("--dry-run");
-    if (fo.policy.empty()) throw Error("give at least one --keep-... rule; forget never removes every snapshot");
+    fo.force = a.has("--force");
+    if (a.positional.empty() && fo.policy.no_rules())
+        throw Error("give snapshot IDs or at least one --keep-... rule; forget never removes every snapshot");
+    if (!a.positional.empty() && !fo.policy.no_rules())
+        throw Error("give either snapshot IDs or --keep-... rules, not both");
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Exclusive, "forget", lock_wait(a));
+    for (const std::string& ref : a.positional) fo.ids.push_back(resolve_snapshot(*repo, ref).id);
     const ForgetResult fr = run_forget(*repo, fo);
 
     if (g_json) {
@@ -887,7 +938,8 @@ int cmd_forget(const Args& a) {
                 os::format_time_local(d.entry.snapshot.time) + "  " + d.reason + "\n");
         }
         out(std::to_string(fr.removed) + " of " + std::to_string(fr.decisions.size()) + " snapshot(s) " +
-            (fo.dry_run ? "would be removed" : "removed") + " (keeping " + describe(fo.policy) + ")\n");
+            (fo.dry_run ? "would be removed" : "removed") +
+            (fo.ids.empty() ? " (keeping " + describe(fo.policy) + ")" : std::string()) + "\n");
     }
     if (a.has("--prune") && fr.removed > 0 && !fo.dry_run) {
         const PruneResult pr = prune_and_report(*repo, lock, false);
@@ -1023,6 +1075,107 @@ int cmd_key(const Args& a) {
     return kExitOk;
 }
 
+// pin / unpin <snapshot>: a pinned snapshot is never removed by retention or a size limit.
+int cmd_pin(const Args& a, bool pin) {
+    if (a.positional.size() != 1) throw Error(std::string("usage: vaultik ") + (pin ? "pin" : "unpin") + " -r <repo> <snapshot>");
+    auto repo = open_repo(a);
+    // Shared: a forget (exclusive) cannot remove the snapshot while it is rewritten.
+    RepoLock lock(*repo, RepoLock::Mode::Shared, pin ? "pin" : "unpin", lock_wait(a));
+    SnapshotRef ref = resolve_snapshot(*repo, a.positional[0]);
+    ref.snapshot.pinned = pin;
+    repo->update_snapshot(ref.id, ref.snapshot);
+    out("Snapshot " + short_id(ref.id) + (pin ? " is pinned: it stays until it is unpinned.\n" : " is no longer pinned.\n"));
+    return kExitOk;
+}
+
+// note <snapshot> [text...]: describes a snapshot; no text removes the note.
+int cmd_note(const Args& a) {
+    if (a.positional.empty()) throw Error("usage: vaultik note -r <repo> <snapshot> [text]");
+    std::string text;
+    for (std::size_t i = 1; i < a.positional.size(); ++i) text += (i > 1 ? " " : "") + a.positional[i];
+    for (char& c : text)
+        if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+    if (text.size() > 500) throw Error("a note can be at most 500 characters");
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "note", lock_wait(a));
+    SnapshotRef ref = resolve_snapshot(*repo, a.positional[0]);
+    ref.snapshot.note = text;
+    repo->update_snapshot(ref.id, ref.snapshot);
+    out(text.empty() ? "Note removed from snapshot " + short_id(ref.id) + ".\n"
+                     : "Snapshot " + short_id(ref.id) + ": \"" + text + "\"\n");
+    return kExitOk;
+}
+
+// history <path>: the versions of one file or folder (only those where it changed, unless --all).
+int cmd_history(const Args& a) {
+    if (a.positional.size() != 1) throw Error("usage: vaultik history -r <repo> <path>   e.g. C/Users/me/report.docx");
+    std::string path = a.positional[0];
+    std::replace(path.begin(), path.end(), '\\', '/');
+    auto repo = open_repo(a);
+    const std::vector<SnapshotRecord> snaps = load_snapshot_records(*repo);
+    const std::vector<ItemVersion> versions = item_history(*repo, snaps, path);
+    const bool all = a.has("--all");
+    if (g_json) {
+        nlohmann::json list = nlohmann::json::array();
+        for (const ItemVersion& v : versions) {
+            if (!all && !v.changed) continue;
+            const SnapshotRecord& s = snaps[v.snapshot];
+            list.push_back({{"snapshot", id_hex(s.id)},
+                            {"time", s.snapshot.time},
+                            {"size", v.node.size},
+                            {"modified", v.node.mtime},
+                            {"changed", v.changed}});
+        }
+        emit({{"event", "history"}, {"path", path}, {"versions", list}});
+        return kExitOk;
+    }
+    if (versions.empty()) {
+        out("No snapshot has " + path + "\n");
+        return kExitOk;
+    }
+    out(pad("Snapshot", 10) + pad("Backed up", 21) + pad("Modified", 21) + rpad("Size", 12) + "\n");
+    std::size_t shown = 0;
+    for (const ItemVersion& v : versions) {
+        if (!all && !v.changed) continue;
+        const SnapshotRecord& s = snaps[v.snapshot];
+        out(pad(short_id(s.id), 10) + pad(os::format_time_local(s.snapshot.time), 21) +
+            pad(os::format_time_local(v.node.mtime), 21) + rpad(format_bytes(v.node.size), 12) +
+            (v.changed ? "" : "  (same)") + "\n");
+        ++shown;
+    }
+    out(std::to_string(shown) + " version(s)" + (all ? "" : " where it changed") + ", in " +
+        std::to_string(versions.size()) + " of " + std::to_string(snaps.size()) + " snapshot(s)\n");
+    return kExitOk;
+}
+
+// find <pattern>: files and folders by name in every snapshot.
+int cmd_find(const Args& a) {
+    if (a.positional.size() != 1) throw Error("usage: vaultik find -r <repo> <name or pattern>   e.g. \"budget*.xlsx\"");
+    auto repo = open_repo(a);
+    const std::vector<SnapshotRecord> snaps = load_snapshot_records(*repo);
+    bool truncated = false;
+    const std::vector<FoundItem> items = find_items(*repo, snaps, a.positional[0], 500, &truncated);
+    if (g_json) {
+        nlohmann::json list = nlohmann::json::array();
+        for (const FoundItem& f : items) {
+            list.push_back({{"path", f.path},
+                            {"folder", f.kind == NodeKind::Dir},
+                            {"size", f.size},
+                            {"snapshots", f.snapshots.size()},
+                            {"newest", snaps[f.snapshots.front()].snapshot.time}});
+        }
+        emit({{"event", "find"}, {"items", list}, {"truncated", truncated}});
+        return kExitOk;
+    }
+    for (const FoundItem& f : items) {
+        const std::string newest = os::format_time_local(snaps[f.snapshots.front()].snapshot.time);
+        out((f.kind == NodeKind::Dir ? std::string("d ") : std::string("- ")) + rpad(format_bytes(f.size), 11) + "  " +
+            pad(newest, 20) + pad(std::to_string(f.snapshots.size()) + " snap", 9) + f.path + "\n");
+    }
+    out(std::to_string(items.size()) + " match(es)" + (truncated ? " (more exist; narrow the pattern)" : "") + "\n");
+    return kExitOk;
+}
+
 int cmd_snapshots(const Args& a) {
     auto repo = open_repo(a);
     const auto all = load_all_snapshots(*repo);
@@ -1042,6 +1195,8 @@ int cmd_snapshots(const Args& a) {
             for (std::size_t i = 0; i < s.tags.size(); ++i) line += (i ? "," : "") + s.tags[i];
             line += "]";
         }
+        if (s.pinned) line += "  pinned";
+        if (!s.note.empty()) line += "  \"" + s.note + "\"";
         out(line + "\n");
     }
     out(std::to_string(all.size()) + " snapshot(s)\n");
@@ -1226,6 +1381,11 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "prune") return cmd_prune(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
+    if (a.command == "pin") return cmd_pin(a, true);
+    if (a.command == "unpin") return cmd_pin(a, false);
+    if (a.command == "note") return cmd_note(a);
+    if (a.command == "history") return cmd_history(a);
+    if (a.command == "find") return cmd_find(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }
 

@@ -74,6 +74,9 @@ public:
     void flush();
 
     Id save_snapshot(const Snapshot& snapshot);
+    // Rewrites an existing snapshot (its pin or note). Hold a shared lock, so a forget cannot
+    // remove the snapshot meanwhile; throws Error when it no longer exists.
+    void update_snapshot(const Id& id, const Snapshot& snapshot);
     Snapshot load_snapshot(const Id& id);
     std::vector<Id> list_snapshot_ids();
 

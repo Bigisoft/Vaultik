@@ -134,8 +134,9 @@ void validate(const Job& job) {
     if (job.resources.max_memory != 0 && job.resources.max_memory < kMinMemoryLimit)
         throw Error("memory limit must be at least 128M");
     const RetentionPolicy& k = job.retention;
-    for (const int n : {k.last, k.hourly, k.daily, k.weekly, k.monthly, k.yearly})
+    for (const int n : {k.last, k.hourly, k.daily, k.weekly, k.monthly, k.yearly, k.within_days})
         if (n < 0 || n > 10000) throw Error("retention counts must be between 0 and 10000");
+    if (k.max_bytes != 0 && k.max_bytes < (1ull << 30)) throw Error("a size limit must be at least 1 GB");
 }
 
 std::string to_json(const Job& job) {
@@ -173,7 +174,9 @@ std::string to_json(const Job& job) {
           {"daily", job.retention.daily},
           {"weekly", job.retention.weekly},
           {"monthly", job.retention.monthly},
-          {"yearly", job.retention.yearly}}},
+          {"yearly", job.retention.yearly},
+          {"within_days", job.retention.within_days},
+          {"max_bytes", job.retention.max_bytes}}},
     };
     return j.dump(2) + "\n";
 }
@@ -220,6 +223,8 @@ Job job_from_json(const std::string& text) {
             job.retention.weekly = k.value("weekly", 0);
             job.retention.monthly = k.value("monthly", 0);
             job.retention.yearly = k.value("yearly", 0);
+            job.retention.within_days = k.value("within_days", 0);
+            job.retention.max_bytes = k.value("max_bytes", std::uint64_t{0});
         }
         validate(job);
         return job;

@@ -14,7 +14,11 @@ namespace vaultik {
 
 // How many snapshots to keep. Each rule keeps the newest snapshot of each of the last N hours,
 // days, weeks (Monday to Sunday), months or years that have one, in local time; `last` keeps the
-// N newest. A snapshot kept by any rule stays. All zero means "keep everything".
+// N newest; `within_days` keeps every snapshot of the last N days. A snapshot kept by any rule
+// stays, and a pinned snapshot always stays. No rule means "keep everything".
+//
+// `max_bytes` (jobs only) then removes the oldest unpinned snapshots of the job, never the newest,
+// until the data the remaining snapshots use fits (see plan_size_limit).
 struct RetentionPolicy {
     int last = 0;
     int hourly = 0;
@@ -22,8 +26,14 @@ struct RetentionPolicy {
     int weekly = 0;
     int monthly = 0;
     int yearly = 0;
+    int within_days = 0;
+    std::uint64_t max_bytes = 0;
 
-    bool empty() const { return last <= 0 && hourly <= 0 && daily <= 0 && weekly <= 0 && monthly <= 0 && yearly <= 0; }
+    // No count rule: every snapshot is kept by the rules (a size limit may still remove some).
+    bool no_rules() const {
+        return last <= 0 && hourly <= 0 && daily <= 0 && weekly <= 0 && monthly <= 0 && yearly <= 0 && within_days <= 0;
+    }
+    bool empty() const { return no_rules() && max_bytes == 0; }
     bool operator==(const RetentionPolicy&) const = default;
 };
 
@@ -49,6 +59,9 @@ std::vector<ForgetDecision> plan_forget(std::vector<SnapshotRecord> snapshots, c
 struct ForgetOptions {
     RetentionPolicy policy;
     std::vector<std::string> tags;  // only snapshots carrying all of these tags are considered
+    // Instead of a policy: exactly these snapshots. A pinned one is refused unless `force`.
+    std::vector<Id> ids;
+    bool force = false;
     bool dry_run = false;
 };
 
@@ -59,6 +72,26 @@ struct ForgetResult {
 
 // Throws Error for an empty policy rather than removing everything.
 ForgetResult run_forget(Repository& repo, const ForgetOptions& options);
+
+// All snapshots that can be read, newest first.
+std::vector<SnapshotRecord> load_snapshot_records(Repository& repo);
+
+struct SizePlan {
+    std::vector<SnapshotRecord> remove;  // oldest first
+    std::uint64_t size_before = 0;       // stored bytes the snapshots use now
+    std::uint64_t size_after = 0;        // and after removing `remove`
+    bool fits = true;                    // false: even removing every candidate is not enough
+};
+
+// For a size limit on the snapshots carrying `tag` (a job's "job:<id>"): the fewest oldest of them
+// to remove, never pinned ones and never the newest, so that the data all remaining snapshots in the
+// repository use fits in `max_bytes`. Data shared with other snapshots counts as long as any of them
+// remains. Walks the folder listings a few times (a binary search); reads nothing else.
+SizePlan plan_size_limit(Repository& repo, const std::vector<SnapshotRecord>& all, const std::string& tag,
+                         std::uint64_t max_bytes);
+
+// Removes the given snapshots (after plan_size_limit). Returns how many went.
+std::size_t remove_snapshots(Repository& repo, const std::vector<SnapshotRecord>& snapshots);
 
 struct PruneOptions {
     bool dry_run = false;
