@@ -31,18 +31,22 @@ LocalBackend::LocalBackend(const std::string& root, bool create) : root_(os::abs
 
 void LocalBackend::check_no_links(const std::string& name) const {
     if (!elevated_) return;
+    // Every folder from the top of the drive down to the file's own folder (not the file: a link
+    // there is replaced or deleted itself, not followed). Fails closed: a folder that cannot be
+    // looked at counts as a link. A short window between this check and the write remains.
     constexpr std::uint32_t kReparsePoint = 0x400;  // FILE_ATTRIBUTE_REPARSE_POINT
-    std::string path = root_;
-    std::string rest = name;
-    for (;;) {
+    std::vector<std::string> chain;  // the file's folder up to the drive or share, then top-down
+    for (std::string p = os::parent_of(path_of(name)); !p.empty(); p = os::parent_of(p)) chain.push_back(p);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        const std::string& path = *it;
         os::FileInfo info;
         os::ErrorCode err = 0;
-        if (os::stat(path, info, err) && ((info.attributes & kReparsePoint) != 0 || info.type == os::EntryType::Symlink))
+        if (!os::stat(path, info, err)) {
+            if (os::is_not_found(err)) return;  // not there yet: created as a plain folder
+            throw Error("refusing to write: cannot check " + path + ": " + os::error_message(err));
+        }
+        if ((info.attributes & kReparsePoint) != 0 || info.type != os::EntryType::Dir)
             throw Error("refusing to write through a link in the backup folder: " + path);
-        const std::size_t slash = rest.find('/');
-        if (slash == std::string::npos) return;  // the folders on the way are checked, not the file
-        path = os::join(path, rest.substr(0, slash));
-        rest = rest.substr(slash + 1);
     }
 }
 
