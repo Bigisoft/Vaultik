@@ -197,28 +197,47 @@ void RepoLock::release() {
     }
 }
 
+RepoLock::State RepoLock::probe() {
+    try {
+        return repo_.backend().exists(name_) ? State::Held : State::Gone;
+    } catch (const Error&) {
+        return State::Unknown;
+    }
+}
+
 bool RepoLock::held() {
     if (lost_) return false;
     // A definite answer only: saving a snapshot on a guess could reference data a prune that
     // took over the repository has deleted. A few tries ride out a network hiccup.
     for (int attempt = 0; attempt < 3; ++attempt) {
-        try {
-            if (!repo_.backend().exists(name_)) lost_ = true;
-            return !lost_;
-        } catch (const Error&) {
-            std::this_thread::sleep_for(std::chrono::seconds(2));
+        switch (probe()) {
+            case State::Held: return !lost_;
+            case State::Gone: lost_ = true; return false;
+            case State::Unknown: std::this_thread::sleep_for(std::chrono::seconds(2)); break;
         }
     }
-    return false;  // unknown: not held, as far as saving is concerned (lost_ stays as it was)
+    return false;  // still unknown: not held as far as saving is concerned; the refresh goes on
 }
 
 void RepoLock::refresh_loop() {
     std::unique_lock lock(mu_);
     std::uint64_t last_write = info_.time;
     while (!cv_.wait_for(lock, std::chrono::minutes(1), [this] { return stop_; })) {
-        // Never write back a lock that someone removed: that run may be deleting data now.
-        if (!held()) return;
+        // Never write back a lock that someone removed: that run may be deleting data now. When
+        // the backend cannot answer, keep going: the deadline below stops the run in time.
+        const State state = probe();
+        if (state == State::Gone) {
+            lost_ = true;
+            return;
+        }
         const std::uint64_t now = os::now();
+        if (state == State::Unknown) {
+            if (now - last_write > kLockStaleTicks * 2 / 3) {
+                lost_ = true;
+                return;
+            }
+            continue;
+        }
         if (now - last_write < kLockRefreshTicks) continue;
         info_.time = now;
         try {

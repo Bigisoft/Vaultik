@@ -83,6 +83,9 @@ public:
     bool held();
 
 private:
+    enum class State { Held, Gone, Unknown };
+    // One look at the lock file; Unknown when the backend could not answer.
+    State probe();
     void refresh_loop();
 
     Repository& repo_;
