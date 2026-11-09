@@ -190,6 +190,10 @@ vaultik prune     -r E:\Backups\vaultik
 vaultik jobs
 vaultik run-job   documents
 vaultik check-job documents --full
+vaultik copy      documents
+vaultik diff      --job documents latest
+vaultik estimate  --job documents
+vaultik mount     --job documents latest
 vaultik restore   --job documents latest --target D:\Restore
 vaultik key passwd   -r E:\Backups\vaultik
 vaultik key passwd   -r E:\Backups\vaultik --recovery-key
@@ -285,6 +289,17 @@ so any program can open or copy files from it. Deleting and renaming are refused
 written there reaches the backup. The folder is removed when it is closed (the status bar
 button, Enter in the command, or quitting Vaultik); one left by a killed process is removed by
 the next mount.
+
+### Second copy
+
+A job can name a second copy (General tab): another folder or cloud storage, e.g. a USB drive
+for the backup and cloud storage for the copy. After each backup that saved a version,
+`run-job` copies the new versions there (`vaultik copy <job>` does it on demand): a repository
+of its own, with the job's password, created on first use. The two repositories have their own
+keys, so every chunk is decrypted and stored again under the copy's key; data the copy already
+has is not stored twice, and `<settings>\copies\<job>.map` remembers what was copied so later
+runs read only what is new. The job's keep rules apply to the copy too. A copy is its own entry
+in the history ("copy"), so a failed copy shows in the tray without failing the backup.
 
 ### External drives
 
@@ -426,17 +441,11 @@ Priorities only take effect when something else competes for the resource, so on
    installer whose uninstall also removes the scheduled tasks. Still to come with the Linux port
    (8): an AppImage (portable: runs from the backup drive and on SteamOS) and a Flatpak, put on
    the backup drive next to the Windows programs.
-7. More convenience and security:
-   - A second copy (3-2-1): copy a backup to another destination after each run (USB drive to
-     cloud or back), so one job keeps two independent copies.
-   - A size and time estimate before the first backup.
-   - Compare two versions: files added, changed and removed, with a side-by-side diff for text.
-   - "Restore previous version" in File Explorer's right-click menu, opening the file's history.
-   - Ready-made exclusions: temporary files, browser caches, `node_modules`, Windows clutter and
-     the recycle bin, each one tick.
-   - Pause and resume a long backup, and a slower speed during working hours.
-   - Bulgarian translation of the frontend.
-   - Unlock with Windows Hello or a security key instead of typing the backup password.
+7. More convenience and security (done): a second copy of each backup (3-2-1), a size and time
+   estimate before the first backup, comparing two versions with a side-by-side text diff,
+   "Earlier versions in Vaultik" in File Explorer's right-click menu, ready-made exclusions,
+   pausing a backup and a slower speed during working hours, a Bulgarian translation, and
+   Windows Hello before backups are opened.
 8. Linux port, SteamOS on the Steam Deck first. It starts with an in-depth review of the whole
    codebase once items 4 to 7 are done, so the Windows version is sound before porting. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
