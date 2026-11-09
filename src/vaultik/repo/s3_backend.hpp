@@ -10,6 +10,8 @@
 // ("<folder>/data/ab/ab12..."); S3 replaces objects atomically, so no temporary names are needed.
 // The bucket must exist; Vaultik never creates or deletes buckets.
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -53,6 +55,23 @@ public:
     std::vector<std::string> list(const std::string& dir) override;
     void remove(const std::string& name) override;
 
+    // Whether the bucket has Object Lock turned on (needed for CloudCredentials::lock_days).
+    bool object_lock_enabled();
+
+    // Brings every repository file back as it was at `time` (seconds since 1970) from the bucket's
+    // old versions: removes later delete markers and later versions, or, when a later version is
+    // itself locked, copies the old version over it. Files added after `time` stay. Needs a
+    // bucket with versioning (always on with Object Lock).
+    struct RollbackResult {
+        std::uint64_t files_checked = 0;
+        std::uint64_t restored = 0;    // deleted or overwritten files brought back
+        std::uint64_t unchanged = 0;
+        std::uint64_t newer = 0;       // added after `time`, left alone
+        std::vector<std::string> failed;  // "<file>: <why>"
+    };
+    RollbackResult roll_back(std::int64_t time, bool dry_run,
+                             const std::function<void(const std::string&)>& on_file = {});
+
 private:
     struct Result;
     // Sends a signed request, retrying network failures, throttling and server errors.
@@ -95,6 +114,28 @@ ListPage parse_list(std::string_view xml);
 
 // The text of the first <tag>...</tag> in `xml`, XML entities decoded; empty when absent.
 std::string xml_value(std::string_view xml, std::string_view tag);
+
+// One entry of a ListObjectVersions answer: a version of an object, or a delete marker.
+struct ObjectVersion {
+    std::string key;
+    std::string version_id;
+    std::string last_modified;  // "2026-11-09T20:00:00.000Z"
+    bool delete_marker = false;
+    bool latest = false;
+};
+struct VersionPage {
+    std::vector<ObjectVersion> versions;  // in the server's order: by key, newest first
+    bool truncated = false;
+    std::string next_key_marker;
+    std::string next_version_marker;
+};
+VersionPage parse_versions(std::string_view xml);
+
+// "2026-12-09T20:00:00Z" for a time in seconds since 1970 (UTC).
+std::string iso_time(std::int64_t unix_seconds);
+// The headers that upload `body` with Object Lock in governance mode until `until` (seconds since
+// 1970): the mode, the date, and the Content-MD5 that S3 requires with them.
+std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std::int64_t until);
 
 }  // namespace s3
 

@@ -47,6 +47,9 @@ struct Job {
     // password (JobStore::set_cloud_secret).
     std::string cloud_key_id;
     std::string cloud_region;
+    // S3 only: keep uploaded data locked (Object Lock) for this many days; 0 for none. See
+    // CloudCredentials::lock_days.
+    int cloud_lock_days = 0;
     std::vector<std::string> sources;
     std::vector<std::string> excludes;
     std::vector<std::string> tags;

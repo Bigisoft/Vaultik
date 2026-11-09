@@ -716,7 +716,7 @@ void JobDialog::accept() {
         }
     } catch (const Error& e) {
         QApplication::restoreOverrideCursor();
-        QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        plain_warning(this, windowTitle(), QString::fromUtf8(e.what()));
         return;
     }
     QApplication::restoreOverrideCursor();

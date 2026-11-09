@@ -201,6 +201,10 @@ void validate(const Job& job) {
     if (k.max_bytes != 0 && k.max_bytes < (1ull << 30)) throw Error("a size limit must be at least 1 GB");
     if (job.backup_on_connect && (job.repository_volume.empty() || is_cloud_location(job.repository)))
         throw Error("backing up when the drive is connected needs a destination folder on a local or USB drive");
+    if (job.cloud_lock_days < 0 || job.cloud_lock_days > 3650)
+        throw Error("the lock must be between 0 and 3650 days");
+    if (job.cloud_lock_days > 0 && cloud_kind(job.repository) != CloudKind::S3)
+        throw Error("locking uploaded data needs S3-compatible storage with Object Lock");
     if (job.health.sample_percent < 1 || job.health.sample_percent > 100)
         throw Error("the weekly check must read between 1% and 100% of the data");
 }
@@ -214,6 +218,7 @@ std::string to_json(const Job& job) {
         {"repository", job.repository},
         {"cloud_key_id", job.cloud_key_id},
         {"cloud_region", job.cloud_region},
+        {"cloud_lock_days", job.cloud_lock_days},
         {"sources", job.sources},
         {"excludes", job.excludes},
         {"tags", job.tags},
@@ -263,6 +268,7 @@ Job job_from_json(const std::string& text) {
         job.repository = j.at("repository").get<std::string>();
         job.cloud_key_id = j.value("cloud_key_id", std::string());
         job.cloud_region = j.value("cloud_region", std::string());
+        job.cloud_lock_days = j.value("cloud_lock_days", 0);
         job.sources = strings(j, "sources");
         job.excludes = strings(j, "excludes");
         job.tags = strings(j, "tags");
@@ -563,6 +569,7 @@ std::string JobStore::cloud_secret(const std::string& id) const {
 CloudCredentials JobStore::cloud_credentials(const Job& job) const {
     if (!is_cloud_location(job.repository) || job.id.empty()) return {};
     CloudCredentials c{job.cloud_key_id, cloud_secret(job.id), job.cloud_region};
+    c.lock_days = job.cloud_lock_days;
     // A renewed sign-in token is stored right away, so the next run starts from it.
     c.on_secret_changed = [dir = dir_, id = job.id](const std::string& secret) {
         try {

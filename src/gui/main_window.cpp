@@ -202,13 +202,15 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         const QString alert = ev.value("alert").toString();
         if (!alert.isEmpty()) {
             log_->appendPlainText(tr("WARNING: %1").arg(alert));
-            QMessageBox box(QMessageBox::Warning, tr("Files may be encrypted by ransomware"),
-                            tr("The backup found many files that changed in a way ransomware changes them."),
-                            QMessageBox::Ok, this);
-            box.setInformativeText(alert + "\n\n" +
-                                   tr("If you did not change these files yourself, disconnect the backup drive, do "
-                                      "not trust the newest version, and restore from the pinned one. Old versions "
-                                      "were not removed this time."));
+            // Plain text throughout: the alert names files, and a file name must never become markup.
+            QMessageBox box(QMessageBox::Warning, tr("Files may be encrypted by ransomware"), QString(), QMessageBox::Ok,
+                            this);
+            box.setTextFormat(Qt::PlainText);
+            box.setText(tr("The backup found many files that changed in a way ransomware changes them.") + "\n\n" +
+                        alert + "\n\n" +
+                        tr("If you did not change these files yourself, disconnect the backup drive, do not trust "
+                           "the newest version, and restore from the pinned one. Old versions were not removed "
+                           "this time."));
             box.exec();
         }
         statusBar()->showMessage(msg, 15000);

@@ -90,6 +90,7 @@ CloudCredentials CloudCredentials::from_environment() {
     if (c.secret.empty()) c.secret = os::get_env("AWS_SECRET_ACCESS_KEY");
     c.region = os::get_env("AWS_REGION");
     if (c.region.empty()) c.region = os::get_env("AWS_DEFAULT_REGION");
+    c.lock_days = std::atoi(os::get_env("VAULTIK_S3_LOCK_DAYS").c_str());
     return c;
 }
 

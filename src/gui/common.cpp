@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QEventLoop>
 #include <QLocale>
+#include <QMessageBox>
 #include <QProgressDialog>
 #include <QStringList>
 #include <QThread>
@@ -12,6 +13,13 @@
 
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/platform/os.hpp"
+
+void plain_warning(QWidget* parent, const QString& title, const QString& text) {
+    QMessageBox box(QMessageBox::Warning, title, QString(), QMessageBox::Ok, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(text);
+    box.exec();
+}
 
 QString format_bytes(std::uint64_t bytes) {
     static const char* kUnits[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};

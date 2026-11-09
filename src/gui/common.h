@@ -18,6 +18,11 @@ inline std::string u8(const QString& s) {
     return s.toStdString();
 }
 
+class QWidget;
+// A warning box whose text is shown as plain text, never as markup: for messages that carry file
+// names or text from a server.
+void plain_warning(QWidget* parent, const QString& title, const QString& text);
+
 inline QString qs(const std::string& s) {
     return QString::fromStdString(s);
 }

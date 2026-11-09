@@ -7,6 +7,8 @@
 #include <thread>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/crypto/md5.hpp"
+#include "vaultik/util/base64.hpp"
 #include "vaultik/platform/http.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/hex.hpp"
@@ -183,6 +185,26 @@ std::string xml_value(std::string_view xml, std::string_view tag) {
     return out;
 }
 
+std::string iso_time(std::int64_t unix_seconds) {
+    const std::time_t t = static_cast<std::time_t>(unix_seconds);
+    std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
+}
+
+std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std::int64_t until) {
+    const auto digest = md5(body);
+    return {{"content-md5", base64_encode(ByteSpan(digest.data(), digest.size()))},
+            {"x-amz-object-lock-mode", "GOVERNANCE"},
+            {"x-amz-object-lock-retain-until-date", iso_time(until)}};
+}
+
 ListPage parse_list(std::string_view xml) {
     ListPage page;
     std::size_t pos = 0;
@@ -201,6 +223,33 @@ ListPage parse_list(std::string_view xml) {
     const std::string_view tail = xml.substr(pos);
     page.truncated = xml_value(tail, "IsTruncated") == "true";
     page.next_token = xml_value(tail, "NextContinuationToken");
+    return page;
+}
+
+VersionPage parse_versions(std::string_view xml) {
+    VersionPage page;
+    std::size_t pos = 0;
+    for (;;) {
+        const std::size_t v = xml.find("<Version>", pos);
+        const std::size_t d = xml.find("<DeleteMarker>", pos);
+        if (v == std::string_view::npos && d == std::string_view::npos) break;
+        const bool marker = d < v;
+        const std::size_t a = marker ? d : v;
+        const std::size_t b = xml.find(marker ? "</DeleteMarker>" : "</Version>", a);
+        if (b == std::string_view::npos) break;
+        const std::string_view item = xml.substr(a, b - a);
+        ObjectVersion o;
+        o.key = xml_value(item, "Key");
+        o.version_id = xml_value(item, "VersionId");
+        o.last_modified = xml_value(item, "LastModified");
+        o.latest = xml_value(item, "IsLatest") == "true";
+        o.delete_marker = marker;
+        if (!o.key.empty()) page.versions.push_back(std::move(o));
+        pos = b;
+    }
+    page.truncated = xml_value(xml, "IsTruncated") == "true";
+    page.next_key_marker = xml_value(xml, "NextKeyMarker");
+    page.next_version_marker = xml_value(xml, "NextVersionIdMarker");
     return page;
 }
 
@@ -303,9 +352,108 @@ bool S3Backend::exists(const std::string& name) {
 }
 
 void S3Backend::put(const std::string& name, ByteSpan data) {
-    const Result r = request("PUT", key_of(name), {}, {}, data);
+    // Everything but the lock files (which runs remove when they end) is locked, when asked.
+    const bool lock = credentials_.lock_days > 0 && !name.starts_with("locks/");
+    std::vector<std::pair<std::string, std::string>> headers;
+    if (lock) {
+        const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                                     std::chrono::system_clock::now().time_since_epoch())
+                                     .count();
+        headers = s3::lock_headers(data, now + static_cast<std::int64_t>(credentials_.lock_days) * 86400);
+    }
+    const Result r = request("PUT", key_of(name), {}, std::move(headers), data);
+    if (r.status == 400 && lock) {
+        const std::string_view text(reinterpret_cast<const char*>(r.response.body.data()), r.response.body.size());
+        throw Error(location_ + ": uploading " + name + " with a lock failed: " + s3::xml_value(text, "Message") +
+                    " - the bucket needs Object Lock turned on (it can only be chosen when the bucket is created), "
+                    "or turn off locking for this job");
+    }
     if (r.status != 200) refuse(location_, "uploading " + name, r.response);
     throttle_write(data.size());
+}
+
+bool S3Backend::object_lock_enabled() {
+    const Result r = request("GET", {}, "object-lock=", {}, {});
+    if (r.status != 200) {  // ObjectLockConfigurationNotFoundError: the bucket has none
+        const std::string_view text(reinterpret_cast<const char*>(r.response.body.data()), r.response.body.size());
+        if (s3::xml_value(text, "Code").find("ObjectLockConfigurationNotFound") != std::string::npos) return false;
+        refuse(location_, "checking Object Lock", r.response);
+    }
+    const std::string_view text(reinterpret_cast<const char*>(r.response.body.data()), r.response.body.size());
+    return s3::xml_value(text, "ObjectLockEnabled") == "Enabled";
+}
+
+S3Backend::RollbackResult S3Backend::roll_back(std::int64_t time, bool dry_run,
+                                               const std::function<void(const std::string&)>& on_file) {
+    // Every version of every repository file, by key, newest first (the server's order).
+    const std::string root = where_.folder.empty() ? std::string() : where_.folder + "/";
+    std::vector<s3::ObjectVersion> all;
+    std::string key_marker, version_marker;
+    for (;;) {
+        // Query parameters in sorted order, as the signature needs them.
+        std::string query;
+        if (!key_marker.empty()) query += "key-marker=" + s3::uri_encode(key_marker, false) + "&";
+        query += "prefix=" + s3::uri_encode(root, false);
+        if (!version_marker.empty()) query += "&version-id-marker=" + s3::uri_encode(version_marker, false);
+        query += "&versions=";
+        const Result r = request("GET", {}, query, {}, {});
+        if (r.status != 200) refuse(location_, "listing old versions", r.response);
+        const std::string_view text(reinterpret_cast<const char*>(r.response.body.data()), r.response.body.size());
+        s3::VersionPage page = s3::parse_versions(text);
+        for (auto& v : page.versions) all.push_back(std::move(v));
+        if (!page.truncated) break;
+        if (page.next_key_marker.empty() || (page.next_key_marker == key_marker && page.next_version_marker == version_marker))
+            throw Error(location_ + ": the cloud storage sent an incomplete list of old versions");
+        key_marker = page.next_key_marker;
+        version_marker = page.next_version_marker;
+    }
+
+    const std::string at = s3::iso_time(time).substr(0, 19);  // compared with LastModified's first 19
+    const auto later = [&at](const s3::ObjectVersion& v) { return v.last_modified.substr(0, 19) > at; };
+    RollbackResult result;
+    for (std::size_t i = 0; i < all.size();) {
+        std::size_t end = i;
+        while (end < all.size() && all[end].key == all[i].key) ++end;
+        const std::string key = all[i].key;
+        const std::string name = key.substr(std::min(root.size(), key.size()));
+        const std::size_t first = i;
+        i = end;
+        if (name.empty() || name.starts_with("locks/") || key.back() == '/') continue;  // never bring back old locks
+        ++result.files_checked;
+
+        // The version that was current at `time`, and everything after it.
+        std::size_t then = first;
+        while (then < end && later(all[then])) ++then;
+        if (then == end || all[then].delete_marker) {
+            ++result.newer;  // did not exist then
+            continue;
+        }
+        if (then == first) {
+            ++result.unchanged;
+            continue;
+        }
+        if (on_file) on_file(name);
+        if (dry_run) {
+            ++result.restored;
+            continue;
+        }
+        // Remove the later delete markers and versions, newest first; a locked later version
+        // cannot go, so then the old version is copied over it.
+        bool done = true;
+        for (std::size_t k = first; k < then; ++k) {
+            const Result r = request("DELETE", key, "versionId=" + s3::uri_encode(all[k].version_id, false), {}, {});
+            if (r.status == 204 || r.status == 200) continue;
+            done = false;
+            const std::string source = "/" + s3::uri_encode(where_.bucket, false) + "/" + s3::uri_encode(key, true) +
+                                       "?versionId=" + s3::uri_encode(all[then].version_id, false);
+            const Result c = request("PUT", key, {}, {{"x-amz-copy-source", source}}, {});
+            if (c.status == 200) done = true;
+            else result.failed.push_back(name + ": the cloud storage refused (" + std::to_string(c.status) + ")");
+            break;
+        }
+        if (done) ++result.restored;
+    }
+    return result;
 }
 
 Bytes S3Backend::get(const std::string& name) {

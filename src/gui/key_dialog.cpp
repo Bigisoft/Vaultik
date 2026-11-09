@@ -241,7 +241,7 @@ void KeyDialog::change_password() {
         QApplication::restoreOverrideCursor();
         wipe(credential.secret);
         wipe(pw);
-        QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        plain_warning(this, windowTitle(), QString::fromUtf8(e.what()));
         return;
     }
     QStringList updated;
@@ -307,7 +307,7 @@ void KeyDialog::make_recovery_key() {
     } catch (const Error& e) {
         QApplication::restoreOverrideCursor();
         wipe(credential.secret);
-        QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        plain_warning(this, windowTitle(), QString::fromUtf8(e.what()));
         return;
     }
     QApplication::restoreOverrideCursor();
