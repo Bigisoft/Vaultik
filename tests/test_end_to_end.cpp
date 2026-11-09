@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -349,6 +350,35 @@ TEST_CASE("files that look encrypted by ransomware raise the alarm") {
 
     CHECK(byte_entropy(random_data(65536, 1)) > 7.9);
     CHECK(byte_entropy(text(1)) < 5.0);
+}
+
+TEST_CASE("repository files are replaced while another program has them open") {
+    TempDir tmp;
+    LocalBackend backend(u8(tmp.path / "repo"), true);
+    const auto bytes = [](const char* s) { return ByteSpan(reinterpret_cast<const std::uint8_t*>(s), std::strlen(s)); };
+    backend.put("snapshots/ab", bytes("first"));
+    // Another process reading the file keeps it open (shared for reading and deleting, as Vaultik does).
+    os::ErrorCode err = 0;
+    os::File reader = os::File::open_random(u8(tmp.path / "repo" / "snapshots" / "ab"), err);
+    REQUIRE(reader.valid());
+    CHECK_NOTHROW(backend.put("snapshots/ab", bytes("second")));
+    const Bytes now = backend.get("snapshots/ab");
+    CHECK(std::string(now.begin(), now.end()) == "second");
+}
+
+TEST_CASE("a new repository is never created over existing backup data") {
+    TempDir tmp;
+    init_repo(tmp.path / "repo");
+    {
+        auto repo = open_repo(tmp.path / "repo");
+        BackupOptions options;
+        write_file(tmp.path / "src" / "a.txt", random_data(100, 1));
+        options.paths = {u8(tmp.path / "src")};
+        run_backup(*repo, options);
+    }
+    fs::remove(tmp.path / "repo" / "config");  // the config lost, the data still there
+    LocalBackend backend(u8(tmp.path / "repo"));
+    CHECK_THROWS_AS(Repository::init(backend, "another password"), Error);
 }
 
 TEST_CASE("a second copy of a backup") {

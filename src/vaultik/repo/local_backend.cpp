@@ -51,8 +51,15 @@ void LocalBackend::ensure_parent_dirs(const std::string& file_path) {
 }
 
 bool LocalBackend::exists(const std::string& name) {
-    const std::string p = path_of(name);
-    return os::exists(p) && !os::is_directory(p);
+    // Only "not found" means missing: an unreachable share or a refused access must not look
+    // like an empty repository (a second copy would then be created over the old one).
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    if (!os::stat(path_of(name), info, err)) {
+        if (os::is_not_found(err)) return false;
+        os::throw_error("cannot check repository file " + name, err);
+    }
+    return info.type != os::EntryType::Dir;
 }
 
 void LocalBackend::put(const std::string& name, ByteSpan data) {
@@ -118,6 +125,22 @@ Bytes LocalBackend::get(const std::string& name) {
 Bytes LocalBackend::get_range(const std::string& name, std::uint64_t offset, std::size_t length) {
     Bytes out(length);
     if (length == 0) return out;
+    // Only packs (written once, never replaced) keep an open handle. Snapshots, index, lock and
+    // key files are replaced in place, and an open handle on them would make another process's
+    // replace fail on file systems without POSIX renames (FAT, exFAT).
+    if (!name.starts_with("data/")) {
+        os::ErrorCode err = 0;
+        os::File file = os::File::open_random(path_of(name), err);
+        if (!file.valid()) os::throw_error("cannot open repository file " + name, err);
+        try {
+            file.read_at(offset, out.data(), length);
+        } catch (const os::OsError&) {
+            throw;
+        } catch (const Error& e) {
+            throw Error(std::string("repository file ") + name + ": " + e.what());
+        }
+        return out;
+    }
     std::lock_guard lock(mu_);
     OpenFile& f = open_cached(name);
     try {

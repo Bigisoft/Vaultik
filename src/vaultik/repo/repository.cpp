@@ -48,6 +48,13 @@ bool parse_object_name(const std::string& name, const std::string& dir, Id& id) 
 
 void Repository::init(Backend& backend, std::string_view password, const InitOptions& options) {
     if (backend.exists(kConfigName)) throw Error("a repository already exists at " + backend.location());
+    // Data without a config is a damaged or unreachable repository, not an empty place: a new
+    // config (with a new key) would make that data unreadable for good.
+    for (const char* dir : {"data", "index", "snapshots", "keys"}) {
+        if (!backend.list(dir).empty())
+            throw Error(backend.location() + " already holds Vaultik data (" + dir +
+                        ") but no readable config; refusing to create a new repository over it");
+    }
     if (password.empty()) throw Error("the password must not be empty");
     options.chunker.validate();
 

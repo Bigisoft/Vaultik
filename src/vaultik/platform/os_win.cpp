@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 #include "vaultik/util/resources.hpp"
 #include "vaultik/util/win.hpp"
@@ -394,7 +395,25 @@ ErrorCode make_dir(const std::string& path) {
 }
 
 void rename_replace(const std::string& from, const std::string& to) {
-    if (!MoveFileExW(native(from).c_str(), native(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    // POSIX semantics: the target is replaced even while other processes have it open (with
+    // FILE_SHARE_DELETE, as Vaultik and most readers do); MoveFileEx refuses that with access
+    // denied. NTFS supports it; elsewhere (FAT, exFAT, some shares) the plain move follows.
+    const std::wstring target = native(to);
+    HANDLE h = CreateFileW(native(from).c_str(), DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+        const std::size_t name_bytes = target.size() * sizeof(wchar_t);
+        std::vector<std::uint8_t> buffer(sizeof(FILE_RENAME_INFO) + name_bytes);
+        auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+        info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        info->RootDirectory = nullptr;
+        info->FileNameLength = static_cast<DWORD>(name_bytes);
+        std::memcpy(info->FileName, target.data(), name_bytes);
+        const BOOL renamed = SetFileInformationByHandle(h, FileRenameInfoEx, info, static_cast<DWORD>(buffer.size()));
+        CloseHandle(h);
+        if (renamed) return;
+    }
+    if (!MoveFileExW(native(from).c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         throw_last_error("cannot finalize " + to);
 }
 

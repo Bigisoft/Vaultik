@@ -199,12 +199,17 @@ void RepoLock::release() {
 
 bool RepoLock::held() {
     if (lost_) return false;
-    try {
-        if (!repo_.backend().exists(name_)) lost_ = true;
-    } catch (const Error&) {
-        // Cannot tell (for example a network hiccup): the refresh thread keeps checking.
+    // A definite answer only: saving a snapshot on a guess could reference data a prune that
+    // took over the repository has deleted. A few tries ride out a network hiccup.
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        try {
+            if (!repo_.backend().exists(name_)) lost_ = true;
+            return !lost_;
+        } catch (const Error&) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
     }
-    return !lost_;
+    return false;  // unknown: not held, as far as saving is concerned (lost_ stays as it was)
 }
 
 void RepoLock::refresh_loop() {
@@ -220,7 +225,13 @@ void RepoLock::refresh_loop() {
             write_lock(repo_, name_, info_);
             last_write = now;
         } catch (const Error&) {
-            // Try again next minute; the lock only goes stale after many missed refreshes.
+            // Try again next minute; but well before others may judge the lock stale (and take
+            // the repository over), give up on it, so this run stops instead of carrying on
+            // against a repository that is no longer reserved for it.
+            if (now - last_write > kLockStaleTicks * 2 / 3) {
+                lost_ = true;
+                return;
+            }
         }
     }
 }
