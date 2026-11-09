@@ -17,6 +17,10 @@ void random_bytes(std::span<std::uint8_t> out);
 // Overwrites memory in a way the compiler cannot optimize away.
 void secure_wipe(void* data, std::size_t size);
 
+// SHA-256 and HMAC-SHA256 (for signing cloud storage requests).
+Key32 sha256(ByteSpan data);
+Key32 hmac_sha256(ByteSpan key, ByteSpan data);
+
 // PBKDF2-HMAC-SHA256 with a 32-byte output.
 Key32 pbkdf2_sha256(std::string_view password, ByteSpan salt, std::uint32_t iterations);
 

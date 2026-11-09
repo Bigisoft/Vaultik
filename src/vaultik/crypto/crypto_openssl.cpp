@@ -5,6 +5,7 @@
 
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 
 #include <limits>
@@ -48,6 +49,21 @@ void random_bytes(std::span<std::uint8_t> out) {
 
 void secure_wipe(void* data, std::size_t size) {
     OPENSSL_cleanse(data, size);
+}
+
+Key32 sha256(ByteSpan data) {
+    Key32 out{};
+    unsigned int len = 0;
+    check(EVP_Digest(data.data(), data.size(), out.data(), &len, EVP_sha256(), nullptr), "EVP_Digest(SHA256)");
+    return out;
+}
+
+Key32 hmac_sha256(ByteSpan key, ByteSpan data) {
+    Key32 out{};
+    unsigned int len = 0;
+    if (HMAC(EVP_sha256(), key.data(), to_int(key.size()), data.data(), data.size(), out.data(), &len) == nullptr)
+        throw Error("HMAC-SHA256 failed");
+    return out;
 }
 
 Key32 pbkdf2_sha256(std::string_view password, ByteSpan salt, std::uint32_t iterations) {

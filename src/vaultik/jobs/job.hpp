@@ -5,6 +5,7 @@
 // Jobs live in the per-user config directory (config_dir()) as one JSON file each:
 //   jobs/<id>.json        the job definition
 //   secrets/<id>.key      the repository password (DPAPI-encrypted on Windows, mode 0600 elsewhere)
+//   secrets/<id>.cloud    the cloud storage secret key, sealed the same way
 //   history/<id>.jsonl    one line per run, newest last
 
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "vaultik/ops/prune.hpp"
+#include "vaultik/repo/s3_backend.hpp"
 #include "vaultik/util/resources.hpp"
 
 namespace vaultik::jobs {
@@ -29,7 +31,11 @@ struct Schedule {
 struct Job {
     std::string id;    // file-name safe, derived from the name when created
     std::string name;  // shown in the UI
-    std::string repository;
+    std::string repository;  // a folder, or cloud storage "s3:https://<endpoint>/<bucket>[/<folder>]"
+    // Cloud storage: the access key ID and signing region (empty: from the endpoint). The secret
+    // key is stored like the password (JobStore::set_cloud_secret).
+    std::string cloud_key_id;
+    std::string cloud_region;
     std::vector<std::string> sources;
     std::vector<std::string> excludes;
     std::vector<std::string> tags;
@@ -102,6 +108,12 @@ public:
     void set_password(const std::string& id, const std::string& password) const;
     // Empty when no password is stored.
     std::string password(const std::string& id) const;
+
+    // The cloud storage secret key, sealed like the password (secrets/<id>.cloud). Empty when none.
+    void set_cloud_secret(const std::string& id, const std::string& secret) const;
+    std::string cloud_secret(const std::string& id) const;
+    // The job's cloud storage keys (empty for a folder destination).
+    CloudCredentials cloud_credentials(const Job& job) const;
 
     void append_history(const std::string& id, const RunRecord& record) const;
     // Most recent last; at most `limit` records.

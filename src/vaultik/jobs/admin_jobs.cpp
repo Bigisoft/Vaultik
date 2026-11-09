@@ -139,6 +139,11 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
     if (!job || job->id != id) throw Error("there is no saved job \"" + id + "\"");
     if (!job->run_as_admin) throw Error("the job \"" + job->name + "\" is not set to run with administrator rights");
     std::string pw = from.password(id);
+    std::string cloud = from.cloud_secret(id);
+    const auto wipe_all = [&] {
+        secure_wipe(pw.data(), pw.size());
+        secure_wipe(cloud.data(), cloud.size());
+    };
 
     const std::string dir = prepare_admin_store(user_sid);
     const JobStore to(dir);
@@ -149,11 +154,12 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
         } else {
             to.set_password(id, pw);
         }
+        to.set_cloud_secret(id, cloud);
     } catch (...) {
-        secure_wipe(pw.data(), pw.size());
+        wipe_all();
         throw;
     }
-    secure_wipe(pw.data(), pw.size());
+    wipe_all();
 
     // The task XML is written inside the admin store, where nobody else can swap it before
     // schtasks reads it.

@@ -110,6 +110,10 @@ void validate(const Job& job) {
     if (!job.id.empty() && !std::all_of(job.id.begin(), job.id.end(), is_id_char))
         throw Error("invalid job id \"" + job.id + "\"");
     if (job.repository.empty()) throw Error("the job needs a backup destination (repository)");
+    if (is_cloud_location(job.repository)) {
+        parse_s3_location(job.repository);  // throws with what is wrong
+        if (job.cloud_key_id.empty()) throw Error("cloud storage needs an access key ID");
+    }
     if (job.sources.empty()) throw Error("the job needs at least one folder or file to back up");
     for (const std::string& s : job.sources)
         if (s.empty()) throw Error("empty source path");
@@ -133,6 +137,8 @@ std::string to_json(const Job& job) {
         {"id", job.id},
         {"name", job.name},
         {"repository", job.repository},
+        {"cloud_key_id", job.cloud_key_id},
+        {"cloud_region", job.cloud_region},
         {"sources", job.sources},
         {"excludes", job.excludes},
         {"tags", job.tags},
@@ -172,6 +178,8 @@ Job job_from_json(const std::string& text) {
         job.id = j.at("id").get<std::string>();
         job.name = j.at("name").get<std::string>();
         job.repository = j.at("repository").get<std::string>();
+        job.cloud_key_id = j.value("cloud_key_id", std::string());
+        job.cloud_region = j.value("cloud_region", std::string());
         job.sources = strings(j, "sources");
         job.excludes = strings(j, "excludes");
         job.tags = strings(j, "tags");
@@ -306,6 +314,32 @@ std::string secret_path(const std::string& dir, const std::string& id) {
     return os::join(os::join(dir, "secrets"), id + ".key");
 }
 
+std::string cloud_secret_path(const std::string& dir, const std::string& id) {
+    return os::join(os::join(dir, "secrets"), id + ".cloud");
+}
+
+void seal_to(const std::string& path, const std::string& secret) {
+    Bytes sealed = os::protect_secret(bytes_of(secret));
+    os::write_file_atomic(path, sealed, 0600);
+    secure_wipe(sealed.data(), sealed.size());
+}
+
+// Empty when the file does not exist.
+std::string unseal_from(const std::string& path) {
+    Bytes sealed;
+    try {
+        sealed = os::read_file(path, 64 * 1024);
+    } catch (const os::OsError& e) {
+        if (os::is_not_found(e.code())) return {};
+        throw;
+    }
+    Bytes plain = os::unprotect_secret(sealed);
+    std::string out(plain.begin(), plain.end());
+    secure_wipe(plain.data(), plain.size());
+    secure_wipe(sealed.data(), sealed.size());
+    return out;
+}
+
 std::string history_path(const std::string& dir, const std::string& id) {
     return os::join(os::join(dir, "history"), id + ".jsonl");
 }
@@ -371,30 +405,37 @@ void JobStore::remove(const std::string& id) const {
     check_id(id);
     os::remove_file(job_path(dir_, id));
     os::remove_file(secret_path(dir_, id));
+    os::remove_file(cloud_secret_path(dir_, id));
     os::remove_file(history_path(dir_, id));
 }
 
 void JobStore::set_password(const std::string& id, const std::string& password) const {
     check_id(id);
-    Bytes sealed = os::protect_secret(bytes_of(password));
-    os::write_file_atomic(secret_path(dir_, id), sealed, 0600);
-    secure_wipe(sealed.data(), sealed.size());
+    seal_to(secret_path(dir_, id), password);
 }
 
 std::string JobStore::password(const std::string& id) const {
     check_id(id);
-    Bytes sealed;
-    try {
-        sealed = os::read_file(secret_path(dir_, id), 64 * 1024);
-    } catch (const os::OsError& e) {
-        if (os::is_not_found(e.code())) return {};
-        throw;
+    return unseal_from(secret_path(dir_, id));
+}
+
+void JobStore::set_cloud_secret(const std::string& id, const std::string& secret) const {
+    check_id(id);
+    if (secret.empty()) {
+        os::remove_file(cloud_secret_path(dir_, id));
+        return;
     }
-    Bytes plain = os::unprotect_secret(sealed);
-    std::string pw(plain.begin(), plain.end());
-    secure_wipe(plain.data(), plain.size());
-    secure_wipe(sealed.data(), sealed.size());
-    return pw;
+    seal_to(cloud_secret_path(dir_, id), secret);
+}
+
+std::string JobStore::cloud_secret(const std::string& id) const {
+    check_id(id);
+    return unseal_from(cloud_secret_path(dir_, id));
+}
+
+CloudCredentials JobStore::cloud_credentials(const Job& job) const {
+    if (!is_cloud_location(job.repository) || job.id.empty()) return {};
+    return {job.cloud_key_id, cloud_secret(job.id), job.cloud_region};
 }
 
 void JobStore::append_history(const std::string& id, const RunRecord& record) const {

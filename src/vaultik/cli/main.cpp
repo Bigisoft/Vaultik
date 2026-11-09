@@ -27,7 +27,7 @@
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/keys.hpp"
-#include "vaultik/repo/local_backend.hpp"
+#include "vaultik/repo/backends.hpp"
 #include "vaultik/repo/lock.hpp"
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -339,8 +339,19 @@ std::string get_password(const Args& a, bool confirm) {
     return pw;
 }
 
+// Cloud storage keys: a saved job's (with --job), otherwise none, so the environment is used.
+CloudCredentials cloud_credentials(const Args& a) {
+    if (auto job = job_arg(a)) return jobs::JobStore().cloud_credentials(*job);
+    return {};
+}
+
+std::unique_ptr<Backend> backend_for(const Args& a, bool create = false) {
+    const CloudCredentials cloud = cloud_credentials(a);
+    return open_backend(repo_path(a), &cloud, create);
+}
+
 std::unique_ptr<Repository> open_repo(const Args& a) {
-    auto backend = std::make_unique<LocalBackend>(repo_path(a));
+    auto backend = backend_for(a);
     std::string pw = get_password(a, false);
     status("Opening repository...");
     std::unique_ptr<Repository> repo;
@@ -486,12 +497,14 @@ double seconds_since(std::chrono::steady_clock::time_point start) {
 // ---------------------------------------------------------------------------------------------
 
 int cmd_init(const Args& a) {
-    LocalBackend backend(repo_path(a), /*create=*/true);
+    const auto backend_ptr = backend_for(a, /*create=*/true);
+    Backend& backend = *backend_ptr;
     std::string pw = get_password(a, true);
     status("Creating repository...");
     Repository::init(backend, pw);
     const std::string recovery = create_recovery_key(backend, {pw});
     secure_wipe(pw.data(), pw.size());
+    clear_status();
     out("Created repository at " + backend.location() + "\n");
     out("Recovery key: " + recovery + "\n");
     out("Keep the password safe: without it these backups cannot be restored. Write the\n"
@@ -553,9 +566,11 @@ std::unique_ptr<os::ShadowCopy> prepare_shadow_copy(VssMode mode, bool pause_sql
 int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
                       RepoLock& lock, VssMode vss, bool pause_sql_server) {
     // Never back up the repository into itself.
-    const std::string repo_full = os::absolute_path(repo_location);
-    o.excludes.push_back(repo_full);
-    o.excludes.push_back(os::join(repo_full, "*"));
+    if (!is_cloud_location(repo_location)) {
+        const std::string repo_full = os::absolute_path(repo_location);
+        o.excludes.push_back(repo_full);
+        o.excludes.push_back(os::join(repo_full, "*"));
+    }
 
     const auto start = std::chrono::steady_clock::now();
     record.started = os::now();
@@ -806,7 +821,8 @@ int cmd_run_job(const Args& a) {
         status("Opening repository...");
         std::unique_ptr<Repository> repo;
         try {
-            repo = Repository::open(std::make_unique<LocalBackend>(job->repository), pw);
+            const CloudCredentials cloud = store.cloud_credentials(*job);
+            repo = Repository::open(open_backend(job->repository, &cloud), pw);
         } catch (...) {
             secure_wipe(pw.data(), pw.size());
             clear_status();
@@ -935,6 +951,13 @@ Credential key_credential(const Args& a) {
 }
 
 bool same_location(const std::string& a, const std::string& b) {
+    if (is_cloud_location(a) || is_cloud_location(b)) {
+        std::string x = a;
+        std::string y = b;
+        while (!x.empty() && x.back() == '/') x.pop_back();
+        while (!y.empty() && y.back() == '/') y.pop_back();
+        return x == y;
+    }
     std::string x = os::absolute_path(a);
     std::string y = os::absolute_path(b);
 #ifdef _WIN32
@@ -954,7 +977,8 @@ int cmd_key(const Args& a) {
         throw Error("unexpected \"" + a.positional[1] +
                     "\": --recovery-key asks for the key (or reads VAULTIK_RECOVERY_KEY); keep it off the command line");
     const std::string location = repo_path(a);
-    LocalBackend backend(location);
+    const auto backend_ptr = backend_for(a);
+    Backend& backend = *backend_ptr;
     Credential credential = key_credential(a);
 
     if (sub == "recovery") {

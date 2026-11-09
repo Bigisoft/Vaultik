@@ -44,6 +44,22 @@ void secure_wipe(void* data, std::size_t size) {
     SecureZeroMemory(data, size);
 }
 
+Key32 sha256(ByteSpan data) {
+    Key32 out{};
+    check(BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, ptr_or_dummy(data.data()), to_ulong(data.size()),
+                     out.data(), to_ulong(out.size())),
+          "BCryptHash(SHA256)");
+    return out;
+}
+
+Key32 hmac_sha256(ByteSpan key, ByteSpan data) {
+    Key32 out{};
+    check(BCryptHash(BCRYPT_HMAC_SHA256_ALG_HANDLE, ptr_or_dummy(key.data()), to_ulong(key.size()),
+                     ptr_or_dummy(data.data()), to_ulong(data.size()), out.data(), to_ulong(out.size())),
+          "BCryptHash(HMAC-SHA256)");
+    return out;
+}
+
 Key32 pbkdf2_sha256(std::string_view password, ByteSpan salt, std::uint32_t iterations) {
     if (iterations == 0) throw Error("PBKDF2 iteration count must be positive");
     BCRYPT_ALG_HANDLE alg = nullptr;

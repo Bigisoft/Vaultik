@@ -54,6 +54,9 @@ add_library(vaultik_core STATIC
     src/vaultik/platform/os_common.cpp
     src/vaultik/platform/vss.cpp
     src/vaultik/platform/acl.cpp
+    src/vaultik/platform/http.cpp
+    src/vaultik/repo/s3_backend.cpp
+    src/vaultik/repo/backends.cpp
     src/vaultik/jobs/job.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
@@ -73,7 +76,7 @@ if(WIN32)
         /W4 /permissive- /utf-8 /EHsc /Zc:__cplusplus /Zc:preprocessor
         $<$<CONFIG:Release>:/O2 /Gy /Gw>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
-                          bcrypt advapi32 crypt32 ole32 vssapi)
+                          bcrypt advapi32 crypt32 ole32 vssapi winhttp)
 else()
     target_sources(vaultik_core PRIVATE
         src/vaultik/util/resources_posix.cpp
@@ -144,6 +147,7 @@ add_executable(vaultik_tests
     tests/test_jobs.cpp
     tests/test_prune.cpp
     tests/test_keys.cpp
+    tests/test_s3.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 add_test(NAME vaultik_tests COMMAND vaultik_tests)
