@@ -896,12 +896,16 @@ void refresh_drive_copy(const jobs::Job& job) {
         const os::VolumeLocation loc = os::volume_of(job.repository);
         if (loc.volume.empty() || loc.system || !loc.external) return;
         const std::string target = os::join(loc.root, "Vaultik");
-        // Only a real folder and real files there (or none yet): links lead somewhere else.
+        // Only a real folder and real files there (or none yet): links lead somewhere else. Any
+        // reparse point counts as a link, also one whose kind cannot be read (fail closed). What
+        // is left is a race with someone changing the drive during this user's own backup, who
+        // could then only write where this user can anyway.
+        constexpr std::uint32_t kReparsePoint = 0x400;  // FILE_ATTRIBUTE_REPARSE_POINT
         const auto plain = [](const std::string& path, os::EntryType want) {
             os::FileInfo info;
             os::ErrorCode err = 0;
             if (!os::stat(path, info, err)) return os::is_not_found(err);
-            return info.type == want;
+            return info.type == want && (info.attributes & kReparsePoint) == 0;
         };
         const char* const names[] = {"vaultik.exe", "vaultik-gui.exe", "vaultik-task.exe", "portable",
                                      "How to restore.txt", "version"};
