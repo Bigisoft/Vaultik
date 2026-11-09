@@ -255,6 +255,17 @@ to one job. `--dry-run` shows the decision without removing anything. Removing s
 no space by itself: `prune` (or `forget --prune`) then deletes the data no remaining snapshot
 uses, rewriting packs that are mostly unused.
 
+### Browsing a version in File Explorer
+
+"Open in Explorer" on a version (or `vaultik mount --job <job> <version>`) shows it as a
+read-only folder under the settings folder (`browse`), using the Windows Projected File System
+(an optional Windows feature; Vaultik offers to turn it on). Nothing is copied up front: folder
+listings come from the version and a file is read from the backup the first time it is opened,
+so any program can open or copy files from it. Deleting and renaming are refused, and nothing
+written there reaches the backup. The folder is removed when it is closed (the status bar
+button, Enter in the command, or quitting Vaultik); one left by a killed process is removed by
+the next mount.
+
 ### External drives
 
 A job saving to a folder on a drive records the drive's volume ID (`"volume"` in the job
@@ -375,11 +386,9 @@ Priorities only take effect when something else competes for the resource, so on
    (`forget`/`prune`), repository locks, Volume Shadow Copy (done)
 3. Cloud storage: S3-compatible storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2,
    MinIO) and cloud drives (pCloud, OneDrive, Google Drive, MEGA) (done, Windows)
-4. Friendlier versions (done for the timeline, pins, notes, file history, search, cleanup
-   presets, and a start page per job with the last result, next run, size, warnings and a
-   calendar of backup days); still to come:
-   - Browse a version in File Explorer as a folder or drive letter (Windows Projected File
-     System, built into Windows, no third-party driver).
+4. Friendlier versions (done): timeline, pins, notes, file history, search, cleanup presets, a
+   start page per job (last result, next run, size, warnings, a calendar of backup days), and
+   browsing a version in File Explorer (Windows Projected File System).
 5. Knowing backups work, and protecting them (done):
    - Notifications and a tray icon (done).
    - Health checks (done): after a backup, a check reads a sample of the stored data weekly and

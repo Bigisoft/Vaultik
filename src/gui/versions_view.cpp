@@ -49,6 +49,9 @@ QString changes_text(const Snapshot& s) {
 
 VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     restore_ = new QPushButton(tr("Restore..."));
+    explore_ = new QPushButton(tr("Open in Explorer"));
+    explore_->setToolTip(tr("Show this version as a read-only folder in File Explorer; files are read from the "
+                            "backup when you open them"));
     pin_ = new QPushButton(tr("Pin"));
     note_ = new QPushButton(tr("Note..."));
     delete_ = new QPushButton(tr("Delete"));
@@ -59,6 +62,7 @@ VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     auto* actions = new QHBoxLayout;
     actions->setContentsMargins(0, 0, 0, 0);
     actions->addWidget(restore_);
+    actions->addWidget(explore_);
     actions->addWidget(pin_);
     actions->addWidget(note_);
     actions->addStretch();
@@ -103,6 +107,9 @@ VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     connect(restore_, &QPushButton::clicked, this, [this] {
         if (const int i = selected_index(); i >= 0) emit restore_requested(i);
     });
+    connect(explore_, &QPushButton::clicked, this, [this] {
+        if (const int i = selected_index(); i >= 0) emit explore_requested(i);
+    });
     connect(pin_, &QPushButton::clicked, this, [this] {
         if (const int i = selected_index(); i >= 0) emit pin_requested(i, !versions_[static_cast<std::size_t>(i)].snapshot.pinned);
     });
@@ -118,6 +125,7 @@ VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
 
 void VersionsView::refresh_icons() {
     restore_->setIcon(icon(QStringLiteral("arrow_counterclockwise_20_regular")));
+    explore_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
     pin_->setIcon(icon(QStringLiteral("pin_20_regular")));
     note_->setIcon(icon(QStringLiteral("note_20_regular")));
     delete_->setIcon(icon(QStringLiteral("delete_20_regular")));
@@ -219,7 +227,7 @@ int VersionsView::selected_index() const {
 
 void VersionsView::update_buttons() {
     const int i = selected_index();
-    for (QPushButton* b : {restore_, pin_, note_, delete_}) b->setEnabled(i >= 0);
+    for (QPushButton* b : {restore_, explore_, pin_, note_, delete_}) b->setEnabled(i >= 0);
     const bool pinned = i >= 0 && versions_[static_cast<std::size_t>(i)].snapshot.pinned;
     pin_->setText(pinned ? tr("Unpin") : tr("Pin"));
     delete_->setEnabled(i >= 0 && !pinned);
@@ -236,6 +244,8 @@ void VersionsView::context_menu(const QPoint& pos) {
     QMenu menu(this);
     menu.addAction(icon(QStringLiteral("arrow_counterclockwise_20_regular")), tr("Restore..."), this,
                    [this, i] { emit restore_requested(i); });
+    menu.addAction(icon(QStringLiteral("folder_open_20_regular")), tr("Open in Explorer"), this,
+                   [this, i] { emit explore_requested(i); });
     menu.addAction(icon(QStringLiteral("pin_20_regular")), pinned ? tr("Unpin") : tr("Pin"), this,
                    [this, i, pinned] { emit pin_requested(i, !pinned); });
     menu.addAction(icon(QStringLiteral("note_20_regular")), tr("Note..."), this, [this, i] { emit note_requested(i); });

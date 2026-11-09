@@ -31,6 +31,7 @@
 #include "vaultik/repo/backends.hpp"
 #include "vaultik/repo/s3_backend.hpp"
 #include "vaultik/ops/history.hpp"
+#include "vaultik/ops/mount.hpp"
 #include "vaultik/repo/lock.hpp"
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -85,6 +86,11 @@ Commands:
                                after a power cut (SQL Server recovers them)
   snapshots                    List snapshots
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
+  mount <snapshot>             Windows: show a version as a read-only folder for File
+                               Explorer until Enter is pressed (files are read
+                               from the backup when opened)
+      --target <folder>        A new or empty folder to use (default: in the
+                               settings folder, under browse)
   restore <snapshot>           Restore files
       --target <folder>        Where to restore (required)
       --path <path>            Only this file or folder, e.g. C/Users/me/Documents
@@ -259,6 +265,7 @@ Args parse_args(const std::vector<std::string>& argv) {
 
 bool g_json = false;
 std::atomic<bool> g_cancel{false};
+std::atomic<bool> g_stdin_closed{false};  // the program that started this one went away (--json)
 
 // One JSON object per line on stdout; the frontend parses these.
 void emit(const nlohmann::json& event) {
@@ -284,6 +291,7 @@ void start_cancel_watcher() {
                 return;
             }
         }
+        g_stdin_closed = true;
     }).detach();
 }
 
@@ -1020,6 +1028,83 @@ bool backup_running(Repository& repo, const jobs::Job& job) {
     return false;
 }
 
+// Where `mount` puts versions by default: <settings>\browse\<process id>\<name>, so folders left by
+// a mount whose process was killed can be told apart and removed.
+std::string browse_dir() {
+    return os::join(jobs::config_dir(), "browse");
+}
+
+void remove_leftover_mounts() {
+    const std::string base = browse_dir();
+    os::DirReader reader(base);
+    std::string name;
+    os::FileInfo info;
+    std::vector<std::string> stale;
+    while (reader.next(name, info)) {
+        if (info.type != os::EntryType::Dir) continue;
+        const unsigned long pid = std::strtoul(name.c_str(), nullptr, 10);
+        if (pid != 0 && pid != os::process_id() && !os::process_alive(static_cast<std::uint32_t>(pid)))
+            stale.push_back(os::join(base, name));
+    }
+    for (const std::string& dir : stale) {
+        os::DirReader inner(dir);
+        while (inner.next(name, info))
+            if (info.type == os::EntryType::Dir) SnapshotMount::remove_leftover(os::join(dir, name));
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(std::u8string(dir.begin(), dir.end())), ec);
+    }
+}
+
+// "mount <snapshot> [--target <folder>]": shows a version as a read-only folder (File Explorer
+// can browse it) until Enter is pressed, or with --json until "cancel" or the caller goes away.
+int cmd_mount(const Args& a) {
+    if (a.positional.size() != 1) throw Error("usage: vaultik mount -r <repo> <snapshot> [--target <folder>]");
+    if (!SnapshotMount::available()) throw Error(SnapshotMount::how_to_enable());
+    auto repo = open_repo(a);
+    // Shared, like a restore: a prune cannot delete data the folder still shows.
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "browse", lock_wait(a));
+    repo->reload_index();
+    const SnapshotRef ref = resolve_snapshot(*repo, a.positional[0]);
+
+    remove_leftover_mounts();
+    std::string folder;
+    std::string own_dir;
+    if (const auto target = a.value("--target")) {
+        folder = *target;
+    } else {
+        std::string label = job_arg(a) ? job_arg(a)->name : std::string("Backup");
+        label += " " + os::format_time_local(ref.snapshot.time);
+        for (char& c : label)
+            if (c == ':' || c == '/' || c == '\\' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                c = '.';
+        own_dir = os::join(browse_dir(), std::to_string(os::process_id()));
+        folder = os::join(own_dir, label);
+    }
+
+    {
+        SnapshotMount mount(*repo, ref.snapshot, folder);
+        if (g_json) {
+            emit({{"event", "mounted"}, {"folder", mount.folder()}, {"snapshot", id_hex(ref.id)}});
+        } else {
+            out("Version " + short_id(ref.id) + " from " + os::format_time_local(ref.snapshot.time) + " is open at\n  " +
+                mount.folder() + "\nIt is read-only. Press Enter to close it.\n");
+            std::thread([] {
+                std::string line;
+                std::getline(std::cin, line);
+                g_cancel = true;
+            }).detach();
+        }
+        while (!g_cancel && !g_stdin_closed && !lock.lost()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }  // the folder goes here
+    if (!own_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(std::u8string(own_dir.begin(), own_dir.end())), ec);
+    }
+    if (g_json) emit({{"event", "done"}, {"status", "success"}, {"message", "closed"}});
+    else out("Closed.\n");
+    return kExitOk;
+}
+
 // "2026-11-09 20:30" (or with seconds, or only a date) in local time, as seconds since 1970.
 std::int64_t parse_local_time(const std::string& text) {
     int v[6] = {0, 0, 0, 0, 0, 0};
@@ -1678,6 +1763,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
+    if (a.command == "mount") return cmd_mount(a);
     if (a.command == "admin-job") return cmd_admin_job(a);
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);

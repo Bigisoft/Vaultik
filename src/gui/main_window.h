@@ -18,6 +18,7 @@ class QListWidget;
 class QListWidgetItem;
 class QPlainTextEdit;
 class QProgressBar;
+class QProcess;
 class QPushButton;
 class QStackedWidget;
 class QTabWidget;
@@ -133,6 +134,19 @@ private:
     void watch_connect_runs();
     std::vector<ConnectRun> connect_runs_;
     QTimer* connect_timer_ = nullptr;
+
+    // Versions open in File Explorer: one "vaultik mount" process each, closed on request or quit.
+    struct Mount {
+        QProcess* process = nullptr;
+        std::string job;
+        std::string snapshot;  // id (hex)
+        QString folder;        // empty until it is ready
+    };
+    void explore_version(int index);
+    void close_mounts();
+    void update_mounts_button();
+    std::vector<Mount> mounts_;
+    QPushButton* mounts_button_ = nullptr;
 
     Runner* runner_ = nullptr;
     std::string running_job_;

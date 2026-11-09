@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -14,6 +15,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
@@ -33,6 +35,7 @@
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QUrl>
 #include <QVBoxLayout>
 
 #include "cloud_dialog.h"
@@ -256,6 +259,15 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     // drives, so this one needs its native window even while it stays hidden in the tray.
     (void)winId();
     connect(new DriveWatcher(this), &DriveWatcher::connected, this, &MainWindow::drives_connected);
+    // Versions open in Explorer: a button to close them, and they close when Vaultik quits.
+    mounts_button_ = new QPushButton;
+    mounts_button_->setProperty("role", "flat");
+    mounts_button_->setToolTip(tr("Close the versions shown as folders in File Explorer"));
+    connect(mounts_button_, &QPushButton::clicked, this, &MainWindow::close_mounts);
+    statusBar()->addPermanentWidget(mounts_button_);
+    mounts_button_->hide();
+    connect(qApp, &QCoreApplication::aboutToQuit, this, &MainWindow::close_mounts);
+
     connect_timer_ = new QTimer(this);
     connect_timer_->setInterval(3000);
     connect(connect_timer_, &QTimer::timeout, this, &MainWindow::watch_connect_runs);
@@ -389,6 +401,95 @@ void MainWindow::watch_connect_runs() {
         refresh_sidebar();
     }
     if (connect_runs_.empty()) connect_timer_->stop();
+}
+
+void MainWindow::explore_version(int index) {
+    const jobs::Job* job = current_job();
+    if (!job) return;
+    const auto it = repos_.find(job->id);
+    if (it == repos_.end() || index < 0 || index >= static_cast<int>(it->second.snapshots.size())) return;
+    const std::string snapshot = id_hex(it->second.snapshots[static_cast<std::size_t>(index)].id);
+    // Already open: show it again.
+    for (const Mount& m : mounts_) {
+        if (m.job == job->id && m.snapshot == snapshot) {
+            if (!m.folder.isEmpty()) QDesktopServices::openUrl(QUrl::fromLocalFile(m.folder));
+            return;
+        }
+    }
+    auto* process = new QProcess(this);
+    mounts_.push_back({process, job->id, snapshot, QString()});
+    update_mounts_button();
+    statusBar()->showMessage(tr("Opening the version in File Explorer..."), 10000);
+
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, process] {
+        while (process->canReadLine()) {
+            const QJsonObject ev = QJsonDocument::fromJson(process->readLine()).object();
+            if (ev.value("event").toString() != "mounted") continue;
+            for (Mount& m : mounts_) {
+                if (m.process != process) continue;
+                m.folder = ev.value("folder").toString();
+                // A job with one source opens right at it (the version keeps the full path,
+                // "D:\Pictures" as "D\Pictures"); otherwise at the top.
+                QString open = m.folder;
+                for (const jobs::Job& j : jobs_) {
+                    if (j.id != m.job || j.sources.size() != 1) continue;
+                    QString inside = m.folder;
+                    for (const std::string& part : os::path_components(os::absolute_path(j.sources.front())))
+                        inside += QDir::separator() + qs(part);
+                    if (QFileInfo(inside).isDir()) open = inside;
+                }
+                QDesktopServices::openUrl(QUrl::fromLocalFile(open));
+            }
+            statusBar()->clearMessage();
+            update_mounts_button();
+        }
+    });
+    connect(process, &QProcess::finished, this, [this, process] {
+        const auto m = std::find_if(mounts_.begin(), mounts_.end(), [process](const Mount& x) { return x.process == process; });
+        const bool was_open = m != mounts_.end() && !m->folder.isEmpty();
+        if (m != mounts_.end()) mounts_.erase(m);
+        update_mounts_button();
+        const QString error = QString::fromUtf8(process->readAllStandardError()).trimmed().remove(QStringLiteral("error: "));
+        process->deleteLater();
+        if (was_open || error.isEmpty()) return;
+        if (error.contains(QStringLiteral("Projected File System"))) {
+            // An optional Windows feature; turning it on needs administrator approval.
+            const auto answer = QMessageBox::question(
+                this, tr("Open in Explorer"),
+                tr("Showing a version as a folder uses the Windows Projected File System, which is turned off on "
+                   "this computer. Turn it on now? Windows asks for administrator approval."));
+            if (answer != QMessageBox::Yes) return;
+            try {
+                os::run_command_elevated({"powershell.exe", "-NoProfile", "-Command",
+                                          "Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart"});
+                QMessageBox::information(this, tr("Open in Explorer"),
+                                         tr("When Windows has finished, choose Open in Explorer again. If it still "
+                                            "does not work, restart the computer."));
+            } catch (const Error& e) {
+                plain_warning(this, tr("Open in Explorer"), QString::fromUtf8(e.what()));
+            }
+            return;
+        }
+        plain_warning(this, tr("Open in Explorer"), error);
+    });
+    QString program = Runner::engine_path();
+    process->start(program, {QStringLiteral("mount"), QStringLiteral("--job"), qs(job->id), qs(snapshot),
+                             QStringLiteral("--json")});
+}
+
+void MainWindow::close_mounts() {
+    // Each one removes its folder; give them a moment, so nothing is left behind.
+    for (const Mount& m : mounts_) m.process->write("cancel\n");
+    for (const Mount& m : mounts_) m.process->waitForFinished(5000);
+}
+
+void MainWindow::update_mounts_button() {
+    int open = 0;
+    for (const Mount& m : mounts_)
+        if (!m.folder.isEmpty()) ++open;
+    mounts_button_->setVisible(open > 0);
+    mounts_button_->setText(open == 1 ? tr("1 version open in Explorer: Close")
+                                      : tr("%1 versions open in Explorer: Close").arg(open));
 }
 
 void MainWindow::run_job_now(const std::string& id) {
@@ -601,6 +702,7 @@ QWidget* MainWindow::build_job_page() {
     connect(versions_, &VersionsView::pin_requested, this, [this](int i, bool pin) { change_version(i, pin, false); });
     connect(versions_, &VersionsView::note_requested, this, [this](int i) { change_version(i, false, true); });
     connect(versions_, &VersionsView::delete_requested, this, &MainWindow::delete_version);
+    connect(versions_, &VersionsView::explore_requested, this, &MainWindow::explore_version);
     tabs_->addTab(versions_, tr("Versions"));
 
     find_ = new FindPage;

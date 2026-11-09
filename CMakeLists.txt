@@ -79,6 +79,7 @@ if(WIN32)
         src/vaultik/util/resources_win.cpp
         src/vaultik/crypto/crypto_win.cpp
         src/vaultik/platform/os_win.cpp
+        src/vaultik/ops/mount_win.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
@@ -86,12 +87,13 @@ if(WIN32)
         /W4 /permissive- /utf-8 /EHsc /Zc:__cplusplus /Zc:preprocessor
         $<$<CONFIG:Release>:/O2 /Gy /Gw>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
-                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32)
+                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib)
 else()
     target_sources(vaultik_core PRIVATE
         src/vaultik/util/resources_posix.cpp
         src/vaultik/crypto/crypto_openssl.cpp
         src/vaultik/platform/os_posix.cpp
+        src/vaultik/ops/mount_posix.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC _GNU_SOURCE _FILE_OFFSET_BITS=64)
     target_compile_options(vaultik_core PUBLIC -Wall -Wextra -Wpedantic $<$<CONFIG:Release>:-O2>)
@@ -107,6 +109,12 @@ add_executable(vaultik
     $<IF:$<BOOL:${WIN32}>,src/vaultik/cli/console_win.cpp,src/vaultik/cli/console_posix.cpp>
 )
 target_link_libraries(vaultik PRIVATE vaultik_core)
+if(WIN32)
+    # The Projected File System (vaultik mount) is an optional Windows feature: load its DLL only
+    # when a version is browsed, so vaultik still starts where the feature is off.
+    target_link_options(vaultik PRIVATE /DELAYLOAD:ProjectedFSLib.dll)
+    target_link_libraries(vaultik PRIVATE delayimp)
+endif()
 if(WIN32)
     target_link_options(vaultik PRIVATE $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>)
 
