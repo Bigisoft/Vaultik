@@ -446,8 +446,8 @@ Priorities only take effect when something else competes for the resource, so on
    "Earlier versions in Vaultik" in File Explorer's right-click menu, ready-made exclusions,
    pausing a backup and a slower speed during working hours, a Bulgarian translation, and
    Windows Hello before backups are opened.
-8. Linux port, SteamOS on the Steam Deck first. It starts with an in-depth review of the whole
-   codebase once items 4 to 7 are done, so the Windows version is sound before porting. Then: build and test the existing POSIX platform layer,
+8. Linux port, SteamOS on the Steam Deck first. The review before it is done; its Linux hazards
+   are listed in docs/LINUX_PORT.md. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
    and the browser sign-in are Windows-only so far). Packaged as in 6.
 9. Volume image backup, restore to a volume or `.vhdx`
