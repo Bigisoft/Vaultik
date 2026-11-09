@@ -43,6 +43,10 @@ QDateTime to_datetime(std::uint64_t filetime) {
     return QDateTime::fromMSecsSinceEpoch(ms);
 }
 
+std::uint64_t from_datetime(const QDateTime& dt) {
+    return vaultik::os::kUnixEpochTicks + static_cast<std::uint64_t>(dt.toMSecsSinceEpoch()) * 10000;
+}
+
 QString format_time(std::uint64_t filetime) {
     const QDateTime dt = to_datetime(filetime);
     return dt.isValid() ? dt.toString(QStringLiteral("yyyy-MM-dd HH:mm")) : QStringLiteral("-");

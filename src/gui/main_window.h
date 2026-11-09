@@ -26,6 +26,7 @@ class QTreeWidget;
 class Runner;
 class Tray;
 class VersionsView;
+class OverviewView;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -59,6 +60,8 @@ private:
     const vaultik::jobs::Job* current_job() const;
     void show_job();
     void refresh_history();
+    // The start page, from the job's history and schedule and, once open, its repository.
+    void refresh_overview();
     void load_snapshots(bool force);
     void show_versions();
     void new_job();
@@ -107,6 +110,7 @@ private:
     QLabel* progress_text_ = nullptr;
     QLabel* current_file_ = nullptr;
     QTabWidget* tabs_ = nullptr;
+    OverviewView* overview_ = nullptr;
     VersionsView* versions_ = nullptr;
     FindPage* find_ = nullptr;
     QTreeWidget* history_ = nullptr;

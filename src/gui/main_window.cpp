@@ -28,6 +28,7 @@
 #include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStorageInfo>
 #include <QTabWidget>
 #include <QTimer>
 #include <QToolButton>
@@ -41,6 +42,7 @@
 #include "job_card.h"
 #include "job_dialog.h"
 #include "key_dialog.h"
+#include "overview.h"
 #include "restore_dialog.h"
 #include "app_settings.h"
 #include "runner.h"
@@ -78,6 +80,35 @@ QString when_text(std::uint64_t filetime) {
     if (dt.date() == today) return QObject::tr("today %1").arg(time);
     if (dt.date() == today.addDays(-1)) return QObject::tr("yesterday %1").arg(time);
     return locale.toString(dt, QStringLiteral("ddd d MMM ")) + time;
+}
+
+// When Task Scheduler starts the job next (local time); invalid for a manual job. Mirrors the
+// triggers in jobs/scheduler.cpp: an hourly job repeats from 2026-01-01 00:<minute>.
+QDateTime next_run(const jobs::Schedule& s, const QDateTime& now) {
+    switch (s.kind) {
+        case jobs::Schedule::Kind::Manual:
+            return {};
+        case jobs::Schedule::Kind::Hourly: {
+            const QDateTime start(QDate(2026, 1, 1), QTime(0, s.minute));
+            const qint64 step = static_cast<qint64>(s.every_hours) * 3600;
+            const qint64 since = start.secsTo(now);
+            if (since < 0 || step <= 0) return start;
+            return start.addSecs((since / step + 1) * step);
+        }
+        case jobs::Schedule::Kind::Daily: {
+            const QDateTime t(now.date(), QTime(s.hour, s.minute));
+            return t > now ? t : t.addDays(1);
+        }
+        case jobs::Schedule::Kind::Weekly:
+            for (int i = 0; i <= 7; ++i) {
+                const QDate day = now.date().addDays(i);
+                if ((s.weekdays & (1u << (day.dayOfWeek() - 1))) == 0) continue;
+                const QDateTime t(day, QTime(s.hour, s.minute));
+                if (t > now) return t;
+            }
+            return {};
+    }
+    return {};
 }
 
 QString location_text(const std::string& repository) {
@@ -560,7 +591,12 @@ QWidget* MainWindow::build_job_page() {
     tabs_ = new QTabWidget;
     tabs_->setDocumentMode(true);
 
+    overview_ = new OverviewView;
+    connect(overview_, &OverviewView::check_requested, this, [this] { check_job(false); });
+    tabs_->addTab(overview_, tr("Overview"));
+
     versions_ = new VersionsView;
+    connect(overview_, &OverviewView::versions_requested, this, [this] { tabs_->setCurrentWidget(versions_); });
     connect(versions_, &VersionsView::restore_requested, this, [this](int i) { open_restore(i); });
     connect(versions_, &VersionsView::pin_requested, this, [this](int i, bool pin) { change_version(i, pin, false); });
     connect(versions_, &VersionsView::note_requested, this, [this](int i) { change_version(i, false, true); });
@@ -743,6 +779,7 @@ void MainWindow::refresh_history() {
                                                                                  : status_text(check->status).toLower());
     }
     status_text_->setText(text + "  ·  " + tr("Schedule: %1").arg(next));
+    refresh_overview();
 }
 
 void MainWindow::load_snapshots(bool force) {
@@ -802,6 +839,116 @@ void MainWindow::show_versions() {
     }
     versions_->set_versions(r.snapshots, leaving, retention_summary(job->retention));
     find_->set_source(r.repo, r.snapshots);
+    refresh_overview();
+}
+
+void MainWindow::refresh_overview() {
+    const jobs::Job* job = current_job();
+    if (!job) return;
+    const auto records = jobs::combined_history(store_, job->id, 500);
+    const jobs::RunRecord* backup = jobs::last_backup(records);
+    const jobs::RunRecord* check = jobs::last_check(records);
+    OverviewData d;
+
+    // Last backup.
+    if (backup) {
+        d.has_backup = true;
+        d.backup_status = backup->status;
+        d.backup_when = when_text(backup->started);
+        d.backup_when[0] = d.backup_when[0].toUpper();
+        if (backup->status == jobs::RunStatus::Failed || backup->status == jobs::RunStatus::Cancelled)
+            d.backup_detail = status_text(backup->status) + (backup->message.empty() ? QString() : ": " + qs(backup->message));
+        else
+            d.backup_detail = tr("%1, %2 new").arg(count_of(backup->files, tr("file"), tr("files")),
+                                                   format_bytes(backup->new_bytes)) +
+                              (backup->status == jobs::RunStatus::Partial
+                                   ? "\n" + tr("%1 could not be read").arg(count_of(backup->errors, tr("item"), tr("items")))
+                                   : QString());
+    }
+
+    // Next backup.
+    const QDateTime next = next_run(job->schedule, QDateTime::currentDateTime());
+    if (next.isValid()) {
+        d.next_run = when_text(from_datetime(next));
+        if (next.date() == QDate::currentDate().addDays(1))
+            d.next_run = tr("tomorrow %1").arg(QLocale().toString(next.time(), QLocale::ShortFormat));
+        d.next_run[0] = d.next_run[0].toUpper();
+        d.next_detail = qs(jobs::describe(job->schedule)) + ", " + tr("if the computer is on (otherwise right after)");
+    } else {
+        d.next_run = tr("When you start it");
+        d.next_detail = tr("This job has no schedule.");
+    }
+    if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
+
+    // Versions and size, once the repository is open.
+    const auto it = repos_.find(job->id);
+    if (it != repos_.end() && !it->second.snapshots.empty()) {
+        const auto& snaps = it->second.snapshots;  // newest first
+        d.versions = count_of(snaps.size(), tr("version"), tr("versions"));
+        d.versions_detail = tr("From %1 to %2").arg(QLocale().toString(to_datetime(snaps.back().snapshot.time).date(), QLocale::ShortFormat),
+                                                    QLocale().toString(to_datetime(snaps.front().snapshot.time).date(), QLocale::ShortFormat));
+        const SnapshotStats& s = snaps.front().snapshot.stats;
+        d.size = tr("Newest: %1 in %2").arg(format_bytes(s.bytes), count_of(s.files, tr("file"), tr("files")));
+        std::uint64_t stored = 0;
+        it->second.repo->index().for_each([&](const Id&, const BlobLocation& loc) { stored += loc.length; });
+        d.size_detail = tr("Stored at the destination: %1").arg(format_bytes(stored));
+    } else if (it != repos_.end()) {
+        d.versions = tr("No versions yet");
+    } else {
+        d.versions = tr("...");
+        d.versions_detail = tr("Opening the backup...");
+    }
+    if (!is_cloud_location(job->repository)) {
+        const QStorageInfo disk(qs(job->repository));
+        if (disk.isValid() && disk.isReady())
+            d.size_detail += (d.size_detail.isEmpty() ? "" : "\n") +
+                             tr("%1 free on %2").arg(format_bytes(static_cast<std::uint64_t>(disk.bytesAvailable())),
+                                                     QDir::toNativeSeparators(disk.rootPath()));
+    }
+
+    // Health check.
+    if (check) {
+        d.has_check = true;
+        d.check_ok = !jobs::found_damage(*check) && check->status != jobs::RunStatus::Failed;
+        d.check_when = (check->kind == jobs::RunKind::FullCheck ? tr("Full check %1") : tr("Checked %1"))
+                           .arg(when_text(check->started));
+        d.check_detail = qs(check->message);
+    }
+
+    // What needs attention, most serious first.
+    const AppSettings settings = AppSettings::load();
+    const int days = overdue_after_days(*job, settings.remind_after_days);
+    const std::uint64_t saved = last_saved(store_, *job);
+    const std::uint64_t now = os::now();
+    constexpr std::uint64_t kDay = 864'000'000'000ull;
+    if (backup && !backup->alert.empty()) {
+        d.warning = tr("The last backup found files that may be encrypted by ransomware: %1").arg(qs(backup->alert));
+    } else if (check && jobs::found_damage(*check)) {
+        d.warning = tr("The last health check found damaged or missing data. Back up again soon, and check the "
+                       "destination drive. %1").arg(qs(check->message));
+    } else if (backup && backup->status == jobs::RunStatus::Failed) {
+        d.warning = tr("The last backup failed: %1").arg(qs(backup->message));
+    } else if (days > 0 && saved > 0 && now > saved && (now - saved) / kDay >= static_cast<std::uint64_t>(days)) {
+        d.warning = tr("No version was saved for %1.").arg(count_of((now - saved) / kDay, tr("day"), tr("days")));
+    }
+
+    // Backup days.
+    for (const jobs::RunRecord& r : records) {
+        if (r.kind != jobs::RunKind::Backup || r.status == jobs::RunStatus::Cancelled) continue;
+        const QDate day = to_datetime(r.started).date();
+        const OverviewData::Day kind = r.status == jobs::RunStatus::Success   ? OverviewData::Day::Saved
+                                       : r.status == jobs::RunStatus::Partial ? OverviewData::Day::Partial
+                                                                              : OverviewData::Day::Failed;
+        auto& cur = d.days[day];
+        // The best result of the day: a saved version beats a failure.
+        if (cur == OverviewData::Day::None || static_cast<int>(kind) < static_cast<int>(cur)) cur = kind;
+    }
+    if (it != repos_.end())  // versions made outside this job's history (e.g. from the command line)
+        for (const SnapshotEntry& e : it->second.snapshots) {
+            auto& cur = d.days[to_datetime(e.snapshot.time).date()];
+            if (cur == OverviewData::Day::None || cur == OverviewData::Day::Failed) cur = OverviewData::Day::Saved;
+        }
+    overview_->set_data(d);
 }
 
 void MainWindow::change_version(int index, bool pin, bool note) {

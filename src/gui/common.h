@@ -36,6 +36,7 @@ QString format_duration(double seconds);
 QString count_of(std::uint64_t n, const QString& one, const QString& many);
 // FILETIME ticks to a local date and time (invalid for 0).
 QDateTime to_datetime(std::uint64_t filetime);
+std::uint64_t from_datetime(const QDateTime& dt);
 
 // Where a snapshot path ("C/Users/me/x.txt") came from on this computer ("C:\Users\me\x.txt"); empty
 // when it has no sensible original location (a whole drive or share).
