@@ -26,8 +26,12 @@ class RestoreDialog : public QDialog {
     Q_OBJECT
 
 public:
+    // A `job` without an id stands for a repository opened by folder (job.repository) and
+    // `password` rather than a saved job.
     RestoreDialog(const vaultik::jobs::Job& job, std::shared_ptr<vaultik::Repository> repo,
-                  std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent = nullptr);
+                  std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent = nullptr,
+                  QString password = {});
+    ~RestoreDialog() override;
 
     void reject() override;
 
@@ -41,6 +45,7 @@ private:
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;
     std::vector<SnapshotEntry> snapshots_;
+    QString password_;
 
     QComboBox* snapshot_ = nullptr;
     QTreeWidget* tree_ = nullptr;

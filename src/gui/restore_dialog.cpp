@@ -55,8 +55,12 @@ QString snapshot_label(const SnapshotEntry& e) {
 }  // namespace
 
 RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> repo,
-                             std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent)
-    : QDialog(parent), job_(job), repo_(std::move(repo)), snapshots_(std::move(snapshots)) {
+                             std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent, QString password)
+    : QDialog(parent),
+      job_(job),
+      repo_(std::move(repo)),
+      snapshots_(std::move(snapshots)),
+      password_(std::move(password)) {
     setWindowTitle(tr("Restore from \"%1\"").arg(qs(job.name)));
     resize(760, 600);
 
@@ -251,7 +255,12 @@ void RestoreDialog::start_restore() {
         }
     }
 
-    QStringList args{"restore", "--job", qs(job_.id), qs(id_hex(snap.id)), "--target", target};
+    QStringList args{"restore"};
+    if (job_.id.empty())
+        args << "--repo" << qs(job_.repository);
+    else
+        args << "--job" << qs(job_.id);
+    args << qs(id_hex(snap.id)) << "--target" << target;
     if (!path.isEmpty()) args << "--path" << path;
     if (overwrite_->isChecked()) args << "--overwrite";
     warnings_ = 0;
@@ -259,7 +268,11 @@ void RestoreDialog::start_restore() {
     restore_->setEnabled(false);
     snapshot_->setEnabled(false);
     status_->setText(tr("Starting..."));
-    runner_->start(args);
+    runner_->start(args, password_);
+}
+
+RestoreDialog::~RestoreDialog() {
+    password_.fill(QChar(0));
 }
 
 void RestoreDialog::reject() {

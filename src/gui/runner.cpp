@@ -27,7 +27,7 @@ bool Runner::running() const {
     return process_ != nullptr && process_->state() != QProcess::NotRunning;
 }
 
-void Runner::start(const QStringList& args) {
+void Runner::start(const QStringList& args, const QString& password) {
     if (running()) return;
     if (process_ != nullptr) process_->deleteLater();
     buffer_.clear();
@@ -47,6 +47,10 @@ void Runner::start(const QStringList& args) {
             emit finished(QStringLiteral("failed"), ev);
         }
     });
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.remove(QStringLiteral("VAULTIK_PASSWORD"));
+    if (!password.isEmpty()) env.insert(QStringLiteral("VAULTIK_PASSWORD"), password);
+    process_->setProcessEnvironment(env);
     process_->start(engine_path(), QStringList(args) << QStringLiteral("--json"));
 }
 

@@ -31,7 +31,7 @@ void RepoHandle::open_async(QObject* context, std::string repository, std::strin
                       [](const SnapshotEntry& a, const SnapshotEntry& b) { return a.snapshot.time > b.snapshot.time; });
             result->repo = std::move(repo);
         } catch (const AuthError&) {
-            result->error = QObject::tr("The stored password does not open this repository.");
+            result->error = QObject::tr("The password does not open this backup.");
         } catch (const std::exception& e) {
             result->error = QString::fromUtf8(e.what());
         }

@@ -44,6 +44,7 @@ private:
     void delete_job();
     void run_job();
     void open_restore(int snapshot_index);
+    void restore_from_folder();
     void set_running(bool running);
 
     vaultik::jobs::JobStore store_;

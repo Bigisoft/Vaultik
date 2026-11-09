@@ -19,7 +19,9 @@ public:
     static QString engine_path();
 
     bool running() const;
-    void start(const QStringList& args);
+    // `password`, when given, reaches the engine as VAULTIK_PASSWORD (for a repository opened
+    // without a saved job).
+    void start(const QStringList& args, const QString& password = {});
     // Asks the engine to stop cleanly; kills it if it has not exited after a grace period.
     void cancel();
 

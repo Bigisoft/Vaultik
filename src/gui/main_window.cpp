@@ -4,6 +4,11 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QDateTime>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QInputDialog>
+#include <QLineEdit>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QJsonObject>
@@ -75,6 +80,10 @@ MainWindow::MainWindow() {
     toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     QAction* add = toolbar->addAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder), tr("New backup job"));
     connect(add, &QAction::triggered, this, &MainWindow::new_job);
+    QAction* open_backup =
+        toolbar->addAction(style()->standardIcon(QStyle::SP_DialogOpenButton), tr("Restore from a backup folder..."));
+    open_backup->setToolTip(tr("Open any Vaultik backup with its password, e.g. one made on another computer"));
+    connect(open_backup, &QAction::triggered, this, &MainWindow::restore_from_folder);
     QAction* refresh = toolbar->addAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Refresh"));
     connect(refresh, &QAction::triggered, this, [this] {
         repos_.clear();
@@ -371,6 +380,42 @@ void MainWindow::load_snapshots(bool force) {
                                repos_[id] = OpenRepo{std::move(repo), std::move(list)};
                                if (cur && cur->id == id) fill(repos_[id].snapshots);
                            });
+}
+
+void MainWindow::restore_from_folder() {
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the backup folder"));
+    if (dir.isEmpty()) return;
+    if (!QFileInfo::exists(QDir(dir).filePath(QStringLiteral("config")))) {
+        QMessageBox::warning(this, windowTitle(), tr("%1 does not hold a Vaultik backup.").arg(QDir::toNativeSeparators(dir)));
+        return;
+    }
+    bool ok = false;
+    QString password = QInputDialog::getText(this, tr("Backup password"),
+                                             tr("Password of the backup in %1:").arg(QDir::toNativeSeparators(dir)),
+                                             QLineEdit::Password, QString(), &ok);
+    if (!ok || password.isEmpty()) return;
+
+    jobs::Job source;
+    source.name = u8(QDir::toNativeSeparators(dir));
+    source.repository = source.name;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    statusBar()->showMessage(tr("Opening the backup..."));
+    RepoHandle::open_async(
+        this, source.repository, u8(password),
+        [this, source, password](std::shared_ptr<Repository> repo, std::vector<SnapshotEntry> list,
+                                 QString error) mutable {
+            QApplication::restoreOverrideCursor();
+            statusBar()->clearMessage();
+            if (!error.isEmpty()) {
+                QMessageBox::warning(this, windowTitle(), error);
+            } else if (list.empty()) {
+                QMessageBox::information(this, windowTitle(), tr("This backup has no snapshots to restore from."));
+            } else {
+                RestoreDialog dialog(source, std::move(repo), std::move(list), 0, this, password);
+                dialog.exec();
+            }
+            password.fill(QChar(0));
+        });
 }
 
 void MainWindow::open_restore(int snapshot_index) {
