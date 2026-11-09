@@ -7,6 +7,7 @@
 
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/ops/backup.hpp"
+#include "vaultik/ops/copy.hpp"
 #include "vaultik/ops/diff.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/verify.hpp"
@@ -348,6 +349,68 @@ TEST_CASE("files that look encrypted by ransomware raise the alarm") {
 
     CHECK(byte_entropy(random_data(65536, 1)) > 7.9);
     CHECK(byte_entropy(text(1)) < 5.0);
+}
+
+TEST_CASE("a second copy of a backup") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path a_dir = tmp.path / "a";
+    const fs::path b_dir = tmp.path / "b";
+    write_file(src / "one.bin", random_data(2u << 20, 31));
+    write_file(src / "sub" / "two.txt", random_data(1000, 32));
+    init_repo(a_dir);
+    init_repo(b_dir);  // its own key: everything is stored again under it
+    auto a = open_repo(a_dir);
+    auto b = open_repo(b_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    options.tags = {"job:docs"};
+    run_backup(*a, options);
+    write_file(src / "sub" / "two.txt", random_data(1200, 33));
+    const BackupResult second = run_backup(*a, options);
+
+    CopyOptions co;
+    co.tags = {"job:docs"};
+    co.map_file = u8(tmp.path / "copy.map");
+    CopyResult r = copy_snapshots(*a, *b, co);
+    CHECK(r.copied == 2);
+    CHECK(r.present == 0);
+    const std::vector<Id> ids = b->list_snapshot_ids();
+    REQUIRE(ids.size() == 2);
+
+    // The newest copy restores the same files, knows its original and its parent.
+    Snapshot newest;
+    for (const Id& id : ids) {
+        const Snapshot s = b->load_snapshot(id);
+        if (s.copy_of && *s.copy_of == second.snapshot_id) newest = s;
+    }
+    REQUIRE(newest.copy_of.has_value());
+    CHECK(newest.parent.has_value());
+    CHECK(newest.tags == std::vector<std::string>{"job:docs"});
+    RestoreOptions ro;
+    ro.target = u8(tmp.path / "out");
+    run_restore(*b, newest, ro);
+    CHECK(snapshot_of_dir(restored_location(tmp.path / "out", src)) == snapshot_of_dir(src));
+    VerifyOptions vo;
+    vo.read_data = true;
+    CHECK(run_verify(*b, vo).errors == 0);
+
+    // Copying again finds both; a new backup copies only what is new.
+    r = copy_snapshots(*a, *b, co);
+    CHECK(r.copied == 0);
+    CHECK(r.present == 2);
+    write_file(src / "three.txt", random_data(500, 34));
+    run_backup(*a, options);
+    r = copy_snapshots(*a, *b, co);
+    CHECK(r.copied == 1);
+    // Only three.txt's chunk and the listings of the folders above it (up to the drive), not the
+    // 2 MB of one.bin again.
+    CHECK(r.bytes < (64u << 10));
+
+    // Other jobs' snapshots are left out.
+    options.tags = {"job:other"};
+    run_backup(*a, options);
+    CHECK(copy_snapshots(*a, *b, co).copied == 0);
 }
 
 TEST_CASE("comparing two versions") {

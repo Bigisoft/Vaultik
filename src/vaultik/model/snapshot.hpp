@@ -41,6 +41,8 @@ struct Snapshot {
     SnapshotStats stats;
     bool pinned = false;  // never removed by retention or a size limit
     std::string note;     // the user's description, e.g. "before Windows update"
+    // In a second copy: the id of the snapshot it was copied from (in the first repository).
+    std::optional<Id> copy_of;
 };
 
 Bytes serialize_snapshot(const Snapshot& s);

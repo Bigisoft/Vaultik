@@ -52,6 +52,7 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/restore.cpp
     src/vaultik/ops/history.cpp
     src/vaultik/ops/diff.cpp
+    src/vaultik/ops/copy.cpp
     src/vaultik/ops/verify.cpp
     src/vaultik/ops/prune.cpp
     src/vaultik/platform/os_common.cpp

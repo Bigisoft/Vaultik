@@ -1,7 +1,10 @@
 #include "vaultik/model/snapshot.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <string_view>
+
+#include "vaultik/util/hex.hpp"
 
 namespace vaultik {
 
@@ -16,6 +19,7 @@ namespace {
 constexpr std::string_view kPinnedTag = "vaultik:pinned";
 constexpr std::string_view kNoteTag = "vaultik:note=";
 constexpr std::string_view kChangesTag = "vaultik:changes=";
+constexpr std::string_view kCopyOfTag = "vaultik:copy-of=";
 
 // The user's tags plus the reserved ones that carry the newer fields.
 std::vector<std::string> all_tags(const Snapshot& s) {
@@ -24,6 +28,7 @@ std::vector<std::string> all_tags(const Snapshot& s) {
         if (!t.starts_with(kReservedTagPrefix)) tags.push_back(t);
     if (s.pinned) tags.emplace_back(kPinnedTag);
     if (!s.note.empty()) tags.push_back(std::string(kNoteTag) + s.note);
+    if (s.copy_of) tags.push_back(std::string(kCopyOfTag) + to_hex(ByteSpan(s.copy_of->data(), s.copy_of->size())));
     if (s.stats.changes_known) {
         tags.push_back(std::string(kChangesTag) + std::to_string(s.stats.files_new) + "," +
                        std::to_string(s.stats.files_changed) + "," + std::to_string(s.stats.items_removed));
@@ -36,6 +41,17 @@ void read_reserved(Snapshot& s, const std::string& tag) {
         s.pinned = true;
     } else if (tag.starts_with(kNoteTag)) {
         s.note = tag.substr(kNoteTag.size());
+    } else if (tag.starts_with(kCopyOfTag)) {
+        try {
+            const Bytes raw = from_hex(tag.substr(kCopyOfTag.size()));
+            if (raw.size() == sizeof(Id)) {
+                Id id{};
+                std::copy(raw.begin(), raw.end(), id.begin());
+                s.copy_of = id;
+            }
+        } catch (const Error&) {
+            // a damaged tag: the snapshot is then simply not known as a copy
+        }
     } else if (tag.starts_with(kChangesTag)) {
         // "<new>,<changed>,<removed>"
         const char* p = tag.c_str() + kChangesTag.size();
