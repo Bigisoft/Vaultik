@@ -53,7 +53,9 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/prune.cpp
     src/vaultik/platform/os_common.cpp
     src/vaultik/platform/vss.cpp
+    src/vaultik/platform/acl.cpp
     src/vaultik/jobs/job.cpp
+    src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
 )
 target_include_directories(vaultik_core PUBLIC src)

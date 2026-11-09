@@ -3,6 +3,8 @@
 #include <cstdio>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/hex.hpp"
 
@@ -136,6 +138,8 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
            "  <Actions Context=\"Author\">\n"
            "    <Exec><Command>" +
            xml_escape(launcher) + "</Command><Arguments>run-job " + xml_escape(job.id) +
+           // An administrator job reads only the admin-only copy of itself (see admin_jobs.hpp).
+           (job.run_as_admin ? " --admin" : "") +
            "</Arguments></Exec>\n"
            "  </Actions>\n"
            "</Task>\n";
@@ -176,13 +180,30 @@ bool task_is_elevated(const std::string& job_id) {
     return xml.find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos;
 }
 
+// Runs "vaultik admin-job <verb> <id> ..." with administrator approval and turns a failure into an
+// Error carrying the message the elevated process left in the admin store.
+void run_admin_step(const std::string& program_dir, const std::string& verb, const std::string& job_id) {
+    const std::string sid = os::current_user_sid();
+    std::vector<std::string> argv = {os::join(program_dir, "vaultik.exe"), "admin-job", verb, job_id, "--user", sid};
+    if (verb == "install") {
+        argv.push_back("--from");
+        argv.push_back(config_dir());
+    }
+    const int code = os::run_command_elevated(argv);
+    if (code == 0) return;
+    std::string message;
+    try {
+        const Bytes text = os::read_file(admin_error_file(sid), 64 * 1024);
+        message = trim(std::string(text.begin(), text.end()));
+    } catch (const Error&) {
+    }
+    if (message.empty()) message = "the administrator step failed (exit code " + std::to_string(code) + ")";
+    throw Error(message);
+}
+
 }  // namespace
 
-void apply_schedule(const Job& job, const std::string& program_dir) {
-    if (job.schedule.kind == Schedule::Kind::Manual) {
-        remove_schedule(job.id);
-        return;
-    }
+int create_task(const Job& job, const std::string& program_dir, const std::string& temp_dir, std::string* output) {
     // schtasks reads task XML as UTF-16 with a byte order mark.
     const std::wstring xml = widen(schedule_definition(job, program_dir));
     Bytes data = {0xFF, 0xFE};
@@ -192,35 +213,51 @@ void apply_schedule(const Job& job, const std::string& program_dir) {
     }
     std::uint8_t rnd[6];
     random_bytes(rnd);
-    const std::string tmp = os::join(config_dir(), "task-" + to_hex(rnd) + ".xml");
+    const std::string tmp = os::join(temp_dir, "task-" + to_hex(rnd) + ".xml");
     os::write_file_atomic(tmp, data);
-    const std::vector<std::string> create = {"schtasks.exe", "/Create", "/TN", task_name(job.id), "/XML", tmp, "/F"};
-    // Replacing a task that runs as administrator needs the rights as well, also when the new one
-    // does not.
-    const bool elevated = job.run_as_admin || task_is_elevated(job.id);
-    std::string output;
     int code = -1;
     try {
-        code = elevated ? os::run_command_elevated(create) : os::run_command(create, &output);
+        code = os::run_command({"schtasks.exe", "/Create", "/TN", task_name(job.id), "/XML", tmp, "/F"}, output);
     } catch (...) {
         os::remove_file(tmp);
         throw;
     }
     os::remove_file(tmp);
-    if (code != 0) {
-        if (elevated) throw Error("Task Scheduler refused the schedule (schtasks exit code " + std::to_string(code) + ")");
-        throw Error("Task Scheduler refused the schedule: " + trim(output));
+    return code;
+}
+
+void delete_task(const std::string& job_id) {
+    std::string ignored;
+    try {
+        os::run_command({"schtasks.exe", "/Delete", "/TN", task_name(job_id), "/F"}, &ignored);
+    } catch (const Error&) {
     }
 }
 
+void apply_schedule(const Job& job, const std::string& program_dir) {
+    if (job.schedule.kind == Schedule::Kind::Manual) {
+        remove_schedule(job.id);
+        return;
+    }
+    if (job.run_as_admin) {
+        // Checked here too, so an unsafe install is reported before Windows asks for approval.
+        check_program_dir(program_dir);
+        run_admin_step(program_dir, "install", job.id);
+        return;
+    }
+    // Replacing an administrator task, or dropping the admin copy of the job, needs the rights.
+    if (task_is_elevated(job.id) || has_admin_copy(job.id)) run_admin_step(program_dir, "remove", job.id);
+    std::string output;
+    if (create_task(job, program_dir, config_dir(), &output) != 0)
+        throw Error("Task Scheduler refused the schedule: " + trim(output));
+}
+
 void remove_schedule(const std::string& job_id) {
-    const std::vector<std::string> remove = {"schtasks.exe", "/Delete", "/TN", task_name(job_id), "/F"};
     try {
-        if (task_is_elevated(job_id)) {
-            os::run_command_elevated(remove);
+        if (task_is_elevated(job_id) || has_admin_copy(job_id)) {
+            run_admin_step(os::parent_of(os::executable_path()), "remove", job_id);
         } else {
-            std::string ignored;
-            os::run_command(remove, &ignored);
+            delete_task(job_id);
         }
     } catch (const Error&) {
     }

@@ -31,6 +31,7 @@
 #include "common.h"
 #include "job_dialog.h"
 #include "key_dialog.h"
+#include "vaultik/jobs/admin_jobs.hpp"
 #include "restore_dialog.h"
 #include "runner.h"
 #include "vaultik/jobs/scheduler.hpp"
@@ -269,7 +270,7 @@ void MainWindow::reload_jobs(const std::string& select_id) {
     for (std::size_t i = 0; i < jobs_.size(); ++i) {
         const jobs::Job& j = jobs_[i];
         auto* item = new QListWidgetItem(qs(j.name) + "\n" + qs(jobs::describe(j.schedule)));
-        const auto h = store_.history(j.id, 1);
+        const auto h = jobs::combined_history(store_, j.id, 1);
         if (!h.empty()) item->setIcon(status_icon(style(), h.back().status));
         list_->addItem(item);
         if (j.id == select_id) select = static_cast<int>(i);
@@ -310,7 +311,7 @@ void MainWindow::show_job() {
 void MainWindow::refresh_history() {
     const jobs::Job* job = current_job();
     if (!job) return;
-    const auto records = store_.history(job->id, 200);
+    const auto records = jobs::combined_history(store_, job->id, 200);
     history_->clear();
     for (auto it = records.rbegin(); it != records.rend(); ++it) {
         const jobs::RunRecord& r = *it;

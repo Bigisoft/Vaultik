@@ -19,7 +19,9 @@
 #include <QVBoxLayout>
 
 #include "common.h"
+#include "runner.h"
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/local_backend.hpp"
 
@@ -198,6 +200,7 @@ void KeyDialog::change_password() {
     }
     QStringList updated;
     QStringList failed;
+    QStringList admin_failed;
     for (const jobs::Job& job : store_.list()) {
         if (!same_location(qs(job.repository), dir)) continue;
         try {
@@ -205,6 +208,15 @@ void KeyDialog::change_password() {
             updated << qs(job.name);
         } catch (const Error&) {
             failed << qs(job.name);
+            continue;
+        }
+        // Scheduled runs of an administrator job read their own copy, which needs approval to update.
+        if (job.run_as_admin && job.schedule.kind != jobs::Schedule::Kind::Manual) {
+            try {
+                jobs::apply_schedule(job, u8(QDir::toNativeSeparators(QFileInfo(Runner::engine_path()).absolutePath())));
+            } catch (const Error&) {
+                admin_failed << qs(job.name);
+            }
         }
     }
     QApplication::restoreOverrideCursor();
@@ -219,6 +231,10 @@ void KeyDialog::change_password() {
     if (!failed.isEmpty())
         text += "\n\n" + tr("Could not update the saved jobs %1; edit them and enter the new password.")
                              .arg(failed.join(", "));
+    if (!admin_failed.isEmpty())
+        text += "\n\n" + tr("Scheduled runs of %1 still use the old password: open the job and save it to "
+                            "update them.")
+                             .arg(admin_failed.join(", "));
     QMessageBox::information(this, windowTitle(), text);
 }
 

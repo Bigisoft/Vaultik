@@ -3,7 +3,10 @@
 #include <filesystem>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/job.hpp"
+#include "vaultik/platform/acl.hpp"
+#include "vaultik/platform/os.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/util/hex.hpp"
 
@@ -120,6 +123,8 @@ TEST_CASE("scheduler definitions") {
     CHECK(xml.find("<RunLevel>LeastPrivilege</RunLevel>") != std::string::npos);
     j.run_as_admin = true;
     CHECK(schedule_definition(j, "C:\\x").find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos);
+    CHECK(schedule_definition(j, "C:\\x").find("--admin</Arguments>") != std::string::npos);
+    CHECK(xml.find("--admin") == std::string::npos);
     j.run_as_admin = false;
     j.schedule.kind = Schedule::Kind::Hourly;
     j.schedule.every_hours = 6;
@@ -179,3 +184,33 @@ TEST_CASE("job store: save, list, find, password, history, remove") {
     CHECK(store.history(a.id).empty());
     CHECK_THROWS_AS(store.remove("../evil"), Error);
 }
+
+#ifdef _WIN32
+TEST_CASE("admin-only checks for jobs with administrator rights") {
+    const std::string program_files = os::get_env("ProgramFiles");
+    REQUIRE(!program_files.empty());
+    std::string why;
+    CHECK_MESSAGE(os::admin_only_chain(program_files, &why), why);
+    CHECK(os::admin_only_chain(os::join(program_files, "Common Files"), &why));
+
+    // A folder the user made: the user can change it, so it is refused, with a reason.
+    TempStore t;
+    fs::create_directories(t.path);
+    why.clear();
+    CHECK_FALSE(os::admin_only(t.dir(), false, &why));
+    CHECK(!why.empty());
+    CHECK_THROWS_AS(check_program_dir(t.dir()), Error);
+
+    CHECK(os::current_user_sid().starts_with("S-1-5-"));
+    CHECK(admin_store_dir().find("\\Vaultik\\admin\\S-1-5-") != std::string::npos);
+
+    // The user's own history alone when the job has no admin copy.
+    const JobStore store(t.dir());
+    Job j = sample();
+    store.save(j);
+    RunRecord r;
+    r.started = 5;
+    store.append_history(j.id, r);
+    CHECK(combined_history(store, j.id).size() == 1);
+}
+#endif

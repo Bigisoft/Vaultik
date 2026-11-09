@@ -228,7 +228,9 @@ QWidget* JobDialog::build_schedule() {
     admin_ = new QCheckBox(tr("Run with administrator rights"));
     form->addRow(QString(), admin_);
     auto* admin_note = new QLabel(tr("Lets scheduled runs back up open and locked files through a shadow copy. "
-                                     "Windows asks for administrator approval each time the job is saved."));
+                                     "Windows asks for administrator approval each time the job is saved. "
+                                     "Vaultik must be installed in a folder only administrators can change, "
+                                     "such as C:\\Program Files\\Vaultik."));
     admin_note->setWordWrap(true);
     admin_note->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(QString(), admin_note);

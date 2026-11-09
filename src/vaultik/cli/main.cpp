@@ -34,6 +34,8 @@
 #include "vaultik/util/resources.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/vss.hpp"
+#include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/platform/acl.hpp"
 
 #ifdef _WIN32
 #include "vaultik/util/win.hpp"
@@ -114,6 +116,8 @@ Commands:
   schedule <job>               Register the job's schedule with the system
                                scheduler (Task Scheduler or a systemd user timer)
   unschedule <job>             Remove it again (the job itself is kept)
+  admin-job install|remove     Used by schedule and the frontend for jobs with
+                               administrator rights (asks for approval)
 
 <snapshot> is an ID prefix (at least 4 characters) or "latest".
 
@@ -171,10 +175,11 @@ const std::set<std::string> kValueOptions = {
     "--repo",     "--tag", "--exclude", "--target",    "--path",       "--password-file",
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
-    "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly"};
+    "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
+    "--user", "--from"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
-                                              "--recovery-key", "--vss-skip-sql"};
+                                              "--recovery-key", "--vss-skip-sql", "--admin"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -671,7 +676,7 @@ int cmd_jobs(const Args& /*a*/) {
     }
     out(pad("ID", 24) + pad("Schedule", 26) + pad("Last run", 30) + "Repository\n");
     for (const auto& j : all) {
-        const auto h = store.history(j.id, 1);
+        const auto h = jobs::combined_history(store, j.id, 1);
         const std::string last =
             h.empty() ? "never" : os::format_time_local(h.back().started) + " " + jobs::to_string(h.back().status);
         out(pad(j.id, 24) + pad(jobs::describe(j.schedule), 26) + pad(last, 30) + j.repository + "\n");
@@ -727,9 +732,63 @@ std::string clean_up(Repository& repo, const jobs::Job& job) {
     }
 }
 
+// The approved step behind saving or removing a job with administrator rights (see
+// admin_jobs.hpp): "admin-job install|remove <id> --user <sid> [--from <config dir>]". Started by
+// the frontend or `schedule` through a Windows approval prompt, without a visible console, so a
+// failure is also written where the caller can read it.
+int cmd_admin_job(const Args& a) {
+    if (a.positional.size() != 2 || !a.value("--user"))
+        throw Error("usage: vaultik admin-job install|remove <job id> --user <account SID> [--from <folder>]");
+    const std::string& verb = a.positional[0];
+    const std::string& id = a.positional[1];
+    const std::string sid = *a.value("--user");
+    std::string error_file;
+    try {
+        error_file = jobs::admin_error_file(sid);
+        // Only in a store that is already protected: elsewhere the file could be a planted link.
+        std::string ignored;
+        if (!os::admin_only(os::parent_of(error_file), false, &ignored)) error_file.clear();
+        if (!error_file.empty()) os::remove_file(error_file);
+    } catch (const Error&) {
+        error_file.clear();
+    }
+    try {
+        if (verb == "install") {
+            const auto from = a.value("--from");
+            if (!from) throw Error("admin-job install needs --from <the account's Vaultik settings folder>");
+            jobs::install_admin_job(jobs::JobStore(*from), id, sid);
+        } else if (verb == "remove") {
+            jobs::remove_admin_job(id, sid);
+        } else {
+            throw Error("admin-job takes install or remove");
+        }
+    } catch (const std::exception& e) {
+        if (error_file.empty()) {
+            try {
+                // The store may have been created (and so protected) during the failed step.
+                std::string ignored;
+                const std::string f = jobs::admin_error_file(sid);
+                if (os::admin_only(os::parent_of(f), false, &ignored)) error_file = f;
+            } catch (const Error&) {
+            }
+        }
+        if (!error_file.empty()) {
+            try {
+                const std::string text = e.what();
+                os::write_file_atomic(error_file, ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+            } catch (const Error&) {
+            }
+        }
+        throw;
+    }
+    return kExitOk;
+}
+
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
-    const jobs::JobStore store;
+    // --admin (the scheduled task of a job with administrator rights): only the admin-only copy of
+    // the job is trusted, never the user's own settings.
+    const jobs::JobStore store = a.has("--admin") ? jobs::open_admin_store() : jobs::JobStore();
     const auto job = store.find(a.positional[0]);
     if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
 
@@ -928,6 +987,10 @@ int cmd_key(const Args& a) {
         try {
             store.set_password(job.id, pw);
             out("Saved job \"" + job.name + "\" uses the new password.\n");
+            // Its scheduled runs read the administrator copy, which needs approval to update.
+            if (job.run_as_admin && job.schedule.kind != jobs::Schedule::Kind::Manual) {
+                jobs::apply_schedule(job, os::parent_of(os::executable_path()));
+            }
         } catch (const Error& e) {
             warning("cannot update the password of job \"" + job.name + "\": " + e.what());
         }
@@ -1120,6 +1183,7 @@ int run(const std::vector<std::string>& argv) {
 
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
+    if (a.command == "admin-job") return cmd_admin_job(a);
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);
 

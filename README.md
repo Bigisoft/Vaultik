@@ -73,7 +73,13 @@ Start `vaultik-gui`, then **New backup job**:
   On Windows a job can also run with administrator rights, so scheduled runs use a shadow copy
   for open and locked files. Windows then asks for administrator approval each time the job (or
   its schedule) is saved or removed. Without the option, the task runs with normal rights and
-  needs no approval.
+  needs no approval. Such a job only works when Vaultik is installed in a folder only
+  administrators can change, such as `C:\Program Files\Vaultik`: the approved step checks this,
+  then copies the job and its password into `C:\ProgramData\Vaultik\admin\<your account>`, which
+  your account can read but only administrators can change. Scheduled runs read only that copy,
+  and refuse to run if its permissions were loosened, so nothing your normal account (or a program
+  running as you) can change decides what an administrator run does. Editing the job in Vaultik
+  and saving it updates the copy; so does changing the password in Vaultik.
 - **Resources:** a priority preset and optional hard limits (see below).
 - **Old backups:** how many backups to keep, for example one per day for 7 days, one per week
   for 4 weeks and one per month for 12 months (the default for new jobs). After each run the
@@ -198,9 +204,9 @@ Priorities only take effect when something else competes for the resource, so on
   a frozen view of each source volume made at the start of the backup. Without those rights, and
   on Linux, files are read live: locked files are skipped with a warning, and a file being
   written during the backup may be captured mid-change. Scheduled jobs get those rights only
-  with the job's "Run with administrator rights" option. Such a task runs the Vaultik programs
-  and reads the job settings from places your normal account can change, so keep Vaultik in a
-  folder only administrators can write to (such as Program Files) when you use it.
+  with the job's "Run with administrator rights" option, which needs Vaultik installed in a
+  folder only administrators can change. The backup destination of such a job is still a folder
+  you can change; keep it on a drive used for backups only.
 - Windows: file content, attributes, creation and modification times are kept. ACLs, alternate
   data streams and symlink/junction targets are not (links are recorded without content).
   Linux: content, permissions, owner (restored when running as root), modification time and
