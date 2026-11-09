@@ -410,6 +410,14 @@ TEST_CASE("ready-made exclusions skip what they say") {
         options.excludes.insert(options.excludes.end(), p.patterns.begin(), p.patterns.end());
     const BackupResult r = run_backup(*repo, options);
     CHECK(r.snapshot.stats.files == 2);  // keep.txt and project/main.js
+
+    // The estimate counts the same files the backup reads.
+    const SourceEstimate e = estimate_sources(options.paths, options.excludes);
+    CHECK(e.files == 2);
+    CHECK(e.bytes == 200);
+    CHECK(e.unreadable == 0);
+    CHECK(estimate_sources({u8(src)}, {}).files == 9);  // without the exclusions
+    CHECK_THROWS_AS(estimate_sources({u8(src)}, {}, [] { return true; }), Cancelled);
 }
 
 TEST_CASE("overlapping backup paths are rejected") {

@@ -125,6 +125,9 @@ Commands:
   history <path>               The versions of a file or folder, e.g.
                                C/Users/me/report.docx, where it changed (--all:
                                every snapshot that has it)
+  estimate <path>...           How much a first backup reads and roughly how long it
+                               takes (--exclude as for backup; --job: the job's
+                               sources and exclusions); needs no repository
   diff <older> [<newer>]       Files and folders added (+), removed (-) and changed
                                (M) between two snapshots; with one, since the
                                snapshot before it
@@ -1612,6 +1615,39 @@ int cmd_note(const Args& a) {
 }
 
 // history <path>: the versions of one file or folder (only those where it changed, unless --all).
+// "estimate <path>...": how much a first backup of these paths reads, and roughly how long it takes.
+int cmd_estimate(const Args& a) {
+    std::vector<std::string> paths = a.positional;
+    std::vector<std::string> excludes = a.all("--exclude");
+    if (const auto job = job_arg(a)) {
+        if (paths.empty()) paths = job->sources;
+        excludes.insert(excludes.end(), job->excludes.begin(), job->excludes.end());
+    }
+    if (paths.empty()) throw Error("usage: vaultik estimate <path>... [--exclude <pattern>] (or --job <job>)");
+    const SourceEstimate e = estimate_sources(paths, excludes, [] { return g_cancel.load(); },
+                                              [](const SourceEstimate& so_far) {
+                                                  if (!g_json)
+                                                      status(std::to_string(so_far.files) + " files, " +
+                                                             format_bytes(so_far.bytes) + "...");
+                                              });
+    clear_status();
+    // Typical speeds: an external hard disk, and two internet uploads (Mbit/s / 8 = MB/s).
+    const auto secs = [&](double mb_per_s) { return static_cast<double>(e.bytes) / (mb_per_s * 1e6); };
+    if (g_json) {
+        emit({{"event", "done"}, {"status", "success"}, {"files", e.files}, {"dirs", e.dirs}, {"bytes", e.bytes},
+              {"unreadable", e.unreadable}, {"seconds_drive", secs(100)}, {"seconds_upload_20", secs(2.5)},
+              {"seconds_upload_100", secs(12.5)}});
+        return kExitOk;
+    }
+    out(std::to_string(e.files) + " files in " + std::to_string(e.dirs) + " folders, " + format_bytes(e.bytes) + "\n");
+    if (e.unreadable > 0) out(std::to_string(e.unreadable) + " folder(s) could not be read\n");
+    out("First backup, roughly: " + format_duration(secs(100)) + " to an external drive (100 MB/s), " +
+        format_duration(secs(12.5)) + " uploading at 100 Mbit/s, " + format_duration(secs(2.5)) +
+        " at 20 Mbit/s.\nIt stores less after compression and deduplication; later backups only read what "
+        "changed.\n");
+    return kExitOk;
+}
+
 // "diff <older> [<newer>]": what changed between two snapshots (one: since its parent).
 int cmd_diff(const Args& a) {
     if (a.positional.empty() || a.positional.size() > 2)
@@ -1951,6 +1987,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "note") return cmd_note(a);
     if (a.command == "history") return cmd_history(a);
     if (a.command == "diff") return cmd_diff(a);
+    if (a.command == "estimate") return cmd_estimate(a);
     if (a.command == "find") return cmd_find(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }

@@ -27,6 +27,7 @@
 #include <set>
 
 #include "common.h"
+#include "vaultik/ops/backup.hpp"
 #include "key_dialog.h"
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/crypto/crypto.hpp"
@@ -169,6 +170,33 @@ QWidget* JobDialog::build_general() {
     return page;
 }
 
+void JobDialog::estimate_size() {
+    const jobs::Job j = collect();
+    if (j.sources.empty()) {
+        QMessageBox::information(this, windowTitle(), tr("Add the folders or files to back up first."));
+        return;
+    }
+    SourceEstimate e;
+    const QString error = run_busy(this, tr("Counting files..."), [&](const std::function<bool()>& cancelled) {
+        e = estimate_sources(j.sources, j.excludes, cancelled);
+    });
+    if (!error.isEmpty()) {
+        if (error != tr("Cancelled.")) plain_warning(this, windowTitle(), error);
+        return;
+    }
+    // Typical speeds: an external hard disk, or uploading at 100 Mbit/s (12.5 MB/s).
+    const bool cloud = is_cloud_location(u8(repository_->text().trimmed()));
+    const double seconds = static_cast<double>(e.bytes) / (cloud ? 12.5e6 : 100e6);
+    QString text = tr("%1 in %2.").arg(format_bytes(e.bytes), count_of(e.files, tr("file"), tr("files"))) + " ";
+    text += cloud ? tr("The first backup takes roughly %1 when uploading at 100 Mbit/s.").arg(format_duration(seconds))
+                  : tr("The first backup takes roughly %1 to an external hard disk.").arg(format_duration(seconds));
+    text += " " + tr("It stores less after compression and deduplication, and later backups only read what changed.");
+    if (e.unreadable > 0)
+        text += " " + tr("%1 could not be read.").arg(count_of(e.unreadable, tr("folder"), tr("folders")));
+    estimate_->setText(text);
+    estimate_->show();
+}
+
 QWidget* JobDialog::build_sources() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
@@ -188,7 +216,16 @@ QWidget* JobDialog::build_sources() {
             sources_->addItem(QDir::toNativeSeparators(f));
     });
     connect(remove, &QPushButton::clicked, this, [this] { qDeleteAll(sources_->selectedItems()); });
-    layout->addWidget(row({add_folder, add_file, remove}));
+    auto* estimate = new QPushButton(tr("Estimate size"));
+    estimate->setToolTip(tr("Count what the first backup reads, with the exclusions below"));
+    connect(estimate, &QPushButton::clicked, this, &JobDialog::estimate_size);
+    layout->addWidget(row({add_folder, add_file, remove, estimate}));
+    estimate_ = new QLabel;
+    estimate_->setWordWrap(true);
+    estimate_->setTextFormat(Qt::PlainText);
+    estimate_->setForegroundRole(QPalette::PlaceholderText);
+    estimate_->hide();
+    layout->addWidget(estimate_);
 
     // Ready-made exclusions, two per row.
     layout->addWidget(new QLabel(tr("Skip:")));

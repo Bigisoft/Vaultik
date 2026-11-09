@@ -482,6 +482,60 @@ BackupResult BackupEngine::run() {
 
 }  // namespace
 
+SourceEstimate estimate_sources(const std::vector<std::string>& paths, const std::vector<std::string>& excludes,
+                                const std::function<bool()>& cancelled,
+                                const std::function<void(const SourceEstimate&)>& progress) {
+    const Excluder excluder(excludes);
+    SourceEstimate e;
+    auto last = std::chrono::steady_clock::now();
+    const auto tick = [&] {
+        if (cancelled && cancelled()) throw Cancelled();
+        const auto now = std::chrono::steady_clock::now();
+        if (progress && now - last > std::chrono::milliseconds(200)) {
+            last = now;
+            progress(e);
+        }
+    };
+    std::vector<std::string> pending;
+    for (const std::string& p : paths) {
+        const std::string full = os::absolute_path(p);
+        os::FileInfo info;
+        os::ErrorCode err = 0;
+        if (!os::stat(full, info, err)) {
+            ++e.unreadable;
+            continue;
+        }
+        if (info.type == os::EntryType::File) {
+            ++e.files;
+            e.bytes += info.size;
+        } else if (info.type == os::EntryType::Dir || os::is_directory(full)) {
+            ++e.dirs;
+            pending.push_back(full);
+        }
+    }
+    while (!pending.empty()) {
+        const std::string dir = std::move(pending.back());
+        pending.pop_back();
+        os::DirReader reader(dir);
+        std::string name;
+        os::FileInfo info;
+        while (reader.next(name, info)) {
+            tick();
+            const std::string child = os::join(dir, name);
+            if (excluder.excluded(name, child)) continue;
+            if (info.type == os::EntryType::Dir) {
+                ++e.dirs;
+                pending.push_back(child);
+            } else if (info.type == os::EntryType::File) {
+                ++e.files;
+                e.bytes += info.size;
+            }
+        }
+        if (!reader.ok()) ++e.unreadable;
+    }
+    return e;
+}
+
 double byte_entropy(ByteSpan data) {
     if (data.empty()) return 0;
     std::array<std::uint32_t, 256> counts{};

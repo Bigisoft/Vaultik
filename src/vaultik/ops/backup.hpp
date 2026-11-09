@@ -65,6 +65,19 @@ struct BackupResult {
     ChangeAlarm alarm;
 };
 
+// What a backup of `paths` would read: files, folders and bytes, after the exclusions, walked as a
+// backup walks them (links and placeholders are not followed). Folders that cannot be listed are
+// counted in `unreadable`. `progress` is called now and then with the totals so far.
+struct SourceEstimate {
+    std::uint64_t files = 0;
+    std::uint64_t dirs = 0;
+    std::uint64_t bytes = 0;
+    std::uint64_t unreadable = 0;
+};
+SourceEstimate estimate_sources(const std::vector<std::string>& paths, const std::vector<std::string>& excludes,
+                                const std::function<bool()>& cancelled = {},
+                                const std::function<void(const SourceEstimate&)>& progress = {});
+
 // Shannon entropy of the bytes, in bits per byte (0-8); encrypted or compressed data is near 8.
 double byte_entropy(ByteSpan data);
 
