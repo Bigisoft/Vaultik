@@ -174,6 +174,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/drive_watcher.cpp
             src/gui/overview.cpp
             src/gui/compare_dialog.cpp
+            src/gui/hello.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)
@@ -189,7 +190,7 @@ if(VAULTIK_BUILD_GUI)
         set_target_properties(vaultik-make-icon PROPERTIES EXCLUDE_FROM_ALL ON)
         target_link_libraries(vaultik-make-icon PRIVATE Qt6::Gui Qt6::Svg)
         if(WIN32)
-            target_link_libraries(vaultik-gui PRIVATE windowscodecs uiautomationcore)  # previews, accessibility
+            target_link_libraries(vaultik-gui PRIVATE windowscodecs uiautomationcore windowsapp)  # previews, accessibility, Windows Hello
         endif()
         # The GUI starts the engine (and the scheduler starts the launcher) from its own folder.
         add_dependencies(vaultik-gui vaultik)

@@ -27,6 +27,7 @@ AppSettings AppSettings::load() {
     a.single_click_toggle = flag("tray/single_click", a.single_click_toggle);
     a.notify_failures = flag("notify/failures", a.notify_failures);
     a.notify_overdue = flag("notify/overdue", a.notify_overdue);
+    a.require_hello = flag("security/hello", a.require_hello);
     a.remind_after_days = std::clamp(s.value(QStringLiteral("notify/remind_after_days"), a.remind_after_days).toInt(), 0, 365);
     return a;
 }
@@ -40,6 +41,7 @@ void AppSettings::save() const {
     s.setValue(QStringLiteral("tray/single_click"), single_click_toggle);
     s.setValue(QStringLiteral("notify/failures"), notify_failures);
     s.setValue(QStringLiteral("notify/overdue"), notify_overdue);
+    s.setValue(QStringLiteral("security/hello"), require_hello);
     s.setValue(QStringLiteral("notify/remind_after_days"), remind_after_days);
 }
 

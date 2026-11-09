@@ -147,6 +147,12 @@ private:
         std::string snapshot;  // id (hex)
         QString folder;        // empty until it is ready
     };
+    // With "Ask for Windows Hello" on: asks for it unless already unlocked; false when not verified.
+    bool unlock();
+    bool locked() const;
+    // Hidden again: forgets the opened backups and closes Explorer views, so the next look asks again.
+    void relock();
+    bool unlocked_ = false;
     void explore_version(int index);
     void compare_versions(int a, int b);
     // Makes sure the job's password is saved (on another computer a portable copy cannot read the

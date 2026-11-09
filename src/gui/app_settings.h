@@ -18,6 +18,9 @@ struct AppSettings {
     bool notify_overdue = true;   // a notification when a job has not backed up for too long
     int remind_after_days = 7;    // when a job without a schedule counts as overdue (0: never)
 
+    // Security
+    bool require_hello = false;  // Windows Hello before backups are opened (restore, browse, search)
+
     static AppSettings load();
     void save() const;
 };

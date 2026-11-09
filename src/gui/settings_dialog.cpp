@@ -8,6 +8,7 @@
 #include <QVBoxLayout>
 
 #include "app_settings.h"
+#include "hello.h"
 #include "theme.h"
 
 namespace {
@@ -112,6 +113,30 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
                               "job, a day for an hourly one. With Windows' Do Not Disturb on, notifications go quietly "
                               "to the notification centre."),
                            26));
+
+    // Security: Windows Hello before anyone can open the backups from this window.
+    hello_ = new QCheckBox(tr("Ask for Windows Hello before opening backups"));
+    hello_->setChecked(s.require_hello);
+    const bool hello_ready = hello::available();
+    if (!hello_ready && !s.require_hello) {
+        hello_->setEnabled(false);
+        hello_->setToolTip(tr("Set up Windows Hello (face, fingerprint or PIN) in Windows Settings first."));
+    }
+    connect(hello_, &QCheckBox::clicked, this, [this](bool on) {
+        // Turning it on proves it works, so nobody is locked out by a setting that cannot be met;
+        // turning it off needs it too, or anyone at the computer could. (When Windows Hello is gone
+        // altogether, turning it off is the way back in.)
+        if (!on && !hello::available()) return;
+        const QString why = on ? tr("Confirm it is you to protect Vaultik's backups")
+                               : tr("Confirm it is you to stop protecting Vaultik's backups");
+        if (hello::verify(this, why) != hello::Result::Verified) hello_->setChecked(!on);
+    });
+    layout->addSpacing(12);
+    layout->addWidget(heading(tr("Security")));
+    layout->addWidget(hello_);
+    layout->addWidget(note(tr("Restoring, browsing, searching and comparing versions then need your face, fingerprint "
+                              "or PIN, once until Vaultik is hidden again. Scheduled backups are not affected."),
+                           26));
     layout->addSpacing(10);
     layout->addWidget(buttons);
 
@@ -137,6 +162,7 @@ void SettingsDialog::accept() {
     s.notify_failures = failures_->isChecked();
     s.notify_overdue = overdue_->isChecked();
     s.remind_after_days = remind_->value();
+    s.require_hello = hello_->isChecked();
     s.save();
 
     if (!vaultik::jobs::is_portable()) {  // never touch the installed copy's entry

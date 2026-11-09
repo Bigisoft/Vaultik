@@ -43,6 +43,7 @@
 #include "compare_dialog.h"
 #include "drive_watcher.h"
 #include "find_page.h"
+#include "hello.h"
 #include "job_card.h"
 #include "job_dialog.h"
 #include "key_dialog.h"
@@ -312,6 +313,7 @@ void MainWindow::bring_to_front() {
 void MainWindow::toggle_visible() {
     if (isVisible() && !isMinimized()) {
         hide();
+        relock();
     } else {
         bring_to_front();
     }
@@ -324,6 +326,7 @@ void MainWindow::changeEvent(QEvent* event) {
         // Hide once the minimize has finished, so the window comes back in its normal state.
         QTimer::singleShot(0, this, [this] {
             hide();
+            relock();
             setWindowState(windowState() & ~Qt::WindowMinimized);
         });
     }
@@ -427,6 +430,37 @@ void MainWindow::compare_versions(int a, int b) {
     }
     CompareDialog dialog(repo, older, newer, std::move(diff), this);
     dialog.exec();
+}
+
+bool MainWindow::locked() const {
+    return !unlocked_ && AppSettings::load().require_hello;
+}
+
+bool MainWindow::unlock() {
+    if (!locked()) return true;
+    bring_to_front();
+    switch (hello::verify(this, tr("Confirm it is you to open Vaultik's backups"))) {
+        case hello::Result::Verified:
+            unlocked_ = true;
+            return true;
+        case hello::Result::Unavailable:
+            plain_warning(this, tr("Windows Hello"),
+                          tr("Windows Hello is not available now, so the backups stay locked. Set it up again in "
+                             "Windows Settings, or turn off \"Ask for Windows Hello\" in Vaultik's Settings."));
+            return false;
+        default:
+            return false;
+    }
+}
+
+void MainWindow::relock() {
+    if (!AppSettings::load().require_hello || !unlocked_) return;
+    unlocked_ = false;
+    close_mounts();
+    repos_.clear();  // the opened repositories (and their keys) go
+    find_->set_source(nullptr, {});
+    versions_->set_message(tr("Vaultik is locked. Open Versions or Find a file to unlock it with Windows Hello."));
+    refresh_overview();
 }
 
 bool MainWindow::ensure_password(const jobs::Job& job) {
@@ -843,7 +877,7 @@ QWidget* MainWindow::build_job_page() {
     tabs_->addTab(log_page, tr("Log"));
 
     connect(tabs_, &QTabWidget::currentChanged, this, [this](int i) {
-        if (i == 0 || i == 1) load_snapshots(false);
+        if (i <= 2) load_snapshots(false);  // Overview, Versions, Find a file
     });
     layout->addWidget(tabs_, 1);
     return page;
@@ -936,7 +970,7 @@ void MainWindow::show_job() {
     subtitle_->setToolTip(qs(job->repository));
     set_running(runner_->running());
     refresh_history();
-    if (tabs_->currentIndex() <= 1) load_snapshots(false);
+    if (tabs_->currentIndex() <= 2) load_snapshots(false);
 }
 
 void MainWindow::refresh_history() {
@@ -1000,6 +1034,15 @@ void MainWindow::refresh_history() {
 void MainWindow::load_snapshots(bool force) {
     const jobs::Job* job = current_job();
     if (!job) return;
+    if (locked()) {
+        // The start page does not ask; Versions and Find a file do, as they show the backup.
+        if (tabs_->currentWidget() == overview_ || !unlock()) {
+            versions_->set_message(tr("Vaultik is locked. Open Versions or Find a file to unlock it with Windows Hello."));
+            return;
+        }
+        job = current_job();  // the prompt ran the event loop
+        if (!job) return;
+    }
     const std::string id = job->id;
     if (!force && repos_.contains(id)) {
         show_versions();
@@ -1243,6 +1286,7 @@ void MainWindow::delete_version(int index) {
 }
 
 void MainWindow::restore_from_folder() {
+    if (!unlock()) return;
     // A folder (USB drive, disk, network share) or cloud storage.
     QMessageBox where(QMessageBox::Question, tr("Restore from a backup"), tr("Where is the backup?"),
                       QMessageBox::Cancel, this);
@@ -1308,10 +1352,11 @@ void MainWindow::open_keys() {
     KeyDialog dialog(store_, job ? QDir::toNativeSeparators(qs(job->repository)) : QString(), this);
     dialog.exec();
     repos_.clear();  // reopen with the saved password, which may have changed
-    if (tabs_->currentIndex() <= 1) load_snapshots(false);
+    if (tabs_->currentIndex() <= 2) load_snapshots(false);
 }
 
 void MainWindow::open_restore(int snapshot_index, const QString& select_path) {
+    if (!unlock()) return;
     const jobs::Job* job = current_job();
     if (!job) return;
     auto it = repos_.find(job->id);
@@ -1433,6 +1478,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     if (tray_ != nullptr && !quitting_ && AppSettings::load().close_to_tray) {
         // Keep watching from the tray; a running backup goes on too.
         hide();
+        relock();
         event->ignore();
         QSettings settings;
         if (!settings.value(QStringLiteral("tray/explained"), false).toBool()) {

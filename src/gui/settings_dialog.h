@@ -28,4 +28,5 @@ private:
     QCheckBox* failures_ = nullptr;
     QCheckBox* overdue_ = nullptr;
     QSpinBox* remind_ = nullptr;
+    QCheckBox* hello_ = nullptr;
 };
