@@ -88,14 +88,30 @@ Start `vaultik-gui`, then **New backup job**:
   running as you) can change decides what an administrator run does. Editing the job in Vaultik
   and saving it updates the copy; so does changing the password in Vaultik.
 - **Resources:** a priority preset and optional hard limits (see below).
-- **Old backups:** how many backups to keep, for example one per day for 7 days, one per week
-  for 4 weeks and one per month for 12 months (the default for new jobs). After each run the
-  job's backups that no rule keeps are removed and the space only they used is freed. Turned off,
-  every backup is kept.
+- **Old backups:** a preset: **Smart** (the default: one version per day for 7 days, per week
+  for 4 weeks and per month for 12 months), the newest N versions, every version of the last N
+  days, custom rules, or keep everything; plus an optional size limit, which removes the oldest
+  versions (never the newest, never pinned ones) when the backup grows past it. The dialog says
+  in plain words what the rules keep. Every version is a complete backup, so removing one never
+  breaks the others; after each run the versions no rule keeps go and the space only they used
+  is freed.
 
-The job page shows live progress, the run history (also of scheduled runs), and the snapshots.
-**Restore** opens a snapshot browser: pick a file or folder (or nothing, for everything) and
-restore it to another folder or to its original location.
+The window follows the Windows light or dark setting and accent colour. The sidebar lists the
+jobs with their last result; the job page shows live progress and four tabs:
+
+- **Versions:** a timeline grouped by day, week and month, each version with what changed since
+  the one before (new, changed and removed files), its size and the space it added. **Pin** a
+  version to keep it whatever the rules say, add a **note** ("before reinstalling Windows"),
+  **delete** one, or **restore** from it. Versions the next cleanup will remove are marked.
+- **Find a file:** search every version by name (`budget`, `*.xlsx`); pick a result to see only
+  the versions where it changed, each compared with the file on this PC now, and restore any
+  of them.
+- **Activity:** every run, also the scheduled ones, with its result.
+- **Log:** warnings of the runs started here.
+
+**Restore** opens a version browser: pick a file or folder (or nothing, for everything) and
+restore it to another folder or to its original location; right-click an item for all its
+versions.
 
 **Restore from a backup location** in the toolbar opens any Vaultik backup, in a folder or in
 cloud storage, with its password, without a saved job: the way to get files back on another
@@ -282,7 +298,13 @@ Priorities only take effect when something else competes for the resource, so on
    (`forget`/`prune`), repository locks, Volume Shadow Copy (done)
 3. Cloud storage: S3-compatible storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2,
    MinIO) and cloud drives (pCloud, OneDrive, Google Drive, MEGA) (done, Windows)
-4. Portable version and installer, so Vaultik is easy to use on another computer (next):
+4. Friendlier versions (done for the timeline, pins, notes, file history, search and cleanup
+   presets); still to come:
+   - Browse a version in File Explorer as a folder or drive letter (Windows Projected File
+     System, built into Windows, no third-party driver).
+   - A start page per job: last result, next run, size, a warning when backups stopped, and a
+     calendar of backup days.
+5. Portable version and installer, so Vaultik is easy to use on another computer (next):
    - Portable: the programs in one folder; a `portable` marker file next to them keeps jobs and
      settings in that folder instead of the user profile.
    - A copy on the backup drive: backups to a disk or USB drive keep `<drive>\Vaultik\` up to date
@@ -291,9 +313,9 @@ Priorities only take effect when something else competes for the resource, so on
    - Windows installer: Program Files, a Start menu entry, upgrades in place, and an uninstaller
      that also removes the scheduled tasks.
    - Linux: the same as an AppImage (portable: runs from the backup drive and on SteamOS) and a
-     Flatpak, put on the backup drive next to the Windows programs once the Linux port (5) works.
-5. Linux port, SteamOS on the Steam Deck first: build and test the existing POSIX platform layer,
+     Flatpak, put on the backup drive next to the Windows programs once the Linux port (6) works.
+6. Linux port, SteamOS on the Steam Deck first: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
-   and the browser sign-in are Windows-only so far). Packaged as in 4.
-6. Volume image backup, restore to a volume or `.vhdx`
-7. Bare-metal restore from a recovery USB (WinPE on Windows)
+   and the browser sign-in are Windows-only so far). Packaged as in 5.
+7. Volume image backup, restore to a volume or `.vhdx`
+8. Bare-metal restore from a recovery USB (WinPE on Windows)

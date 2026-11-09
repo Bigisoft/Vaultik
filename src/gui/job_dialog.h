@@ -8,6 +8,7 @@
 class QCheckBox;
 class QComboBox;
 class QGroupBox;
+class QLabel;
 class QLineEdit;
 class QListWidget;
 class QSpinBox;
@@ -37,6 +38,8 @@ private:
     vaultik::jobs::Job collect() const;
     void apply_preset(int index);
     void update_schedule_fields();
+    vaultik::RetentionPolicy collect_retention() const;
+    void update_retention_fields();
     bool prepare_repository(const vaultik::jobs::Job& job, const std::string& password);
 
     const vaultik::jobs::JobStore& store_;
@@ -72,7 +75,15 @@ private:
     QSpinBox* read_limit_ = nullptr;
     QSpinBox* write_limit_ = nullptr;
 
-    QGroupBox* retention_ = nullptr;  // checkable: off keeps every backup
+    // Old backups: a preset, its one setting, the custom rules, and a size limit.
+    QComboBox* keep_mode_ = nullptr;
+    QStackedWidget* keep_pages_ = nullptr;
+    QSpinBox* keep_count_ = nullptr;
+    QSpinBox* keep_days_ = nullptr;
+    QCheckBox* size_limit_ = nullptr;
+    QSpinBox* size_limit_gb_ = nullptr;
+    QLabel* keep_summary_ = nullptr;
+    QSpinBox* keep_within_ = nullptr;
     QSpinBox* keep_last_ = nullptr;
     QSpinBox* keep_hourly_ = nullptr;
     QSpinBox* keep_daily_ = nullptr;

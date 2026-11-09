@@ -92,7 +92,7 @@ void store_apps(const nlohmann::json& j) {
 
 // Runs `work` on a worker thread behind a progress dialog with Cancel. Returns the error text
 // (empty on success); `code_needed` is set when MEGA asked for a two-factor code.
-QString run_busy(QWidget* parent, const QString& text,
+QString run_signin_busy(QWidget* parent, const QString& text,
                  const std::function<void(const std::function<bool()>&)>& work, bool* code_needed = nullptr) {
     std::atomic<bool> cancel{false};
     QString error;
@@ -373,7 +373,7 @@ void CloudDialog::sign_in() {
             std::string p = u8(password->text());
             const std::string c = u8(code->text().trimmed());
             bool needs_code = false;
-            error = run_busy(
+            error = run_signin_busy(
                 this, tr("Signing in to MEGA..."),
                 [&](const std::function<bool()>&) { result = MegaBackend::sign_in(e, p, c); }, &needs_code);
             secure_wipe(p.data(), p.size());
@@ -388,7 +388,7 @@ void CloudDialog::sign_in() {
     } else {
         cloud::OAuthApp app{u8(app_id_->text().trimmed()), u8(app_secret_->text().trimmed())};
         const QString text = tr("Finish signing in in your web browser, then come back here.");
-        error = run_busy(this, text, [&](const std::function<bool()>& cancelled) {
+        error = run_signin_busy(this, text, [&](const std::function<bool()>& cancelled) {
             if (kind == CloudKind::PCloud) result = PCloudBackend::sign_in(app, cancelled);
             else if (kind == CloudKind::OneDrive) result = OneDriveBackend::sign_in(app, cancelled);
             else result = GoogleDriveBackend::sign_in(app, cancelled);
@@ -502,7 +502,7 @@ void CloudDialog::test_connection() {
     std::string renewed;
     keys.on_secret_changed = [&renewed](const std::string& s) { renewed = s; };
     bool has_repo = false;
-    error = run_busy(this, tr("Connecting..."), [&](const std::function<bool()>&) {
+    error = run_signin_busy(this, tr("Connecting..."), [&](const std::function<bool()>&) {
         const std::unique_ptr<Backend> backend = open_backend(location, &keys);
         has_repo = backend->exists("config");
         backend->list("locks");  // needs listing rights too

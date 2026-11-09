@@ -20,6 +20,11 @@
           "default-features": false,
           "features": [ "gui", "widgets", "png" ],
           "platform": "windows"
+        },
+        {
+          "name": "qtsvg",
+          "default-features": false,
+          "platform": "windows"
         }
       ]
     }

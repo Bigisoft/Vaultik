@@ -10,6 +10,13 @@
 
 using namespace vaultik;
 
+std::vector<SnapshotRecord> records_of(const std::vector<SnapshotEntry>& entries) {
+    std::vector<SnapshotRecord> out;
+    out.reserve(entries.size());
+    for (const SnapshotEntry& e : entries) out.push_back({e.id, e.snapshot});
+    return out;
+}
+
 void RepoHandle::open_async(QObject* context, std::string repository, std::string password, CloudCredentials cloud,
                             Done done) {
     struct Result {

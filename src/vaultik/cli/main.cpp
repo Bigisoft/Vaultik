@@ -39,6 +39,10 @@
 #include "vaultik/platform/acl.hpp"
 
 #ifdef _WIN32
+#include <cstdlib>
+#if defined(_MSC_VER) && defined(_DEBUG)
+#include <crtdbg.h>
+#endif
 #include "vaultik/util/win.hpp"
 #endif
 
@@ -46,7 +50,7 @@ namespace vaultik::cli {
 
 namespace {
 
-constexpr char kVersion[] = "0.3.0";
+constexpr char kVersion[] = "0.4.0";
 
 // Exit codes.
 constexpr int kExitOk = 0;
@@ -1427,6 +1431,17 @@ int run_main(const std::vector<std::string>& args) {
 
 #ifdef _WIN32
 int wmain(int argc, wchar_t** argv) {
+#if defined(_MSC_VER) && defined(_DEBUG)
+    // With VAULTIK_LEAK_CHECK set, a debug build reports every heap block still allocated at exit.
+    wchar_t* leak_check = nullptr;
+    std::size_t leak_check_len = 0;
+    if (_wdupenv_s(&leak_check, &leak_check_len, L"VAULTIK_LEAK_CHECK") == 0 && leak_check != nullptr) {
+        std::free(leak_check);
+        _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
+        _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+        _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
+    }
+#endif
     // Arguments arrive as UTF-16; everything inside Vaultik is UTF-8.
     std::vector<std::string> args;
     args.reserve(static_cast<std::size_t>(argc));

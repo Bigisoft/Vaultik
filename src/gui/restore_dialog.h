@@ -28,9 +28,10 @@ class RestoreDialog : public QDialog {
 public:
     // A `job` without an id stands for a repository opened by location (job.repository),
     // `password` and, for cloud storage, `cloud` keys, rather than a saved job.
+    // `select_path`, when given, opens the folders down to that item and selects it.
     RestoreDialog(const vaultik::jobs::Job& job, std::shared_ptr<vaultik::Repository> repo,
                   std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent = nullptr,
-                  QString password = {}, vaultik::CloudCredentials cloud = {});
+                  QString password = {}, vaultik::CloudCredentials cloud = {}, const QString& select_path = {});
     ~RestoreDialog() override;
 
     void reject() override;
@@ -41,6 +42,8 @@ private:
     void update_target_state();
     void start_restore();
     QString selected_path() const;
+    void select_path(const QString& path);
+    void show_versions_of_selected();
 
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;

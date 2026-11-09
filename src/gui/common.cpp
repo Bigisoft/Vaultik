@@ -1,7 +1,16 @@
 #include "common.h"
 
 #include <QDateTime>
+#include <QEventLoop>
+#include <QLocale>
+#include <QProgressDialog>
+#include <QStringList>
+#include <QThread>
 
+#include <atomic>
+#include <exception>
+
+#include "vaultik/ops/prune.hpp"
 #include "vaultik/platform/os.hpp"
 
 QString format_bytes(std::uint64_t bytes) {
@@ -16,10 +25,19 @@ QString format_bytes(std::uint64_t bytes) {
     return QStringLiteral("%1 %2").arg(v, 0, 'f', v < 10 ? 2 : (v < 100 ? 1 : 0)).arg(kUnits[unit]);
 }
 
-QString format_time(std::uint64_t filetime) {
-    if (filetime < vaultik::os::kUnixEpochTicks) return QStringLiteral("-");
+QString count_of(std::uint64_t n, const QString& one, const QString& many) {
+    return QLocale().toString(static_cast<qulonglong>(n)) + " " + (n == 1 ? one : many);
+}
+
+QDateTime to_datetime(std::uint64_t filetime) {
+    if (filetime < vaultik::os::kUnixEpochTicks) return {};
     const qint64 ms = static_cast<qint64>((filetime - vaultik::os::kUnixEpochTicks) / 10000);
-    return QDateTime::fromMSecsSinceEpoch(ms).toString(QStringLiteral("yyyy-MM-dd HH:mm"));
+    return QDateTime::fromMSecsSinceEpoch(ms);
+}
+
+QString format_time(std::uint64_t filetime) {
+    const QDateTime dt = to_datetime(filetime);
+    return dt.isValid() ? dt.toString(QStringLiteral("yyyy-MM-dd HH:mm")) : QStringLiteral("-");
 }
 
 QString format_duration(double seconds) {
@@ -27,4 +45,68 @@ QString format_duration(double seconds) {
     const auto total = static_cast<qint64>(seconds);
     if (total < 3600) return QStringLiteral("%1 min %2 s").arg(total / 60).arg(total % 60);
     return QStringLiteral("%1 h %2 min").arg(total / 3600).arg((total % 3600) / 60);
+}
+
+QString original_path(const QString& snapshot_path) {
+    const QStringList parts = snapshot_path.split('/', Qt::SkipEmptyParts);
+#ifdef Q_OS_WIN
+    if (parts.isEmpty()) return {};
+    if (parts[0] == "UNC") return parts.size() < 4 ? QString() : "\\\\" + parts.mid(1).join('\\');
+    if (parts[0].size() != 1 || parts.size() < 2) return {};
+    return parts[0] + ":\\" + parts.mid(1).join('\\');
+#else
+    if (parts.isEmpty()) return {};
+    return "/" + parts.join('/');
+#endif
+}
+
+QString retention_summary(const vaultik::RetentionPolicy& p) {
+    using vaultik::RetentionPolicy;
+    QString text;
+    if (p.no_rules()) {
+        text = QObject::tr("Every version is kept.");
+    } else {
+        QStringList parts;
+        if (p.within_days > 0) parts << QObject::tr("every version from the last %1").arg(count_of(p.within_days, QObject::tr("day"), QObject::tr("days")));
+        if (p.last > 0) parts << QObject::tr("the newest %1").arg(count_of(p.last, QObject::tr("version"), QObject::tr("versions")));
+        if (p.hourly > 0) parts << QObject::tr("one per hour for %1").arg(count_of(p.hourly, QObject::tr("hour"), QObject::tr("hours")));
+        if (p.daily > 0) parts << QObject::tr("one per day for %1").arg(count_of(p.daily, QObject::tr("day"), QObject::tr("days")));
+        if (p.weekly > 0) parts << QObject::tr("one per week for %1").arg(count_of(p.weekly, QObject::tr("week"), QObject::tr("weeks")));
+        if (p.monthly > 0) parts << QObject::tr("one per month for %1").arg(count_of(p.monthly, QObject::tr("month"), QObject::tr("months")));
+        if (p.yearly > 0) parts << QObject::tr("one per year for %1").arg(count_of(p.yearly, QObject::tr("year"), QObject::tr("years")));
+        QString list = parts.size() > 1 ? parts.mid(0, parts.size() - 1).join(QStringLiteral(", ")) + QObject::tr(" and ") + parts.last()
+                                        : parts.join(QString());
+        text = QObject::tr("Keeps %1.").arg(list);
+    }
+    if (p.max_bytes > 0)
+        text += " " + QObject::tr("Older versions are also removed to keep the backup under %1.").arg(format_bytes(p.max_bytes));
+    if (!p.empty()) text += " " + QObject::tr("Pinned versions are always kept.");
+    return text;
+}
+
+QString run_busy(QWidget* parent, const QString& text,
+                 const std::function<void(const std::function<bool()>& cancelled)>& work) {
+    std::atomic<bool> cancel{false};
+    QString error;
+    // Owned here and deleted after it finished; the dialog lives on the stack.
+    QThread* thread = QThread::create([&] {
+        try {
+            work([&] { return cancel.load(); });
+        } catch (const std::exception& e) {
+            error = QString::fromUtf8(e.what());
+        }
+    });
+    QProgressDialog dialog(text, QObject::tr("Cancel"), 0, 0, parent);
+    dialog.setWindowModality(Qt::WindowModal);
+    dialog.setMinimumDuration(400);  // quick work finishes without a flash of a dialog
+    QEventLoop loop;
+    QObject::connect(thread, &QThread::finished, &loop, &QEventLoop::quit);
+    QObject::connect(&dialog, &QProgressDialog::canceled, &dialog, [&] { cancel = true; });
+    thread->start();
+    loop.exec();
+    thread->wait();
+    delete thread;
+    // Work that noticed the cancel stopped with an error; work that finished anyway succeeded.
+    if (cancel && !error.isEmpty()) error = QObject::tr("Cancelled.");
+    return error;
 }

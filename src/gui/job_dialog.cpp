@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QTabWidget>
 #include <QTimeEdit>
 #include <QVBoxLayout>
@@ -318,37 +319,124 @@ void JobDialog::update_schedule_fields() {
     days_row_->setEnabled(kind == jobs::Schedule::Kind::Weekly);
 }
 
+namespace {
+
+// Index order of the "keep" combo box.
+enum KeepMode { kSmart, kNewest, kDays, kCustom, kEverything };
+
+bool is_smart(const RetentionPolicy& p) {
+    const RetentionPolicy d = jobs::default_retention();
+    return p.last == 0 && p.hourly == 0 && p.yearly == 0 && p.within_days == 0 && p.daily == d.daily &&
+           p.weekly == d.weekly && p.monthly == d.monthly;
+}
+
+}  // namespace
+
 QWidget* JobDialog::build_retention() {
     auto* page = new QWidget;
     auto* layout = new QVBoxLayout(page);
 
-    retention_ = new QGroupBox(tr("Remove old backups automatically"));
-    retention_->setCheckable(true);
-    auto* form = new QFormLayout(retention_);
+    keep_mode_ = combo({tr("Smart (recommended)"), tr("Keep the newest versions"), tr("Keep versions for a number of days"),
+                        tr("Custom rules"), tr("Keep everything")});
+    auto* form = new QFormLayout;
+    form->addRow(tr("Old versions:"), keep_mode_);
+    layout->addLayout(form);
+
+    keep_pages_ = new QStackedWidget;
+    // Smart: nothing to set.
+    keep_pages_->addWidget(new QWidget);
+    // Newest N.
+    keep_count_ = spin(1, 10000, QString(), QString());
+    keep_pages_->addWidget(row({new QLabel(tr("Keep the newest")), keep_count_, new QLabel(tr("versions"))}));
+    // N days.
+    keep_days_ = spin(1, 10000, QString(), QString());
+    keep_pages_->addWidget(row({new QLabel(tr("Keep every version from the last")), keep_days_, new QLabel(tr("days"))}));
+    // Custom.
+    auto* custom = new QWidget;
+    auto* cf = new QFormLayout(custom);
+    cf->setContentsMargins(0, 0, 0, 0);
     const QString off = tr("off");
+    keep_within_ = spin(0, 10000, QString(), off);
     keep_last_ = spin(0, 1000, QString(), off);
     keep_hourly_ = spin(0, 1000, QString(), off);
     keep_daily_ = spin(0, 1000, QString(), off);
     keep_weekly_ = spin(0, 1000, QString(), off);
     keep_monthly_ = spin(0, 1000, QString(), off);
     keep_yearly_ = spin(0, 1000, QString(), off);
-    form->addRow(tr("Keep the newest:"), row({keep_last_, new QLabel(tr("backups"))}));
-    form->addRow(tr("Keep one per hour for:"), row({keep_hourly_, new QLabel(tr("hours"))}));
-    form->addRow(tr("Keep one per day for:"), row({keep_daily_, new QLabel(tr("days"))}));
-    form->addRow(tr("Keep one per week for:"), row({keep_weekly_, new QLabel(tr("weeks"))}));
-    form->addRow(tr("Keep one per month for:"), row({keep_monthly_, new QLabel(tr("months"))}));
-    form->addRow(tr("Keep one per year for:"), row({keep_yearly_, new QLabel(tr("years"))}));
-    layout->addWidget(retention_);
+    cf->addRow(tr("Keep every version from the last:"), row({keep_within_, new QLabel(tr("days"))}));
+    cf->addRow(tr("Keep the newest:"), row({keep_last_, new QLabel(tr("versions"))}));
+    cf->addRow(tr("Keep one per hour for:"), row({keep_hourly_, new QLabel(tr("hours"))}));
+    cf->addRow(tr("Keep one per day for:"), row({keep_daily_, new QLabel(tr("days"))}));
+    cf->addRow(tr("Keep one per week for:"), row({keep_weekly_, new QLabel(tr("weeks"))}));
+    cf->addRow(tr("Keep one per month for:"), row({keep_monthly_, new QLabel(tr("months"))}));
+    cf->addRow(tr("Keep one per year for:"), row({keep_yearly_, new QLabel(tr("years"))}));
+    keep_pages_->addWidget(custom);
+    // Everything.
+    keep_pages_->addWidget(new QWidget);
+    layout->addWidget(keep_pages_);
 
-    auto* note = new QLabel(tr(
-        "After each run, backups of this job that no rule keeps are removed, and the space only they "
-        "used is freed. A backup kept by any rule stays. Periods count only those that have a backup, "
-        "so a computer that was switched off for a while does not lose its older backups.\n\n"
-        "With this turned off, every backup is kept and the destination keeps growing."));
+    size_limit_ = new QCheckBox(tr("Keep the backup under"));
+    size_limit_gb_ = spin(1, 1000000, tr(" GB"), QString());
+    size_limit_gb_->setValue(500);
+    layout->addWidget(row({size_limit_, size_limit_gb_}));
+    auto* size_note = new QLabel(tr("When the backup grows past this, the oldest versions are removed first. The "
+                                    "newest version and pinned versions always stay."));
+    size_note->setWordWrap(true);
+    size_note->setProperty("role", "faint");
+    layout->addWidget(size_note);
+
+    keep_summary_ = new QLabel;
+    keep_summary_->setWordWrap(true);
+    keep_summary_->setProperty("role", "muted");
+    layout->addSpacing(8);
+    layout->addWidget(keep_summary_);
+
+    auto* note = new QLabel(tr("Every version is a complete backup, so removing one never breaks the others. "
+                               "Old versions are removed after each run, and the space only they used is freed. "
+                               "Pin a version in the Versions tab to keep it whatever these rules say."));
     note->setWordWrap(true);
+    note->setProperty("role", "faint");
     layout->addWidget(note);
     layout->addStretch();
+
+    connect(keep_mode_, &QComboBox::currentIndexChanged, this, &JobDialog::update_retention_fields);
+    connect(size_limit_, &QCheckBox::toggled, this, &JobDialog::update_retention_fields);
+    for (QSpinBox* s : {keep_count_, keep_days_, keep_within_, keep_last_, keep_hourly_, keep_daily_, keep_weekly_,
+                        keep_monthly_, keep_yearly_, size_limit_gb_})
+        connect(s, &QSpinBox::valueChanged, this, &JobDialog::update_retention_fields);
     return page;
+}
+
+RetentionPolicy JobDialog::collect_retention() const {
+    RetentionPolicy p;
+    switch (keep_mode_->currentIndex()) {
+        case kSmart: p = jobs::default_retention(); break;
+        case kNewest: p.last = keep_count_->value(); break;
+        case kDays: p.within_days = keep_days_->value(); break;
+        case kCustom:
+            p.within_days = keep_within_->value();
+            p.last = keep_last_->value();
+            p.hourly = keep_hourly_->value();
+            p.daily = keep_daily_->value();
+            p.weekly = keep_weekly_->value();
+            p.monthly = keep_monthly_->value();
+            p.yearly = keep_yearly_->value();
+            break;
+        default: break;
+    }
+    if (size_limit_->isChecked()) p.max_bytes = static_cast<std::uint64_t>(size_limit_gb_->value()) << 30;
+    return p;
+}
+
+void JobDialog::update_retention_fields() {
+    keep_pages_->setCurrentIndex(keep_mode_->currentIndex());
+    // Only the page in use takes room.
+    for (int i = 0; i < keep_pages_->count(); ++i)
+        keep_pages_->widget(i)->setSizePolicy(QSizePolicy::Preferred,
+                                              i == keep_pages_->currentIndex() ? QSizePolicy::Preferred : QSizePolicy::Ignored);
+    keep_pages_->adjustSize();
+    size_limit_gb_->setEnabled(size_limit_->isChecked());
+    keep_summary_->setText(retention_summary(collect_retention()));
 }
 
 void JobDialog::load(const jobs::Job& job) {
@@ -402,15 +490,28 @@ void JobDialog::load(const jobs::Job& job) {
     read_limit_->setValue(static_cast<int>(r.read_rate >> 20));
     write_limit_->setValue(static_cast<int>(r.write_rate >> 20));
 
-    // Turned off, the fields still show a sensible starting point for turning it on.
-    const RetentionPolicy& k = job.retention.empty() ? jobs::default_retention() : job.retention;
-    retention_->setChecked(!job.retention.empty());
-    keep_last_->setValue(k.last);
-    keep_hourly_->setValue(k.hourly);
-    keep_daily_->setValue(k.daily);
-    keep_weekly_->setValue(k.weekly);
-    keep_monthly_->setValue(k.monthly);
-    keep_yearly_->setValue(k.yearly);
+    // The preset that matches the rules; the custom fields start from the rules (or the default).
+    const RetentionPolicy& k = job.retention;
+    if (k.no_rules()) keep_mode_->setCurrentIndex(kEverything);
+    else if (is_smart(k)) keep_mode_->setCurrentIndex(kSmart);
+    else if (k.last > 0 && k.hourly == 0 && k.daily == 0 && k.weekly == 0 && k.monthly == 0 && k.yearly == 0 && k.within_days == 0)
+        keep_mode_->setCurrentIndex(kNewest);
+    else if (k.within_days > 0 && k.last == 0 && k.hourly == 0 && k.daily == 0 && k.weekly == 0 && k.monthly == 0 && k.yearly == 0)
+        keep_mode_->setCurrentIndex(kDays);
+    else keep_mode_->setCurrentIndex(kCustom);
+    keep_count_->setValue(k.last > 0 ? k.last : 30);
+    keep_days_->setValue(k.within_days > 0 ? k.within_days : 90);
+    size_limit_->setChecked(k.max_bytes > 0);
+    if (k.max_bytes > 0) size_limit_gb_->setValue(static_cast<int>(std::max<std::uint64_t>(1, k.max_bytes >> 30)));
+    const RetentionPolicy c = k.no_rules() ? jobs::default_retention() : k;
+    keep_within_->setValue(c.within_days);
+    keep_last_->setValue(c.last);
+    keep_hourly_->setValue(c.hourly);
+    keep_daily_->setValue(c.daily);
+    keep_weekly_->setValue(c.weekly);
+    keep_monthly_->setValue(c.monthly);
+    keep_yearly_->setValue(c.yearly);
+    update_retention_fields();
 }
 
 jobs::Job JobDialog::collect() const {
@@ -453,15 +554,7 @@ jobs::Job JobDialog::collect() const {
     r.read_rate = static_cast<std::uint64_t>(read_limit_->value()) << 20;
     r.write_rate = static_cast<std::uint64_t>(write_limit_->value()) << 20;
 
-    j.retention = RetentionPolicy{};
-    if (retention_->isChecked()) {
-        j.retention.last = keep_last_->value();
-        j.retention.hourly = keep_hourly_->value();
-        j.retention.daily = keep_daily_->value();
-        j.retention.weekly = keep_weekly_->value();
-        j.retention.monthly = keep_monthly_->value();
-        j.retention.yearly = keep_yearly_->value();
-    }
+    j.retention = collect_retention();
     return j;
 }
 

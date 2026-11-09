@@ -9,6 +9,7 @@
 
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/model/snapshot.hpp"
+#include "vaultik/ops/prune.hpp"
 #include "vaultik/repo/repository.hpp"
 #include "vaultik/repo/s3_backend.hpp"
 
@@ -16,6 +17,9 @@ struct SnapshotEntry {
     vaultik::Id id{};
     vaultik::Snapshot snapshot;
 };
+
+// The same list in the engine's form (for history, search and retention).
+std::vector<vaultik::SnapshotRecord> records_of(const std::vector<SnapshotEntry>& entries);
 
 // Opens a job's repository on a worker thread (key derivation and index loading take a moment,
 // longer on a USB disk) and lists its snapshots, newest first. The opened repository is then

@@ -12,6 +12,7 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
 #include <QProgressBar>
 #include <QPushButton>
@@ -21,7 +22,9 @@
 #include <QVBoxLayout>
 
 #include "common.h"
+#include "find_page.h"
 #include "runner.h"
+#include "theme.h"
 #include "vaultik/model/tree.hpp"
 
 using namespace vaultik;
@@ -30,19 +33,8 @@ namespace {
 
 enum Role { KindRole = Qt::UserRole, SubtreeRole, PathRole, LoadedRole };
 
-// Where a snapshot path came from on this kind of system; empty when it has no sensible
-// original location (a whole drive or share).
 QString original_of(const QString& snapshot_path) {
-    const QStringList parts = snapshot_path.split('/', Qt::SkipEmptyParts);
-#ifdef Q_OS_WIN
-    if (parts.isEmpty()) return {};
-    if (parts[0] == "UNC") return parts.size() < 4 ? QString() : "\\\\" + parts.mid(1).join('\\');
-    if (parts[0].size() != 1 || parts.size() < 2) return {};
-    return parts[0] + ":\\" + parts.mid(1).join('\\');
-#else
-    if (parts.isEmpty()) return {};
-    return "/" + parts.join('/');
-#endif
+    return original_path(snapshot_path);
 }
 
 QString snapshot_label(const SnapshotEntry& e) {
@@ -56,7 +48,7 @@ QString snapshot_label(const SnapshotEntry& e) {
 
 RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> repo,
                              std::vector<SnapshotEntry> snapshots, int selected, QWidget* parent, QString password,
-                             CloudCredentials cloud)
+                             CloudCredentials cloud, const QString& select_path)
     : QDialog(parent),
       job_(job),
       repo_(std::move(repo)),
@@ -150,9 +142,74 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
         }
     });
 
+    tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tree_, &QTreeWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
+        QTreeWidgetItem* item = tree_->itemAt(pos);
+        if (item == nullptr || item->data(0, PathRole).toString().isEmpty()) return;
+        tree_->setCurrentItem(item);
+        QMenu menu(this);
+        menu.addAction(icon(QStringLiteral("history_20_regular")), tr("Show all versions of this item..."), this,
+                       &RestoreDialog::show_versions_of_selected);
+        menu.exec(tree_->viewport()->mapToGlobal(pos));
+    });
+    restore_->setProperty("role", "primary");
+    browse_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
+
     show_snapshot(selected >= 0 && selected < static_cast<int>(snapshots_.size()) ? selected : 0);
-    if (selected > 0) snapshot_->setCurrentIndex(selected);
+    if (selected > 0) {
+        const QSignalBlocker block(snapshot_);
+        snapshot_->setCurrentIndex(selected);
+    }
+    if (!select_path.isEmpty()) this->select_path(select_path);
     update_target_state();
+}
+
+void RestoreDialog::select_path(const QString& path) {
+    const QStringList parts = path.split('/', Qt::SkipEmptyParts);
+    QTreeWidgetItem* current = nullptr;
+    for (int depth = 0; depth < parts.size(); ++depth) {
+        QTreeWidgetItem* next = nullptr;
+        const int count = current ? current->childCount() : tree_->topLevelItemCount();
+        for (int i = 0; i < count && next == nullptr; ++i) {
+            QTreeWidgetItem* child = current ? current->child(i) : tree_->topLevelItem(i);
+            if (child->text(0) == parts[depth]) next = child;
+        }
+        if (next == nullptr) return;
+        if (depth + 1 < parts.size()) {
+            expand(next);  // loads its children
+            next->setExpanded(true);
+        }
+        current = next;
+    }
+    if (current != nullptr) {
+        tree_->setCurrentItem(current);
+        tree_->scrollToItem(current, QAbstractItemView::PositionAtCenter);
+    }
+}
+
+void RestoreDialog::show_versions_of_selected() {
+    const QString path = selected_path();
+    if (path.isEmpty()) return;
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Versions"));
+    dialog.resize(720, 460);
+    auto* view = new ItemHistoryView(&dialog);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(view, 1);
+    layout->addWidget(buttons);
+    view->set_source(repo_, snapshots_);
+    int chosen = -1;
+    connect(view, &ItemHistoryView::restore_requested, &dialog, [&](int index, const QString&) {
+        chosen = index;
+        dialog.accept();
+    });
+    view->show_item(path);
+    if (dialog.exec() == QDialog::Accepted && chosen >= 0) {
+        snapshot_->setCurrentIndex(chosen);  // shows that version
+        select_path(path);
+    }
 }
 
 void RestoreDialog::show_snapshot(int index) {
@@ -184,7 +241,6 @@ void RestoreDialog::expand(QTreeWidgetItem* item) {
         id = id_from_hex(u8(item->data(0, SubtreeRole).toString()));
         const Tree tree = parse_tree(repo_->load_blob(BlobType::Tree, id));
         const QString base = item->data(0, PathRole).toString();
-        QStyle* st = style();
         for (const Node& n : tree.nodes) {
             auto* child = new QTreeWidgetItem(item);
             child->setText(0, qs(n.name));
@@ -193,20 +249,20 @@ void RestoreDialog::expand(QTreeWidgetItem* item) {
             child->setText(2, format_time(n.mtime));
             switch (n.kind) {
                 case NodeKind::Dir:
-                    child->setIcon(0, st->standardIcon(QStyle::SP_DirIcon));
+                    child->setIcon(0, icon(QStringLiteral("folder_20_regular")));
                     child->setData(0, SubtreeRole, qs(id_hex(n.subtree)));
                     new QTreeWidgetItem(child);  // placeholder so it can be expanded
                     break;
                 case NodeKind::File:
-                    child->setIcon(0, st->standardIcon(QStyle::SP_FileIcon));
+                    child->setIcon(0, icon(QStringLiteral("document_20_regular")));
                     child->setText(1, format_bytes(n.size));
                     break;
                 case NodeKind::Symlink:
-                    child->setIcon(0, st->standardIcon(QStyle::SP_FileLinkIcon));
+                    child->setIcon(0, icon(QStringLiteral("link_20_regular")));
                     child->setText(1, "-> " + qs(n.link_target));
                     break;
                 case NodeKind::Reparse:
-                    child->setIcon(0, st->standardIcon(QStyle::SP_FileLinkIcon));
+                    child->setIcon(0, icon(QStringLiteral("link_20_regular")));
                     child->setText(1, tr("link (no content)"));
                     break;
             }

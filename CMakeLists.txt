@@ -118,7 +118,7 @@ endif()
 # ---- frontend ---------------------------------------------------------------------------------
 
 if(VAULTIK_BUILD_GUI)
-    find_package(Qt6 6.5 COMPONENTS Widgets)
+    find_package(Qt6 6.5 COMPONENTS Widgets Svg)
     if(Qt6_FOUND)
         qt_add_executable(vaultik-gui WIN32
             src/gui/main.cpp
@@ -129,10 +129,17 @@ if(VAULTIK_BUILD_GUI)
             src/gui/restore_dialog.cpp
             src/gui/key_dialog.cpp
             src/gui/cloud_dialog.cpp
+            src/gui/theme.cpp
+            src/gui/job_card.cpp
+            src/gui/versions_view.cpp
+            src/gui/find_page.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)
-        target_link_libraries(vaultik-gui PRIVATE vaultik_core Qt6::Widgets)
+        # Fluent UI System Icons (MIT, see src/gui/icons/LICENSE-fluentui-system-icons.txt), as :/icons/<name>.svg
+        file(GLOB VAULTIK_ICONS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS src/gui/icons/*.svg)
+        qt_add_resources(vaultik-gui "icons" PREFIX "/" BASE src/gui FILES ${VAULTIK_ICONS})
+        target_link_libraries(vaultik-gui PRIVATE vaultik_core Qt6::Widgets Qt6::Svg)
         # The GUI starts the engine (and the scheduler starts the launcher) from its own folder.
         add_dependencies(vaultik-gui vaultik)
         if(WIN32)
