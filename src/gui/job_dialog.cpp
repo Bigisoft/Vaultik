@@ -112,6 +112,7 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
 
 JobDialog::~JobDialog() {
     cloud_.wipe();
+    copy_cloud_.wipe();
 }
 
 QWidget* JobDialog::build_general() {
@@ -167,6 +168,41 @@ QWidget* JobDialog::build_general() {
     note->setWordWrap(true);
     note->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(note);
+
+    // An optional second copy elsewhere (3-2-1).
+    copy_repository_ = new QLineEdit;
+    copy_repository_->setPlaceholderText(tr("Optional: another drive or cloud storage"));
+    copy_repository_->setClearButtonEnabled(true);
+    auto* copy_browse = new QPushButton(tr("Browse..."));
+    connect(copy_browse, &QPushButton::clicked, this, [this] {
+        const QString start = is_cloud_location(u8(copy_repository_->text())) ? QString() : copy_repository_->text();
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Second copy"), start);
+        if (!dir.isEmpty()) copy_repository_->setText(QDir::toNativeSeparators(dir));
+    });
+    auto* copy_cloud = new QPushButton(tr("Cloud storage..."));
+    connect(copy_cloud, &QPushButton::clicked, this, [this] {
+        CloudTarget initial = copy_cloud_;
+        initial.location = is_cloud_location(u8(copy_repository_->text())) ? copy_repository_->text().trimmed() : QString();
+        CloudDialog dialog(initial, this);
+        initial.wipe();
+        if (dialog.exec() != QDialog::Accepted) return;
+        copy_cloud_.wipe();
+        copy_cloud_ = dialog.target();
+        copy_repository_->setText(copy_cloud_.location);
+    });
+    auto* copy_row = new QWidget;
+    auto* cl = new QHBoxLayout(copy_row);
+    cl->setContentsMargins(0, 0, 0, 0);
+    cl->addWidget(copy_repository_, 1);
+    cl->addWidget(copy_browse);
+    cl->addWidget(copy_cloud);
+    form->addRow(tr("Second copy:"), copy_row);
+    auto* copy_note = new QLabel(tr("After each backup, the new versions are copied there too, so one failed "
+                                    "drive or account does not lose them (e.g. a USB drive and cloud storage). "
+                                    "It uses the same password and keeps versions by the same rules."));
+    copy_note->setWordWrap(true);
+    copy_note->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(copy_note);
     return page;
 }
 
@@ -598,6 +634,25 @@ void JobDialog::load(const jobs::Job& job) {
             }
         }
     }
+    const jobs::SecondCopy& sc = job.second_copy;
+    copy_repository_->setText(qs(sc.repository));
+    copy_cloud_.wipe();
+    copy_cloud_ = CloudTarget{};
+    if (is_cloud_location(sc.repository)) {
+        copy_cloud_.location = qs(sc.repository);
+        copy_cloud_.key_id = qs(sc.cloud_key_id);
+        copy_cloud_.region = qs(sc.cloud_region);
+        copy_cloud_.lock_days = sc.cloud_lock_days;
+        copy_cloud_.lock_compliance = sc.cloud_lock_compliance;
+        if (!job.id.empty()) {
+            try {
+                std::string secret = store_.copy_secret(job.id);
+                copy_cloud_.secret = qs(secret);
+                secure_wipe(secret.data(), secret.size());
+            } catch (const Error&) {
+            }
+        }
+    }
     sources_->clear();
     for (const auto& s : job.sources) sources_->addItem(qs(s));
     // A preset is ticked when the job has all its patterns; the list shows the others.
@@ -690,6 +745,17 @@ jobs::Job JobDialog::collect() const {
         j.cloud_key_id.clear();
         j.cloud_region.clear();
         j.cloud_lock_days = 0;
+    }
+    jobs::SecondCopy& sc = j.second_copy;
+    sc = jobs::SecondCopy{};
+    sc.repository = u8(copy_repository_->text().trimmed());
+    if (is_cloud_location(sc.repository)) {
+        sc.cloud_key_id = u8(copy_cloud_.key_id);
+        sc.cloud_region = u8(copy_cloud_.region);
+        sc.cloud_lock_days = cloud_kind(sc.repository) == CloudKind::S3 ? copy_cloud_.lock_days : 0;
+        sc.cloud_lock_compliance = sc.cloud_lock_days > 0 && copy_cloud_.lock_compliance;
+    } else if (!sc.repository.empty()) {
+        sc.repository = os::absolute_path(sc.repository);
     }
     j.sources.clear();
     for (const QString& s : items_of(sources_)) j.sources.push_back(u8(s));
@@ -820,6 +886,9 @@ void JobDialog::accept() {
             std::string secret = is_cloud_location(j.repository) ? u8(cloud_.secret) : std::string();
             store_.set_cloud_secret(j.id, secret);
             secure_wipe(secret.data(), secret.size());
+            std::string copy = is_cloud_location(j.second_copy.repository) ? u8(copy_cloud_.secret) : std::string();
+            store_.set_copy_secret(j.id, copy);
+            secure_wipe(copy.data(), copy.size());
         }
         const QString dir = QFileInfo(Runner::engine_path()).absolutePath();
         try {

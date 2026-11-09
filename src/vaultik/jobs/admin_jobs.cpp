@@ -148,9 +148,11 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
     if (!job->run_as_admin) throw Error("the job \"" + job->name + "\" is not set to run with administrator rights");
     std::string pw = from.password(id);
     std::string cloud = from.cloud_secret(id);
+    std::string copy = from.copy_secret(id);
     const auto wipe_all = [&] {
         secure_wipe(pw.data(), pw.size());
         secure_wipe(cloud.data(), cloud.size());
+        secure_wipe(copy.data(), copy.size());
     };
 
     const std::string dir = prepare_admin_store(user_sid);
@@ -163,6 +165,7 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
             to.set_password(id, pw);
         }
         to.set_cloud_secret(id, cloud);
+        to.set_copy_secret(id, copy);
     } catch (...) {
         wipe_all();
         throw;

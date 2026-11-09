@@ -97,8 +97,13 @@ void Tray::check() {
         std::uint64_t& seen = seen_[job.id];
         for (const jobs::RunRecord& r : records) {
             if (r.started <= seen) continue;
-            const bool fresh = !first_check_ || &r == jobs::last_backup(records) || &r == jobs::last_check(records);
-            if (r.kind != jobs::RunKind::Backup) {
+            const bool fresh = !first_check_ || &r == jobs::last_backup(records) || &r == jobs::last_check(records) ||
+                               &r == jobs::last_copy(records);
+            if (r.kind == jobs::RunKind::Copy) {
+                if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed)
+                    icon_->showMessage(tr("Second copy of %1 failed").arg(name), qs(r.message).left(200),
+                                       QSystemTrayIcon::Warning, 15000);
+            } else if (r.kind != jobs::RunKind::Backup) {
                 // A check that could not run is not news: the backup before it failed the same way.
                 if (fresh && settings.notify_failures && jobs::found_damage(r))
                     icon_->showMessage(tr("Health check of %1 found problems").arg(name),
@@ -123,8 +128,9 @@ void Tray::check() {
         if (!records.empty()) seen = std::max(seen, records.back().started);
         const jobs::RunRecord* backup = jobs::last_backup(records);
         const jobs::RunRecord* checked = jobs::last_check(records);
+        const jobs::RunRecord* copied = jobs::last_copy(records);
         if ((backup && (backup->status == jobs::RunStatus::Failed || !backup->alert.empty())) ||
-            (checked && jobs::found_damage(*checked)))
+            (checked && jobs::found_damage(*checked)) || (copied && copied->status == jobs::RunStatus::Failed))
             problems << name;
 
         // Too long without a saved version; reported once a day.

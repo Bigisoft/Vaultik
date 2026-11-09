@@ -204,7 +204,7 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
     std::uint64_t last_full = 0, last_any = 0;
     for (const RunRecord& r : history) {
-        if (r.kind == RunKind::Backup || r.status == RunStatus::Cancelled) continue;
+        if (!is_check(r.kind) || r.status == RunStatus::Cancelled) continue;
         last_any = std::max(last_any, r.finished);
         if (r.kind == RunKind::FullCheck) last_full = std::max(last_full, r.finished);
     }
@@ -252,6 +252,16 @@ void validate(const Job& job) {
     if (w.start_minute < 0 || w.start_minute >= 24 * 60 || w.end_minute < 0 || w.end_minute >= 24 * 60)
         throw Error("working hours must be times of the day");
     if (w.enabled && (w.weekdays & 0x7F) == 0) throw Error("working hours need at least one day");
+    const SecondCopy& sc = job.second_copy;
+    if (!sc.repository.empty()) {
+        if (os::fold_case(sc.repository) == os::fold_case(job.repository))
+            throw Error("the second copy must go to another place than the backup itself");
+        if (sc.cloud_lock_days < 0 || sc.cloud_lock_days > 3650) throw Error("the lock must be between 0 and 3650 days");
+        if (sc.cloud_lock_days > 0 && cloud_kind(sc.repository) != CloudKind::S3)
+            throw Error("locking uploaded data needs S3-compatible storage with Object Lock");
+        if (cloud_kind(sc.repository) == CloudKind::S3 && sc.cloud_key_id.empty())
+            throw Error("the second copy's cloud storage needs an access key ID");
+    }
     if (job.cloud_lock_days < 0 || job.cloud_lock_days > 3650)
         throw Error("the lock must be between 0 and 3650 days");
     if (job.cloud_lock_days > 0 && cloud_kind(job.repository) != CloudKind::S3)
@@ -302,6 +312,12 @@ std::string to_json(const Job& job) {
           {"max_bytes", job.retention.max_bytes}}},
         {"volume", {{"id", job.repository_volume}, {"path", job.repository_relative}}},
         {"backup_on_connect", job.backup_on_connect},
+        {"second_copy",
+         {{"repository", job.second_copy.repository},
+          {"cloud_key_id", job.second_copy.cloud_key_id},
+          {"cloud_region", job.second_copy.cloud_region},
+          {"cloud_lock_days", job.second_copy.cloud_lock_days},
+          {"cloud_lock_mode", job.second_copy.cloud_lock_compliance ? "compliance" : "governance"}}},
         {"work_hours",
          {{"enabled", job.work_hours.enabled},
           {"weekdays", job.work_hours.weekdays},
@@ -369,6 +385,14 @@ Job job_from_json(const std::string& text) {
             job.repository_relative = j.at("volume").value("path", std::string());
         }
         job.backup_on_connect = j.value("backup_on_connect", false);
+        if (j.contains("second_copy")) {
+            const json& c = j.at("second_copy");
+            job.second_copy.repository = c.value("repository", std::string());
+            job.second_copy.cloud_key_id = c.value("cloud_key_id", std::string());
+            job.second_copy.cloud_region = c.value("cloud_region", std::string());
+            job.second_copy.cloud_lock_days = c.value("cloud_lock_days", 0);
+            job.second_copy.cloud_lock_compliance = c.value("cloud_lock_mode", std::string()) == "compliance";
+        }
         if (j.contains("work_hours")) {
             const json& w = j.at("work_hours");
             job.work_hours.enabled = w.value("enabled", false);
@@ -410,7 +434,10 @@ RunRecord record_from_json(const std::string& text) {
         const json j = json::parse(text);
         RunRecord r;
         const std::string kind = j.value("kind", std::string("backup"));  // missing before 0.5
-        r.kind = kind == "full_check" ? RunKind::FullCheck : kind == "check" ? RunKind::Check : RunKind::Backup;
+        r.kind = kind == "full_check" ? RunKind::FullCheck
+                 : kind == "check"    ? RunKind::Check
+                 : kind == "copy"     ? RunKind::Copy
+                                      : RunKind::Backup;
         r.on_connect = j.value("trigger", std::string()) == "connect";
         r.alert = j.value("alert", std::string());
         r.started = j.value("started", std::uint64_t{0});
@@ -437,7 +464,13 @@ const RunRecord* last_backup(const std::vector<RunRecord>& history) {
 
 const RunRecord* last_check(const std::vector<RunRecord>& history) {
     for (auto it = history.rbegin(); it != history.rend(); ++it)
-        if (it->kind != RunKind::Backup) return &*it;
+        if (is_check(it->kind)) return &*it;
+    return nullptr;
+}
+
+const RunRecord* last_copy(const std::vector<RunRecord>& history) {
+    for (auto it = history.rbegin(); it != history.rend(); ++it)
+        if (it->kind == RunKind::Copy) return &*it;
     return nullptr;
 }
 
@@ -446,6 +479,7 @@ const char* to_string(RunKind kind) {
         case RunKind::Backup: return "backup";
         case RunKind::Check: return "check";
         case RunKind::FullCheck: return "full_check";
+        case RunKind::Copy: return "copy";
     }
     return "backup";
 }
@@ -516,6 +550,10 @@ std::string secret_path(const std::string& dir, const std::string& id) {
 
 std::string cloud_secret_path(const std::string& dir, const std::string& id) {
     return os::join(os::join(dir, "secrets"), id + ".cloud");
+}
+
+std::string copy_secret_path(const std::string& dir, const std::string& id) {
+    return os::join(os::join(dir, "secrets"), id + ".copycloud");
 }
 
 void seal_to(const std::string& path, const std::string& secret) {
@@ -608,6 +646,7 @@ void JobStore::remove(const std::string& id) const {
     os::remove_file(job_path(dir_, id));
     os::remove_file(secret_path(dir_, id));
     os::remove_file(cloud_secret_path(dir_, id));
+    os::remove_file(copy_secret_path(dir_, id));
     os::remove_file(history_path(dir_, id));
 }
 
@@ -638,6 +677,35 @@ void JobStore::set_cloud_secret(const std::string& id, const std::string& secret
 std::string JobStore::cloud_secret(const std::string& id) const {
     check_id(id);
     return unseal_from(cloud_secret_path(dir_, id));
+}
+
+void JobStore::set_copy_secret(const std::string& id, const std::string& secret) const {
+    check_id(id);
+    if (secret.empty()) {
+        os::remove_file(copy_secret_path(dir_, id));
+        return;
+    }
+    seal_to(copy_secret_path(dir_, id), secret);
+}
+
+std::string JobStore::copy_secret(const std::string& id) const {
+    check_id(id);
+    return unseal_from(copy_secret_path(dir_, id));
+}
+
+CloudCredentials JobStore::copy_credentials(const Job& job) const {
+    const SecondCopy& sc = job.second_copy;
+    if (!is_cloud_location(sc.repository) || job.id.empty()) return {};
+    CloudCredentials c{sc.cloud_key_id, copy_secret(job.id), sc.cloud_region};
+    c.lock_days = sc.cloud_lock_days;
+    c.lock_compliance = sc.cloud_lock_compliance;
+    c.on_secret_changed = [dir = dir_, id = job.id](const std::string& secret) {
+        try {
+            JobStore(dir).set_copy_secret(id, secret);
+        } catch (const Error&) {
+        }
+    };
+    return c;
 }
 
 CloudCredentials JobStore::cloud_credentials(const Job& job) const {

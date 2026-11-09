@@ -57,6 +57,17 @@ bool in_work_hours(const WorkHours& w, int weekday, int minute);
 // working hours, the working-hours ones (0 means no limit).
 std::pair<std::uint64_t, std::uint64_t> rate_limits_now(const ResourcePolicy& normal, const WorkHours& w);
 
+// A second copy of the job's backup (3-2-1), made after each run: another folder or cloud
+// storage, a repository of its own with the same password (created on first use). Its cloud keys
+// are stored like the job's (JobStore::set_copy_secret).
+struct SecondCopy {
+    std::string repository;  // empty: no second copy
+    std::string cloud_key_id;
+    std::string cloud_region;
+    int cloud_lock_days = 0;
+    bool cloud_lock_compliance = false;
+};
+
 struct Job {
     std::string id;    // file-name safe, derived from the name when created
     std::string name;  // shown in the UI
@@ -84,6 +95,7 @@ struct Job {
     bool run_as_admin = false;
     ResourcePolicy resources;
     WorkHours work_hours;
+    SecondCopy second_copy;
     // Old snapshots of this job to remove after each run (then unused data is pruned). Empty keeps
     // everything.
     RetentionPolicy retention;
@@ -121,8 +133,12 @@ HealthPolicy default_health(std::string_view repository);
 
 enum class RunStatus { Success, Partial, Failed, Cancelled };
 
-// What a run did: a backup, a health check that read a sample of the data, or one that read all.
-enum class RunKind { Backup, Check, FullCheck };
+// What a run did: a backup, a health check that read a sample of the data or all of it, or the
+// second copy after a backup.
+enum class RunKind { Backup, Check, FullCheck, Copy };
+inline bool is_check(RunKind k) {
+    return k == RunKind::Check || k == RunKind::FullCheck;
+}
 
 struct RunRecord {
     RunKind kind = RunKind::Backup;
@@ -162,9 +178,10 @@ RunRecord record_from_json(const std::string& text);
 // The newest backup run, or the newest health check, in a history (oldest first); null if none.
 const RunRecord* last_backup(const std::vector<RunRecord>& history);
 const RunRecord* last_check(const std::vector<RunRecord>& history);
+const RunRecord* last_copy(const std::vector<RunRecord>& history);
 // A health check that found damaged or missing data (not one that could not run).
 inline bool found_damage(const RunRecord& r) {
-    return r.kind != RunKind::Backup && r.status == RunStatus::Failed && r.errors > 0;
+    return is_check(r.kind) && r.status == RunStatus::Failed && r.errors > 0;
 }
 
 const char* to_string(RunStatus status);
@@ -200,6 +217,10 @@ public:
 
     // The cloud storage secret key, sealed like the password (secrets/<id>.cloud). Empty when none.
     void set_cloud_secret(const std::string& id, const std::string& secret) const;
+    // The same for the second copy's cloud storage (secrets/<id>.copycloud).
+    void set_copy_secret(const std::string& id, const std::string& secret) const;
+    std::string copy_secret(const std::string& id) const;
+    CloudCredentials copy_credentials(const Job& job) const;
     std::string cloud_secret(const std::string& id) const;
     // The job's cloud storage keys (empty for a folder destination).
     CloudCredentials cloud_credentials(const Job& job) const;

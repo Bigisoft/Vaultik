@@ -51,6 +51,8 @@ private:
     QLineEdit* repository_ = nullptr;
     QLineEdit* password_ = nullptr;
     QLineEdit* password2_ = nullptr;
+    QLineEdit* copy_repository_ = nullptr;  // the second copy (empty: none)
+    CloudTarget copy_cloud_;
     QListWidget* sources_ = nullptr;
     QListWidget* excludes_ = nullptr;
     std::vector<QCheckBox*> preset_boxes_;  // in the order of jobs::exclusion_presets()

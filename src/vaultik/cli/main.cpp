@@ -33,6 +33,7 @@
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/backends.hpp"
 #include "vaultik/repo/s3_backend.hpp"
+#include "vaultik/ops/copy.hpp"
 #include "vaultik/ops/diff.hpp"
 #include "vaultik/ops/history.hpp"
 #include "vaultik/ops/mount.hpp"
@@ -163,6 +164,9 @@ Commands:
                                connected, the drive is there, and it is not
                                already backing up or just finished (used by
                                the tray when a drive is plugged in)
+  copy <job>                   Copy the job's new versions to its second copy now
+                               (run-job does this after each backup), creating it
+                               there on first use with the job's password
   check-job <job>              Read the job's share of its stored data back and
                                check every version now (added to its history)
       --full                   Read all of the stored data
@@ -1353,6 +1357,98 @@ private:
     std::thread thread_;
 };
 
+// After a job's backup: copies its new versions to the job's second destination (creating the
+// repository there on first use, with the job's password), then removes copies beyond the job's
+// retention there. Fills `record` (kind Copy) whatever happens; returns kExitOk or kExitError.
+int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job, Repository& source,
+                jobs::RunRecord& record) {
+    record.kind = jobs::RunKind::Copy;
+    record.started = os::now();
+    const std::string& where = job.second_copy.repository;
+    try {
+        std::string pw = store.password(job.id);
+        if (pw.empty()) pw = get_password(a, false);
+        std::unique_ptr<Repository> target;
+        try {
+            const CloudCredentials cloud = store.copy_credentials(job);
+            auto backend = open_backend(where, &cloud, true);
+            if (!backend->exists("config")) {
+                if (!g_json) out("Creating the second copy at " + where + "\n");
+                Repository::init(*backend, pw);
+            }
+            target = Repository::open(std::move(backend), pw);
+        } catch (...) {
+            secure_wipe(pw.data(), pw.size());
+            throw;
+        }
+        secure_wipe(pw.data(), pw.size());
+        if (!g_json) out("Second copy: copying new versions to " + where + "\n");
+
+        CopyResult r;
+        {
+            RepoLock from_lock(source, RepoLock::Mode::Shared, "copy (job " + job.id + ")", lock_wait(a, std::chrono::minutes(10)));
+            RepoLock to_lock(*target, RepoLock::Mode::Shared, "copy (job " + job.id + ")", lock_wait(a, std::chrono::minutes(10)));
+            source.reload_index();
+            target->reload_index();
+            CopyOptions co;
+            co.tags = {"job:" + job.id};
+            co.map_file = os::join(os::join(store.dir(), "copies"), job.id + ".map");
+            co.should_cancel = [&] { return stop_requested() || from_lock.lost() || to_lock.lost(); };
+            co.on_progress = [](const std::string& msg) {
+                if (g_json) emit({{"event", "copy_progress"}, {"current", msg}});
+                else status("Copying " + msg);
+            };
+            r = copy_snapshots(source, *target, co);
+        }
+        if (!g_json) clear_status();
+        std::string note;
+        if (!job.retention.empty()) note = clean_up(*target, job);
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Success;
+        record.files = r.copied;
+        record.bytes = r.bytes;
+        record.message = r.copied == 0 ? "the second copy was up to date"
+                                       : "copied " + std::to_string(r.copied) + " version(s), " + format_bytes(r.bytes) + " new";
+        if (!note.empty()) record.message += "; " + note;
+        if (g_json) {
+            emit({{"event", "copy"}, {"status", "success"}, {"copied", r.copied}, {"bytes", r.bytes},
+                  {"message", record.message}});
+        } else {
+            out("Second copy: " + record.message + "\n");
+        }
+        return kExitOk;
+    } catch (const Cancelled&) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Cancelled;
+        record.message = "cancelled; the versions copied so far stay";
+    } catch (const std::exception& e) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Failed;
+        record.message = std::string("the second copy failed: ") + e.what();
+    }
+    if (g_json) emit({{"event", "copy"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
+    else warning(record.message);
+    return kExitError;
+}
+
+// "copy --job <job>": makes the job's second copy now (also run by run-job after each backup).
+int cmd_copy(const Args& a) {
+    if (a.positional.size() != 1) throw Error("usage: vaultik copy <job id or name>");
+    const jobs::JobStore store = job_store(a);
+    const auto job = store.find(a.positional[0]);
+    if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
+    if (job->second_copy.repository.empty()) throw Error("the job \"" + job->name + "\" has no second copy set up");
+    apply_resource_policy(resource_policy(a, job->resources));
+    const auto repo = open_job_repo(a, store, *job);
+    jobs::RunRecord record;
+    const int code = second_copy(a, store, *job, *repo, record);
+    store.append_history(job->id, record);
+    if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
+    return code;
+}
+
 // "check-job <job> [--full]": a health check of the job's backup now, recorded in its history.
 int cmd_check_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik check-job <job id or name> [--full]");
@@ -1456,6 +1552,17 @@ int cmd_run_job(const Args& a) {
         throw;
     }
     store.append_history(job->id, record);
+
+    // The second copy, after a backup that saved a version. Its result is its own history entry.
+    if (!job->second_copy.repository.empty() && !g_cancel.load() && record.status != jobs::RunStatus::Failed) {
+        jobs::RunRecord copy;
+        second_copy(a, store, *job, *repo, copy);
+        try {
+            store.append_history(job->id, copy);
+        } catch (const Error& e) {
+            warning(std::string("could not record the second copy: ") + e.what());
+        }
+    }
 
     // Then the health check, when one is due. It never changes the backup's result: a problem
     // it finds is its own entry in the history (and a notification from the tray).
@@ -2021,6 +2128,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
+    if (a.command == "copy") return cmd_copy(a);
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
     if (a.command == "mount") return cmd_mount(a);
     if (a.command == "admin-job") return cmd_admin_job(a);

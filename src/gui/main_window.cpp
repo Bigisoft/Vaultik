@@ -949,7 +949,10 @@ void MainWindow::refresh_history() {
         const bool backup = r.kind == jobs::RunKind::Backup;
         auto* item = new QTreeWidgetItem(history_);
         item->setText(0, format_time(r.started));
-        item->setText(1, backup ? tr("Backup") : r.kind == jobs::RunKind::FullCheck ? tr("Full check") : tr("Health check"));
+        item->setText(1, backup                                 ? tr("Backup")
+                         : r.kind == jobs::RunKind::FullCheck ? tr("Full check")
+                         : r.kind == jobs::RunKind::Copy      ? tr("Second copy")
+                                                              : tr("Health check"));
         item->setIcon(2, status_icon(r.status));
         if (backup) {
             item->setText(2, r.alert.empty() ? status_text(r.status) : tr("Warning: files may be encrypted"));
@@ -1116,6 +1119,12 @@ void MainWindow::refresh_overview() {
         d.versions = tr("...");
         d.versions_detail = tr("Opening the backup...");
     }
+    if (!job->second_copy.repository.empty()) {
+        const jobs::RunRecord* copy = jobs::last_copy(records);
+        d.size_detail += (d.size_detail.isEmpty() ? QString() : QStringLiteral("\n")) +
+                         (copy == nullptr ? tr("Second copy: not made yet")
+                                          : tr("Second copy: %1, %2").arg(when_text(copy->started), status_text(copy->status).toLower()));
+    }
     if (!is_cloud_location(job->repository)) {
         const QStorageInfo disk(qs(job->repository));
         if (disk.isValid() && disk.isReady())
@@ -1146,6 +1155,8 @@ void MainWindow::refresh_overview() {
                        "destination drive. %1").arg(qs(check->message));
     } else if (backup && backup->status == jobs::RunStatus::Failed) {
         d.warning = tr("The last backup failed: %1").arg(qs(backup->message));
+    } else if (const jobs::RunRecord* copy = jobs::last_copy(records); copy && copy->status == jobs::RunStatus::Failed) {
+        d.warning = tr("The last second copy failed: %1").arg(qs(copy->message));
     } else if (days > 0 && saved > 0 && now > saved && (now - saved) / kDay >= static_cast<std::uint64_t>(days)) {
         d.warning = tr("No version was saved for %1.").arg(count_of((now - saved) / kDay, tr("day"), tr("days")));
     }
