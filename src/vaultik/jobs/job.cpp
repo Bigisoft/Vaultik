@@ -155,6 +155,23 @@ void record_volume(Job& job) {
 
 }  // namespace
 
+const std::vector<ExclusionPreset>& exclusion_presets() {
+    static const std::vector<ExclusionPreset> presets = {
+        {"temp", {"*.tmp", "*.temp", "~$*", "*/AppData/Local/Temp", "*/Windows/Temp"}, true},
+        {"caches",
+         {"*/AppData/Local/*/Cache", "*/AppData/Local/*/Code Cache", "*/AppData/Local/*/GPUCache",
+          "*/AppData/Local/*/cache2", "*/AppData/Local/Microsoft/Windows/INetCache", "*/.cache"},
+         true},
+        {"dev", {"node_modules", "__pycache__", ".pytest_cache", ".mypy_cache"}, false},
+        {"clutter",
+         {"Thumbs.db", "desktop.ini", "System Volume Information", "pagefile.sys", "hiberfil.sys", "swapfile.sys",
+          "*/Windows/SoftwareDistribution/Download"},
+         true},
+        {"recycle", {"$Recycle.Bin"}, true},
+    };
+    return presets;
+}
+
 HealthPolicy default_health(std::string_view repository) {
     HealthPolicy h;
     h.monthly = !is_cloud_location(repository);

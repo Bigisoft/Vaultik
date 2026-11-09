@@ -86,6 +86,15 @@ bool drive_connected(const Job& job);
 // The retention a new job starts with: 7 daily, 4 weekly and 12 monthly snapshots.
 RetentionPolicy default_retention();
 
+// Ready-made exclusions, each a set of patterns for Job::excludes (with '/' as the separator,
+// which matches '\' on Windows). A job uses a preset when it has all of its patterns.
+struct ExclusionPreset {
+    std::string id;  // "temp", "caches", "dev", "clutter", "recycle"
+    std::vector<std::string> patterns;
+    bool default_on = false;  // ticked for a new job
+};
+const std::vector<ExclusionPreset>& exclusion_presets();
+
 // The health checks a job saving to `repository` starts with: weekly 10%, and the monthly full
 // check only for a folder (a full check of cloud storage downloads everything).
 HealthPolicy default_health(std::string_view repository);

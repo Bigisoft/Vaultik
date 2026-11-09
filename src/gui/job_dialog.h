@@ -53,6 +53,7 @@ private:
     QLineEdit* password2_ = nullptr;
     QListWidget* sources_ = nullptr;
     QListWidget* excludes_ = nullptr;
+    std::vector<QCheckBox*> preset_boxes_;  // in the order of jobs::exclusion_presets()
     QCheckBox* vss_ = nullptr;    // Windows only
     QCheckBox* skip_sql_ = nullptr;  // Windows only
     QCheckBox* admin_ = nullptr;  // Windows only

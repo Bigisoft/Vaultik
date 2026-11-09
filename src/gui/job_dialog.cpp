@@ -8,6 +8,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -21,6 +22,9 @@
 #include <QTabWidget>
 #include <QTimeEdit>
 #include <QVBoxLayout>
+
+#include <algorithm>
+#include <set>
 
 #include "common.h"
 #include "key_dialog.h"
@@ -99,6 +103,8 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
         defaults.schedule.kind = jobs::Schedule::Kind::Daily;
         defaults.resources = priority_preset("low");
         defaults.retention = jobs::default_retention();
+        for (const jobs::ExclusionPreset& p : jobs::exclusion_presets())
+            if (p.default_on) defaults.excludes.insert(defaults.excludes.end(), p.patterns.begin(), p.patterns.end());
         load(defaults);
     }
 }
@@ -184,7 +190,29 @@ QWidget* JobDialog::build_sources() {
     connect(remove, &QPushButton::clicked, this, [this] { qDeleteAll(sources_->selectedItems()); });
     layout->addWidget(row({add_folder, add_file, remove}));
 
-    layout->addWidget(new QLabel(tr("Skip names matching (wildcards * and ?; a pattern with a path "
+    // Ready-made exclusions, two per row.
+    layout->addWidget(new QLabel(tr("Skip:")));
+    auto* presets = new QGridLayout;
+    presets->setContentsMargins(0, 0, 0, 0);
+    int n = 0;
+    for (const jobs::ExclusionPreset& p : jobs::exclusion_presets()) {
+        QString label, tip;
+        if (p.id == "temp") label = tr("Temporary files");
+        else if (p.id == "caches") label = tr("Browser and app caches");
+        else if (p.id == "dev") label = tr("Developer folders (node_modules, Python caches)");
+        else if (p.id == "clutter") label = tr("Windows clutter (thumbnails, page file)");
+        else if (p.id == "recycle") label = tr("Recycle bin");
+        else label = qs(p.id);
+        for (const std::string& pattern : p.patterns) tip += (tip.isEmpty() ? "" : "\n") + qs(pattern);
+        auto* box = new QCheckBox(label);
+        box->setToolTip(tip);
+        presets->addWidget(box, n / 2, n % 2);
+        preset_boxes_.push_back(box);
+        ++n;
+    }
+    layout->addLayout(presets);
+
+    layout->addWidget(new QLabel(tr("Also skip names matching (wildcards * and ?; a pattern with a path "
                                     "separator matches the full path):")));
     excludes_ = new QListWidget;
     layout->addWidget(excludes_, 1);
@@ -516,8 +544,19 @@ void JobDialog::load(const jobs::Job& job) {
     }
     sources_->clear();
     for (const auto& s : job.sources) sources_->addItem(qs(s));
+    // A preset is ticked when the job has all its patterns; the list shows the others.
     excludes_->clear();
-    for (const auto& e : job.excludes) excludes_->addItem(qs(e));
+    std::set<std::string> covered;
+    const auto& presets = jobs::exclusion_presets();
+    for (std::size_t i = 0; i < presets.size(); ++i) {
+        const bool all = std::all_of(presets[i].patterns.begin(), presets[i].patterns.end(), [&](const std::string& p) {
+            return std::find(job.excludes.begin(), job.excludes.end(), p) != job.excludes.end();
+        });
+        preset_boxes_[i]->setChecked(all);
+        if (all) covered.insert(presets[i].patterns.begin(), presets[i].patterns.end());
+    }
+    for (const auto& e : job.excludes)
+        if (!covered.contains(e)) excludes_->addItem(qs(e));
     if (vss_ != nullptr) vss_->setChecked(job.vss);
     if (skip_sql_ != nullptr) {
         skip_sql_->setChecked(job.vss_skip_sql);
@@ -593,7 +632,13 @@ jobs::Job JobDialog::collect() const {
     j.sources.clear();
     for (const QString& s : items_of(sources_)) j.sources.push_back(u8(s));
     j.excludes.clear();
-    for (const QString& e : items_of(excludes_)) j.excludes.push_back(u8(e));
+    const auto& presets = jobs::exclusion_presets();
+    for (std::size_t i = 0; i < presets.size(); ++i)
+        if (preset_boxes_[i]->isChecked())
+            for (const std::string& p : presets[i].patterns)
+                if (std::find(j.excludes.begin(), j.excludes.end(), p) == j.excludes.end()) j.excludes.push_back(p);
+    for (const QString& e : items_of(excludes_))
+        if (std::find(j.excludes.begin(), j.excludes.end(), u8(e)) == j.excludes.end()) j.excludes.push_back(u8(e));
     if (vss_ != nullptr) j.vss = vss_->isChecked();
     if (skip_sql_ != nullptr) j.vss_skip_sql = skip_sql_->isChecked();
     if (admin_ != nullptr) j.run_as_admin = admin_->isChecked();

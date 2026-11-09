@@ -5,6 +5,7 @@
 #include <map>
 #include <random>
 
+#include "vaultik/jobs/job.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/verify.hpp"
@@ -346,6 +347,30 @@ TEST_CASE("files that look encrypted by ransomware raise the alarm") {
 
     CHECK(byte_entropy(random_data(65536, 1)) > 7.9);
     CHECK(byte_entropy(text(1)) < 5.0);
+}
+
+TEST_CASE("ready-made exclusions skip what they say") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    const Bytes one = random_data(100, 7);
+    write_file(src / "keep.txt", one);                                      // kept
+    write_file(src / "report.tmp", one);                                    // temp
+    write_file(src / "~$report.docx", one);                                 // temp (Office lock file)
+    write_file(src / "AppData" / "Local" / "Temp" / "t.txt", one);          // temp
+    write_file(src / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default" / "Cache" / "c", one);
+    write_file(src / "project" / "node_modules" / "lib" / "a.js", one);     // dev
+    write_file(src / "project" / "main.js", one);                           // kept
+    write_file(src / "Thumbs.db", one);                                     // clutter
+    write_file(src / "$Recycle.Bin" / "x", one);                            // recycle
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    for (const jobs::ExclusionPreset& p : jobs::exclusion_presets())
+        options.excludes.insert(options.excludes.end(), p.patterns.begin(), p.patterns.end());
+    const BackupResult r = run_backup(*repo, options);
+    CHECK(r.snapshot.stats.files == 2);  // keep.txt and project/main.js
 }
 
 TEST_CASE("overlapping backup paths are rejected") {
