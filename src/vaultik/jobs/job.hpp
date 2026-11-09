@@ -64,7 +64,20 @@ struct Job {
     // everything.
     RetentionPolicy retention;
     HealthPolicy health;
+    // A folder destination's drive, recorded when the job is saved (see os::volume_of), so the job
+    // finds its backup when the drive comes back with another letter. Empty for cloud storage,
+    // network shares and folders not reachable when saved.
+    std::string repository_volume;
+    std::string repository_relative;  // the folder below the volume's root
+    // Windows: also back up as soon as the destination drive is connected (watched by the tray).
+    bool backup_on_connect = false;
 };
+
+// Points job.repository at the job's drive wherever it is connected now (a changed drive letter);
+// leaves it alone when the drive is not connected or no drive was recorded.
+void relocate(Job& job);
+// Whether the job's recorded drive is connected; true when none was recorded.
+bool drive_connected(const Job& job);
 
 // The retention a new job starts with: 7 daily, 4 weekly and 12 monthly snapshots.
 RetentionPolicy default_retention();
@@ -80,6 +93,7 @@ enum class RunKind { Backup, Check, FullCheck };
 
 struct RunRecord {
     RunKind kind = RunKind::Backup;
+    bool on_connect = false;  // started because the destination drive was connected
     std::uint64_t started = 0;   // FILETIME ticks
     std::uint64_t finished = 0;
     RunStatus status = RunStatus::Success;

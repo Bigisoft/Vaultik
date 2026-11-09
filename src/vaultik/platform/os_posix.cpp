@@ -484,6 +484,15 @@ bool is_pseudo_filesystem(const std::string& path) {
 #endif
 }
 
+// Linux: comes with the port (by filesystem UUID under /dev/disk/by-uuid and the mount table).
+VolumeLocation volume_of(const std::string& /*path*/) {
+    return {};
+}
+
+std::string volume_root(const std::string& /*volume*/) {
+    return {};
+}
+
 Bytes protect_secret(ByteSpan plain) {
     return Bytes(plain.begin(), plain.end());  // protected by the 0600 file mode
 }

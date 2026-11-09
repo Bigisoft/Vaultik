@@ -135,6 +135,10 @@ Commands:
                                settings; the run is added to the job's history.
                                Then runs the job's health check when one is due
       --no-check               Skip the health check this time
+      --on-connect             Run only if the job backs up when its drive is
+                               connected, the drive is there, and it is not
+                               already backing up or just finished (used by
+                               the tray when a drive is plugged in)
   check-job <job>              Read the job's share of its stored data back and
                                check every version now (added to its history)
       --full                   Read all of the stored data
@@ -205,7 +209,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check"};
+                                              "--full", "--no-check", "--on-connect"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -956,6 +960,15 @@ std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& s
     return repo;
 }
 
+// Whether another run is backing up this job right now (it holds a live lock naming the job).
+bool backup_running(Repository& repo, const jobs::Job& job) {
+    const std::string mine = "backup (job " + job.id + ")";
+    const std::uint64_t now = os::now();
+    for (const LockEntry& e : list_locks(repo))
+        if (e.info && e.info->command == mine && !is_stale(*e.info, now)) return true;
+    return false;
+}
+
 // "check-job <job> [--full]": a health check of the job's backup now, recorded in its history.
 int cmd_check_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik check-job <job id or name> [--full]");
@@ -999,16 +1012,26 @@ int cmd_run_job(const Args& a) {
     if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
 
     // The job's own resource settings, unless overridden on the command line.
+    const bool on_connect = a.has("--on-connect");
+    if (on_connect && !jobs::connect_backup_due(store, *job)) return kExitOk;
+
     const ResourcePolicy policy = resource_policy(a, job->resources);
     apply_resource_policy(policy);
     if (!policy.is_default() && !g_json) err("Resources: " + describe(policy) + "\n");
 
     jobs::RunRecord record;
+    record.on_connect = on_connect;
     record.started = os::now();
     int code = kExitError;
     std::unique_ptr<Repository> repo;
     try {
+        if (!jobs::drive_connected(*job))
+            throw Error("the backup drive is not connected (" + job->repository + ")");
         repo = open_job_repo(a, store, *job);
+        if (on_connect && backup_running(*repo, *job)) {
+            if (!g_json) out("Job \"" + job->name + "\" is already backing up.\n");
+            return kExitOk;
+        }
         if (!g_json) out("Job \"" + job->name + "\": backing up to " + job->repository + "\n");
 
         BackupOptions o;

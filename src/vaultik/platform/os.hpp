@@ -186,6 +186,21 @@ ErrorCode read_symlink(const std::string& path, std::string& target);
 // True for kernel pseudo file systems (/proc, /sys, ...) that must never be backed up.
 bool is_pseudo_filesystem(const std::string& path);
 
+// Where a local folder lives. `volume` is a name that stays the same when the drive gets another
+// letter (Windows: "\\?\Volume{GUID}\"), `root` the volume's current mount path ("F:\") and
+// `relative` the rest of the path below it ("Backups\vaultik"). `volume` is empty for network
+// shares, folders that do not exist, and systems without such names. `system` is true for the
+// volume Windows runs from.
+struct VolumeLocation {
+    std::string volume;
+    std::string root;
+    std::string relative;
+    bool system = false;
+};
+VolumeLocation volume_of(const std::string& path);
+// The current mount path of a volume named by volume_of ("F:\"), or empty when it is not connected.
+std::string volume_root(const std::string& volume);
+
 // ---- small files (os_common.cpp, built on File) ----------------------------------------------
 
 // Creates `path` and any missing parents. Throws OsError.

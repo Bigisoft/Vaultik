@@ -31,6 +31,11 @@ void check_program_dir(const std::string& program_dir);
 // Run history from the user's store and, when there is one, the admin store, oldest first.
 std::vector<RunRecord> combined_history(const JobStore& store, const std::string& id, std::size_t limit = 100);
 
+// Whether connecting the job's drive should start a backup: the job asks for it, its drive is
+// connected, and it did not save a version in the last 10 minutes (Windows reports one
+// connection several times, and the drive may have been plugged straight back in).
+bool connect_backup_due(const JobStore& store, const Job& job);
+
 // Whether the admin store holds the job (so removing it needs administrator rights).
 bool has_admin_copy(const std::string& id);
 

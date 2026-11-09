@@ -105,6 +105,47 @@ RetentionPolicy default_retention() {
     return p;
 }
 
+void relocate(Job& job) {
+    if (job.repository_volume.empty() || is_cloud_location(job.repository)) return;
+    const std::string root = os::volume_root(job.repository_volume);
+    if (root.empty()) return;
+    const std::string now = job.repository_relative.empty() ? root : os::join(root, job.repository_relative);
+    if (os::fold_case(now) != os::fold_case(os::absolute_path(job.repository))) job.repository = now;
+}
+
+bool drive_connected(const Job& job) {
+    return job.repository_volume.empty() || is_cloud_location(job.repository) ||
+           !os::volume_root(job.repository_volume).empty();
+}
+
+namespace {
+
+// Records the drive of a folder destination (see Job::repository_volume).
+void record_volume(Job& job) {
+    if (is_cloud_location(job.repository) || job.repository.starts_with("\\\\") || job.repository.starts_with("//")) {
+        job.repository_volume.clear();
+        job.repository_relative.clear();
+        return;
+    }
+    // Only a folder that is there: the letter may belong to another drive while this one is away.
+    const os::VolumeLocation loc = os::is_directory(job.repository) ? os::volume_of(job.repository) : os::VolumeLocation{};
+    if (!loc.volume.empty()) {
+        job.repository_volume = loc.volume;
+        job.repository_relative = loc.relative;
+        return;
+    }
+    // Otherwise the drive is not connected now: keep what was recorded when it was, unless the
+    // destination now names another folder ("X:\" plus the recorded folder is still the same one).
+    const std::string& r = job.repository;
+    const bool drive_form = r.size() >= 3 && r[1] == ':' && (r[2] == '\\' || r[2] == '/');
+    if (!drive_form || os::fold_case(r.substr(3)) != os::fold_case(job.repository_relative)) {
+        job.repository_volume.clear();
+        job.repository_relative.clear();
+    }
+}
+
+}  // namespace
+
 HealthPolicy default_health(std::string_view repository) {
     HealthPolicy h;
     h.monthly = !is_cloud_location(repository);
@@ -158,6 +199,8 @@ void validate(const Job& job) {
     for (const int n : {k.last, k.hourly, k.daily, k.weekly, k.monthly, k.yearly, k.within_days})
         if (n < 0 || n > 10000) throw Error("retention counts must be between 0 and 10000");
     if (k.max_bytes != 0 && k.max_bytes < (1ull << 30)) throw Error("a size limit must be at least 1 GB");
+    if (job.backup_on_connect && (job.repository_volume.empty() || is_cloud_location(job.repository)))
+        throw Error("backing up when the drive is connected needs a destination folder on a local or USB drive");
     if (job.health.sample_percent < 1 || job.health.sample_percent > 100)
         throw Error("the weekly check must read between 1% and 100% of the data");
 }
@@ -200,6 +243,8 @@ std::string to_json(const Job& job) {
           {"yearly", job.retention.yearly},
           {"within_days", job.retention.within_days},
           {"max_bytes", job.retention.max_bytes}}},
+        {"volume", {{"id", job.repository_volume}, {"path", job.repository_relative}}},
+        {"backup_on_connect", job.backup_on_connect},
         {"health",
          {{"weekly", job.health.weekly},
           {"sample_percent", job.health.sample_percent},
@@ -253,6 +298,11 @@ Job job_from_json(const std::string& text) {
             job.retention.within_days = k.value("within_days", 0);
             job.retention.max_bytes = k.value("max_bytes", std::uint64_t{0});
         }
+        if (j.contains("volume")) {
+            job.repository_volume = j.at("volume").value("id", std::string());
+            job.repository_relative = j.at("volume").value("path", std::string());
+        }
+        job.backup_on_connect = j.value("backup_on_connect", false);
         job.health = default_health(job.repository);  // missing in jobs saved before 0.5
         if (j.contains("health")) {
             const json& h = j.at("health");
@@ -275,6 +325,7 @@ std::string to_json(const RunRecord& r) {
         {"message", r.message},
     };
     if (r.kind != RunKind::Backup) j["kind"] = to_string(r.kind);
+    if (r.on_connect) j["trigger"] = "connect";
     return j.dump();
 }
 
@@ -284,6 +335,7 @@ RunRecord record_from_json(const std::string& text) {
         RunRecord r;
         const std::string kind = j.value("kind", std::string("backup"));  // missing before 0.5
         r.kind = kind == "full_check" ? RunKind::FullCheck : kind == "check" ? RunKind::Check : RunKind::Backup;
+        r.on_connect = j.value("trigger", std::string()) == "connect";
         r.started = j.value("started", std::uint64_t{0});
         r.finished = j.value("finished", std::uint64_t{0});
         r.status = status_from(j.value("status", std::string("failed")));
@@ -442,6 +494,7 @@ std::vector<Job> JobStore::list() const {
         if (info.type != os::EntryType::File || !name.ends_with(".json")) continue;
         try {
             jobs.push_back(job_from_json(text_of(os::read_file(os::join(os::join(dir_, "jobs"), name)))));
+            relocate(jobs.back());
         } catch (const Error&) {
             // a damaged or foreign file: leave it alone and keep listing
         }
@@ -462,6 +515,7 @@ std::optional<Job> JobStore::find(const std::string& id_or_name) const {
 }
 
 void JobStore::save(Job& job) const {
+    record_volume(job);
     validate(job);
     if (job.id.empty()) {
         std::vector<std::string> taken;

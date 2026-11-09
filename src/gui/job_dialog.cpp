@@ -214,6 +214,30 @@ QWidget* JobDialog::build_sources() {
     return page;
 }
 
+void JobDialog::update_on_connect() {
+    const std::string repo = u8(repository_->text().trimmed());
+    QString why;
+    if (repo.empty()) {
+        why = tr("Choose a destination folder first.");
+    } else if (is_cloud_location(repo) || repo.starts_with("\\\\") || repo.starts_with("//")) {
+        why = tr("Only for a destination on a drive connected to this computer.");
+    } else {
+        const os::VolumeLocation loc = os::volume_of(repo);
+        const bool known = !job_.repository_volume.empty() && repo == job_.repository;  // recorded before
+        if (loc.volume.empty() && !known)
+            why = tr("The destination drive is not connected now. Connect it to turn this on.");
+        else if (loc.system)
+            why = tr("The destination is on the Windows drive, which is always connected.");
+    }
+    on_connect_->setEnabled(why.isEmpty());
+    if (!why.isEmpty()) on_connect_->setChecked(false);
+    on_connect_note_->setText(
+        why.isEmpty() ? tr("Vaultik recognises the drive itself, also under another drive letter, and tells you when "
+                           "it can be unplugged. Vaultik needs to be running, e.g. in the notification area (Settings, "
+                           "Start with Windows).")
+                      : why);
+}
+
 QWidget* JobDialog::build_schedule() {
     auto* page = new QWidget;
     auto* form = new QFormLayout(page);
@@ -241,6 +265,15 @@ QWidget* JobDialog::build_schedule() {
     }
     dl->addStretch();
     form->addRow(tr("Days:"), days_row_);
+
+    // Also when the destination drive is plugged in (an external disk that is not always there).
+    on_connect_ = new QCheckBox(tr("Also back up when the destination drive is connected"));
+    form->addRow(QString(), on_connect_);
+    on_connect_note_ = new QLabel;
+    on_connect_note_->setWordWrap(true);
+    on_connect_note_->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(QString(), on_connect_note_);
+    connect(repository_, &QLineEdit::textChanged, this, &JobDialog::update_on_connect);
 
     // Health checks: after a scheduled or manual backup, when one is due.
     check_weekly_ = new QCheckBox(tr("Once a week, read back"));
@@ -489,6 +522,8 @@ void JobDialog::load(const jobs::Job& job) {
         skip_sql_->setEnabled(job.vss);
     }
     if (admin_ != nullptr) admin_->setChecked(job.run_as_admin);
+    update_on_connect();
+    if (on_connect_->isEnabled()) on_connect_->setChecked(job.backup_on_connect);
     check_weekly_->setChecked(job.health.weekly);
     check_percent_->setValue(job.health.sample_percent);
     check_percent_->setEnabled(job.health.weekly);
@@ -580,6 +615,7 @@ jobs::Job JobDialog::collect() const {
     r.write_rate = static_cast<std::uint64_t>(write_limit_->value()) << 20;
 
     j.retention = collect_retention();
+    j.backup_on_connect = on_connect_->isChecked();
     j.health.weekly = check_weekly_->isChecked();
     j.health.sample_percent = check_percent_->value();
     j.health.monthly = check_monthly_->isChecked();

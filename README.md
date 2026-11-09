@@ -255,6 +255,15 @@ to one job. `--dry-run` shows the decision without removing anything. Removing s
 no space by itself: `prune` (or `forget --prune`) then deletes the data no remaining snapshot
 uses, rewriting packs that are mostly unused.
 
+### External drives
+
+A job saving to a folder on a drive records the drive's volume ID (`"volume"` in the job
+file). When Windows gives the drive another letter, the job follows it, so a backup drive that
+comes back as `G:` instead of `F:` still works. With "Also back up when the destination drive is
+connected" (Schedule tab), the running frontend or tray icon starts the job as soon as the drive
+is plugged in (`run-job <job> --on-connect`, which does nothing when the job just saved a
+version or is already running), then says when the drive can be unplugged.
+
 ### Health checks
 
 After `run-job` saves a version, it runs the job's health check when one is due (`--no-check`
@@ -344,9 +353,9 @@ Priorities only take effect when something else competes for the resource, so on
    - Notifications and a tray icon (done).
    - Health checks (done): after a backup, a check reads a sample of the stored data weekly and
      all of it monthly, so a failing drive is noticed before a restore needs it.
-   - Back up when the drive is plugged in: a job whose destination is a removable drive runs when
-     that drive connects (recognised by its volume ID, not its letter), then says it can be
-     unplugged.
+   - Back up when the drive is plugged in (done): a job whose destination is an external drive
+     runs when that drive connects (recognised by its volume ID, not its letter), then says it
+     can be unplugged.
    - Ransomware warning: when a backup sees an unusual share of files changed or renamed at
      once, it warns and pauses cleanup, so older clean versions are never removed automatically.
    - Locked cloud copies: S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded data

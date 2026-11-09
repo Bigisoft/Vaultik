@@ -154,6 +154,58 @@ TEST_CASE("health checks: settings and when they are due") {
     CHECK(found_damage(damaged));
 }
 
+#ifdef _WIN32
+TEST_CASE("jobs find their drive under another letter") {
+    TempStore tmp;
+    const fs::path repo = tmp.path / "repo";
+    fs::create_directories(repo);
+    const std::u8string u = repo.u8string();
+    const std::string repo_dir(u.begin(), u.end());
+
+    const os::VolumeLocation loc = os::volume_of(repo_dir);
+    REQUIRE_FALSE(loc.volume.empty());
+    CHECK(loc.volume.starts_with("\\\\?\\Volume{"));
+    CHECK(os::volume_root(loc.volume).size() >= 3);
+    CHECK(os::volume_root("\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\").empty());
+
+    JobStore store(tmp.dir());
+    Job j = sample();
+    j.repository = repo_dir;
+    j.backup_on_connect = true;
+    store.save(j);
+    CHECK(j.repository_volume == loc.volume);
+    CHECK(j.repository_relative == loc.relative);
+    CHECK(drive_connected(j));
+
+    // The drive came back as Q: (the stored letter is stale): the job points at its real place.
+    Job moved = j;
+    moved.repository = "Q:\\" + j.repository_relative;
+    relocate(moved);
+    CHECK(os::fold_case(moved.repository) == os::fold_case(os::absolute_path(repo_dir)));
+
+    // A drive that is not connected leaves the job as it is.
+    Job away = j;
+    away.repository_volume = "\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\";
+    away.repository = "Q:\\Backups";
+    relocate(away);
+    CHECK(away.repository == "Q:\\Backups");
+    CHECK_FALSE(drive_connected(away));
+
+    // Records say when a run was started by connecting the drive.
+    RunRecord r;
+    r.on_connect = true;
+    CHECK(record_from_json(to_json(r)).on_connect);
+    CHECK_FALSE(record_from_json(to_json(RunRecord{})).on_connect);
+
+    // Only a folder on a drive can be backed up on connect.
+    Job cloud = sample();
+    cloud.repository = "s3:https://s3.example.com/bucket";
+    cloud.cloud_key_id = "AKIDEXAMPLE";
+    cloud.backup_on_connect = true;
+    CHECK_THROWS_AS(validate(cloud), Error);
+}
+#endif
+
 TEST_CASE("job validation") {
     Job j = sample();
     j.sources.clear();

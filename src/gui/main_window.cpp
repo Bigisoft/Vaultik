@@ -22,6 +22,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSettings>
@@ -35,6 +36,7 @@
 
 #include "cloud_dialog.h"
 #include "common.h"
+#include "drive_watcher.h"
 #include "find_page.h"
 #include "job_card.h"
 #include "job_dialog.h"
@@ -48,6 +50,7 @@
 #include "versions_view.h"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/scheduler.hpp"
+#include "vaultik/platform/os.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/repo/lock.hpp"
 
@@ -204,6 +207,14 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     connect(list_, &QListWidget::currentRowChanged, this, [this] { show_job(); });
     connect(ThemeNotifier::instance(), &ThemeNotifier::changed, this, &MainWindow::refresh_icons);
 
+    // Backups that start when their drive is connected. Windows tells top-level windows about new
+    // drives, so this one needs its native window even while it stays hidden in the tray.
+    (void)winId();
+    connect(new DriveWatcher(this), &DriveWatcher::connected, this, &MainWindow::drives_connected);
+    connect_timer_ = new QTimer(this);
+    connect_timer_->setInterval(3000);
+    connect(connect_timer_, &QTimer::timeout, this, &MainWindow::watch_connect_runs);
+
     // Scheduled runs happen outside this window; pick up their results.
     auto* timer = new QTimer(this);
     connect(timer, &QTimer::timeout, this, [this] {
@@ -257,6 +268,78 @@ void MainWindow::changeEvent(QEvent* event) {
             setWindowState(windowState() & ~Qt::WindowMinimized);
         });
     }
+}
+
+void MainWindow::drives_connected(const QStringList& roots) {
+    const std::vector<jobs::Job> list = store_.list();  // relocated to the drives' current letters
+    for (const QString& root : roots) {
+        const os::VolumeLocation loc = os::volume_of(u8(root));
+        if (loc.volume.empty()) continue;
+        for (const jobs::Job& job : list) {
+            if (job.repository_volume != loc.volume || !jobs::connect_backup_due(store_, job)) continue;
+            const bool busy = std::any_of(connect_runs_.begin(), connect_runs_.end(),
+                                          [&](const ConnectRun& r) { return r.job == job.id; }) ||
+                              running_job_ == job.id;
+            if (busy) continue;
+            // A separate, windowless engine process, so it goes on if this window is closed.
+            QString program = Runner::engine_path();
+#ifdef Q_OS_WIN
+            program = QFileInfo(program).dir().filePath(QStringLiteral("vaultik-task.exe"));
+#endif
+            qint64 pid = 0;
+            const std::uint64_t started = os::now();
+            if (!QProcess::startDetached(program, {QStringLiteral("run-job"), qs(job.id), QStringLiteral("--on-connect")},
+                                         QString(), &pid))
+                continue;
+            connect_runs_.push_back({job.id, static_cast<std::uint32_t>(pid), root, started});
+            const QString title = tr("Backing up %1").arg(qs(job.name));
+            const QString text = tr("%1 was connected. Leave it plugged in until Vaultik says it is done.").arg(root);
+            if (tray_ != nullptr) tray_->notify(title, text);
+            statusBar()->showMessage(title + "  " + text, 15000);
+        }
+    }
+    if (!connect_runs_.empty() && !connect_timer_->isActive()) connect_timer_->start();
+}
+
+void MainWindow::watch_connect_runs() {
+    for (auto it = connect_runs_.begin(); it != connect_runs_.end();) {
+        if (os::process_alive(it->pid)) {
+            ++it;
+            continue;
+        }
+        const ConnectRun run = *it;
+        it = connect_runs_.erase(it);
+        const auto job = store_.find(run.job);
+        if (!job) continue;
+        // The backup this process saved (its health check, if one was due, ran before it ended).
+        const auto history = jobs::combined_history(store_, run.job, 20);
+        const jobs::RunRecord* r = nullptr;
+        for (auto h = history.rbegin(); h != history.rend() && r == nullptr; ++h)
+            if (h->kind == jobs::RunKind::Backup && h->on_connect && h->started >= run.started) r = &*h;
+        QString title, text;
+        bool warn = false;
+        if (r == nullptr) {
+            continue;  // it found nothing to do (already backing up, or just backed up)
+        } else if (r->status == jobs::RunStatus::Success) {
+            title = tr("%1 is backed up").arg(qs(job->name));
+            text = tr("You can unplug %1 now.").arg(run.drive);
+        } else if (r->status == jobs::RunStatus::Partial) {
+            title = tr("%1 is backed up, %2 skipped").arg(qs(job->name), count_of(r->errors, tr("file"), tr("files")));
+            text = tr("You can unplug %1 now. Open Vaultik to see what could not be read.").arg(run.drive);
+            warn = true;
+        } else if (r->status == jobs::RunStatus::Failed) {
+            title = tr("Backup failed: %1").arg(qs(job->name));
+            text = qs(r->message).left(200);
+            warn = true;
+        } else {
+            title = tr("Backup of %1 stopped").arg(qs(job->name));
+            text = tr("No new version was saved. You can unplug %1.").arg(run.drive);
+        }
+        if (tray_ != nullptr) tray_->notify(title, text, warn);
+        statusBar()->showMessage(title + "  " + text, 30000);
+        refresh_sidebar();
+    }
+    if (connect_runs_.empty()) connect_timer_->stop();
 }
 
 void MainWindow::run_job_now(const std::string& id) {

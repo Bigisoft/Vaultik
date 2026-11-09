@@ -439,6 +439,39 @@ bool is_pseudo_filesystem(const std::string& /*path*/) {
     return false;
 }
 
+VolumeLocation volume_of(const std::string& path) {
+    VolumeLocation loc;
+    const std::wstring full = full_path(widen(path));
+    if (full.rfind(L"\\\\", 0) == 0) return loc;  // a network share
+    std::wstring root(MAX_PATH + 1, L'\0');
+    if (!GetVolumePathNameW(full.c_str(), root.data(), static_cast<DWORD>(root.size()))) return loc;
+    root.resize(wcslen(root.c_str()));
+    if (root.empty() || GetDriveTypeW(root.c_str()) == DRIVE_REMOTE) return loc;
+    wchar_t name[64] = {};
+    if (!GetVolumeNameForVolumeMountPointW(root.c_str(), name, 64)) return loc;
+    loc.volume = narrow(name);
+    loc.root = narrow(root);
+    loc.relative = full.size() > root.size() ? narrow(std::wstring_view(full).substr(root.size())) : std::string();
+    wchar_t windows[MAX_PATH] = {};
+    const UINT n = GetSystemWindowsDirectoryW(windows, MAX_PATH);
+    loc.system = n >= 3 && _wcsnicmp(windows, root.c_str(), root.size()) == 0;
+    return loc;
+}
+
+std::string volume_root(const std::string& volume) {
+    if (volume.empty()) return {};
+    const std::wstring name = widen(volume);
+    std::wstring paths(1024, L'\0');
+    DWORD needed = 0;
+    if (!GetVolumePathNamesForVolumeNameW(name.c_str(), paths.data(), static_cast<DWORD>(paths.size()), &needed)) {
+        if (GetLastError() != ERROR_MORE_DATA) return {};
+        paths.assign(needed, L'\0');
+        if (!GetVolumePathNamesForVolumeNameW(name.c_str(), paths.data(), needed, &needed)) return {};
+    }
+    // A list of mount paths, each ending in \0; the first one (usually the drive letter) will do.
+    return narrow(std::wstring(paths.c_str()));
+}
+
 Bytes protect_secret(ByteSpan plain) {
     DATA_BLOB in{static_cast<DWORD>(plain.size()), const_cast<BYTE*>(plain.data())};
     DATA_BLOB out{};

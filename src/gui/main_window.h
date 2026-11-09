@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QStringList>
 
 #include <chrono>
 #include <map>
@@ -115,6 +116,19 @@ private:
     QLabel* empty_icon_ = nullptr;
     QPushButton* empty_create_ = nullptr;
     QPushButton* empty_restore_ = nullptr;
+
+    // Backups started because their drive was connected: separate processes, watched until they
+    // end so the user hears when the drive can be unplugged.
+    struct ConnectRun {
+        std::string job;
+        std::uint32_t pid = 0;
+        QString drive;
+        std::uint64_t started = 0;
+    };
+    void drives_connected(const QStringList& roots);
+    void watch_connect_runs();
+    std::vector<ConnectRun> connect_runs_;
+    QTimer* connect_timer_ = nullptr;
 
     Runner* runner_ = nullptr;
     std::string running_job_;

@@ -80,6 +80,10 @@ void Tray::explain_hidden() {
                        QSystemTrayIcon::Information, 8000);
 }
 
+void Tray::notify(const QString& title, const QString& text, bool warning) {
+    icon_->showMessage(title, text, warning ? QSystemTrayIcon::Warning : QSystemTrayIcon::Information, 10000);
+}
+
 void Tray::check() {
     const AppSettings settings = AppSettings::load();
     const std::vector<jobs::Job> list = store_.list();
@@ -104,7 +108,8 @@ void Tray::check() {
             } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed) {
                 icon_->showMessage(tr("Backup failed: %1").arg(name), qs(r.message).left(200), QSystemTrayIcon::Critical,
                                    15000);
-            } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Partial) {
+            } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Partial && !r.on_connect) {
+                // (a run for a connected drive reports when it ends, with what was skipped)
                 icon_->showMessage(tr("Backup of %1 skipped files").arg(name),
                                    tr("%1 could not be read. Open Vaultik to see which.")
                                        .arg(count_of(r.errors, tr("file"), tr("files"))),

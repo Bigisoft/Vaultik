@@ -139,6 +139,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/app_settings.cpp
             src/gui/settings_dialog.cpp
             src/gui/tray.cpp
+            src/gui/drive_watcher.cpp
             src/gui/main_window.cpp
         )
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)

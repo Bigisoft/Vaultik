@@ -30,6 +30,8 @@ public:
     void check();
     // Tells the user, once, that closing the window left Vaultik running here.
     void explain_hidden();
+    // A notification from the icon; `warning` shows it as one.
+    void notify(const QString& title, const QString& text, bool warning = false);
 
 private:
     void rebuild_menu();
