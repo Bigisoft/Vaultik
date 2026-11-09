@@ -36,6 +36,7 @@
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/repo/repository.hpp"
 #include "vaultik/util/resources.hpp"
+#include "vaultik/version.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/vss.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
@@ -53,7 +54,7 @@ namespace vaultik::cli {
 
 namespace {
 
-constexpr char kVersion[] = "0.4.0";
+constexpr char kVersion[] = VAULTIK_VERSION;
 
 // Exit codes.
 constexpr int kExitOk = 0;

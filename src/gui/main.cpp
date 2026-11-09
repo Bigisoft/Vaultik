@@ -7,6 +7,7 @@
 
 #include <QAbstractNativeEventFilter>
 #include <QApplication>
+#include <QSettings>
 #include <QStringList>
 
 #ifdef Q_OS_WIN
@@ -27,6 +28,7 @@ extern "C" HRESULT WINAPI UiaDisconnectAllProviders();
 #include "theme.h"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/version.hpp"
 
 namespace {
 
@@ -111,7 +113,13 @@ int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("Vaultik"));
     QApplication::setOrganizationName(QStringLiteral("Vaultik"));
-    QApplication::setApplicationVersion(QStringLiteral("0.4.0"));
+    QApplication::setApplicationVersion(QStringLiteral(VAULTIK_VERSION));
+    if (vaultik::jobs::is_portable()) {
+        // A portable copy leaves nothing on the computer: its own settings go next to the jobs.
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope,
+                           QString::fromUtf8(vaultik::jobs::config_dir()));
+    }
     apply_theme(app);
 
     MainWindow window(tray);

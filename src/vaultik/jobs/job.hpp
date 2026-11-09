@@ -113,9 +113,11 @@ struct RunRecord {
     std::string alert;
 };
 
-// Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests, portable installs).
-// Windows: %LOCALAPPDATA%\Vaultik. Linux: $XDG_CONFIG_HOME/vaultik or ~/.config/vaultik.
+// Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file
+// named "portable" next to the programs) keeps it in "Settings" there. Otherwise Windows:
+// %LOCALAPPDATA%\Vaultik; Linux: $XDG_CONFIG_HOME/vaultik or ~/.config/vaultik.
 std::string config_dir();
+bool is_portable();
 
 // A file-name safe id from a display name ("My Docs!" -> "my-docs"), unique among `taken`.
 std::string make_id(const std::string& name, const std::vector<std::string>& taken);
@@ -163,7 +165,8 @@ public:
     void remove(const std::string& id) const;
 
     void set_password(const std::string& id, const std::string& password) const;
-    // Empty when no password is stored.
+    // Empty when no password is stored, or when it was stored on another computer or account
+    // (Windows seals it for this account), so the caller asks for it again.
     std::string password(const std::string& id) const;
 
     // The cloud storage secret key, sealed like the password (secrets/<id>.cloud). Empty when none.

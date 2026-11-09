@@ -64,9 +64,18 @@ std::string ascii_lower(std::string s) {
 
 }  // namespace
 
+bool is_portable() {
+    try {
+        return os::exists(os::join(os::parent_of(os::executable_path()), "portable"));
+    } catch (const Error&) {
+        return false;
+    }
+}
+
 std::string config_dir() {
     const std::string over = os::get_env("VAULTIK_CONFIG_DIR");
     if (!over.empty()) return os::absolute_path(over);
+    if (is_portable()) return os::join(os::parent_of(os::executable_path()), "Settings");
 #ifdef _WIN32
     const std::string base = os::get_env("LOCALAPPDATA");
     if (base.empty()) throw Error("LOCALAPPDATA is not set");
@@ -551,7 +560,12 @@ void JobStore::set_password(const std::string& id, const std::string& password) 
 
 std::string JobStore::password(const std::string& id) const {
     check_id(id);
-    return unseal_from(secret_path(dir_, id));
+    try {
+        return unseal_from(secret_path(dir_, id));
+    } catch (const Error&) {
+        // Sealed for another account or computer (a portable copy on another PC): ask again.
+        return {};
+    }
 }
 
 void JobStore::set_cloud_secret(const std::string& id, const std::string& secret) const {

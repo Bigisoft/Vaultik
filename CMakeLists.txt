@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Vaultik VERSION 0.2.0 LANGUAGES C CXX)
+project(Vaultik VERSION 0.5.0 LANGUAGES C CXX)
 
 if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Vaultik supports Windows and Linux")
@@ -73,6 +73,25 @@ add_library(vaultik_core STATIC
 )
 target_include_directories(vaultik_core PUBLIC src)
 
+# The version, from project() above: vaultik/version.hpp for the code, and on Windows a version
+# resource (the file's Properties) with the program icon for each program.
+configure_file(src/version.hpp.in ${CMAKE_BINARY_DIR}/generated/vaultik/version.hpp @ONLY)
+target_include_directories(vaultik_core PUBLIC ${CMAKE_BINARY_DIR}/generated)
+
+function(vaultik_version_resource target description)
+    if(NOT WIN32)
+        return()
+    endif()
+    set(VAULTIK_RC_NAME ${target})
+    set(VAULTIK_RC_DESCRIPTION "${description}")
+    set(VAULTIK_RC_ICON "")
+    if(EXISTS ${CMAKE_SOURCE_DIR}/src/gui/vaultik.ico)
+        set(VAULTIK_RC_ICON "1 ICON \"${CMAKE_SOURCE_DIR}/src/gui/vaultik.ico\"")
+    endif()
+    configure_file(${CMAKE_SOURCE_DIR}/src/version.rc.in ${CMAKE_BINARY_DIR}/generated/${target}.rc @ONLY)
+    target_sources(${target} PRIVATE ${CMAKE_BINARY_DIR}/generated/${target}.rc)
+endfunction()
+
 if(WIN32)
     target_sources(vaultik_core PRIVATE
         src/vaultik/util/win.cpp
@@ -109,6 +128,7 @@ add_executable(vaultik
     $<IF:$<BOOL:${WIN32}>,src/vaultik/cli/console_win.cpp,src/vaultik/cli/console_posix.cpp>
 )
 target_link_libraries(vaultik PRIVATE vaultik_core)
+vaultik_version_resource(vaultik "Vaultik backup engine and command line")
 if(WIN32)
     # The Projected File System (vaultik mount) is an optional Windows feature: load its DLL only
     # when a version is browsed, so vaultik still starts where the feature is off.
@@ -122,6 +142,7 @@ if(WIN32)
     add_executable(vaultik-task WIN32 src/vaultik/cli/task_launcher.cpp)
     target_compile_definitions(vaultik-task PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_compile_options(vaultik-task PRIVATE /W4 /permissive- /utf-8)
+    vaultik_version_resource(vaultik-task "Vaultik scheduled run launcher")
 endif()
 
 # ---- frontend ---------------------------------------------------------------------------------
@@ -155,8 +176,15 @@ if(VAULTIK_BUILD_GUI)
         set_target_properties(vaultik-gui PROPERTIES AUTOMOC ON)
         # Fluent UI System Icons (MIT, see src/gui/icons/LICENSE-fluentui-system-icons.txt), as :/icons/<name>.svg
         file(GLOB VAULTIK_ICONS RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS src/gui/icons/*.svg)
+        list(APPEND VAULTIK_ICONS src/gui/app_icon.svg)  # :/app_icon.svg
         qt_add_resources(vaultik-gui "icons" PREFIX "/" BASE src/gui FILES ${VAULTIK_ICONS})
         target_link_libraries(vaultik-gui PRIVATE vaultik_core Qt6::Widgets Qt6::Svg)
+        vaultik_version_resource(vaultik-gui "Vaultik")
+
+        # Development tool, built on request: renders the program icon (see tools/make_icon.cpp).
+        qt_add_executable(vaultik-make-icon tools/make_icon.cpp)
+        set_target_properties(vaultik-make-icon PROPERTIES EXCLUDE_FROM_ALL ON)
+        target_link_libraries(vaultik-make-icon PRIVATE Qt6::Gui Qt6::Svg)
         if(WIN32)
             target_link_libraries(vaultik-gui PRIVATE windowscodecs uiautomationcore)  # previews, accessibility
         endif()

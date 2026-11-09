@@ -48,6 +48,13 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     start_->setChecked(startup.enabled);
     start_hidden_ = new QCheckBox(tr("Start hidden in the notification area"));
     start_hidden_->setChecked(startup.enabled ? startup.hidden : true);
+    const bool portable = vaultik::jobs::is_portable();
+    if (portable) {
+        // It may run from a drive that is not always there, and Windows would start it at sign-in.
+        start_->setEnabled(false);
+        start_->setChecked(false);
+        start_->setToolTip(tr("Not for a portable copy: install Vaultik on this computer to start it at sign-in."));
+    }
 
     tray_icon_ = new QCheckBox(tr("Show Vaultik's icon in the notification area"));
     tray_icon_->setChecked(s.tray_icon);
@@ -132,9 +139,11 @@ void SettingsDialog::accept() {
     s.remind_after_days = remind_->value();
     s.save();
 
-    StartupSetting startup;
-    startup.enabled = start_->isChecked();
-    startup.hidden = startup.enabled && start_hidden_->isChecked();
-    set_startup_setting(startup);
+    if (!vaultik::jobs::is_portable()) {  // never touch the installed copy's entry
+        StartupSetting startup;
+        startup.enabled = start_->isChecked();
+        startup.hidden = startup.enabled && start_hidden_->isChecked();
+        set_startup_setting(startup);
+    }
     QDialog::accept();
 }

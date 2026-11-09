@@ -353,6 +353,24 @@ void apply_theme(QApplication& app) {
     });
 }
 
+QIcon app_icon() {
+    static const QIcon cached = [] {
+        QIcon result;
+        QSvgRenderer svg(QStringLiteral(":/app_icon.svg"));
+        for (const int s : {16, 20, 24, 32, 40, 48, 64, 128, 256}) {
+            QPixmap pixmap(s, s);
+            pixmap.fill(Qt::transparent);
+            QPainter p(&pixmap);
+            p.setRenderHint(QPainter::Antialiasing);
+            svg.render(&p);
+            p.end();
+            result.addPixmap(pixmap);
+        }
+        return result;
+    }();
+    return cached;
+}
+
 QIcon icon(const QString& name, const QColor& color) {
     const QColor c = color.isValid() ? color : g_theme.text;
     const QString key = name + hex(c);

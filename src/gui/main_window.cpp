@@ -56,6 +56,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/repo/backends.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/repo/lock.hpp"
 
@@ -142,7 +143,7 @@ QFrame* card() {
 
 MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     setWindowTitle(QStringLiteral("Vaultik"));
-    setWindowIcon(icon(QStringLiteral("shield_checkmark_20_filled"), theme().accent));
+    setWindowIcon(app_icon());
     resize(1180, 760);
     setMinimumSize(900, 560);
 
@@ -403,9 +404,43 @@ void MainWindow::watch_connect_runs() {
     if (connect_runs_.empty()) connect_timer_->stop();
 }
 
+bool MainWindow::ensure_password(const jobs::Job& job) {
+    try {
+        std::string saved = store_.password(job.id);
+        const bool have = !saved.empty();
+        secure_wipe(saved.data(), saved.size());
+        if (have) return true;
+    } catch (const Error&) {
+    }
+    for (;;) {
+        bool ok = false;
+        QString pw = QInputDialog::getText(
+            this, tr("Password for %1").arg(qs(job.name)),
+            tr("Enter the password of this backup. Vaultik saves it for your account on this computer."),
+            QLineEdit::Password, QString(), &ok);
+        if (!ok || pw.isEmpty()) return false;
+        std::string bytes = u8(pw);
+        pw.fill(QChar(0));
+        QString error;
+        try {
+            // Check it against the repository before saving it.
+            const CloudCredentials cloud = store_.cloud_credentials(job);
+            error = run_busy(this, tr("Checking the password..."), [&](const std::function<bool()>&) {
+                Repository::open(open_backend(job.repository, &cloud), bytes);
+            });
+            if (error.isEmpty()) store_.set_password(job.id, bytes);
+        } catch (const Error& e) {
+            error = QString::fromUtf8(e.what());
+        }
+        secure_wipe(bytes.data(), bytes.size());
+        if (error.isEmpty()) return true;
+        plain_warning(this, tr("Password for %1").arg(qs(job.name)), error);
+    }
+}
+
 void MainWindow::explore_version(int index) {
     const jobs::Job* job = current_job();
-    if (!job) return;
+    if (!job || !ensure_password(*job)) return;
     const auto it = repos_.find(job->id);
     if (it == repos_.end() || index < 0 || index >= static_cast<int>(it->second.snapshots.size())) return;
     const std::string snapshot = id_hex(it->second.snapshots[static_cast<std::size_t>(index)].id);
@@ -744,7 +779,6 @@ void MainWindow::refresh_icons() {
     open_backup_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
     keys_->setIcon(icon(QStringLiteral("key_20_regular")));
     settings_->setIcon(icon(QStringLiteral("settings_20_regular")));
-    setWindowIcon(icon(QStringLiteral("shield_checkmark_20_filled"), t.accent));
     if (tray_ != nullptr) tray_->refresh_icons();
     restore_->setIcon(icon(QStringLiteral("arrow_counterclockwise_20_regular")));
     more_->setIcon(icon(QStringLiteral("more_horizontal_20_regular")));
@@ -893,6 +927,12 @@ void MainWindow::load_snapshots(bool force) {
         return;
     }
     if (loading_job_ == id) return;
+    if (!ensure_password(*job)) {
+        versions_->set_message(tr("This backup needs its password. Choose Refresh in the ... menu to enter it."));
+        return;
+    }
+    job = current_job();  // the password dialog ran the event loop
+    if (!job || job->id != id) return;
     loading_job_ = id;
     versions_->set_message(tr("Opening the backup..."));
     find_->set_source(nullptr, {});
@@ -1272,7 +1312,7 @@ void MainWindow::check_job(bool full) {
 
 void MainWindow::start_run(const QStringList& args, bool check) {
     const jobs::Job* job = current_job();
-    if (!job) return;
+    if (!job || !ensure_password(*job)) return;
     running_job_ = job->id;
     check_run_ = check;
     check_result_.clear();
