@@ -36,9 +36,16 @@ DriveReading reading_of(const os::DriveHealth& d, std::uint64_t now);
 // it differs from its last stored reading, or that one is a day old, so frequent looks (the
 // frontend checks every few minutes) do not grow the file. The file is trimmed to the newest
 // readings of each drive when it grows past 1 MB. Best effort: never throws.
-void record_drives(const std::vector<os::DriveHealth>& drives, const std::string& dir = config_dir());
-// The stored readings of one drive, oldest first.
-std::vector<DriveReading> drive_history(const std::string& key, const std::string& dir = config_dir());
+void record_drives(const std::vector<os::DriveHealth>& drives, const std::string& dir);
+// The same in the right place for this process: the user's config folder, or for a process with
+// administrator rights the account's admin store (after checking it is admin-only; nothing is
+// stored when it is not), since a privileged write into a folder the user can change could be
+// redirected by a planted link.
+void record_drives(const std::vector<os::DriveHealth>& drives);
+// The stored readings of one drive in `dir`, oldest first.
+std::vector<DriveReading> drive_history(const std::string& key, const std::string& dir);
+// Those of the user's config folder and the admin store together, oldest first.
+std::vector<DriveReading> drive_history(const std::string& key);
 
 // One way a drive changed within the window.
 struct DriveChange {

@@ -5,6 +5,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 
 namespace vaultik::jobs {
@@ -171,6 +173,34 @@ std::vector<DriveReading> drive_history(const std::string& key, const std::strin
     std::vector<DriveReading> out;
     for (DriveReading& r : load(dir))
         if (r.key == key) out.push_back(std::move(r));
+    return out;
+}
+
+void record_drives(const std::vector<os::DriveHealth>& drives) {
+    if (!os::process_elevated()) {
+        record_drives(drives, config_dir());
+        return;
+    }
+    try {
+        record_drives(drives, open_admin_store().dir());
+    } catch (const std::exception&) {
+        // no admin-only store for this account: keep nothing rather than write where the user can
+    }
+}
+
+std::vector<DriveReading> drive_history(const std::string& key) {
+    std::vector<DriveReading> out = drive_history(key, config_dir());
+    try {
+        const std::string admin = admin_store_dir();
+        if (admin != config_dir()) {
+            std::vector<DriveReading> more = drive_history(key, admin);
+            out.insert(out.end(), more.begin(), more.end());
+            std::stable_sort(out.begin(), out.end(),
+                             [](const DriveReading& a, const DriveReading& b) { return a.time < b.time; });
+        }
+    } catch (const std::exception&) {
+        // no admin store here (POSIX)
+    }
     return out;
 }
 
