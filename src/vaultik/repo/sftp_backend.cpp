@@ -414,7 +414,8 @@ std::vector<std::string> SftpBackend::list(const std::string& dir) {
 
 void SftpBackend::remove(const std::string& name) {
     with_retry("deleting", name, [&](Connection& c) {
-        for (const std::string& p : {path_of(name), path_of(name) + ".old"}) {  // (see exists)
+        // The old copy first: were it left, readers would fall back to it once the name is gone.
+        for (const std::string& p : {path_of(name) + ".old", path_of(name)}) {  // (see exists)
             const int rc = libssh2_sftp_unlink_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()));
             if (rc != 0 && c.sftp_error() != LIBSSH2_FX_NO_SUCH_FILE) c.fail(location_ + ": deleting " + name, rc);
         }
