@@ -77,8 +77,8 @@ std::string own_admin_store() {
 
 void check_admin_command(const std::string& command, const std::string& what) {
     if (command.empty()) return;
-    if (command.find_first_of("%^") != std::string::npos)
-        throw Error(what + " of a job with administrator rights must not use %variables% or ^");
+    if (command.find_first_of("%^!") != std::string::npos)
+        throw Error(what + " of a job with administrator rights must not use %variables%, !variables! or ^");
     if (command.find("..") != std::string::npos)
         throw Error(what + " of a job with administrator rights must not use \"..\"");
     if (command.find("\\\\") != std::string::npos || command.find("//") != std::string::npos)
@@ -207,7 +207,10 @@ void check_admin_command(const std::string& command, const std::string& what) {
             }))
             refuse(word, "not a program name; write a program's name or its full path");
         const std::string base = ext.empty() ? name : name.substr(0, dot);
-        for (const char* banned : {"start", "if", "for", "mshta", "wscript", "cscript", "explorer", "rundll32"})
+        // (Programs whose job is to start others, often through the user's own settings.)
+        for (const char* banned : {"start", "if", "for", "forfiles", "mshta", "wscript", "cscript", "explorer",
+                                   "rundll32", "regsvr32", "wmic", "pcalua", "conhost", "runas", "cmstp", "wsl",
+                                   "bash", "hh", "mmc", "control", "msiexec", "ftp", "scriptrunner"})
             if (base == banned)
                 refuse(word, "it can start programs these checks do not see; put the steps in a .cmd file in a "
                              "folder only administrators can change");
@@ -242,7 +245,10 @@ void check_admin_command(const std::string& command, const std::string& what) {
             std::size_t k = i + 1;
             for (; k < words.size(); ++k) {
                 const std::string sw = lower(words[k].text);
-                if (sw.empty() || sw[0] != '/') refuse(words[i].text, "cmd must be given /d /v:off and then /c");
+                // Only switches known not to change how the rest is read.
+                if (sw != "/d" && sw != "/v:off" && sw != "/e:on" && sw != "/q" && sw != "/s" && sw != "/c" &&
+                    sw != "/k")
+                    refuse(words[i].text, "cmd must be given /d /v:off and then /c, and no other switches");
                 if (sw == "/d") autorun_off = true;
                 if (sw == "/v:off") expansion_off = true;
                 if (sw == "/c" || sw == "/k") break;

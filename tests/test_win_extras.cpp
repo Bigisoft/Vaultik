@@ -234,6 +234,9 @@ TEST_CASE("commands of administrator jobs: only safe ones, checked") {
     CHECK_THROWS(check_admin_command("for %i in (1) do x", "the command"));
     CHECK_THROWS(check_admin_command("cmd /c ver", "the command"));  // the user's AutoRun command
     CHECK_THROWS(check_admin_command("cmd /d /v:off /c x.vbs", "the command"));
+    CHECK_THROWS(check_admin_command("cmd /d /v:off /v:on /c ver", "the command"));
+    CHECK_THROWS(check_admin_command("forfiles /c x", "the command"));
+    CHECK_THROWS(check_admin_command("ver !x!", "the command"));
     CHECK_THROWS(check_admin_command("cmd /d /v:off /c \"ver & x.vbs\"", "the command"));
     CHECK_THROWS(check_admin_command("> out.txt ver", "the command"));
     CHECK_THROWS(check_admin_command("ver\nx.vbs", "the command"));
