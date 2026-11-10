@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <memory>
 #include <system_error>
 
 #include "vaultik/crypto/crypto.hpp"
@@ -14,6 +15,9 @@
 #include "vaultik/util/hex.hpp"
 #ifdef _WIN32
 #include <windows.h>
+// After windows.h:
+#include <lm.h>
+#include <sddl.h>
 
 #include "vaultik/util/win.hpp"
 #endif
@@ -472,10 +476,71 @@ std::string admin_store_dir(const std::string& sid) {
     return os::join(os::join(vaultik_root(), "admin"), sid_or_current(sid));
 }
 
+bool account_is_administrator(const std::string& sid_text) {
+#ifdef _WIN32
+    if (!account_sid(sid_text)) return false;
+    PSID raw = nullptr;
+    if (!ConvertStringSidToSidW(widen(sid_text).c_str(), &raw)) return false;
+    const std::unique_ptr<void, decltype(&LocalFree)> sid(raw, &LocalFree);
+    const auto name_of = [](PSID s, std::wstring* name, std::wstring* domain, SID_NAME_USE* use) {
+        wchar_t n[256];
+        wchar_t d[256];
+        DWORD nn = 256;
+        DWORD dn = 256;
+        if (!LookupAccountSidW(nullptr, s, n, &nn, d, &dn, use)) return false;
+        *name = n;
+        *domain = d;
+        return true;
+    };
+    std::wstring name;
+    std::wstring domain;
+    SID_NAME_USE use{};
+    if (!name_of(sid.get(), &name, &domain, &use) || use != SidTypeUser) return false;
+    // A disabled account of this computer (an account of a domain is the domain's to disable).
+    wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD cn = MAX_COMPUTERNAME_LENGTH + 1;
+    if (GetComputerNameW(computer, &cn) && _wcsicmp(computer, domain.c_str()) == 0) {
+        USER_INFO_1* info = nullptr;
+        if (NetUserGetInfo(nullptr, name.c_str(), 1, reinterpret_cast<LPBYTE*>(&info)) != NERR_Success) return false;
+        const bool disabled = (info->usri1_flags & UF_ACCOUNTDISABLE) != 0;
+        NetApiBufferFree(info);
+        if (disabled) return false;
+    }
+    // Administrators, directly or through a group (whatever the group is called in this language).
+    BYTE admins_buf[SECURITY_MAX_SID_SIZE];
+    DWORD admins_size = sizeof admins_buf;
+    if (!CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, admins_buf, &admins_size)) return false;
+    std::wstring admins;
+    std::wstring builtin;
+    SID_NAME_USE group_use{};
+    if (!name_of(admins_buf, &admins, &builtin, &group_use)) return false;
+    LOCALGROUP_USERS_INFO_0* groups = nullptr;
+    DWORD read = 0;
+    DWORD total = 0;
+    const std::wstring account = domain + L"\\" + name;
+    if (NetUserGetLocalGroups(nullptr, account.c_str(), 0, LG_INCLUDE_INDIRECT, reinterpret_cast<LPBYTE*>(&groups),
+                              MAX_PREFERRED_LENGTH, &read, &total) != NERR_Success)
+        return false;
+    bool member = false;
+    for (DWORD i = 0; i < read && !member; ++i) member = _wcsicmp(groups[i].lgrui0_name, admins.c_str()) == 0;
+    NetApiBufferFree(groups);
+    return member;
+#else
+    (void)sid_text;
+    return false;
+#endif
+}
+
 void act_for_account(const std::string& sid) {
 #ifdef _WIN32
     if (os::current_user_sid() != kSystemSid) throw Error("--user is only for runs as the system account");
     if (!account_sid(sid)) throw Error("not an account: " + sid);
+    // Approved by an administrator, but the system account's rights are not that account's: an
+    // account taken out of the administrators (or disabled) no longer has its jobs run with them.
+    if (!account_is_administrator(sid))
+        throw Error("the account that approved this job is no longer an administrator of this computer (or is "
+                    "disabled), so the job does not run with administrator rights; an administrator can save it "
+                    "again in Vaultik");
     acting_account() = sid;
 #else
     (void)sid;

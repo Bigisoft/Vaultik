@@ -25,7 +25,12 @@ std::string admin_store_dir(const std::string& sid = {});
 // In a run as the system account ("run-job --admin --user <SID>"): the admin store used from now on
 // is that account's. Throws Error unless this process runs as the system account and `sid` is an
 // account's SID. No-op on POSIX.
+// Also throws when that account is no longer an administrator of this computer, or is disabled.
 void act_for_account(const std::string& sid);
+
+// Whether `sid` names an enabled account that is an administrator of this computer, directly or
+// through a group. False when that cannot be found out (fails closed). False on POSIX.
+bool account_is_administrator(const std::string& sid);
 
 // Whether `path` is inside some account's admin store (its secrets are sealed for the machine).
 bool in_admin_store(const std::string& path);

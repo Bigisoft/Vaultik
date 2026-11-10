@@ -419,6 +419,9 @@ TEST_CASE("jobs with administrator rights run as the system account") {
     using namespace vaultik;
     // Only a run as the system account works for another account.
     CHECK_THROWS(jobs::act_for_account(os::current_user_sid()));
+    CHECK_FALSE(jobs::account_is_administrator("S-1-5-18"));            // not a person's account
+    CHECK_FALSE(jobs::account_is_administrator("S-1-5-21-1-2-3-1001"));  // no such account
+    CHECK_FALSE(jobs::account_is_administrator("S-1-5-21-1-2-3-x"));
     // The admin store's secrets are sealed with the computer's key; others with the account's.
     const std::string store = jobs::admin_store_dir("S-1-5-21-1-2-3-1001");
     CHECK(jobs::in_admin_store(os::join(os::join(store, "secrets"), "x.key")));
