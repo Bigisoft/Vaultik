@@ -15,6 +15,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSpinBox>
@@ -31,6 +32,7 @@
 #include "key_dialog.h"
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/jobs/profile_items.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/config.hpp"
@@ -252,10 +254,50 @@ QWidget* JobDialog::build_sources() {
             sources_->addItem(QDir::toNativeSeparators(f));
     });
     connect(remove, &QPushButton::clicked, this, [this] { qDeleteAll(sources_->selectedItems()); });
+    // Ready-made choices: the account's own folders, wherever Windows keeps them.
+    auto* common = new QPushButton(tr("Add common data"));
+    auto* common_menu = new QMenu(common);
+    connect(common_menu, &QMenu::aboutToShow, this, [this, common_menu] {
+        common_menu->clear();
+        for (const std::string& group : jobs::profile_groups()) {
+            QString label;
+            if (group == "documents") label = tr("Documents");
+            else if (group == "desktop") label = tr("Desktop");
+            else if (group == "pictures") label = tr("Pictures");
+            else if (group == "music") label = tr("Music");
+            else if (group == "videos") label = tr("Videos");
+            else if (group == "downloads") label = tr("Downloads");
+            else if (group == "browsers") label = tr("Browser bookmarks, passwords and history");
+            else if (group == "email") label = tr("Email (Outlook data files, Thunderbird)");
+            else if (group == "games") label = tr("Game saves");
+            else label = qs(group);
+            const std::vector<std::string> paths = jobs::existing_paths(group);
+            QStringList shown;
+            for (const std::string& p : paths) shown << qs(p);
+            QAction* act = common_menu->addAction(label);
+            act->setEnabled(!paths.empty());
+            act->setToolTip(paths.empty() ? tr("Not on this computer") : shown.join('\n'));
+            connect(act, &QAction::triggered, this, [this, shown] {
+                for (const QString& p : shown) {
+                    // Not twice, and not inside a folder already listed.
+                    bool covered = false;
+                    for (int i = 0; i < sources_->count() && !covered; ++i) {
+                        const QString have = QDir::toNativeSeparators(sources_->item(i)->text());
+                        covered = p.compare(have, Qt::CaseInsensitive) == 0 ||
+                                  p.startsWith(have.endsWith('\\') ? have : have + '\\', Qt::CaseInsensitive);
+                    }
+                    if (!covered) sources_->addItem(p);
+                }
+            });
+        }
+        common_menu->setToolTipsVisible(true);
+    });
+    common->setMenu(common_menu);
+    common->setToolTip(tr("Your own folders and the data of common programs, wherever Windows keeps them"));
     auto* estimate = new QPushButton(tr("Estimate size"));
     estimate->setToolTip(tr("Count what the first backup reads, with the exclusions below"));
     connect(estimate, &QPushButton::clicked, this, &JobDialog::estimate_size);
-    layout->addWidget(row({add_folder, add_file, remove, estimate}));
+    layout->addWidget(row({add_folder, add_file, common, remove, estimate}));
     estimate_ = new QLabel;
     estimate_->setWordWrap(true);
     estimate_->setTextFormat(Qt::PlainText);

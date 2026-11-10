@@ -9,6 +9,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QListWidget>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
@@ -28,6 +29,7 @@
 #include "runner.h"
 #include "theme.h"
 #include "vaultik/model/tree.hpp"
+#include "vaultik/ops/move_here.hpp"
 
 using namespace vaultik;
 
@@ -91,6 +93,10 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     status_->setWordWrap(true);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+    move_ = buttons->addButton(tr("Move to this PC..."), QDialogButtonBox::ActionRole);
+    move_->setToolTip(tr("Set up this computer from an old one's backup: its Documents, Desktop, pictures, browser "
+                         "profiles, email and game saves, each into the same folder of your account here"));
+    connect(move_, &QPushButton::clicked, this, &RestoreDialog::move_here);
     restore_ = buttons->addButton(tr("Restore"), QDialogButtonBox::AcceptRole);
     restore_->setDefault(true);
     connect(restore_, &QPushButton::clicked, this, &RestoreDialog::start_restore);
@@ -145,6 +151,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     connect(runner_, &Runner::finished, this, [this](const QString& result, const QJsonObject& ev) {
         bar_->hide();
         restore_->setEnabled(true);
+        move_->setEnabled(true);
         snapshot_->setEnabled(true);
         if (result == "success" || result == "partial") {
             QString text = tr("Restored %1 files (%2) in %3.")
@@ -375,6 +382,87 @@ void RestoreDialog::start_restore() {
     warnings_ = 0;
     bar_->show();
     restore_->setEnabled(false);
+    move_->setEnabled(false);
+    snapshot_->setEnabled(false);
+    status_->setText(tr("Starting..."));
+    runner_->start(args, password_, cloud_);
+}
+
+void RestoreDialog::move_here() {
+    if (runner_->running() || snapshots_.empty()) return;
+    const SnapshotEntry& snap = snapshots_[static_cast<std::size_t>(snapshot_->currentIndex())];
+    std::vector<vaultik::MoveItem> plan;
+    try {
+        plan = vaultik::plan_move(*repo_, snap.snapshot);
+    } catch (const std::exception& e) {
+        QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        return;
+    }
+    if (plan.empty()) {
+        QMessageBox::information(this, windowTitle(),
+                                 tr("This version holds none of an account's own folders (Documents, Desktop, ...)."));
+        return;
+    }
+
+    QDialog choose(this);
+    choose.setWindowTitle(tr("Move to this PC"));
+    choose.resize(720, 420);
+    auto* layout = new QVBoxLayout(&choose);
+    auto* intro = new QLabel(tr("These go into the same folders of your account on this computer. Files that are "
+                                "there already are left alone, unless you tick the box below."));
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+    auto* account = new QComboBox;
+    for (const std::string& a : vaultik::plan_accounts(plan)) account->addItem(qs(a));
+    auto* account_row = new QHBoxLayout;
+    account_row->addWidget(new QLabel(tr("From the account:")));
+    account_row->addWidget(account, 1);
+    layout->addLayout(account_row);
+    auto* list = new QListWidget;
+    layout->addWidget(list, 1);
+    const auto fill = [&] {
+        list->clear();
+        for (const vaultik::MoveItem& m : plan) {
+            if (qs(m.account) != account->currentText()) continue;
+            auto* item = new QListWidgetItem(tr("%1  →  %2").arg(qs(m.from).replace('/', '\\'), qs(m.to)));
+            item->setData(Qt::UserRole, qs(m.id));
+            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+            item->setCheckState(Qt::Checked);
+            list->addItem(item);
+        }
+    };
+    fill();
+    connect(account, &QComboBox::currentIndexChanged, &choose, fill);
+    auto* replace = new QCheckBox(tr("Replace files that are there already"));
+    layout->addWidget(replace);
+    auto* note = new QLabel(tr("Close the browsers and email programs on this computer first. Saved browser passwords "
+                               "were sealed for the old account: the browser asks you to sign in again."));
+    note->setWordWrap(true);
+    note->setForegroundRole(QPalette::PlaceholderText);
+    layout->addWidget(note);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
+    QPushButton* go = buttons->addButton(tr("Move"), QDialogButtonBox::AcceptRole);
+    set_role(go, "primary");
+    connect(go, &QPushButton::clicked, &choose, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &choose, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (choose.exec() != QDialog::Accepted) return;
+
+    QStringList ids;
+    for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->checkState() == Qt::Checked) ids << list->item(i)->data(Qt::UserRole).toString();
+    if (ids.isEmpty()) return;
+    QStringList args{"move-here"};
+    if (job_.id.empty())
+        args << "--repo" << qs(job_.repository);
+    else
+        args << "--job" << qs(job_.id);
+    args << qs(id_hex(snap.id)) << "--account" << account->currentText() << "--only" << ids.join(',');
+    if (replace->isChecked()) args << "--overwrite";
+    warnings_ = 0;
+    bar_->show();
+    restore_->setEnabled(false);
+    move_->setEnabled(false);
     snapshot_->setEnabled(false);
     status_->setText(tr("Starting..."));
     runner_->start(args, password_, cloud_);

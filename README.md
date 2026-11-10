@@ -89,7 +89,11 @@ Start `vaultik-gui`, then **New backup job**:
   then for S3-compatible storage the endpoint, an existing bucket, an optional folder in it and an
   access key, or for a cloud drive a folder and a sign-in; **Test connection** checks them. The
   secret key or sign-in token is stored like the password (see "Cloud drives" below).
-- **What to back up:** folders and files, name patterns to skip (`*.tmp`, `node_modules`), and
+- **What to back up:** folders and files, with **Add common data** for your own folders
+  (Documents, Desktop, Pictures, Music, Videos, Downloads) and the data of common programs:
+  browser profiles (Chrome, Edge, Brave, Firefox, Opera), email (Outlook data files, Thunderbird)
+  and game saves, each found wherever Windows keeps it (moved into OneDrive, say). Also name
+  patterns to skip (`*.tmp`, `node_modules`), and
   whether to use a Volume Shadow Copy for open and locked files (on by default; it needs
   administrator rights, see "Current limits"). For the shadow copy, Windows briefly pauses the
   writes of programs that take part in it, such as SQL Server. "Do not pause SQL Server" leaves
@@ -481,6 +485,19 @@ Run one any time with **Test a restore** on the Overview or `vaultik test-restor
 restore of a few files" (off by default) runs one after a backup when the last is 30 days old.
 The temporary folder is made in Vaultik's settings folder, or for a run with administrator rights
 in the admin-only store, never in a folder a less privileged program could tamper with.
+
+### Moving to a new PC
+
+**Move to this PC...** in the restore window (or `vaultik move-here --job <job>`, or `-r
+<repository>`, with a version, `latest` by default) finds an old computer's account in a backup,
+`<drive>\Users\<name>`, and puts its Documents, Desktop, Pictures, Music, Videos, Downloads,
+browser profiles, email and game saves into the same folders of your account on this computer,
+wherever they are here (another user name, Documents in OneDrive, another drive). You choose what
+goes; files already there are left alone unless you tick the box (`--overwrite`), and the old
+account's permissions are never applied. `--dry-run` lists what goes where; `--only
+documents,browsers` picks groups or single items; `--account` picks one when the backup holds
+several. Close the browsers and email programs first; saved browser passwords were sealed for the
+old account, so browsers ask you to sign in again.
 
 ### Repairing a damaged backup
 

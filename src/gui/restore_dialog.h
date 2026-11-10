@@ -46,6 +46,8 @@ private:
     void select_path(const QString& path);
     void preview_selected();
     void show_versions_of_selected();
+    // The old account's folders in this version, each into the same kind of folder here.
+    void move_here();
 
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;
@@ -65,6 +67,7 @@ private:
     QProgressBar* bar_ = nullptr;
     QLabel* status_ = nullptr;
     QPushButton* restore_ = nullptr;
+    QPushButton* move_ = nullptr;
     Runner* runner_ = nullptr;
     int warnings_ = 0;
 };
