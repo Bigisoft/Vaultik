@@ -44,13 +44,18 @@ std::wstring without_nt_prefix(std::wstring s) {
 }  // namespace
 
 Bytes read_security(const std::string& path) {
-    const std::wstring p = native_path(path);
+    // Through a handle on the item itself: for a symlink or junction, its own descriptor, never
+    // that of what it points at.
+    UniqueHandle h(CreateFileW(native_path(path).c_str(), READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                               nullptr));
+    if (!h.valid()) return {};
     DWORD needed = 0;
-    GetFileSecurityW(p.c_str(), kSecurityParts, nullptr, 0, &needed);
+    GetKernelObjectSecurity(h.get(), kSecurityParts, nullptr, 0, &needed);
     if (needed == 0 || needed > (1u << 20)) return {};
     Bytes sd(needed);
-    if (!GetFileSecurityW(p.c_str(), kSecurityParts, reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data()), needed,
-                          &needed))
+    if (!GetKernelObjectSecurity(h.get(), kSecurityParts, reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data()), needed,
+                                 &needed))
         return {};
     sd.resize(GetSecurityDescriptorLength(reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data())));
     return sd;

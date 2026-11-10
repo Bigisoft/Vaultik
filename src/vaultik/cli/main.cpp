@@ -1223,7 +1223,7 @@ int restore_check(const Args& a, const jobs::JobStore& store, Repository& repo, 
     record.kind = jobs::RunKind::RestoreTest;
     record.started = os::now();
     std::string work = store.dir();
-    if (os::process_elevated() && !a.has("--admin")) work = jobs::open_admin_store().dir();
+    if (os::process_elevated() && !a.has("--admin")) work = jobs::own_admin_store();
     RestoreTestResult r;
     try {
         RepoLock lock(repo, RepoLock::Mode::Shared, "test restore (job " + job.id + ")");
@@ -1920,7 +1920,11 @@ int cmd_run_job(const Args& a) {
     alert_for(*job, record, store.dir());
 
     // The second copy, after a backup that saved a version. Its result is its own history entry.
-    if (!job->second_copy.repository.empty() && !g_cancel.load() && record.status != jobs::RunStatus::Failed) {
+    const bool copy_waits = a.has("--scheduled") && job->schedule.skip_metered &&
+                            is_cloud_location(job->second_copy.repository) && os::metered_connection();
+    if (copy_waits && !g_json) out("Second copy: skipped, the internet connection is metered\n");
+    if (!job->second_copy.repository.empty() && !g_cancel.load() && record.status != jobs::RunStatus::Failed &&
+        !copy_waits) {
         jobs::RunRecord copy;
         second_copy(a, store, *job, *repo, copy, !record.alert.empty() || !record.hold.empty());
         try {

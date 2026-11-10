@@ -58,11 +58,21 @@ std::wstring shown(const std::string& utf8, const std::string& what) {
         }
     }
     flush_spaces();
-    if (out.size() > 120) throw Error(what + " is too long to show in full for approval (over 120 characters)");
+    if (out.size() > 200) throw Error(what + " is too long to show in full for approval (over 200 characters)");
     return out;
 }
 
 }  // namespace
+
+namespace {
+std::string prepare_admin_store(const std::string& sid);  // below
+}  // namespace
+
+std::string own_admin_store() {
+    if (!os::process_elevated()) throw Error("the admin store needs administrator rights");
+    prepare_admin_store(os::current_user_sid());
+    return open_admin_store().dir();
+}
 
 void check_admin_command(const std::string& command, const std::string& what) {
     if (command.empty()) return;
@@ -121,9 +131,14 @@ void check_admin_command(const std::string& command, const std::string& what) {
             for (std::size_t k = 1; sw && k < word.size(); ++k)
                 sw = std::isalnum(static_cast<unsigned char>(word[k])) != 0;
             if (sw) {
+                // cmd would read it as a path at the top of the drive, with any of the usual
+                // program extensions: refuse it when anything there answers to it.
                 char windows[MAX_PATH] = {};
-                GetSystemWindowsDirectoryA(windows, MAX_PATH);
-                sw = !os::exists(std::string(windows, 2) + "\\" + word.substr(1));
+                const UINT n = GetSystemWindowsDirectoryA(windows, MAX_PATH);
+                if (n < 2 || n >= MAX_PATH) refuse(word, "the system drive cannot be told");
+                const std::string at_top = std::string(windows, 2) + "\\" + word.substr(1);
+                for (const char* ext : {"", ".com", ".exe", ".bat", ".cmd", ".vbs", ".js", ".wsf", ".msc", ".ps1"})
+                    if (os::exists(at_top + ext)) sw = false;
             }
             if (!sw) refuse(word, "not a full path; write it as C:\\...");
         }
@@ -153,6 +168,9 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
     if (!same_secrets) text += L"(Its cloud storage keys or sign-ins are new or changed.)\n";
     text += L"Saves the backup to:\n    " + shown(job.repository, "the destination") + L"\n";
     if (!job.cloud_key_id.empty()) text += L"    with the access key " + shown(job.cloud_key_id, "the access key") + L"\n";
+    if (!job.cloud_region.empty())
+        text += (cloud_kind(job.repository) == CloudKind::Sftp ? L"    trusting the server key " : L"    in the region ") +
+                shown(job.cloud_region, "the server key") + L"\n";
     if (!job.second_copy.repository.empty()) {
         text += L"And a second copy to:\n    " + shown(job.second_copy.repository, "the second copy's destination") + L"\n";
         if (!job.second_copy.cloud_key_id.empty())

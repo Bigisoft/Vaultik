@@ -1,5 +1,8 @@
 #include "vaultik/jobs/alerts.hpp"
 
+#include <chrono>
+#include <thread>
+
 #include <nlohmann/json.hpp>
 
 #include "vaultik/platform/http.hpp"
@@ -68,6 +71,9 @@ AlertSettings load_alerts(const std::string& dir) {
 }
 
 void save_alerts(const AlertSettings& s, const std::string& dir) {
+    for (const std::string* text : {&s.ntfy_url, &s.ntfy_email, &s.telegram_chat, &s.webhook_url})
+        for (const char c : *text)
+            if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) throw Error("an alert setting contains control characters");
     for (const std::string* url : {&s.ntfy_url, &s.webhook_url})
         if (!url->empty()) check_url(*url);
     const nlohmann::json j = {{"on_failure", s.on_failure},   {"on_damage", s.on_damage},
@@ -103,11 +109,24 @@ std::vector<std::string> send_alert(const AlertSettings& s, const Alert& a, cons
     std::vector<std::string> failed;
     if (!s.any()) return failed;
     http::Client client;
+    // A computer that just woke up may have no network yet: try again a few times, but never
+    // hold the run up for more than about two minutes in all.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::minutes(2);
     const auto attempt = [&](const std::string& channel, const auto& fn) {
-        try {
-            fn();
-        } catch (const std::exception& e) {
-            failed.push_back(channel + ": " + e.what());
+        for (int round = 0;; ++round) {
+            try {
+                fn();
+                return;
+            } catch (const http::NetworkError& e) {
+                if (round >= 3 || std::chrono::steady_clock::now() + std::chrono::seconds(15) > deadline) {
+                    failed.push_back(channel + ": " + e.what());
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(5 + 10 * round));
+            } catch (const std::exception& e) {
+                failed.push_back(channel + ": " + e.what());
+                return;
+            }
         }
     };
     const std::string text = a.title + (a.message.empty() ? "" : "\n" + a.message);

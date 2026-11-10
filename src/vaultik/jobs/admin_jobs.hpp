@@ -20,6 +20,9 @@ namespace vaultik::jobs {
 // The admin store of the account `sid` (default: the current one). Throws on POSIX.
 std::string admin_store_dir(const std::string& sid = {});
 
+// With administrator rights: the current account's admin store, created when it is missing.
+std::string own_admin_store();
+
 // Opens the current account's admin store after checking that it, and the folders above it, are
 // admin-only. Throws Error saying what is wrong.
 JobStore open_admin_store();

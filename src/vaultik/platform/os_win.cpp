@@ -357,6 +357,10 @@ File File::create_directory(const std::string& path, ErrorCode& err) {
     // "\\?\C:\x" -> "\??\C:\x" (and "\\?\UNC\..." -> "\??\UNC\..."), the NT name of the path.
     std::wstring name = native(path);
     if (name.starts_with(L"\\\\?\\")) name[1] = L'?';
+    if (name.size() * sizeof(wchar_t) > 65534) {  // the most a UNICODE_STRING holds
+        err = ERROR_FILENAME_EXCED_RANGE;
+        return File();
+    }
     struct UnicodeString {
         USHORT Length;
         USHORT MaximumLength;

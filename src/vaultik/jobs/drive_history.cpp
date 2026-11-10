@@ -221,7 +221,16 @@ std::vector<DriveChange> drive_trend(const std::vector<DriveReading>& history, c
             out.push_back({what, *(base->*field), *(now.*field), base->time});
     };
     if (now.health) {
-        if (const DriveReading* base = baseline(&DriveReading::health); base && *base->health - *now.health >= 5)
+        // The health of a hard disk depends on whether its attributes could be read (with
+        // administrator rights): compare only readings of the same kind.
+        const DriveReading* base = nullptr;
+        for (const DriveReading& r : history)
+            if (r.key == now.key && r.time >= start && r.time < now.time && r.health &&
+                r.reallocated.has_value() == now.reallocated.has_value()) {
+                base = &r;
+                break;
+            }
+        if (base && *base->health - *now.health >= 5)
             out.push_back({DriveChange::What::Health, static_cast<std::uint64_t>(*base->health),
                            static_cast<std::uint64_t>(*now.health), base->time});
     }
