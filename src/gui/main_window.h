@@ -182,6 +182,7 @@ private:
     const std::vector<JobDrive>& drives_of(const vaultik::jobs::Job& job);
     std::map<std::string, DriveCache> drive_cache_;
     QPushButton* mounts_button_ = nullptr;
+    class QStatusBar* status_ = nullptr;  // status messages, under the content
 
     Runner* runner_ = nullptr;
     std::string running_job_;

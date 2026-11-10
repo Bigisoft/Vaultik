@@ -170,6 +170,11 @@ QPushButton[role="flat"], QToolButton {
 }
 QPushButton[role="flat"]:hover, QToolButton:hover { background: @hover; }
 QPushButton[role="flat"]:pressed, QToolButton:pressed { background: @pressed; }
+QPushButton[role="action"] {
+    background: @accentsoft; color: @text; border: 1px solid @accent; border-radius: 5px; padding: 4px 12px;
+}
+QPushButton[role="action"]:hover { background: @accent; color: @accenttext; }
+QPushButton[role="action"]:pressed { background: @accenthover; color: @accenttext; }
 QPushButton::menu-indicator, QToolButton::menu-indicator { image: none; width: 0; }
 
 QLineEdit, QComboBox, QSpinBox, QTimeEdit, QPlainTextEdit {

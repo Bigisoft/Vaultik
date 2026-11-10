@@ -185,8 +185,13 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     auto* content = new QWidget;
     content->setObjectName(QStringLiteral("Content"));
     auto* cl = new QVBoxLayout(content);
-    cl->setContentsMargins(28, 22, 28, 18);
+    cl->setContentsMargins(28, 22, 28, 6);
     cl->addWidget(stack_);
+    // Status messages live under the content, not in a window-wide status bar, so the sidebar
+    // reaches the bottom of the window.
+    status_ = new QStatusBar;
+    status_->setSizeGripEnabled(false);
+    cl->addWidget(status_);
 
     auto* central = new QWidget;
     auto* hl = new QHBoxLayout(central);
@@ -283,7 +288,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
                   : result == "cancelled" ? tr("Repair cancelled; nothing was changed yet.")
                                           : tr("Repair failed: %1").arg(ev.value("message").toString());
             log_->appendPlainText(msg);
-            statusBar()->showMessage(msg, 30000);
+            status_->showMessage(msg, 30000);
             repos_.erase(id);  // the index and maybe the versions changed
             reload_jobs(current_job() ? current_job()->id : id);
             return;
@@ -293,7 +298,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
                   : result == "cancelled" ? tr("Test restore cancelled.")
                                           : tr("Test restore failed: %1").arg(ev.value("message").toString());
             log_->appendPlainText(msg);
-            statusBar()->showMessage(msg, 15000);
+            status_->showMessage(msg, 15000);
             reload_jobs(current_job() ? current_job()->id : id);
             return;
         }
@@ -302,7 +307,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
                   : result == "cancelled" ? tr("Health check cancelled.")
                                           : tr("Health check failed: %1").arg(ev.value("message").toString());
             log_->appendPlainText(msg);
-            statusBar()->showMessage(msg, 15000);
+            status_->showMessage(msg, 15000);
             reload_jobs(current_job() ? current_job()->id : id);
             return;
         }
@@ -334,7 +339,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
                            "this time."));
             box.exec();
         }
-        statusBar()->showMessage(msg, 15000);
+        status_->showMessage(msg, 15000);
         repos_.erase(id);  // a new version: reload the list when it is shown
         reload_jobs(current_job() ? current_job()->id : id);
     });
@@ -351,7 +356,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     mounts_button_->setProperty("role", "flat");
     mounts_button_->setToolTip(tr("Close the versions shown as folders in File Explorer"));
     connect(mounts_button_, &QPushButton::clicked, this, &MainWindow::close_mounts);
-    statusBar()->addPermanentWidget(mounts_button_);
+    status_->addPermanentWidget(mounts_button_);
     mounts_button_->hide();
     connect(qApp, &QCoreApplication::aboutToQuit, this, &MainWindow::close_mounts);
 
@@ -442,7 +447,7 @@ void MainWindow::drives_connected(const QStringList& roots) {
             const QString title = tr("Backing up %1").arg(qs(job.name));
             const QString text = tr("%1 was connected. Leave it plugged in until Vaultik says it is done.").arg(root);
             if (tray_ != nullptr) tray_->notify(title, text);
-            statusBar()->showMessage(title + "  " + text, 15000);
+            status_->showMessage(title + "  " + text, 15000);
         }
     }
     if (!connect_runs_.empty() && !connect_timer_->isActive()) connect_timer_->start();
@@ -487,7 +492,7 @@ void MainWindow::watch_connect_runs() {
             text = tr("No new version was saved. You can unplug %1.").arg(run.drive);
         }
         if (tray_ != nullptr) tray_->notify(title, text, warn);
-        statusBar()->showMessage(title + "  " + text, 30000);
+        status_->showMessage(title + "  " + text, 30000);
         refresh_sidebar();
     }
     if (connect_runs_.empty()) connect_timer_->stop();
@@ -604,7 +609,7 @@ void MainWindow::explore_version(int index) {
     auto* process = new QProcess(this);
     mounts_.push_back({process, job->id, snapshot, QString()});
     update_mounts_button();
-    statusBar()->showMessage(tr("Opening the version in File Explorer..."), 10000);
+    status_->showMessage(tr("Opening the version in File Explorer..."), 10000);
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, process] {
         while (process->canReadLine()) {
@@ -625,7 +630,7 @@ void MainWindow::explore_version(int index) {
                 }
                 QDesktopServices::openUrl(QUrl::fromLocalFile(open));
             }
-            statusBar()->clearMessage();
+            status_->clearMessage();
             update_mounts_button();
         }
     });
@@ -1515,7 +1520,7 @@ void MainWindow::delete_version(int index) {
                    list.end());
     }
     show_versions();
-    statusBar()->showMessage(tr("Version deleted."), 8000);
+    status_->showMessage(tr("Version deleted."), 8000);
 }
 
 void MainWindow::restore_from_folder() {
@@ -1561,13 +1566,13 @@ void MainWindow::restore_from_folder() {
     const CloudCredentials keys = cloud.credentials();
     cloud.wipe();
     QApplication::setOverrideCursor(Qt::WaitCursor);
-    statusBar()->showMessage(tr("Opening the backup..."));
+    status_->showMessage(tr("Opening the backup..."));
     RepoHandle::open_async(
         this, source.repository, u8(password), keys,
         [this, source, password, keys, generation = lock_generation_](std::shared_ptr<Repository> repo,
                                                                       std::vector<SnapshotEntry> list, QString error) mutable {
             QApplication::restoreOverrideCursor();
-            statusBar()->clearMessage();
+            status_->clearMessage();
             if (generation != lock_generation_) {
                 // Locked again while it opened: nothing of it is shown.
                 password.fill(QChar(0));
