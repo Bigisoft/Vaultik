@@ -26,6 +26,7 @@ struct DriveHealth {
 
     int disk = -1;         // the system's disk number
     std::string model;     // "WD My Passport 2627"
+    std::string serial;    // the serial number, when the system tells it
     std::string bus;       // "USB", "SATA", "NVMe", ...
     std::string media;     // "HDD", "SSD" or empty
     std::uint64_t size = 0;

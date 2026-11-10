@@ -364,12 +364,13 @@ std::vector<DriveHealth> query(const std::wstring& where) {
         };
 
         std::map<int, std::size_t> by_disk;
-        run(L"SELECT DeviceId, FriendlyName, BusType, MediaType, HealthStatus, OperationalStatus, Size "
+        run(L"SELECT DeviceId, FriendlyName, SerialNumber, BusType, MediaType, HealthStatus, OperationalStatus, Size "
             L"FROM MSFT_PhysicalDisk" + where,
             [&](IWbemClassObject* row) {
                 DriveHealth d;
                 d.disk = std::atoi(text(row, L"DeviceId").c_str());
                 d.model = text(row, L"FriendlyName");
+                d.serial = text(row, L"SerialNumber");
                 d.bus = bus_name(number(row, L"BusType").value_or(0));
                 d.media = media_name(number(row, L"MediaType").value_or(0));
                 d.size = number(row, L"Size").value_or(0);

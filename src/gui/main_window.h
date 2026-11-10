@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "repo_handle.h"
+#include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
@@ -170,6 +171,7 @@ private:
     struct JobDrive {
         DriveRole role;
         vaultik::os::DriveHealth health;
+        std::vector<vaultik::jobs::DriveChange> worse;  // how it got worse lately (stored readings)
     };
     struct DriveCache {
         std::chrono::steady_clock::time_point when{};

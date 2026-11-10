@@ -45,6 +45,7 @@
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/vss.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
@@ -158,6 +159,7 @@ Commands:
   drives                       The health of this computer's drives, as Windows
                                reports it (details need administrator rights)
       --smart                  Also list each drive's S.M.A.R.T. attributes
+      --history                Also list each drive's stored health readings
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
                                sources, destination, password and resource
@@ -242,7 +244,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--smart"};
+                                              "--full", "--no-check", "--on-connect", "--smart", "--history"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1575,7 +1577,9 @@ int cmd_run_job(const Args& a) {
         // The destination drive's own health, as the system reports it: a warning here is the
         // time to copy the backups elsewhere, before the drive fails.
         if (!is_cloud_location(job->repository)) {
-            for (const os::DriveHealth& d : os::drive_health(job->repository)) {
+            const std::vector<os::DriveHealth> drives = os::drive_health(job->repository);
+            jobs::record_drives(drives);
+            for (const os::DriveHealth& d : drives) {
                 const std::string problem = drive_problem(d);
                 if (problem.empty()) continue;
                 record.drive = problem;
@@ -1835,16 +1839,28 @@ int cmd_note(const Args& a) {
 }
 
 // history <path>: the versions of one file or folder (only those where it changed, unless --all).
+// How the drive got worse in the last 90 days, from its stored readings ("2 more reallocated
+// sectors since 2026-10-02 (1 -> 3)"); empty when it did not.
+std::vector<std::string> drive_changes(const os::DriveHealth& d) {
+    std::vector<std::string> out;
+    const jobs::DriveReading now = jobs::reading_of(d, os::now());
+    for (const jobs::DriveChange& c : jobs::drive_trend(jobs::drive_history(now.key), now))
+        out.push_back(jobs::describe(c));
+    return out;
+}
+
 // A drive's problem in words ("WD My Passport 2627: warning, Predictive failure"); empty when it
 // reports none.
 std::string drive_problem(const os::DriveHealth& d) {
     const bool bad = d.status == os::DriveHealth::Status::Warning || d.status == os::DriveHealth::Status::Unhealthy;
     const bool uncorrected = d.read_errors_uncorrected.value_or(0) > 0;
-    if (!bad && d.condition.empty() && !uncorrected && !d.worn_out()) return {};
+    const std::vector<std::string> worse = drive_changes(d);
+    if (!bad && d.condition.empty() && !uncorrected && !d.worn_out() && worse.empty()) return {};
     std::string s = (d.model.empty() ? "disk " + std::to_string(d.disk) : d.model) + ": " + os::to_string(d.status);
     if (!d.condition.empty()) s += ", " + d.condition;
     if (uncorrected) s += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
     if (d.worn_out()) s += ", " + std::to_string(*d.health_percent()) + "% of its rated life left";
+    for (const std::string& w : worse) s += ", " + w;
     return s;
 }
 
@@ -1852,7 +1868,9 @@ std::string drive_problem(const os::DriveHealth& d) {
 // --smart each ATA drive's attribute table.
 int cmd_drives(const Args& a) {
     const bool smart = a.has("--smart");
+    const bool history = a.has("--history");
     const std::vector<os::DriveHealth> drives = os::all_drives();
+    jobs::record_drives(drives);
     // Which drive letters are on each disk.
     std::map<int, std::string> letters;
 #ifdef _WIN32
@@ -1874,6 +1892,21 @@ int cmd_drives(const Args& a) {
             if (d.power_on_hours) j["power_on_hours"] = *d.power_on_hours;
             if (d.read_errors_uncorrected) j["read_errors_uncorrected"] = *d.read_errors_uncorrected;
             if (!d.smart_issues.empty()) j["issues"] = d.smart_issues;
+            if (!d.serial.empty()) j["serial"] = d.serial;
+            if (const auto worse = drive_changes(d); !worse.empty()) j["worse"] = worse;
+            if (history) {
+                nlohmann::json readings = nlohmann::json::array();
+                for (const jobs::DriveReading& r : jobs::drive_history(jobs::drive_key(d))) {
+                    nlohmann::json e = {{"time", os::format_time_local(r.time)}};
+                    if (r.health) e["health_percent"] = *r.health;
+                    if (r.reallocated) e["reallocated"] = *r.reallocated;
+                    if (r.pending) e["pending"] = *r.pending;
+                    if (r.uncorrectable) e["uncorrectable"] = *r.uncorrectable;
+                    if (r.read_errors) e["read_errors"] = *r.read_errors;
+                    readings.push_back(e);
+                }
+                j["history"] = readings;
+            }
             if (smart && !d.smart.empty()) {
                 nlohmann::json attrs = nlohmann::json::array();
                 for (const os::SmartAttribute& s : d.smart)
@@ -1907,6 +1940,20 @@ int cmd_drives(const Args& a) {
             if (issue != d.condition) line += ", " + issue;
         missing = missing || !d.health_percent() || !d.power_on_hours;
         out(line + "\n");
+        for (const std::string& w : drive_changes(d)) out("  Getting worse: " + w + "\n");
+        if (history) {
+            const std::vector<jobs::DriveReading> readings = jobs::drive_history(jobs::drive_key(d));
+            if (readings.empty()) out("    (no stored readings)\n");
+            for (const jobs::DriveReading& r : readings) {
+                std::string row = "    " + os::format_time_local(r.time);
+                if (r.health) row += "  health " + std::to_string(*r.health) + "%";
+                if (r.reallocated) row += "  reallocated " + std::to_string(*r.reallocated);
+                if (r.pending) row += "  pending " + std::to_string(*r.pending);
+                if (r.uncorrectable) row += "  uncorrectable " + std::to_string(*r.uncorrectable);
+                if (r.read_errors) row += "  read errors " + std::to_string(*r.read_errors);
+                out(row + "\n");
+            }
+        }
         if (smart && !d.smart.empty()) {
             out("    ID  Attribute                       Value Worst Thresh  Raw\n");
             for (const os::SmartAttribute& s : d.smart) {

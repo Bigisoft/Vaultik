@@ -1153,6 +1153,25 @@ void MainWindow::show_versions() {
     refresh_overview();
 }
 
+// How a drive got worse lately, in words: "3 more reallocated sectors since 02.10.2026".
+static QString change_text(const jobs::DriveChange& c) {
+    const QString since = QLocale().toString(to_datetime(c.since).date(), QLocale::ShortFormat);
+    const qulonglong more = c.to - c.from;
+    switch (c.what) {
+        case jobs::DriveChange::What::Health:
+            return QObject::tr("health fell from %1% to %2% since %3").arg(c.from).arg(c.to).arg(since);
+        case jobs::DriveChange::What::Reallocated:
+            return QObject::tr("%1 more reallocated sectors since %2").arg(more).arg(since);
+        case jobs::DriveChange::What::Pending:
+            return QObject::tr("%1 more pending sectors since %2").arg(more).arg(since);
+        case jobs::DriveChange::What::Uncorrectable:
+            return QObject::tr("%1 more uncorrectable sectors since %2").arg(more).arg(since);
+        case jobs::DriveChange::What::ReadErrors:
+            return QObject::tr("%1 more unrecoverable read errors since %2").arg(more).arg(since);
+    }
+    return {};
+}
+
 const std::vector<MainWindow::JobDrive>& MainWindow::drives_of(const jobs::Job& job) {
     DriveCache& cache = drive_cache_[job.id];
     const auto now = std::chrono::steady_clock::now();
@@ -1166,12 +1185,20 @@ const std::vector<MainWindow::JobDrive>& MainWindow::drives_of(const jobs::Job& 
             const bool seen = std::any_of(cache.drives.begin(), cache.drives.end(), [&](const JobDrive& d) {
                 return d.role == role && d.health.disk == h.disk;
             });
-            if (!seen) cache.drives.push_back({role, std::move(h)});
+            if (!seen) cache.drives.push_back({role, std::move(h), {}});
         }
     };
     add(DriveRole::Backup, job.repository);
     add(DriveRole::Copy, job.second_copy.repository);
     for (const std::string& s : job.sources) add(DriveRole::Source, s);
+    // Keep a record of each drive's health, and compare with it.
+    std::vector<os::DriveHealth> looked;
+    for (const JobDrive& jd : cache.drives) looked.push_back(jd.health);
+    jobs::record_drives(looked);
+    for (JobDrive& jd : cache.drives) {
+        const jobs::DriveReading reading = jobs::reading_of(jd.health, os::now());
+        jd.worse = jobs::drive_trend(jobs::drive_history(reading.key), reading);
+    }
     return cache.drives;
 }
 
@@ -1307,16 +1334,23 @@ void MainWindow::refresh_overview() {
         if (h.read_errors_uncorrected.value_or(0) > 0 && h.smart.empty())  // (else among the issues)
             notes << tr("%1 unrecoverable read errors").arg(*h.read_errors_uncorrected);
         if (h.temperature) notes << tr("%1 °C").arg(*h.temperature);
-        dr.problem = bad || !h.condition.empty() || h.read_errors_uncorrected.value_or(0) > 0 || h.worn_out();
+        for (const jobs::DriveChange& c : jd.worse) notes << change_text(c);
+        const bool worse = !jd.worse.empty();
+        dr.problem = bad || !h.condition.empty() || h.read_errors_uncorrected.value_or(0) > 0 || h.worn_out() || worse;
         // A backup on the same disk as what it backs up is lost with it.
         if (jd.role != DriveRole::Source && source_disks.contains(h.disk)) {
             notes << tr("the same drive as the backed-up files, so one drive failure loses both");
             dr.problem = true;
         }
         dr.status = notes.join(QStringLiteral(", "));
-        if (dr.problem && d.warning.isEmpty() && (bad || !h.condition.empty() || h.worn_out()) && jd.role != DriveRole::Source)
-            d.warning = tr("The drive with the backup reports a problem (%1: %2). Copy the backup to another drive "
-                           "soon, before it fails.").arg(dr.name, dr.status);
+        if (dr.problem && d.warning.isEmpty() && (bad || !h.condition.empty() || h.worn_out() || worse)) {
+            if (jd.role != DriveRole::Source)
+                d.warning = tr("The drive with the backup reports a problem (%1: %2). Copy the backup to another drive "
+                               "soon, before it fails.").arg(dr.name, dr.status);
+            else
+                d.warning = tr("A drive with the backed-up files reports a problem (%1: %2). Make sure the backup is "
+                               "up to date, and replace the drive soon.").arg(dr.name, dr.status);
+        }
         d.drives.push_back(std::move(dr));
     }
 

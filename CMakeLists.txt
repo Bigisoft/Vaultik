@@ -71,6 +71,7 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/mega_backend.cpp
     src/vaultik/repo/backends.cpp
     src/vaultik/jobs/job.cpp
+    src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
 )
@@ -216,6 +217,7 @@ add_executable(vaultik_tests
     tests/test_main.cpp
     tests/test_util.cpp
     tests/test_drive_health.cpp
+    tests/test_drive_history.cpp
     tests/test_resources.cpp
     tests/test_crypto.cpp
     tests/test_chunker.cpp
