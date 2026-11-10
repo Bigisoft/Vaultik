@@ -47,12 +47,18 @@ std::wstring shown(const std::string& utf8, const std::string& what) {
         }
         flush_spaces();
         const WORD t = types[i];
+        // Letters that render as nothing (Hangul fillers, the blank Braille pattern, Mongolian
+        // and Khmer invisible marks, variation selectors, the combining grapheme joiner).
+        const bool blank = c == 0x034F || c == 0x115F || c == 0x1160 || c == 0x17B4 || c == 0x17B5 ||
+                           (c >= 0x180B && c <= 0x180F) || c == 0x2800 || c == 0x3164 ||
+                           (c >= 0xFE00 && c <= 0xFE0F) || c == 0xFFA0;
         const bool visible = (t & (C1_ALPHA | C1_DIGIT | C1_PUNCT)) != 0 && (t & (C1_CNTRL | C1_SPACE | C1_BLANK)) == 0 &&
-                             !(c >= 0xD800 && c <= 0xDFFF);  // (halves of a surrogate pair: not shown)
+                             !(c >= 0xD800 && c <= 0xDFFF) &&  // (halves of a surrogate pair: not shown)
+                             !blank;
         out += visible ? c : L'�';
     }
     flush_spaces();
-    if (out.size() > 300) throw Error(what + " is too long to show in full for approval; shorten it");
+    if (out.size() > 120) throw Error(what + " is too long to show in full for approval (over 120 characters)");
     return out;
 }
 
@@ -72,6 +78,8 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
         text += L"Command run before each backup:\n    " + shown(job.before_command, "the command before the backup") + L"\n";
     if (!job.after_command.empty())
         text += L"Command run after each backup:\n    " + shown(job.after_command, "the command after the backup") + L"\n";
+    if (approved && same_secrets) text += L"(Some other setting of the job changed.)\n";
+    if (!same_secrets) text += L"(Its cloud storage keys or sign-ins are new or changed.)\n";
     text += L"Saves the backup to:\n    " + shown(job.repository, "the destination") + L"\n";
     if (!job.cloud_key_id.empty()) text += L"    with the access key " + shown(job.cloud_key_id, "the access key") + L"\n";
     if (!job.second_copy.repository.empty()) {
@@ -85,13 +93,18 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
         text += L"Skipping:\n";
         for (const std::string& ex : job.excludes) text += L"    " + shown(ex, "a pattern to skip") + L"\n";
     }
-    if (approved && same_secrets) text += L"\n(Some other setting of the job changed.)\n";
-    if (!same_secrets) text += L"\n(Its cloud storage keys or sign-ins are new or changed.)\n";
     text += L"\nAnyone who knows the backup's password can read what it backs up. Allow this only if you set "
             L"the job up like this yourself. Allow?";
-    // Everything must be on screen: a message box does not scroll.
-    const auto lines = static_cast<std::size_t>(std::count(text.begin(), text.end(), L'\n'));
-    if (text.size() > 4000 || lines > 45)
+    // Everything must be on screen: a message box does not scroll. Count each line as it wraps,
+    // assuming no more than 60 characters fit on one (message boxes are wider on any usual screen).
+    std::size_t lines = 0;
+    for (std::size_t start = 0; start <= text.size();) {
+        std::size_t end = text.find(L'\n', start);
+        if (end == std::wstring::npos) end = text.size();
+        lines += std::max<std::size_t>(1, (end - start + 59) / 60);
+        start = end + 1;
+    }
+    if (lines > 40)
         throw Error("the job's description is too long to show in full for approval; shorten its folders, "
                     "patterns or commands");
     const int answer = MessageBoxW(nullptr, text.c_str(), L"Vaultik: a job with administrator rights",
