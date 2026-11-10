@@ -98,7 +98,7 @@ Commands:
                                4; 1 at background priority or with --max-memory;
                                also accepted by run-job)
       --uploads <n>            Upload n packs in the background (default 2 for cloud
-                               storage, 0 for folders; also accepted by run-job)
+                               storage, 1 for folders; also accepted by run-job)
       --vss <mode>             Windows: read from a Volume Shadow Copy, so open and
                                locked files are included and everything is from one
                                moment. auto (default): when running as administrator,
@@ -878,7 +878,8 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
 // How many worker threads compress and encrypt, and how many packs upload in the background:
 // --threads / --uploads, or by default up to 4 threads (one core is left for the backup's own
 // thread; none at background CPU priority or under a memory cap, where the work stays on one
-// thread) and, for cloud storage, 2 uploads in flight (each holds a 32 MiB pack in memory).
+// thread) and 2 uploads in flight for cloud storage, 1 for a folder (each holds a 32 MiB pack
+// in memory; none at background priority for a folder, or under a memory cap).
 // Returns how many files a backup reads, chunks and hashes at once (--read-threads): by default
 // 4 (fewer on a PC with fewer cores), matching the seal threads, so neither side waits on the
 // other on a fast disk; one at background priority or under a memory cap, like the sealing
@@ -892,7 +893,10 @@ unsigned apply_parallelism(Repository& repo, const Args& a, const std::string& l
         threads = 0;
         readers = 1;
     }
-    unsigned uploads = is_cloud_location(location) && policy.max_memory == 0 ? 2 : 0;
+    // A folder too gets one pack written in the background while the next is built: writing
+    // packs, not reading, is what a first backup to a disk waits on (about twice as fast).
+    unsigned uploads = policy.max_memory != 0 ? 0 : is_cloud_location(location) ? 2
+                                                 : policy.cpu == CpuPriority::Idle ? 0 : 1;
     if (auto v = a.value("--threads")) threads = static_cast<unsigned>(std::clamp(std::stoi(*v), 0, 16));
     if (auto v = a.value("--uploads")) uploads = static_cast<unsigned>(std::clamp(std::stoi(*v), 0, 8));
     if (auto v = a.value("--read-threads")) readers = static_cast<unsigned>(std::clamp(std::stoi(*v), 1, 16));
