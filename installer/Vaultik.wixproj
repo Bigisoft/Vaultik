@@ -7,6 +7,9 @@
     <!-- ICE57 takes the Start menu folder for a per-user one; in this per-machine package
          (ALLUSERS=1) it is the all-users Start menu, which the HKMU key path follows. -->
     <SuppressIces>ICE57</SuppressIces>
-    <DefineConstants>Version=$(Version);BinDir=$(BinDir);IconFile=$(MSBuildThisFileDirectory)..\src\gui\vaultik.ico</DefineConstants>
+    <DefineConstants>Version=$(Version);BinDir=$(BinDir);IconFile=$(MSBuildThisFileDirectory)..\src\gui\vaultik.ico;LicenseRtf=$(MSBuildThisFileDirectory)License.rtf</DefineConstants>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+  </ItemGroup>
 </Project>
