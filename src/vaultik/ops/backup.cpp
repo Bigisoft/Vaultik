@@ -511,11 +511,17 @@ BackupResult BackupEngine::run() {
 
     std::optional<Tree> parent_root;
     std::optional<Id> parent_tree;  // the parent's root tree, to see whether anything changed
+    bool parent_is_own = false;
     snap.parent = find_parent(snap.paths);
     if (snap.parent) {
         try {
             const Snapshot ps = repo_.load_snapshot(*snap.parent);
             parent_tree = ps.tree;
+            // Only a version of this same job may stand for an unchanged run (one that carries
+            // every tag this run would get), so its own retention keeps it.
+            parent_is_own = std::all_of(options_.tags.begin(), options_.tags.end(), [&](const std::string& t) {
+                return std::find(ps.tags.begin(), ps.tags.end(), t) != ps.tags.end();
+            });
             alarm_.parent_files = ps.stats.files;
             parent_root = load_tree(ps.tree);
         } catch (const Error& e) {
@@ -567,7 +573,8 @@ BackupResult BackupEngine::run() {
     report(true);
 
     BackupResult result;
-    if (options_.skip_unchanged && parent_tree && !changed_ && stats_.items_removed == 0 && missing_sources_.empty()) {
+    if (options_.skip_unchanged && parent_tree && parent_is_own && !options_.parent && !changed_ &&
+        stats_.items_removed == 0 && missing_sources_.empty()) {
         // Exactly what the last version holds: nothing to save.
         result.unchanged = true;
         result.snapshot = std::move(snap);

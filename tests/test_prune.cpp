@@ -273,3 +273,14 @@ TEST_CASE("prune keeps data whose index file was lost") {
     vo.read_data = true;
     CHECK(run_verify(*repo, vo).errors == 0);
 }
+
+TEST_CASE("the newest version always stays, even when every rule has passed it") {
+    std::vector<SnapshotRecord> snaps;
+    for (int day = 0; day < 5; ++day) snaps.push_back(snap_at(day));  // January 2026, long ago now
+    RetentionPolicy recent;
+    recent.within_days = 7;
+    const auto d = plan_forget(snaps, recent);
+    CHECK(kept_count(d) == 1);
+    CHECK(d[0].keep);
+    CHECK(d[0].reason == "newest");
+}

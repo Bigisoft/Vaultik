@@ -137,6 +137,9 @@ std::vector<ForgetDecision> plan_forget(std::vector<SnapshotRecord> snapshots, c
                 keep(i, rule.name);
             }
         }
+        // The newest always stays, whatever the rules: with "the last N days" only, a computer that
+        // was off (or saved nothing new) for longer would otherwise lose every version.
+        if (!group.empty() && !decisions[0].keep) keep(0, "newest");
         for (std::size_t i = 0; i < group.size(); ++i) {
             decisions[i].entry = std::move(group[i]);
             out.push_back(std::move(decisions[i]));
