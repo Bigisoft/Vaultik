@@ -907,6 +907,8 @@ int run_shell(const std::string& command, const ShellOptions& o) {
             {L"TEMP", root + L"\\Temp"},
             {L"TMP", root + L"\\Temp"},
             {L"OS", L"Windows_NT"},
+            // Modules only from the system's folders, not the user's Documents.
+            {L"PSModulePath", root + L"\\System32\\WindowsPowerShell\\v1.0\\Modules"},
         };
         // The usual system values many tools expect, from the system rather than this process's
         // environment (which the user's own settings make up).

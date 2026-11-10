@@ -236,6 +236,8 @@ TEST_CASE("commands of administrator jobs: only safe ones, checked") {
     CHECK_THROWS(check_admin_command("cmd /d /v:off /c x.vbs", "the command"));
     CHECK_THROWS(check_admin_command("cmd /d /v:off /v:on /c ver", "the command"));
     CHECK_THROWS(check_admin_command("forfiles /c x", "the command"));
+    CHECK_THROWS(check_admin_command("set PATHEXT=.MSC & compmgmt", "the command"));
+    CHECK_THROWS(check_admin_command("ssh nas stop-db", "the command"));
     CHECK_THROWS(check_admin_command("ver !x!", "the command"));
     CHECK_THROWS(check_admin_command("cmd /d /v:off /c \"ver & x.vbs\"", "the command"));
     CHECK_THROWS(check_admin_command("> out.txt ver", "the command"));

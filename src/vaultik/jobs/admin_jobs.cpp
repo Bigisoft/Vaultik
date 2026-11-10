@@ -210,7 +210,11 @@ void check_admin_command(const std::string& command, const std::string& what) {
         // (Programs whose job is to start others, often through the user's own settings.)
         for (const char* banned : {"start", "if", "for", "forfiles", "mshta", "wscript", "cscript", "explorer",
                                    "rundll32", "regsvr32", "wmic", "pcalua", "conhost", "runas", "cmstp", "wsl",
-                                   "bash", "hh", "mmc", "control", "msiexec", "ftp", "scriptrunner"})
+                                   "bash", "hh", "mmc", "control", "msiexec", "ftp", "scriptrunner",
+                                   // Changing what later commands find, or where.
+                                   "set", "setlocal", "path", "cd", "chdir", "pushd",
+                                   // Reading their settings from the user's own profile.
+                                   "ssh", "scp", "sftp", "git"})
             if (base == banned)
                 refuse(word, "it can start programs these checks do not see; put the steps in a .cmd file in a "
                              "folder only administrators can change");
