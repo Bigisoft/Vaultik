@@ -21,17 +21,20 @@ namespace vaultik::jobs {
 #ifdef _WIN32
 namespace {
 
-// A field of the job for the question below, shown in full. Only letters, digits and punctuation
-// (of any script) and the plain space are shown as they are; every other character (controls,
-// text-direction marks, other kinds of spaces, invisible or combining characters) is shown as
-// U+FFFD, so nothing in a field can fake the layout or wording of the question or hide text. A run
-// of more than 3 spaces is shown as "[n spaces]". A field too long to show in full is refused
-// rather than cut: what is approved must be exactly what is seen.
+// A field of the job for the question below, shown in full. Only an explicit set of narrow,
+// visible characters is shown as it is: printable ASCII, and the letters of Latin (with accents),
+// Greek and Cyrillic, without combining marks. Every other character, invisible, blank-looking,
+// combining, wide or from another script, is shown as its code ("[U+3164]"), so a field cannot
+// hide text or fake the layout or wording of the question. A run of more than 3 spaces is shown
+// as "[n spaces]". A field too long to show in full is refused rather than cut: what is approved
+// must be exactly what is seen.
 std::wstring shown(const std::string& utf8, const std::string& what) {
-    const std::wstring in = widen(utf8);
-    std::vector<WORD> types(in.size() + 1, 0);
-    if (!in.empty() && !GetStringTypeW(CT_CTYPE1, in.data(), static_cast<int>(in.size()), types.data()))
-        throw Error(what + " cannot be shown for approval");
+    const auto plain = [](wchar_t c) {
+        return (c >= 0x21 && c <= 0x7E) ||                                 // ASCII
+               (c >= 0xA1 && c <= 0x24F && c != 0xAD) ||                   // Latin-1, Latin Extended A/B
+               (c >= 0x370 && c <= 0x3FF) ||                               // Greek
+               (c >= 0x400 && c <= 0x52F && !(c >= 0x483 && c <= 0x489));  // Cyrillic, without its marks
+    };
     std::wstring out;
     std::size_t spaces = 0;
     const auto flush_spaces = [&] {
@@ -39,23 +42,19 @@ std::wstring shown(const std::string& utf8, const std::string& what) {
         else out.append(spaces, L' ');
         spaces = 0;
     };
-    for (std::size_t i = 0; i < in.size(); ++i) {
-        const wchar_t c = in[i];
+    for (const wchar_t c : widen(utf8)) {
         if (c == L' ') {
             ++spaces;
             continue;
         }
         flush_spaces();
-        const WORD t = types[i];
-        // Letters that render as nothing (Hangul fillers, the blank Braille pattern, Mongolian
-        // and Khmer invisible marks, variation selectors, the combining grapheme joiner).
-        const bool blank = c == 0x034F || c == 0x115F || c == 0x1160 || c == 0x17B4 || c == 0x17B5 ||
-                           (c >= 0x180B && c <= 0x180F) || c == 0x2800 || c == 0x3164 ||
-                           (c >= 0xFE00 && c <= 0xFE0F) || c == 0xFFA0;
-        const bool visible = (t & (C1_ALPHA | C1_DIGIT | C1_PUNCT)) != 0 && (t & (C1_CNTRL | C1_SPACE | C1_BLANK)) == 0 &&
-                             !(c >= 0xD800 && c <= 0xDFFF) &&  // (halves of a surrogate pair: not shown)
-                             !blank;
-        out += visible ? c : L'�';
+        if (plain(c)) {
+            out += c;
+        } else {
+            wchar_t code[16];
+            swprintf(code, 16, L"[U+%04X]", static_cast<unsigned>(c));
+            out += code;
+        }
     }
     flush_spaces();
     if (out.size() > 120) throw Error(what + " is too long to show in full for approval (over 120 characters)");
@@ -96,12 +95,13 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
     text += L"\nAnyone who knows the backup's password can read what it backs up. Allow this only if you set "
             L"the job up like this yourself. Allow?";
     // Everything must be on screen: a message box does not scroll. Count each line as it wraps,
-    // assuming no more than 60 characters fit on one (message boxes are wider on any usual screen).
+    // assuming no more than 50 characters fit on one; every character shown is a narrow one, and a
+    // message box is wider than that on any usual screen.
     std::size_t lines = 0;
     for (std::size_t start = 0; start <= text.size();) {
         std::size_t end = text.find(L'\n', start);
         if (end == std::wstring::npos) end = text.size();
-        lines += std::max<std::size_t>(1, (end - start + 59) / 60);
+        lines += std::max<std::size_t>(1, (end - start + 49) / 50);
         start = end + 1;
     }
     if (lines > 40)
