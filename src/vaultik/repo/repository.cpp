@@ -1,7 +1,13 @@
 #include "vaultik/repo/repository.hpp"
 
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <exception>
 #include <limits>
+#include <mutex>
+#include <set>
+#include <thread>
 
 #include "vaultik/crypto/hash.hpp"
 
@@ -89,20 +95,56 @@ Repository::Repository(std::unique_ptr<Backend> backend, RepoConfig config, cons
       aead_(std::make_unique<AesGcm>(key.enc)),
       lock_aead_(std::make_unique<AesGcm>(key.enc)),
       id_hasher_(key.id),
-      compressor_(config_.zstd_level) {}
+      compressor_(config_.zstd_level),
+      enc_key_(key.enc) {}
 
-Repository::~Repository() = default;
+// Worker threads that seal blobs and upload packs; see set_parallelism.
+struct Repository::Pipeline {
+    struct Job {
+        BlobType type = BlobType::Data;
+        Id id{};
+        Bytes plain;
+        Bytes sealed;
+        std::uint32_t raw_len = 0;
+        bool done = false;
+        std::exception_ptr error;
+    };
+    struct Upload {
+        Id pack_id{};
+        Bytes bytes;
+        std::vector<BlobEntry> entries;
+    };
 
-std::string Repository::pack_name(const Id& pack_id) {
-    const std::string hex = id_hex(pack_id);
-    return "data/" + hex.substr(0, 2) + "/" + hex;
-}
+    std::mutex mu;
+    std::condition_variable work;  // a job or an upload is waiting, or stop
+    std::condition_variable done;  // a job or an upload finished
+    std::deque<std::shared_ptr<Job>> todo;   // waiting for a worker
+    std::deque<std::shared_ptr<Job>> order;  // every job not yet in the pack, in submission order
+    std::deque<Upload> uploads;              // waiting for an uploader
+    std::size_t uploading = 0;
+    std::vector<std::pair<Id, std::vector<BlobEntry>>> uploaded;  // written, not yet indexed
+    std::uint64_t uploaded_bytes = 0;
+    std::set<Id> in_flight;  // packs queued or being written
+    std::exception_ptr upload_error;
+    bool stop = false;
+    unsigned threads = 0;
+    unsigned max_uploads = 0;
+    std::vector<std::thread> workers;
 
-std::string Repository::snapshot_name(const Id& id) {
-    return std::string(kSnapshotDir) + "/" + id_hex(id);
-}
+    ~Pipeline() {
+        {
+            std::lock_guard g(mu);
+            stop = true;
+        }
+        work.notify_all();
+        for (std::thread& t : workers) t.join();
+    }
+};
 
-Bytes Repository::seal_object(ByteSpan plain, ByteSpan aad, bool compress) {
+namespace {
+
+// Compresses (when it helps) and encrypts an object; shared by the calling thread and workers.
+Bytes seal_with(ZstdCompressor& compressor, const AesGcm& aead, ByteSpan plain, ByteSpan aad, bool compress) {
     if (plain.size() > std::numeric_limits<std::uint32_t>::max()) throw Error("object too large");
     ByteWriter header;
     Bytes payload;
@@ -110,7 +152,7 @@ Bytes Repository::seal_object(ByteSpan plain, ByteSpan aad, bool compress) {
     bool compressed = false;
     if (compress && plain.size() >= 64) {
         Bytes candidate;
-        compressor_.compress_append(plain, candidate);
+        compressor.compress_append(plain, candidate);
         if (candidate.size() < plain.size()) {
             header.u8(kCompZstd);
             header.varint(plain.size());
@@ -125,9 +167,140 @@ Bytes Repository::seal_object(ByteSpan plain, ByteSpan aad, bool compress) {
         payload = header.take();
         payload.insert(payload.end(), plain.begin(), plain.end());
     }
-    Bytes sealed = aead_->seal(payload, aad);
+    Bytes sealed = aead.seal(payload, aad);
     secure_wipe(payload.data(), payload.size());
     return sealed;
+}
+
+}  // namespace
+
+Repository::~Repository() {
+    pipe_.reset();  // waits for the upload in progress; queued packs are dropped (never indexed)
+    secure_wipe(enc_key_.data(), enc_key_.size());
+}
+
+void Repository::set_parallelism(unsigned threads, unsigned uploads) {
+    flush();
+    pipe_.reset();
+    if (threads == 0 && uploads == 0) return;
+    pipe_ = std::make_unique<Pipeline>();
+    Pipeline* p = pipe_.get();
+    p->threads = threads;
+    p->max_uploads = uploads;
+    const int level = config_.zstd_level;
+    const Key32 key = enc_key_;
+    for (unsigned i = 0; i < threads; ++i) {
+        p->workers.emplace_back([p, level, key] {
+            ZstdCompressor compressor(level);
+            const AesGcm aead(key);
+            std::unique_lock lk(p->mu);
+            for (;;) {
+                p->work.wait(lk, [p] { return p->stop || !p->todo.empty(); });
+                if (p->stop) return;
+                const std::shared_ptr<Pipeline::Job> job = p->todo.front();
+                p->todo.pop_front();
+                lk.unlock();
+                try {
+                    job->sealed = seal_with(compressor, aead, job->plain, blob_aad(job->type, job->id), true);
+                } catch (...) {
+                    job->error = std::current_exception();
+                }
+                secure_wipe(job->plain.data(), job->plain.size());
+                job->plain = Bytes();
+                lk.lock();
+                job->done = true;
+                p->done.notify_all();
+            }
+        });
+    }
+    Backend* backend = backend_.get();
+    for (unsigned i = 0; i < uploads; ++i) {
+        p->workers.emplace_back([p, backend] {
+            std::unique_lock lk(p->mu);
+            for (;;) {
+                p->work.wait(lk, [p] { return p->stop || !p->uploads.empty(); });
+                if (p->stop) return;
+                Pipeline::Upload u = std::move(p->uploads.front());
+                p->uploads.pop_front();
+                ++p->uploading;
+                lk.unlock();
+                std::exception_ptr error;
+                try {
+                    backend->put(pack_name(u.pack_id), u.bytes);
+                } catch (...) {
+                    error = std::current_exception();
+                }
+                lk.lock();
+                --p->uploading;
+                if (error) {
+                    if (!p->upload_error) p->upload_error = error;
+                    p->in_flight.erase(u.pack_id);
+                } else {
+                    p->uploaded_bytes += u.bytes.size();
+                    p->uploaded.emplace_back(u.pack_id, std::move(u.entries));
+                }
+                p->done.notify_all();
+            }
+        });
+    }
+}
+
+void Repository::drain(bool all) {
+    if (!pipe_) return;
+    Pipeline& p = *pipe_;
+    for (;;) {
+        std::shared_ptr<Pipeline::Job> job;
+        {
+            std::unique_lock lk(p.mu);
+            if (p.order.empty()) return;
+            if (!p.order.front()->done) {
+                if (!all) return;
+                p.done.wait(lk, [&p] { return p.order.front()->done; });
+            }
+            job = p.order.front();
+            p.order.pop_front();
+        }
+        if (job->error) std::rethrow_exception(job->error);
+        pack_.add(job->type, job->id, job->sealed, job->raw_len);
+        if (pack_.size() >= kPackTargetSize) finish_pack();
+    }
+}
+
+void Repository::collect_uploads(bool all) {
+    if (!pipe_) return;
+    Pipeline& p = *pipe_;
+    std::vector<std::pair<Id, std::vector<BlobEntry>>> ready;
+    std::uint64_t bytes = 0;
+    {
+        std::unique_lock lk(p.mu);
+        if (all) p.done.wait(lk, [&p] { return p.uploads.empty() && p.uploading == 0; });
+        if (p.upload_error) {
+            const std::exception_ptr e = p.upload_error;
+            p.upload_error = nullptr;
+            std::rethrow_exception(e);
+        }
+        ready.swap(p.uploaded);
+        bytes = p.uploaded_bytes;
+        p.uploaded_bytes = 0;
+        for (const auto& r : ready) p.in_flight.erase(r.first);
+    }
+    write_stats_.stored_bytes_added += bytes;
+    write_stats_.packs_written += ready.size();
+    for (auto& r : ready) index_pending_.push_back(std::move(r));
+    if (index_pending_.size() >= kPacksPerIndexFile) write_index();
+}
+
+std::string Repository::pack_name(const Id& pack_id) {
+    const std::string hex = id_hex(pack_id);
+    return "data/" + hex.substr(0, 2) + "/" + hex;
+}
+
+std::string Repository::snapshot_name(const Id& id) {
+    return std::string(kSnapshotDir) + "/" + id_hex(id);
+}
+
+Bytes Repository::seal_object(ByteSpan plain, ByteSpan aad, bool compress) {
+    return seal_with(compressor_, *aead_, plain, aad, compress);
 }
 
 Bytes Repository::open_object(ByteSpan sealed, ByteSpan aad) {
@@ -157,11 +330,37 @@ bool Repository::save_blob(BlobType type, ByteSpan plain, Id& id_out) {
     id_out = blob_id(type, plain);
     if (has_blob(id_out)) return false;
 
-    const Bytes sealed = seal_object(plain, blob_aad(type, id_out), true);
-    pack_.add(type, id_out, sealed, static_cast<std::uint32_t>(plain.size()));
     pack_pending_.insert(id_out);
     ++write_stats_.blobs_added;
     write_stats_.raw_bytes_added += plain.size();
+    if (pipe_ && pipe_->threads > 0) {
+        // A worker compresses and encrypts it; drain() puts it into the pack in this order.
+        auto job = std::make_shared<Pipeline::Job>();
+        job->type = type;
+        job->id = id_out;
+        job->plain.assign(plain.begin(), plain.end());
+        job->raw_len = static_cast<std::uint32_t>(plain.size());
+        Pipeline& p = *pipe_;
+        const std::size_t limit = 2 * static_cast<std::size_t>(p.threads) + 2;  // chunks held in memory
+        {
+            std::lock_guard g(p.mu);
+            p.order.push_back(job);
+            p.todo.push_back(std::move(job));
+        }
+        p.work.notify_all();
+        drain(false);
+        for (;;) {
+            {
+                std::unique_lock lk(p.mu);
+                if (p.order.size() <= limit) break;
+                p.done.wait(lk, [&p] { return p.order.front()->done; });
+            }
+            drain(false);
+        }
+        return true;
+    }
+    const Bytes sealed = seal_object(plain, blob_aad(type, id_out), true);
+    pack_.add(type, id_out, sealed, static_cast<std::uint32_t>(plain.size()));
     if (pack_.size() >= kPackTargetSize) finish_pack();
     return true;
 }
@@ -177,6 +376,14 @@ Bytes Repository::load_blob(BlobType type, const Id& id) {
     const BlobLocation* loc = index_.find(id);
     if (loc == nullptr) throw Error(std::string(blob_type_name(type)) + " blob not found: " + id_hex(id));
     if (loc->type != type) throw Error("blob has an unexpected type: " + id_hex(id));
+    if (pipe_ && pipe_->max_uploads > 0) {
+        bool flying = false;
+        {
+            std::lock_guard g(pipe_->mu);
+            flying = pipe_->in_flight.contains(index_.packs()[loc->pack]);
+        }
+        if (flying) collect_uploads(true);  // its pack is still being written
+    }
     const Bytes sealed = backend_->get_range(pack_name(index_.packs()[loc->pack]), loc->offset, loc->length);
     return decode_blob(type, id, sealed);
 }
@@ -186,13 +393,27 @@ void Repository::finish_pack() {
     std::vector<BlobEntry> entries;
     const Bytes bytes = pack_.finish(*aead_, entries);
     const Id pack_id = blake3(bytes);
+    // Known at once (deduplication), but listed in an index file only once the pack is written.
+    const std::uint32_t pos = index_.add_pack(pack_id);
+    for (const BlobEntry& e : entries) {
+        index_.add(e, pos);
+        pack_pending_.erase(e.id);  // (others may still be with the workers)
+    }
+    if (pipe_ && pipe_->max_uploads > 0) {
+        Pipeline& p = *pipe_;
+        {
+            std::unique_lock lk(p.mu);
+            p.done.wait(lk, [&p] { return p.uploads.size() + p.uploading < p.max_uploads || p.upload_error; });
+            p.in_flight.insert(pack_id);
+            p.uploads.push_back({pack_id, std::move(bytes), std::move(entries)});
+        }
+        p.work.notify_all();
+        collect_uploads(false);
+        return;
+    }
     backend_->put(pack_name(pack_id), bytes);
     write_stats_.stored_bytes_added += bytes.size();
     ++write_stats_.packs_written;
-
-    const std::uint32_t pos = index_.add_pack(pack_id);
-    for (const BlobEntry& e : entries) index_.add(e, pos);
-    pack_pending_.clear();
     index_pending_.emplace_back(pack_id, std::move(entries));
     if (index_pending_.size() >= kPacksPerIndexFile) write_index();
 }
@@ -239,6 +460,7 @@ IndexFileContent Repository::read_index_file(const std::string& name) {
 }
 
 void Repository::copy_blob(BlobType type, const Id& id, ByteSpan sealed, std::uint32_t raw_len) {
+    drain(true);  // keep the order of blobs already handed to the workers
     if (pack_pending_.contains(id)) return;
     pack_.add(type, id, sealed, raw_len);
     pack_pending_.insert(id);
@@ -246,7 +468,9 @@ void Repository::copy_blob(BlobType type, const Id& id, ByteSpan sealed, std::ui
 }
 
 void Repository::flush() {
+    drain(true);
     finish_pack();
+    collect_uploads(true);
     write_index();
 }
 

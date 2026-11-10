@@ -702,3 +702,35 @@ TEST_CASE("repair saves a version again without a file whose data is damaged") {
     CHECK(read_file(restored_location(out, src / "small.txt")) == text("still here"));
     CHECK_FALSE(fs::exists(restored_location(out, src / "big.bin")));
 }
+
+TEST_CASE("a backup with worker threads and background uploads stores the same data") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    for (int i = 0; i < 12; ++i) write_file(src / ("f" + std::to_string(i) + ".bin"), random_data(900000 + i * 1000, 50 + i));
+    write_file(src / "dup.bin", random_data(900000, 50));  // the same as f0: stored once
+    write_file(src / "text.txt", text(std::string(200000, 'a')));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    repo->set_parallelism(3, 2);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    const BackupResult b = run_backup(*repo, options);
+    CHECK(b.snapshot.stats.files == 14);
+    repo->set_parallelism(0, 0);
+    repo.reset();
+
+    auto again = open_repo(repo_dir);
+    VerifyOptions vo;
+    vo.read_data = true;
+    CHECK(run_verify(*again, vo).errors == 0);
+    RestoreOptions ro;
+    ro.target = u8(tmp.path / "out");
+    CHECK(run_restore(*again, b.snapshot, ro).errors == 0);
+    CHECK(snapshot_of_dir(restored_location(tmp.path / "out", src)) == snapshot_of_dir(src));
+
+    // A second backup with the pipeline finds everything already stored.
+    again->set_parallelism(2, 1);
+    const BackupResult c = run_backup(*again, options);
+    CHECK(c.snapshot.stats.new_bytes == 0);
+}

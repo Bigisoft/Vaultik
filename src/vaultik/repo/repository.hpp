@@ -75,6 +75,13 @@ public:
     // Writes the current pack and any pending index entries. Call before saving a snapshot.
     void flush();
 
+    // Speeds up writing: new blobs are compressed and encrypted on `threads` worker threads (0:
+    // on the calling thread; their order in the packs stays the same), and up to `uploads` packs
+    // are written in the background while the next one is built (0: each pack is written before
+    // the backup goes on). Each upload in flight holds a pack (about 32 MiB) in memory. An error
+    // of a background step is thrown by a later save_blob or flush.
+    void set_parallelism(unsigned threads, unsigned uploads);
+
     Id save_snapshot(const Snapshot& snapshot);
     // Rewrites an existing snapshot (its pin or note). Hold a shared lock, so a forget cannot
     // remove the snapshot meanwhile; throws Error when it no longer exists.
@@ -112,6 +119,13 @@ private:
 
     void load_indexes();
     void finish_pack();
+    struct Pipeline;
+    // Moves blobs the workers have sealed into the pack, in order (`all`: waits for every one).
+    void drain(bool all);
+    // Takes finished uploads into the index files to write (`all`: waits for every one).
+    void collect_uploads(bool all);
+    std::unique_ptr<Pipeline> pipe_;
+    Key32 enc_key_{};  // for the workers' own ciphers
     void write_index();
     Bytes seal_object(ByteSpan plain, ByteSpan aad, bool compress);
     Bytes open_object(ByteSpan sealed, ByteSpan aad);

@@ -504,7 +504,11 @@ Priorities only take effect when something else competes for the resource, so on
 - Restores and backups check for links planted in the folders they work on, but a parent folder
   swapped for a link during the run by someone who can write there is not detected. Run elevated
   restores into folders only you can write to.
-- Single-threaded; about 140 MB/s on a fresh backup, which is above USB HDD speeds anyway.
+- Compression and encryption run on up to 4 worker threads (`--threads`), but reading, chunking
+  and hashing stay on one: on a 12-core PC a fresh 9.7 GB backup took 1m43s instead of 2m12s
+  single-threaded (peak memory 101 MB). For cloud storage, 2 packs upload in the background
+  while the next is built (`--uploads`; each holds 32 MiB in memory). At background CPU priority
+  or with `--max-memory`, a backup stays on one thread and uploads one pack at a time.
 
 ## Roadmap
 
