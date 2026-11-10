@@ -48,6 +48,7 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/lock.cpp
     src/vaultik/repo/keys.cpp
     src/vaultik/repo/repository.cpp
+    src/vaultik/repo/recovery.cpp
     src/vaultik/ops/backup.cpp
     src/vaultik/ops/restore.cpp
     src/vaultik/ops/restore_test.cpp
@@ -241,6 +242,7 @@ add_executable(vaultik_tests
     tests/test_s3.cpp
     tests/test_cloud_drives.cpp
     tests/test_versions.cpp
+    tests/test_recovery.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # Assertions run on the main thread only. Without per-thread copies of doctest's state, threads that

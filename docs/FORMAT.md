@@ -273,3 +273,40 @@ snapshot files that cannot be opened or whose root tree is lost; for the others,
 tree that references a lost blob (dropping the file nodes whose chunks are missing and the
 directory nodes whose tree is missing), save the snapshot again with the new root tree and a note
 "(repaired: N file(s) and M folder(s) were lost)", then delete the old snapshot file.
+
+## Recovery data
+
+Recovery data lets a damaged file (usually a pack file) be rebuilt, like a `.par2` file. The file
+of `data_size` bytes is cut into `k` data shards of `shard_size` bytes, back to back, the last one
+zero-padded; `m` parity shards are computed with a systematic Reed-Solomon code over GF(2^8)
+(polynomial `0x11D`). Any `k` intact shards out of the `k + m` rebuild the file, and since the
+shards are contiguous, a run of bad sectors damages only the few shards it touches. Little-endian:
+
+```
+magic          4 bytes "VKRD"
+version        u32  1
+data_size      u64  size of the original file
+shard_size     u32
+data_shards    u32  k
+parity_shards  u32  m
+data_hash      32   BLAKE3 of the whole original file
+shard_hashes   16 * (k + m)  first 16 bytes of BLAKE3 of each data shard (padded), then of each
+                             parity shard
+header_hash    16   first 16 bytes of BLAKE3 of every byte above
+parity         m * shard_size  parity shard 0 .. m-1, back to back
+```
+
+- Parity shard `i` is the sum (XOR) over data shards `j` of `C[i][j] * shard_j`, byte by byte,
+  with the Cauchy matrix `C[i][j] = 1 / ((k + i) xor j)` in GF(2^8).
+- The writer takes a percentage `p` (1 to 50) and chooses: `k_max` = the largest value up to 240
+  with `k_max + ceil(k_max * p / 100) <= 255`; `shard_size = max(ceil(data_size / k_max),
+  min(data_size, 4096))`; `k = ceil(data_size / shard_size)`; `m = max(1, ceil(k * p / 100))`. An
+  empty file has `k = 1` and `shard_size = 0`.
+- Readers reject (as "not recovery data") a wrong magic or version, a header checksum mismatch,
+  `k` or `m` of 0, `k + m > 255`, `data_size` above 1 GiB, and any shard layout the writer cannot
+  produce: for `data_size > 0`, `0 < shard_size <= data_size` and
+  `(k - 1) * shard_size < data_size <= k * shard_size`. Parity shards that fail their hash or lie
+  past the end of the recovery data are not used.
+- Repair hashes every data shard of the damaged file (bytes past the end of a cut-short file read
+  as zeros, bytes past `data_size` are dropped), rebuilds the shards that do not match from the
+  intact data and parity shards, and keeps the result only if its BLAKE3 equals `data_hash`.
