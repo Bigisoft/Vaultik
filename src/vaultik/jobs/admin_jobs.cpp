@@ -21,24 +21,40 @@ namespace vaultik::jobs {
 #ifdef _WIN32
 namespace {
 
-// A job with administrator rights runs its "before" and "after" commands as administrator. The
-// user's own job file could have been changed by any program running as the user, and the
-// approval prompt does not show what the job contains, so the elevated step itself shows the
-// commands and asks, unless the admin copy already has exactly these. A program without
-// administrator rights cannot answer this window for the user.
-void confirm_commands(const Job& job, const std::optional<Job>& approved) {
-    if (job.before_command.empty() && job.after_command.empty()) return;
-    if (approved && approved->before_command == job.before_command && approved->after_command == job.after_command)
-        return;
-    std::wstring text = L"The backup job \"" + widen(job.name) +
-                        L"\" will run these commands with administrator rights at every backup:\n\n";
-    if (!job.before_command.empty()) text += L"Before:  " + widen(job.before_command) + L"\n";
-    if (!job.after_command.empty()) text += L"After:  " + widen(job.after_command) + L"\n";
-    text += L"\nAllow them only if you entered them yourself. Allow?";
-    const int answer = MessageBoxW(nullptr, text.c_str(), L"Vaultik: commands with administrator rights",
+// What a job with administrator rights reads, where it writes, and what it runs.
+bool same_effect(const Job& a, const Job& b) {
+    return a.sources == b.sources && a.excludes == b.excludes && a.repository == b.repository &&
+           a.second_copy.repository == b.second_copy.repository && a.vss == b.vss &&
+           a.before_command == b.before_command && a.after_command == b.after_command;
+}
+
+// A job with administrator rights reads any file (a shadow copy included), writes the backup where
+// the job says, and runs its commands, all as administrator. The job is copied from the user's
+// own job file, which any program running as the user could have changed (the backup password is
+// readable by the user too), and the approval prompt does not show what the job contains. So the
+// elevated step shows what the job does and asks, unless the admin copy already does exactly
+// this. A program without administrator rights cannot answer this window for the user.
+void confirm_job(const Job& job, const std::optional<Job>& approved) {
+    if (approved && same_effect(*approved, job)) return;
+    std::wstring text = L"The backup job \"" + widen(job.name) + L"\" will run with administrator rights:\n\n";
+    text += L"Back up:\n";
+    for (const std::string& s : job.sources) text += L"    " + widen(s) + L"\n";
+    if (!job.excludes.empty()) {
+        text += L"Skipping:  ";
+        for (std::size_t i = 0; i < job.excludes.size() && i < 10; ++i)
+            text += (i ? L", " : L"") + widen(job.excludes[i]);
+        text += job.excludes.size() > 10 ? L", ...\n" : L"\n";
+    }
+    text += L"To:  " + widen(job.repository) + L"\n";
+    if (!job.second_copy.repository.empty()) text += L"Second copy:  " + widen(job.second_copy.repository) + L"\n";
+    if (!job.before_command.empty()) text += L"Command before:  " + widen(job.before_command) + L"\n";
+    if (!job.after_command.empty()) text += L"Command after:  " + widen(job.after_command) + L"\n";
+    text += L"\nAnyone who knows the backup's password can read what it backs up. Allow this only if you set "
+            L"the job up like this yourself. Allow?";
+    const int answer = MessageBoxW(nullptr, text.c_str(), L"Vaultik: a job with administrator rights",
                                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND);
     if (answer != IDYES)
-        throw Error("the job's commands were not allowed to run with administrator rights; nothing was changed");
+        throw Error("the job was not allowed to run with administrator rights; nothing was changed");
 }
 
 }  // namespace
@@ -192,7 +208,7 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
     const std::string dir = prepare_admin_store(user_sid);
     const JobStore to(dir);
     try {
-        confirm_commands(*job, to.find(id));
+        confirm_job(*job, to.find(id));
         to.save(*job);
         if (pw.empty()) {
             os::remove_file(os::join(os::join(dir, "secrets"), id + ".key"));

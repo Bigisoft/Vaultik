@@ -106,7 +106,10 @@ Start `vaultik-gui`, then **New backup job**:
   your account can read but only administrators can change. Scheduled runs read only that copy,
   and refuse to run if its permissions were loosened, so nothing your normal account (or a program
   running as you) can change decides what an administrator run does. Editing the job in Vaultik
-  and saving it updates the copy; so does changing the password in Vaultik.
+  and saving it updates the copy; so does changing the password in Vaultik. The copy is taken from
+  your own job file, which a program running as you could have changed, so when what the job backs
+  up, where it saves it, or its commands differ from the copy already approved (or there is none
+  yet), the approved step shows them and asks before it copies them.
 - **Resources:** a priority preset and optional hard limits (see below).
 - **Old backups:** a preset: **Smart** (the default: one version per day for 7 days, per week
   for 4 weeks and per month for 12 months), the newest N versions, every version of the last N
