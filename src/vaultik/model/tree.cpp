@@ -7,7 +7,85 @@ namespace vaultik {
 namespace {
 
 // Version 1: Windows only (no mode/owner). Version 2 adds mode, uid, gid and symlink targets.
-constexpr std::uint64_t kTreeVersion = 2;
+// Version 3 adds a list of tagged extras to every node (Windows security descriptors, alternate
+// data streams, link targets); it is only written when a node has one.
+constexpr std::uint64_t kTreeVersion = 3;
+
+// Extra tags (version 3). Unknown tags are skipped by readers.
+constexpr std::uint8_t kExtraSecurity = 1;  // id (32): Data blob with the security descriptor
+constexpr std::uint8_t kExtraStream = 2;    // name, varint size, varint count, ids
+constexpr std::uint8_t kExtraLink = 3;      // u32 tag, u8 flags (1 = relative), target
+
+bool has_extras(const Node& n) {
+    return n.security.has_value() || !n.streams.empty() || n.link.has_value();
+}
+
+void write_extras(ByteWriter& w, const Node& n) {
+    std::vector<std::pair<std::uint8_t, Bytes>> extras;
+    if (n.security) {
+        ByteWriter e;
+        e.raw(*n.security);
+        extras.emplace_back(kExtraSecurity, e.take());
+    }
+    for (const DataStream& s : n.streams) {
+        ByteWriter e;
+        e.str(s.name);
+        e.varint(s.size);
+        e.varint(s.content.size());
+        for (const Id& id : s.content) e.raw(id);
+        extras.emplace_back(kExtraStream, e.take());
+    }
+    if (n.link) {
+        ByteWriter e;
+        e.u32(n.link->tag);
+        e.u8(n.link->relative ? 1 : 0);
+        e.str(n.link->target);
+        extras.emplace_back(kExtraLink, e.take());
+    }
+    w.varint(extras.size());
+    for (const auto& [tag, bytes] : extras) {
+        w.u8(tag);
+        w.varint(bytes.size());
+        w.raw(bytes);
+    }
+}
+
+void read_extras(ByteReader& r, Node& n) {
+    const std::size_t count = r.count(2);
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::uint8_t tag = r.u8();
+        const std::uint64_t len = r.varint();
+        if (len > r.remaining()) throw Error("malformed tree: extra out of range");
+        ByteReader e(r.raw(static_cast<std::size_t>(len)));
+        switch (tag) {
+            case kExtraSecurity: {
+                Id id;
+                e.raw_into(id);
+                n.security = id;
+                break;
+            }
+            case kExtraStream: {
+                DataStream s;
+                s.name = e.str();
+                s.size = e.varint();
+                s.content.resize(e.count(32));
+                for (Id& id : s.content) e.raw_into(id);
+                n.streams.push_back(std::move(s));
+                break;
+            }
+            case kExtraLink: {
+                LinkInfo l;
+                l.tag = e.u32();
+                l.relative = (e.u8() & 1) != 0;
+                l.target = e.str();
+                n.link = std::move(l);
+                break;
+            }
+            default:
+                break;  // from a newer version: skipped
+        }
+    }
+}
 
 // Smallest possible node (a metadata-only node with a one-byte empty name length).
 constexpr std::size_t kMinNodeSizeV1 = 1 + 1 + 4 + 8 * 3;
@@ -28,7 +106,9 @@ const Node* Tree::find(std::string_view name) const {
 
 Bytes serialize_tree(const Tree& tree) {
     ByteWriter w;
-    w.varint(kTreeVersion);
+    // Version 2 when no node has extras, so such trees stay readable by older versions.
+    const bool v3 = std::any_of(tree.nodes.begin(), tree.nodes.end(), has_extras);
+    w.varint(v3 ? kTreeVersion : 2);
     w.varint(tree.nodes.size());
     for (const Node& n : tree.nodes) {
         w.str(n.name);
@@ -54,6 +134,7 @@ Bytes serialize_tree(const Tree& tree) {
             case NodeKind::Reparse:
                 break;
         }
+        if (v3) write_extras(w, n);
     }
     return w.take();
 }
@@ -61,8 +142,9 @@ Bytes serialize_tree(const Tree& tree) {
 Tree parse_tree(ByteSpan data) {
     ByteReader r(data);
     const std::uint64_t version = r.varint();
-    if (version != 1 && version != 2) throw Error("unsupported tree version");
-    const bool v2 = version == 2;
+    if (version < 1 || version > 3) throw Error("unsupported tree version");
+    const bool v2 = version >= 2;
+    const bool v3 = version >= 3;
     Tree tree;
     const std::size_t count = r.count(v2 ? kMinNodeSizeV2 : kMinNodeSizeV1);
     tree.nodes.reserve(count);
@@ -98,6 +180,7 @@ Tree parse_tree(ByteSpan data) {
             case NodeKind::Reparse:
                 break;
         }
+        if (v3) read_extras(r, n);
         if (!tree.nodes.empty() && !(tree.nodes.back().name < n.name))
             throw Error("malformed tree: entries not sorted or duplicated");
         tree.nodes.push_back(std::move(n));

@@ -61,6 +61,7 @@ private:
     QLineEdit* target_ = nullptr;
     QPushButton* browse_ = nullptr;
     QCheckBox* overwrite_ = nullptr;
+    QCheckBox* permissions_ = nullptr;
     QProgressBar* bar_ = nullptr;
     QLabel* status_ = nullptr;
     QPushButton* restore_ = nullptr;

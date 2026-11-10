@@ -183,6 +183,34 @@ void set_metadata(const std::string& path, const FileInfo& info);
 ErrorCode make_symlink(const std::string& target, const std::string& path);
 ErrorCode read_symlink(const std::string& path, std::string& target);
 
+// ---- Windows extras (win_extras.cpp; on POSIX nothing is read and writes are not supported) ----
+
+// The security descriptor of a file or folder (owner, group and access list), self-relative.
+// Empty when it cannot be read.
+Bytes read_security(const std::string& path);
+// Applies one. Without the right to set another owner, applies the access list alone.
+ErrorCode write_security(const std::string& path, ByteSpan descriptor);
+
+// The alternate data streams of a file or folder (not its own content).
+struct StreamEntry {
+    std::string name;  // without the colons and the ":$DATA" type
+    std::uint64_t size = 0;
+};
+std::vector<StreamEntry> list_streams(const std::string& path);
+// The path that opens a stream: "C:\x\a.txt" and "info" give "C:\x\a.txt:info".
+std::string stream_path(const std::string& path, const std::string& name);
+
+// A Windows symlink or junction.
+struct ReparseLink {
+    std::uint32_t tag = 0;  // 0xA000000C symlink, 0xA0000003 junction (mount point)
+    std::string target;     // "C:\Data", "\\server\share\x", or a relative "..\x"
+    bool relative = false;
+};
+// False when `path` is not such a link or it cannot be read.
+bool read_link(const std::string& path, ReparseLink& out);
+// Creates one (`directory` for a link to a folder). Returns 0 or the error.
+ErrorCode create_link(const std::string& path, const ReparseLink& link, bool directory);
+
 // True for kernel pseudo file systems (/proc, /sys, ...) that must never be backed up.
 bool is_pseudo_filesystem(const std::string& path);
 

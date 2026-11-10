@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Vaultik VERSION 0.5.0 LANGUAGES C CXX)
+project(Vaultik VERSION 0.6.0 LANGUAGES C CXX)
 
 if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Vaultik supports Windows and Linux")
@@ -106,6 +106,7 @@ if(WIN32)
         src/vaultik/platform/os_win.cpp
         src/vaultik/ops/mount_win.cpp
         src/vaultik/platform/drive_health_win.cpp
+        src/vaultik/platform/win_extras.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
@@ -220,6 +221,7 @@ add_executable(vaultik_tests
     tests/test_util.cpp
     tests/test_drive_health.cpp
     tests/test_drive_history.cpp
+    tests/test_win_extras.cpp
     tests/test_resources.cpp
     tests/test_crypto.cpp
     tests/test_chunker.cpp

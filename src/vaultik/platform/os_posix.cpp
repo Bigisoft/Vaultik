@@ -597,4 +597,29 @@ std::string get_env(const char* name) {
     return v != nullptr ? std::string(v) : std::string();
 }
 
+// Windows extras: POSIX keeps permissions in the node itself (mode, uid, gid).
+Bytes read_security(const std::string& /*path*/) {
+    return {};
+}
+
+ErrorCode write_security(const std::string& /*path*/, ByteSpan /*descriptor*/) {
+    return ENOTSUP;
+}
+
+std::vector<StreamEntry> list_streams(const std::string& /*path*/) {
+    return {};
+}
+
+std::string stream_path(const std::string& path, const std::string& name) {
+    return path + ":" + name;
+}
+
+bool read_link(const std::string& /*path*/, ReparseLink& /*out*/) {
+    return false;
+}
+
+ErrorCode create_link(const std::string& /*path*/, const ReparseLink& /*link*/, bool /*directory*/) {
+    return ENOTSUP;
+}
+
 }  // namespace vaultik::os

@@ -488,8 +488,13 @@ Priorities only take effect when something else competes for the resource, so on
   with the job's "Run with administrator rights" option, which needs Vaultik installed in a
   folder only administrators can change. The backup destination of such a job is still a folder
   you can change; keep it on a drive used for backups only.
-- Windows: file content, attributes, creation and modification times are kept. ACLs, alternate
-  data streams and symlink/junction targets are not (links are recorded without content).
+- Windows: file content, attributes, creation and modification times, permissions (owner, group
+  and access list), alternate data streams and symlink/junction targets are kept. Restores bring
+  streams and links back always, permissions when restoring to the original location (or with
+  `--permissions`): restored into another folder, another account's permissions could lock you
+  out of your own files. Setting another account as owner needs administrator rights; without
+  them the access list is applied alone. Audit settings (SACLs) are not kept. Backups with these
+  extras need Vaultik 0.6 or later to restore.
   Linux: content, permissions, owner (restored when running as root), modification time and
   symlinks are kept; extended attributes and ACLs are not. Kernel file systems (`/proc`, `/sys`,
   `/dev`, tmpfs) are skipped.

@@ -221,11 +221,8 @@ std::uint64_t used_bytes(Repository& repo, const std::vector<const Snapshot*>& s
         pending.pop_back();
         const Tree tree = parse_tree(repo.load_blob(BlobType::Tree, tree_id));
         for (const Node& n : tree.nodes) {
-            if (n.kind == NodeKind::Dir) {
-                if (used.insert(n.subtree).second) pending.push_back(n.subtree);
-            } else if (n.kind == NodeKind::File) {
-                used.insert(n.content.begin(), n.content.end());
-            }
+            if (n.kind == NodeKind::Dir && used.insert(n.subtree).second) pending.push_back(n.subtree);
+            for_each_data_blob(n, [&used](const Id& id) { used.insert(id); });
         }
     }
     std::uint64_t total = 0;
@@ -370,11 +367,8 @@ PruneResult run_prune(Repository& repo, const PruneOptions& o) {
                         "; nothing was deleted (run vaultik verify)");
         }
         for (const Node& n : tree.nodes) {
-            if (n.kind == NodeKind::Dir) {
-                if (used.insert(n.subtree).second) pending.push_back(n.subtree);
-            } else if (n.kind == NodeKind::File) {
-                used.insert(n.content.begin(), n.content.end());
-            }
+            if (n.kind == NodeKind::Dir && used.insert(n.subtree).second) pending.push_back(n.subtree);
+            for_each_data_blob(n, [&used](const Id& id) { used.insert(id); });
         }
     }
 

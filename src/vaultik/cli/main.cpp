@@ -105,6 +105,9 @@ Commands:
       --target <folder>        Where to restore (required)
       --path <path>            Only this file or folder, e.g. C/Users/me/Documents
       --overwrite              Replace existing files in the target
+      --permissions            Windows: give items their stored owner and access
+                               list (needs administrator rights for other owners)
+      --no-links               Windows: skip symlinks and junctions
   verify                       Check repository structure and snapshots
       --read-data              Also read and decrypt every stored chunk
       --read-share <percent>   With --read-data, only this share of the packs,
@@ -256,7 +259,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick"};
+                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick", "--permissions", "--no-links"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -2390,6 +2393,8 @@ int cmd_restore(const Args& a) {
     o.target = *target;
     if (auto p = a.value("--path")) o.subpath = *p;
     o.overwrite = a.has("--overwrite");
+    o.permissions = a.has("--permissions");
+    o.links = !a.has("--no-links");
     const auto start = std::chrono::steady_clock::now();
     o.on_progress = [&](const RestoreProgress& p) {
         if (g_json) {

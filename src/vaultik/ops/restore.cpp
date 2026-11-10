@@ -63,6 +63,9 @@ private:
     void restore_children(const Id& tree_id, const std::string& dir);
     void restore_file(const Node& node, const std::string& path);
     void restore_symlink(const Node& node, const std::string& path);
+    void restore_streams(const Node& node, const std::string& path);
+    void restore_security(const Node& node, const std::string& path);
+    void restore_link(const Node& node, const std::string& path);
     void ensure_dir(const std::string& path);
     void ensure_dir_chain(const std::string& path);
     void warn(const std::string& message);
@@ -164,9 +167,73 @@ void RestoreEngine::restore_file(const Node& node, const std::string& path) {
         return;
     }
     file.close();
+    restore_streams(node, path);
     os::set_metadata(path, info_of(node));
+    restore_security(node, path);
     ++result_.files;
     report();
+}
+
+void RestoreEngine::restore_streams(const Node& node, const std::string& path) {
+    for (const DataStream& s : node.streams) {
+        if (s.name.empty() || s.name.find_first_of(":/\\") != std::string::npos) {
+            warn("skipped a stream with an invalid name on " + path);
+            continue;
+        }
+        const std::string where = os::stream_path(path, s.name);
+        os::ErrorCode err = 0;
+        os::File f = os::File::create(where, true, err);
+        if (!f.valid()) {
+            warn("cannot restore the stream " + s.name + " of " + path + ": " + os::error_message(err));
+            continue;
+        }
+        try {
+            std::uint64_t written = 0;
+            for (const Id& chunk : s.content) {
+                const Bytes data = repo_.load_blob(BlobType::Data, chunk);
+                f.write_all(data);
+                written += data.size();
+            }
+            if (written != s.size) throw Error("restored size does not match the snapshot");
+        } catch (const Error& e) {
+            warn("failed to restore the stream " + s.name + " of " + path + ": " + e.what());
+        }
+    }
+}
+
+void RestoreEngine::restore_security(const Node& node, const std::string& path) {
+    if (!options_.permissions || !node.security) return;
+    try {
+        const Bytes sd = repo_.load_blob(BlobType::Data, *node.security);
+        const os::ErrorCode err = os::write_security(path, sd);
+        if (err != 0) warn("cannot restore the permissions of " + path + ": " + os::error_message(err));
+    } catch (const Error& e) {
+        warn("cannot restore the permissions of " + path + ": " + e.what());
+    }
+}
+
+void RestoreEngine::restore_link(const Node& node, const std::string& path) {
+    if (!options_.links || !node.link) {
+        ++result_.skipped;  // placeholders and other reparse points carry no content
+        return;
+    }
+    if (options_.overwrite) {
+        const std::optional<os::EntryType> existing = entry_type(path);
+        if (existing && *existing != os::EntryType::Dir) os::remove_file(path);
+    }
+    constexpr std::uint32_t kDirectoryAttribute = 0x10;
+    const os::ReparseLink link{node.link->tag, node.link->target, node.link->relative};
+    const os::ErrorCode err = os::create_link(path, link, (node.attributes & kDirectoryAttribute) != 0);
+    if (err != 0) {
+        if (os::is_exists(err)) {
+            ++result_.skipped;
+            if (options_.on_warning) options_.on_warning("exists, not overwritten: " + path);
+            return;
+        }
+        warn("cannot create link " + path + " -> " + node.link->target + ": " + os::error_message(err));
+        return;
+    }
+    ++result_.files;
 }
 
 void RestoreEngine::restore_symlink(const Node& node, const std::string& path) {
@@ -217,6 +284,7 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
             }
             restore_children(node.subtree, path);
             os::set_metadata(path, info_of(node));  // after the children, so times and permissions stick
+            restore_security(node, path);
             ++result_.dirs;
             break;
         case NodeKind::File:
@@ -226,7 +294,7 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
             restore_symlink(node, path);
             break;
         case NodeKind::Reparse:
-            ++result_.skipped;  // links and placeholders from Windows carry no content
+            restore_link(node, path);
             break;
     }
 }

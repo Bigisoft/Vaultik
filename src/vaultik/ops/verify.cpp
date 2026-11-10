@@ -122,17 +122,16 @@ void VerifyEngine::walk_tree(const Id& id, const std::string& path) {
     }
     for (const Node& n : tree.nodes) {
         const std::string child = path + "/" + n.name;
-        if (n.kind == NodeKind::Dir) {
-            walk_tree(n.subtree, child);
-        } else if (n.kind == NodeKind::File) {
-            for (const Id& chunk : n.content) {
-                const BlobLocation* loc = repo_.index().find(chunk);
-                if (loc == nullptr || loc->type != BlobType::Data) {
-                    error("file " + child + " references missing data " + id_hex(chunk));
-                    break;
-                }
+        if (n.kind == NodeKind::Dir) walk_tree(n.subtree, child);
+        // Its content, streams and security descriptor.
+        bool missing = false;
+        for_each_data_blob(n, [&](const Id& chunk) {
+            const BlobLocation* loc = repo_.index().find(chunk);
+            if (!missing && (loc == nullptr || loc->type != BlobType::Data)) {
+                error(child + " references missing data " + id_hex(chunk));
+                missing = true;
             }
-        }
+        });
     }
 }
 

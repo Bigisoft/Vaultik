@@ -118,6 +118,12 @@ private:
     bool scan_entry(const std::string& path, const os::FileInfo& info, std::uint64_t parent_device, Node& node,
                     const Node* pnode);
     bool scan_file(const std::string& path, Node& node, const Node* parent);
+    // Windows extras: the security descriptor (stored once per distinct one), the alternate
+    // data streams of a file, and the target of a symlink or junction.
+    void scan_security(const std::string& path, Node& node);
+    void scan_streams(const std::string& path, Node& node);
+    bool store_stream(os::File& file, std::vector<Id>& content, std::uint64_t& total);
+    std::map<Bytes, Id> security_ids_;
     bool all_present(const std::vector<Id>& ids) const;
     Id save_virtual(const VirtualDir& dir);
     void warn(const std::string& message);
@@ -251,11 +257,65 @@ bool BackupEngine::all_present(const std::vector<Id>& ids) const {
     return std::all_of(ids.begin(), ids.end(), [&](const Id& id) { return repo_.has_blob(id); });
 }
 
+void BackupEngine::scan_security(const std::string& path, Node& node) {
+    const Bytes sd = os::read_security(io(path));
+    if (sd.empty()) return;
+    if (const auto it = security_ids_.find(sd); it != security_ids_.end()) {
+        node.security = it->second;
+        return;
+    }
+    Id id;
+    if (repo_.save_blob(BlobType::Data, sd, id)) stats_.new_bytes += sd.size();
+    if (security_ids_.size() < 10000) security_ids_.emplace(sd, id);
+    node.security = id;
+}
+
+bool BackupEngine::store_stream(os::File& file, std::vector<Id>& content, std::uint64_t& total) {
+    ChunkReader reader(
+        repo_.chunker(), [&file](std::uint8_t* dst, std::size_t max) { return file.read(dst, max); }, buffer_);
+    ByteSpan chunk;
+    while (reader.next(chunk)) {
+        check_cancel();
+        Id id;
+        if (repo_.save_blob(BlobType::Data, chunk, id)) stats_.new_bytes += chunk.size();
+        content.push_back(id);
+        total += chunk.size();
+    }
+    return true;
+}
+
+void BackupEngine::scan_streams(const std::string& path, Node& node) {
+    for (const os::StreamEntry& s : os::list_streams(io(path))) {
+        os::ErrorCode err = 0;
+        os::File f = os::File::open_source(os::stream_path(io(path), s.name), err);
+        if (!f.valid()) {
+            warn("skipped the stream " + s.name + " of " + path + ": " + os::error_message(err));
+            continue;
+        }
+        DataStream ds;
+        ds.name = s.name;
+        try {
+            store_stream(f, ds.content, ds.size);
+        } catch (const os::OsError& e) {
+            warn("skipped the stream " + s.name + " of " + path + ": " + e.what());
+            continue;
+        }
+        node.streams.push_back(std::move(ds));
+    }
+}
+
 bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* parent) {
-    // Unchanged since the parent snapshot: reuse its chunk list without reading the file.
+    // Unchanged since the parent snapshot: reuse its chunk list without reading the file. Its
+    // streams too: writing a stream changes the file's modification time.
+    const auto streams_present = [&](const Node& p) {
+        return std::all_of(p.streams.begin(), p.streams.end(),
+                           [&](const DataStream& s) { return all_present(s.content); });
+    };
     if (parent != nullptr && parent->kind == NodeKind::File && parent->size == node.size &&
-        parent->mtime == node.mtime && parent->ctime == node.ctime && all_present(parent->content)) {
+        parent->mtime == node.mtime && parent->ctime == node.ctime && all_present(parent->content) &&
+        streams_present(*parent)) {
         node.content = parent->content;
+        node.streams = parent->streams;
         stats_.bytes += node.size;
         report();
         return true;
@@ -293,6 +353,7 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         return false;
     }
     node.size = total;  // the file may have changed size since it was listed
+    scan_streams(path, node);
     if (is_new) {
         ++stats_.files_new;
     } else if (node.content != parent->content) {  // a touched but identical file is not a change
@@ -307,13 +368,18 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
 
 bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info, std::uint64_t parent_device,
                               Node& node, const Node* pnode) {
+    scan_security(path, node);
     switch (info.type) {
-        case os::EntryType::Other:
-            // Stored as metadata only; following links could loop or leave the backup set.
+        case os::EntryType::Other: {
+            // Stored as metadata only; following links could loop or leave the backup set. A
+            // symlink's or junction's target is kept, so a restore can bring the link back.
             node.kind = NodeKind::Reparse;
             node.size = 0;
+            os::ReparseLink link;
+            if (os::read_link(io(path), link)) node.link = LinkInfo{link.tag, link.target, link.relative};
             ++stats_.skipped;
             return true;
+        }
         case os::EntryType::Symlink: {
             node.kind = NodeKind::Symlink;
             node.size = 0;

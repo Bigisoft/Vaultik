@@ -78,6 +78,10 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     target_->setText(QDir::toNativeSeparators(QDir::homePath() + "/Restored"));
     browse_ = new QPushButton(tr("Browse..."));
     overwrite_ = new QCheckBox(tr("Replace files that already exist"));
+    permissions_ = new QCheckBox(tr("Restore permissions (who may open or change each item)"));
+    permissions_->setToolTip(tr("Gives each file and folder the owner and access list it had when it was backed "
+                                "up. On by itself for the original location; restored elsewhere, another "
+                                "account's permissions could keep you out of your own restored files."));
 
     bar_ = new QProgressBar;
     bar_->setRange(0, 0);
@@ -114,6 +118,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     layout->addLayout(target_row);
     layout->addWidget(to_original_);
     layout->addWidget(overwrite_);
+    layout->addWidget(permissions_);
     layout->addWidget(bar_);
     layout->addWidget(status_);
     layout->addWidget(buttons);
@@ -123,6 +128,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     connect(tree_, &QTreeWidget::itemSelectionChanged, this, &RestoreDialog::update_target_state);
     connect(tree_, &QTreeWidget::itemSelectionChanged, this, &RestoreDialog::preview_selected);
     connect(to_original_, &QRadioButton::toggled, this, &RestoreDialog::update_target_state);
+    connect(to_original_, &QRadioButton::toggled, permissions_, &QCheckBox::setChecked);
     connect(browse_, &QPushButton::clicked, this, [this] {
         const QString dir = QFileDialog::getExistingDirectory(this, tr("Restore into"), target_->text());
         if (!dir.isEmpty()) target_->setText(QDir::toNativeSeparators(dir));
@@ -365,6 +371,7 @@ void RestoreDialog::start_restore() {
     args << qs(id_hex(snap.id)) << "--target" << target;
     if (!path.isEmpty()) args << "--path" << path;
     if (overwrite_->isChecked()) args << "--overwrite";
+    if (permissions_->isChecked()) args << "--permissions";
     warnings_ = 0;
     bar_->show();
     restore_->setEnabled(false);

@@ -21,6 +21,11 @@ struct RestoreOptions {
     // Snapshot path to restore, '/' or '\' separated, e.g. "C/Users/me/Documents". Empty = everything.
     std::string subpath;
     bool overwrite = false;  // replace files that already exist in the target
+    // Windows: apply each item's stored owner, group and access list. Off by default: restored
+    // into another folder, another account's permissions could lock the user out of the files.
+    bool permissions = false;
+    // Windows: bring symlinks and junctions back as links (their targets are not followed).
+    bool links = true;
 
     std::function<void(const RestoreProgress&)> on_progress;
     std::function<void(const std::string&)> on_warning;

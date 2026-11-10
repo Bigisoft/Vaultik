@@ -267,18 +267,28 @@ TEST_CASE("damaged pack data is detected") {
         run_backup(*repo, options);
     }
 
-    // Flip one byte inside the first blob of the first pack.
+    // Flip one byte inside the largest blob (file content, not a security descriptor).
     fs::path pack;
-    for (const auto& e : fs::recursive_directory_iterator(repo_dir / "data"))
-        if (e.is_regular_file()) pack = e.path();
+    std::uint64_t at = 0;
+    {
+        auto r = open_repo(repo_dir);
+        std::uint32_t largest = 0;
+        for (const std::string& name : r->backend().list("data"))
+            for (const BlobEntry& e : read_pack_header(r->backend(), name, r->aead()))
+                if (e.type == BlobType::Data && e.length > largest) {
+                    largest = e.length;
+                    pack = repo_dir / from_u8(name);
+                    at = e.offset + e.length / 2;
+                }
+    }
     REQUIRE_FALSE(pack.empty());
     {
         std::fstream f(pack, std::ios::binary | std::ios::in | std::ios::out);
-        f.seekg(100);
+        f.seekg(static_cast<std::streamoff>(at));
         char c = 0;
         f.read(&c, 1);
         c = static_cast<char>(c ^ 0x40);
-        f.seekp(100);
+        f.seekp(static_cast<std::streamoff>(at));
         f.write(&c, 1);
     }
 

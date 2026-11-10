@@ -1,5 +1,6 @@
 #include "vaultik/ops/repair.hpp"
 
+#include <algorithm>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -71,9 +72,9 @@ public:
                     ++r.files_lost;
                     continue;
                 }
-                out.nodes.push_back(n);
+                out.nodes.push_back(keep_intact_extras(n, r));
             } else {
-                out.nodes.push_back(n);
+                out.nodes.push_back(keep_intact_extras(n, r));
             }
         }
         r.id = id;
@@ -82,6 +83,21 @@ public:
     }
 
 private:
+    // A node without the streams and the security descriptor whose data is gone.
+    Node keep_intact_extras(Node n, TreeFix& r) {
+        const auto present = [this](const std::vector<Id>& ids) {
+            return std::all_of(ids.begin(), ids.end(), [this](const Id& c) { return repo_.has_blob(c); });
+        };
+        const std::size_t before = n.streams.size();
+        std::erase_if(n.streams, [&](const DataStream& s) { return !present(s.content); });
+        if (n.streams.size() != before) r.changed = true;
+        if (n.security && !repo_.has_blob(*n.security)) {
+            n.security.reset();
+            r.changed = true;
+        }
+        return n;
+    }
+
     Repository& repo_;
     bool dry_run_;
     std::unordered_map<Id, TreeFix, IdHash> done_;

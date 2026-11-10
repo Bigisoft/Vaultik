@@ -154,10 +154,12 @@ per pack: pack id (32), varint count, then per blob the same entry layout as the
 ## Trees
 
 A tree blob lists one directory. Entries are sorted by name, bytewise on UTF-8, with no
-duplicates. Writers produce version 2; readers accept versions 1 and 2.
+duplicates. Writers produce version 3 when any node has extras (see below) and version 2
+otherwise, so trees without extras stay readable by Vaultik 0.5 and older; readers accept
+versions 1 to 3.
 
 ```
-version   varint 2
+version   varint 2 or 3
 count     varint
 per node:
   name        string
@@ -173,13 +175,26 @@ per node:
   file:       varint chunk count, then chunk ids (32 each), in file order
   directory:  subtree id (32)
   symlink:    string   link target, exactly as stored in the link
+  extras:     version 3 only: varint count, then per extra: tag u8, varint length, that many bytes
 ```
+
+Extras (readers skip tags they do not know):
+
+| Tag | Content | Meaning |
+|---|---|---|
+| 1 | id (32) | a Data blob holding the Windows security descriptor (owner, group, access list; self-relative). Identical descriptors are one blob. |
+| 2 | name (string), size (varint), chunk count (varint), chunk ids (32 each) | an NTFS alternate data stream of the file ("file:name") |
+| 3 | reparse tag (u32), flags (u8, bit 0 = relative), target (string) | the target of a Windows symlink (`0xA000000C`) or junction (`0xA0000003`) on a kind 2 node; absolute targets without the `\??\` prefix |
+
+Every blob an extra names counts as in use for prune, is copied with the version, and is checked
+by verify like file content.
 
 Version 1 (written by Vaultik 0.1, Windows only) has the same layout without `mode`, `uid` and
 `gid`, and only kinds 0 to 2.
 
 Kind 2 is used for Windows symlinks, junctions and cloud placeholders (OneDrive files that are
-not on the disk), and for Linux devices, sockets and pipes. Restores skip these.
+not on the disk), and for Linux devices, sockets and pipes. Restores recreate symlinks and
+junctions that have a link extra (without following them) and skip the rest.
 
 ctime is only compared for change detection between backups; restores set it on Windows and
 ignore it on Linux, where it cannot be set.

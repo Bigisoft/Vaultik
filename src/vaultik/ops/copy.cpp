@@ -156,6 +156,9 @@ private:
                 if (options_.on_progress) options_.on_progress(label_ + ": " + child);
                 for (Id& chunk : node.content) chunk = copy_blob(BlobType::Data, chunk);
             }
+            for (DataStream& s : node.streams)
+                for (Id& chunk : s.content) chunk = copy_blob(BlobType::Data, chunk);
+            if (node.security) node.security = copy_blob(BlobType::Data, *node.security);
         }
         tree.sort();
         const Bytes serialized = serialize_tree(tree);
