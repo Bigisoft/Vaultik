@@ -8,6 +8,7 @@
 #include "vaultik/model/snapshot.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/backup.hpp"
+#include "vaultik/crypto/hash.hpp"
 #include "vaultik/repo/pack.hpp"
 #include "vaultik/util/hex.hpp"
 
@@ -145,6 +146,34 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
     const std::vector<std::string> pack_names = backend.list("data");
     IndexFileContent fresh;
     std::unordered_set<Id, IdHash> seen;
+    // A pack rebuilt from its repair data is written back at once: it then holds exactly the
+    // content its id names, as it did before it was damaged, so this changes nothing any index or
+    // version refers to, and the checks below read it as it should be. A dry run keeps it in
+    // memory instead.
+    // A damaged or unreadable pack, whole again from its repair data (when it has some).
+    const auto rebuild = [&](const Id& id, const std::string& name, Bytes& pack, bool read_failed) {
+        Bytes work = std::move(pack);
+        if (read_failed) {
+            try {
+                work = repo.read_pack_salvaging(id);
+            } catch (const std::exception&) {
+                return false;
+            }
+        }
+        if (!repo.rebuild_pack(id, work)) {
+            pack = std::move(work);
+            return false;
+        }
+        pack = std::move(work);
+        if (o.dry_run) {
+            repo.use_pack_bytes(id, pack);
+        } else {
+            backend.put(name, pack);
+        }
+        ++r.packs_rebuilt;
+        warn("pack " + id_hex(id).substr(0, 8) + " was damaged and was rebuilt from its repair data");
+        return true;
+    };
     std::size_t n = 0;
     for (const std::string& name : pack_names) {
         if (cancelled()) throw Cancelled();
@@ -155,11 +184,33 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
         ++r.packs;
         Bytes pack;
         std::vector<BlobEntry> entries;
+        const Id pack_id = id_from_hex(hex);
         try {
             if (o.quick) {
-                entries = read_pack_header(backend, name, repo.aead());
+                try {
+                    entries = read_pack_header(backend, name, repo.aead());
+                } catch (const std::exception&) {
+                    // A damaged header: the whole pack, rebuilt if it can be.
+                    bool failed = false;
+                    try {
+                        pack = backend.get(name);
+                    } catch (const std::exception&) {
+                        failed = true;
+                    }
+                    if (!rebuild(pack_id, name, pack, failed)) throw;
+                    entries = parse_pack_header(pack, repo.aead());
+                }
             } else {
-                pack = backend.get(name);
+                std::exception_ptr read_error;
+                try {
+                    pack = backend.get(name);
+                } catch (const std::exception&) {
+                    read_error = std::current_exception();
+                }
+                if (read_error || blake3(pack) != pack_id) {
+                    if (!rebuild(pack_id, name, pack, read_error != nullptr) && read_error)
+                        std::rethrow_exception(read_error);
+                }
                 entries = parse_pack_header(pack, repo.aead());
             }
         } catch (const std::exception& e) {
@@ -186,7 +237,7 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
             good.push_back(e);
         }
         r.blobs += good.size();
-        if (!good.empty()) fresh.emplace_back(id_from_hex(hex), std::move(good));
+        if (!good.empty()) fresh.emplace_back(pack_id, std::move(good));
     }
     repo.clear_index();
     for (const auto& [pack_id, entries] : fresh) repo.index_pack(pack_id, entries);

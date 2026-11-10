@@ -316,6 +316,97 @@ TEST_CASE("damaged pack data is detected") {
     CHECK(rr.errors > 0);  // the damaged file is reported, not silently restored
 }
 
+TEST_CASE("a pack damaged by bad sectors is rebuilt from its repair data") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "file.bin", random_data(3u << 20, 31));
+    write_file(src / "small.txt", text("small"));
+    init_repo(repo_dir);
+    {
+        auto repo = open_repo(repo_dir);
+        repo->set_parity_percent(5);
+        BackupOptions options;
+        options.paths = {u8(src)};
+        run_backup(*repo, options);
+    }
+    // Every pack got repair data; the setting is the repository's.
+    fs::path largest;
+    Id largest_id{};
+    {
+        auto r = open_repo(repo_dir);
+        CHECK(r->parity_percent() == 5);
+        for (const std::string& name : r->backend().list("data")) {
+            const Id id = id_from_hex(name.substr(name.find_last_of('/') + 1));
+            CHECK(r->backend().exists(Repository::parity_name(id)));
+            if (largest.empty() || fs::file_size(repo_dir / from_u8(name)) > fs::file_size(largest)) {
+                largest = repo_dir / from_u8(name);
+                largest_id = id;
+            }
+        }
+    }
+    REQUIRE_FALSE(largest.empty());
+    const auto check_restore = [&] {
+        auto repo = open_repo(repo_dir);
+        VerifyOptions vo;
+        vo.read_data = true;
+        CHECK(run_verify(*repo, vo).errors == 0);
+        RestoreOptions ro;
+        ro.target = u8(tmp.path / "out");
+        fs::remove_all(tmp.path / "out");
+        const RestoreResult rr = run_restore(*repo, repo->load_snapshot(repo->list_snapshot_ids().at(0)), ro);
+        CHECK(rr.errors == 0);
+        CHECK(snapshot_of_dir(restored_location(tmp.path / "out", src)) == snapshot_of_dir(src));
+    };
+
+    // 20 KiB of zeros in the middle, as bad sectors leave it.
+    {
+        std::fstream f(largest, std::ios::binary | std::ios::in | std::ios::out);
+        f.seekp(static_cast<std::streamoff>(fs::file_size(largest) / 2));
+        const std::string zeros(20 * 1024, '\0');
+        f.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+    }
+    {
+        auto repo = open_repo(repo_dir);
+        VerifyOptions vo;
+        vo.read_data = true;
+        const VerifyResult v = run_verify(*repo, vo);
+        CHECK(v.errors > 0);
+        CHECK(v.packs_repairable == 1);
+        const RepairResult rr = run_repair(*repo, RepairOptions{});
+        CHECK(rr.packs_rebuilt == 1);
+        CHECK(rr.packs_unreadable == 0);
+        CHECK(rr.blobs_damaged == 0);
+        CHECK(rr.snapshots_repaired == 0);
+    }
+    check_restore();
+
+    // Cut short by 30 KiB: the pack's own header (at its end) is gone too.
+    fs::resize_file(largest, fs::file_size(largest) - 30 * 1024);
+    {
+        auto repo = open_repo(repo_dir);
+        RepairOptions quick;
+        quick.quick = true;
+        const RepairResult rr = run_repair(*repo, quick);
+        CHECK(rr.packs_rebuilt == 1);
+        CHECK(rr.packs_unreadable == 0);
+    }
+    check_restore();
+
+    // A health check gives a pack without repair data its repair data.
+    {
+        auto repo = open_repo(repo_dir);
+        repo->backend().remove(Repository::parity_name(largest_id));
+        VerifyOptions vo;
+        vo.read_data = true;
+        vo.add_parity = repo->parity_percent();
+        const VerifyResult v = run_verify(*repo, vo);
+        CHECK(v.errors == 0);
+        CHECK(v.parity_added == 1);
+        CHECK(repo->backend().exists(Repository::parity_name(largest_id)));
+    }
+}
+
 TEST_CASE("files that look encrypted by ransomware raise the alarm") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";

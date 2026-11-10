@@ -500,6 +500,16 @@ something else), **Repair the backup...** in a job's ... menu, or `vaultik repai
 `--dry-run` shows what it would do. It holds the exclusive lock, like prune. From cloud storage
 it downloads everything (with `--quick`, only the pack headers).
 
+**Repair data.** A backup on a single drive has no second copy to fall back on, so each job also
+keeps repair data next to its backup ("Repair data" in the job, 5% of the backup's size by
+default for drives, off for cloud storage, which keeps its own copies): Reed-Solomon parity per
+pack file, like a `.par2` file. With it, Repair rebuilds a pack file damaged by bad sectors, cut
+short or changed, as long as no more than about 5% of it is damaged (in one stretch or several),
+before it would drop anything; a health check that finds such a pack says it can be rebuilt.
+Data saved before repair data was turned on gets it during the health checks, or at once with
+`vaultik repair-data 5 --job <job>` (`off` turns it off). Writing it adds about 60 ms per 32 MiB
+pack on one core.
+
 ### Alerts when you are away
 
 Windows notifications only reach someone at the computer. **Settings > Alerts when you are

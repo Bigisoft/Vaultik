@@ -81,6 +81,7 @@ private:
     QCheckBox* check_restore_ = nullptr;
     QCheckBox* skip_battery_ = nullptr;
     QCheckBox* skip_unchanged_ = nullptr;
+    QComboBox* repair_data_ = nullptr;
     QCheckBox* wake_ = nullptr;
     QCheckBox* skip_metered_ = nullptr;
     QLineEdit* before_command_ = nullptr;

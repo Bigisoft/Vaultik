@@ -396,6 +396,15 @@ QWidget* JobDialog::build_schedule() {
     skip_unchanged_->setToolTip(tr("A run that finds every file as it was shows in the Activity tab as \"nothing "
                                    "changed\" and still counts as a backup; no new version is added."));
     form->addRow(tr("Versions:"), skip_unchanged_);
+    repair_data_ = new QComboBox;
+    repair_data_->addItem(tr("Off"), 0);
+    repair_data_->addItem(tr("5% of the backup's size (recommended for drives)"), 5);
+    repair_data_->addItem(tr("10%"), 10);
+    repair_data_->addItem(tr("20%"), 20);
+    repair_data_->setToolTip(tr("Stores extra repair data next to the backup, so data damaged by bad sectors on the "
+                                "backup drive can be rebuilt by Repair. Data saved before it is turned on gets it "
+                                "during the health checks."));
+    form->addRow(tr("Repair data:"), repair_data_);
     form->addRow(tr("Scheduled runs:"), skip_battery_);
     form->addRow(QString(), wake_);
     form->addRow(QString(), skip_metered_);
@@ -731,6 +740,14 @@ void JobDialog::load(const jobs::Job& job) {
     for (int d = 0; d < 7; ++d) days_[d]->setChecked((job.schedule.weekdays >> d) & 1u);
     skip_battery_->setChecked(job.schedule.skip_on_battery);
     skip_unchanged_->setChecked(job.skip_unchanged);
+    {
+        int at = repair_data_->findData(static_cast<int>(job.repair_data));
+        if (at < 0) {
+            repair_data_->addItem(tr("%1%").arg(job.repair_data), static_cast<int>(job.repair_data));
+            at = repair_data_->count() - 1;
+        }
+        repair_data_->setCurrentIndex(at);
+    }
     wake_->setChecked(job.schedule.wake_computer);
     skip_metered_->setChecked(job.schedule.skip_metered);
     update_schedule_fields();
@@ -833,6 +850,7 @@ jobs::Job JobDialog::collect() const {
         if (days_[d]->isChecked()) j.schedule.weekdays |= static_cast<std::uint8_t>(1u << d);
     j.schedule.skip_on_battery = skip_battery_->isChecked();
     j.skip_unchanged = skip_unchanged_->isChecked();
+    j.repair_data = static_cast<unsigned>(repair_data_->currentData().toInt());
     j.schedule.wake_computer = wake_->isChecked();
     j.schedule.skip_metered = skip_metered_->isChecked();
 

@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "vaultik/crypto/hash.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/backup.hpp"  // Cancelled
 
@@ -74,8 +75,25 @@ void VerifyEngine::check_packs() {
                 result_.bytes_read += pack.size();
                 ++result_.packs_read;
                 if (blake3(pack) != pack_id) {
-                    error("pack content does not match its id: " + name);
+                    Bytes copy = pack;
+                    if (repo_.rebuild_pack(pack_id, copy)) {
+                        ++result_.packs_repairable;
+                        error("pack content does not match its id: " + name +
+                              " (its repair data can rebuild it: run a repair)");
+                    } else {
+                        error("pack content does not match its id: " + name);
+                    }
                     continue;
+                }
+                if (options_.add_parity > 0) {
+                    try {
+                        if (!repo_.backend().exists(Repository::parity_name(pack_id))) {
+                            repo_.write_parity(pack_id, pack, options_.add_parity);
+                            ++result_.parity_added;
+                        }
+                    } catch (const std::exception&) {
+                        // not this time; the pack itself is fine
+                    }
                 }
                 entries = parse_pack_header(pack, repo_.aead());
             } else {

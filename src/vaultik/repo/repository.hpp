@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <unordered_map>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -116,6 +119,28 @@ public:
     static std::string pack_name(const Id& pack_id);
     static std::string snapshot_name(const Id& id);
 
+    // Repair data (docs/FORMAT.md, "Repair data"): while it is on, every pack written gets
+    // parity/<xx>/<pack-id> next to it, `percent` of its size as Reed-Solomon parity, so a pack
+    // damaged by bad sectors can be rebuilt (repair). The setting lives in the repository
+    // ("parity/percent"), so every program writing to it (backup, prune, repair, a copy) adds it.
+    // 0 when off. Writing repair data never fails a backup: a pack without it is only less safe.
+    unsigned parity_percent() const { return parity_percent_.load(); }
+    // Turns it on (1..50) or off (0) for packs written from now on; existing repair data stays.
+    void set_parity_percent(unsigned percent);
+    static std::string parity_name(const Id& pack_id);
+    // Writes the repair data of an intact pack (`bytes` hash to `pack_id`). Throws Error.
+    void write_parity(const Id& pack_id, ByteSpan bytes, unsigned percent);
+    // Rebuilds a damaged pack (read as `pack`: wrong content, cut short or longer) from its repair
+    // data. True when `pack` now hashes to `pack_id`; false (and `pack` unchanged) when the pack
+    // has no repair data, it cannot be read, or too much is damaged.
+    bool rebuild_pack(const Id& pack_id, Bytes& pack);
+    // Reads a pack that cannot be read whole (bad sectors): what can be read, in small pieces,
+    // with zeros where reading failed, for rebuild_pack. Throws when even its size is unknown.
+    Bytes read_pack_salvaging(const Id& pack_id);
+    // Blobs of this pack are read from `bytes` instead of the backend from now on (a repair's dry
+    // run, which rebuilds a pack in memory without writing it).
+    void use_pack_bytes(const Id& pack_id, Bytes bytes);
+
 private:
     Repository(std::unique_ptr<Backend> backend, RepoConfig config, const MasterKey& key);
 
@@ -146,6 +171,8 @@ private:
 
     Index index_;
     PackWriter pack_;
+    std::atomic<unsigned> parity_percent_{0};
+    std::unordered_map<Id, Bytes, IdHash> pack_bytes_;  // use_pack_bytes
     std::unordered_set<Id, IdHash> pack_pending_;  // blobs in the pack being built
     IndexFileContent index_pending_;               // packs written but not yet in an index file
     WriteStats write_stats_;

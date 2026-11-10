@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 
 #include "vaultik/cli/console.hpp"
+#include "vaultik/crypto/hash.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/model/tree.hpp"
@@ -158,6 +159,10 @@ Commands:
                                without what was lost (use --job <job> or -r)
       --quick                  Trust the packs' own headers; read no chunks
       --dry-run                Only show what would be done
+  repair-data <percent>|off    Keep Reed-Solomon repair data next to the stored
+                               data (1-50% of its size; jobs to drives use 5%),
+                               so data damaged by bad sectors can be rebuilt by
+                               repair; adds it to the data stored already
   unlock                       Remove locks left by runs that ended abnormally
   key passwd                   Set a new password (asks for the current one, or
                                use --recovery-key); saved jobs using this
@@ -1159,6 +1164,7 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         VerifyOptions o;
         o.read_data = true;
         o.read_share = full ? 1.0 : job.health.sample_percent / 100.0;
+        o.add_parity = repo.parity_percent();  // data from before repair data gets it over time
         o.sample_seed = record.started;  // a different share each time
         o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
         o.on_progress = [](const std::string& msg) {
@@ -1200,6 +1206,10 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
                          std::to_string(r.packs) + " pack(s), checked " + std::to_string(r.snapshots) +
                          " version(s); no problems";
     }
+    if (r.packs_repairable > 0)
+        record.message += "; " + std::to_string(r.packs_repairable) +
+                          " damaged pack(s) can be rebuilt from their repair data: run a repair";
+    if (r.parity_added > 0) record.message += "; repair data added to " + std::to_string(r.parity_added) + " pack(s)";
     if (g_json) {
         emit({{"event", "check"},
               {"kind", jobs::to_string(kind)},
@@ -1893,6 +1903,14 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
+        // The job's repair data setting becomes the destination's (every writer then follows it).
+        if (repo->parity_percent() != job->repair_data) {
+            try {
+                repo->set_parity_percent(job->repair_data);
+            } catch (const std::exception& e) {
+                warning(std::string("could not change the repair data setting of the destination: ") + e.what());
+            }
+        }
         {
             // A scheduled run waits a while for a prune of the same repository to finish.
             RepoLock lock(*repo, RepoLock::Mode::Shared, "backup (job " + job->id + ")",
@@ -2093,6 +2111,7 @@ int cmd_repair(const Args& a) {
     const RepairResult r = run_repair(*repo, o);
     if (!g_json) clear_status();
     std::string summary = std::to_string(r.blobs) + " intact chunk(s) in " + std::to_string(r.packs) + " pack(s)";
+    if (r.packs_rebuilt) summary += ", " + std::to_string(r.packs_rebuilt) + " damaged pack(s) rebuilt from repair data";
     if (r.packs_unreadable) summary += ", " + std::to_string(r.packs_unreadable) + " pack(s) unreadable";
     if (r.blobs_damaged) summary += ", " + std::to_string(r.blobs_damaged) + " damaged chunk(s)";
     summary += "; " + std::to_string(r.snapshots) + " version(s)";
@@ -2103,7 +2122,8 @@ int cmd_repair(const Args& a) {
     if (!r.changed()) summary += "; nothing was damaged";
     if (g_json) {
         emit({{"event", "done"}, {"status", "success"}, {"dry_run", o.dry_run}, {"packs", r.packs},
-              {"packs_unreadable", r.packs_unreadable}, {"blobs", r.blobs}, {"blobs_damaged", r.blobs_damaged},
+              {"packs_unreadable", r.packs_unreadable}, {"packs_rebuilt", r.packs_rebuilt}, {"blobs", r.blobs},
+              {"blobs_damaged", r.blobs_damaged},
               {"snapshots", r.snapshots}, {"snapshots_repaired", r.snapshots_repaired},
               {"snapshots_removed", r.snapshots_removed}, {"files_lost", r.files_lost},
               {"folders_lost", r.folders_lost}, {"message", summary}});
@@ -2640,6 +2660,50 @@ int cmd_restore(const Args& a) {
     return kExitOk;
 }
 
+// "repair-data <percent>|off": repair data for every pack from now on, and (unless off) for the
+// packs stored already, each after checking that it is intact.
+int cmd_repair_data(const Args& a) {
+    if (a.positional.size() != 1) throw Error("usage: vaultik repair-data <percent (1-50)>|off (-r <repository> or --job <job>)");
+    const std::string& v = a.positional[0];
+    unsigned percent = 0;
+    if (v != "off" && v != "0") {
+        char* end = nullptr;
+        const long p = std::strtol(v.c_str(), &end, 10);
+        if (end == v.c_str() || (*end != '\0' && std::string_view(end) != "%") || p < 1 || p > 50)
+            throw Error("repair-data takes a percentage from 1 to 50, or off");
+        percent = static_cast<unsigned>(p);
+    }
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "repair data", lock_wait(a));
+    repo->reload_index();
+    repo->set_parity_percent(percent);
+    if (percent == 0) {
+        out("Repair data is off for new data; what exists stays and is still used by a repair.\n");
+        return kExitOk;
+    }
+    std::uint64_t added = 0;
+    std::uint64_t damaged = 0;
+    const std::vector<Id>& packs = repo->index().packs();
+    for (std::size_t i = 0; i < packs.size(); ++i) {
+        if (stop_requested() || lock.lost()) throw Cancelled();
+        status("Repair data: pack " + std::to_string(i + 1) + "/" + std::to_string(packs.size()));
+        if (repo->backend().exists(Repository::parity_name(packs[i]))) continue;
+        const Bytes pack = repo->backend().get(Repository::pack_name(packs[i]));
+        if (blake3(pack) != packs[i]) {
+            ++damaged;
+            warning("pack " + id_hex(packs[i]).substr(0, 8) + " is damaged, so no repair data was made for it");
+            continue;
+        }
+        repo->write_parity(packs[i], pack, percent);
+        ++added;
+    }
+    clear_status();
+    out("Repair data is " + std::to_string(percent) + "%; added to " + std::to_string(added) + " of " +
+        std::to_string(packs.size()) + " pack(s)" +
+        (damaged ? ", " + std::to_string(damaged) + " damaged pack(s) skipped (run a repair)" : std::string()) + ".\n");
+    return damaged ? kExitError : kExitOk;
+}
+
 int cmd_verify(const Args& a) {
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "verify", lock_wait(a));
@@ -2750,6 +2814,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "forget") return cmd_forget(a);
     if (a.command == "prune") return cmd_prune(a);
     if (a.command == "repair") return cmd_repair(a);
+    if (a.command == "repair-data") return cmd_repair_data(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
     if (a.command == "pin") return cmd_pin(a, true);

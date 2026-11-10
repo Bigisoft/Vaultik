@@ -17,6 +17,10 @@ struct VerifyOptions {
     // week, say) cover different parts of the repository over time.
     double read_share = 1.0;
     std::uint64_t sample_seed = 0;
+    // With read_data: a pack read whole and intact that has no repair data yet gets it, at this
+    // percent (0: none added). Health checks pass the repository's setting, so data saved before
+    // repair data was turned on gets it over time.
+    unsigned add_parity = 0;
     // Stops the check early (throws Cancelled).
     std::function<bool()> should_cancel;
 
@@ -32,6 +36,8 @@ struct VerifyResult {
     std::uint64_t bytes_read = 0;
     std::uint64_t packs_read = 0;  // read in full (all of them without sampling)
     std::uint64_t errors = 0;
+    std::uint64_t packs_repairable = 0;  // damaged, but their repair data can rebuild them
+    std::uint64_t parity_added = 0;      // packs that got repair data (add_parity)
 };
 
 VerifyResult run_verify(Repository& repo, const VerifyOptions& options);

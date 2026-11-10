@@ -17,6 +17,8 @@ in file names.
   index/<index-id>          sealed index files
   snapshots/<snapshot-id>   sealed snapshot manifests
   locks/<lock-id>           sealed lock files of the runs using the repository
+  parity/percent            optional: repair data is on, at this percentage ("5\n"), see below
+  parity/<xx>/<pack-id>     optional: the repair data of a pack (see "Recovery data")
 ```
 
 Files are written to a temporary name and renamed into place, so a reader never sees a partial
@@ -273,6 +275,19 @@ snapshot files that cannot be opened or whose root tree is lost; for the others,
 tree that references a lost blob (dropping the file nodes whose chunks are missing and the
 directory nodes whose tree is missing), save the snapshot again with the new root tree and a note
 "(repaired: N file(s) and M folder(s) were lost)", then delete the old snapshot file.
+
+## Repair data
+
+While `parity/percent` exists (a decimal 1 to 50), every program that writes a pack also writes
+`parity/<xx>/<pack-id>`: the pack's recovery data (below) at that percentage, from the pack as
+written. It is plaintext: it is computed over the pack file, which is ciphertext already, and the
+hashes in it are of that ciphertext. Writing it is best effort (a pack without it is valid); a
+health check that reads an intact pack without it adds it. Prune deletes it with its pack. Repair
+rebuilds a pack that cannot be read whole, whose content does not hash to its id, or whose header
+cannot be read, from its repair data, and when the result hashes to the pack id it writes the
+pack back at once (the content its id names, so nothing that refers to it changes). Removing
+`parity/percent` turns it off for new packs; existing repair data stays usable. Versions before
+0.7 ignore the `parity/` folder.
 
 ## Recovery data
 

@@ -1,6 +1,8 @@
 #include "vaultik/repo/repository.hpp"
 
+#include <algorithm>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -10,6 +12,7 @@
 #include <thread>
 
 #include "vaultik/crypto/hash.hpp"
+#include "vaultik/repo/recovery.hpp"
 
 namespace vaultik {
 
@@ -20,6 +23,17 @@ constexpr std::uint8_t kCompZstd = 1;
 constexpr char kIndexAadPrefix[] = "VKINDEX1";
 constexpr char kSnapshotAadPrefix[] = "VKSNAP01";
 constexpr char kConfigName[] = "config";
+constexpr char kParityMarker[] = "parity/percent";
+
+// Best effort: a pack is complete without its repair data, so a failure here never fails the
+// write of the pack (a later health check adds what is missing).
+void put_parity(Backend& backend, const Id& pack_id, ByteSpan bytes, unsigned percent) {
+    if (percent == 0) return;
+    try {
+        backend.put(Repository::parity_name(pack_id), repo::make_recovery(bytes, percent));
+    } catch (const std::exception&) {
+    }
+}
 constexpr char kIndexDir[] = "index";
 constexpr char kSnapshotDir[] = "snapshots";
 
@@ -85,7 +99,89 @@ std::unique_ptr<Repository> Repository::open(std::unique_ptr<Backend> backend, s
     const MasterKey key = unwrap_master_key(config, password);
     std::unique_ptr<Repository> repo(new Repository(std::move(backend), std::move(config), key));
     if (load_index) repo->load_indexes();
+    try {
+        if (repo->backend_->exists(kParityMarker)) {
+            const Bytes b = repo->backend_->get(kParityMarker);
+            const int v = std::atoi(std::string(b.begin(), b.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(b.size(), 8))).c_str());
+            if (v >= 1 && v <= 50) repo->parity_percent_ = static_cast<unsigned>(v);
+        }
+    } catch (const std::exception&) {
+        // unreadable: packs are written without repair data, as before
+    }
     return repo;
+}
+
+void Repository::set_parity_percent(unsigned percent) {
+    if (percent > 50) throw Error("repair data can be at most 50% of the data");
+    if (percent == parity_percent_.load()) return;
+    if (percent == 0) {
+        backend_->remove(kParityMarker);
+    } else {
+        const std::string text = std::to_string(percent) + "\n";
+        backend_->put(kParityMarker, ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+    }
+    parity_percent_ = percent;
+}
+
+std::string Repository::parity_name(const Id& pack_id) {
+    const std::string hex = id_hex(pack_id);
+    return "parity/" + hex.substr(0, 2) + "/" + hex;
+}
+
+void Repository::write_parity(const Id& pack_id, ByteSpan bytes, unsigned percent) {
+    backend_->put(parity_name(pack_id), repo::make_recovery(bytes, percent));
+}
+
+bool Repository::rebuild_pack(const Id& pack_id, Bytes& pack) {
+    Bytes parity;
+    try {
+        const std::string name = parity_name(pack_id);
+        if (!backend_->exists(name)) return false;
+        parity = backend_->get(name);
+    } catch (const std::exception&) {
+        return false;
+    }
+    try {
+        Bytes work = pack;
+        const repo::RecoveryResult r = repo::repair_with_recovery(work, parity);
+        if (!(r.repaired || r.intact) || blake3(work) != pack_id) return false;
+        pack = std::move(work);
+        return true;
+    } catch (const std::exception&) {
+        return false;  // the repair data itself is damaged beyond use
+    }
+}
+
+void Repository::use_pack_bytes(const Id& pack_id, Bytes bytes) {
+    pack_bytes_[pack_id] = std::move(bytes);
+}
+
+Bytes Repository::read_pack_salvaging(const Id& pack_id) {
+    const std::string name = pack_name(pack_id);
+    const std::uint64_t size = backend_->size(name);
+    if (size > (std::uint64_t{1} << 30)) throw Error("pack " + name + " is too large to be a pack");
+    Bytes out(static_cast<std::size_t>(size));
+    constexpr std::size_t kBig = 1u << 20;
+    constexpr std::size_t kSmall = 64u << 10;
+    for (std::size_t at = 0; at < out.size(); at += kBig) {
+        const std::size_t len = std::min(kBig, out.size() - at);
+        try {
+            const Bytes part = backend_->get_range(name, at, len);
+            std::memcpy(out.data() + at, part.data(), std::min(part.size(), len));
+            continue;
+        } catch (const std::exception&) {
+        }
+        for (std::size_t s = at; s < at + len; s += kSmall) {
+            const std::size_t n = std::min(kSmall, at + len - s);
+            try {
+                const Bytes part = backend_->get_range(name, s, n);
+                std::memcpy(out.data() + s, part.data(), std::min(part.size(), n));
+            } catch (const std::exception&) {
+                // left as zeros: a damaged part for the repair data to rebuild
+            }
+        }
+    }
+    return out;
 }
 
 Repository::Repository(std::unique_ptr<Backend> backend, RepoConfig config, const MasterKey& key)
@@ -219,8 +315,9 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
         });
     }
     Backend* backend = backend_.get();
+    const std::atomic<unsigned>* parity = &parity_percent_;
     for (unsigned i = 0; i < uploads; ++i) {
-        p->workers.emplace_back([p, backend] {
+        p->workers.emplace_back([p, backend, parity] {
             std::unique_lock lk(p->mu);
             for (;;) {
                 p->work.wait(lk, [p] { return p->stop || !p->uploads.empty(); });
@@ -232,6 +329,7 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
                 std::string error;
                 try {
                     backend->put(pack_name(u.pack_id), u.bytes);
+                    put_parity(*backend, u.pack_id, u.bytes, parity->load());
                 } catch (const std::exception& e) {
                     error = std::string("cannot write a pack: ") + e.what();
                 } catch (...) {
@@ -401,7 +499,15 @@ Bytes Repository::load_blob(BlobType type, const Id& id) {
         }
         if (flying) collect_uploads(true);  // its pack is still being written
     }
-    const Bytes sealed = backend_->get_range(pack_name(index_.packs()[loc->pack]), loc->offset, loc->length);
+    const Id& pack_id = index_.packs()[loc->pack];
+    Bytes sealed;
+    if (const auto held = pack_bytes_.find(pack_id); held != pack_bytes_.end()) {
+        if (loc->offset + loc->length > held->second.size()) throw Error("malformed pack: a blob lies outside it");
+        sealed.assign(held->second.begin() + static_cast<std::ptrdiff_t>(loc->offset),
+                      held->second.begin() + static_cast<std::ptrdiff_t>(loc->offset + loc->length));
+    } else {
+        sealed = backend_->get_range(pack_name(pack_id), loc->offset, loc->length);
+    }
     return decode_blob(type, id, sealed);
 }
 
@@ -420,6 +526,7 @@ void Repository::finish_pack() {
             write_failed_ = std::string("cannot write a pack: ") + e.what();
             throw;
         }
+        put_parity(*backend_, pack_id, bytes, parity_percent_.load());
     }
     // Known at once (deduplication); listed in an index file once the pack is written.
     const std::uint32_t pos = index_.add_pack(pack_id);

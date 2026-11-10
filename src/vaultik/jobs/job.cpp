@@ -375,6 +375,7 @@ std::string to_json(const Job& job) {
         {"volume", {{"id", job.repository_volume}, {"path", job.repository_relative}}},
         {"backup_on_connect", job.backup_on_connect},
         {"skip_unchanged", job.skip_unchanged},
+        {"repair_data", job.repair_data},
         {"before_command", job.before_command},
         {"after_command", job.after_command},
         {"second_copy",
@@ -459,6 +460,9 @@ Job job_from_json(const std::string& text) {
         job.backup_on_connect = j.value("backup_on_connect", false) && !job.run_as_admin;
         job.before_command = j.value("before_command", std::string());
         job.skip_unchanged = j.value("skip_unchanged", false);
+        // Jobs from before repair data: on for drives, where bad sectors are the risk; cloud
+        // storage keeps its own copies.
+        job.repair_data = std::min(50u, j.value("repair_data", is_cloud_location(job.repository) ? 0u : 5u));
         job.after_command = j.value("after_command", std::string());
         if (j.contains("second_copy")) {
             const json& c = j.at("second_copy");

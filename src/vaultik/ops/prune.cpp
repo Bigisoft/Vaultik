@@ -463,8 +463,21 @@ PruneResult run_prune(Repository& repo, const PruneOptions& o) {
     }
     for (const std::string& name : old_index_files) backend.remove(name);
     progress("deleting unused data");
-    for (const Id& id : to_delete) backend.remove(Repository::pack_name(id));
-    for (const auto& [id, live] : to_repack) backend.remove(Repository::pack_name(id));
+    // Each pack's repair data goes with it (most have none: a missing file is no error).
+    const auto remove_parity = [&](const Id& id) {
+        try {
+            backend.remove(Repository::parity_name(id));
+        } catch (const std::exception&) {
+        }
+    };
+    for (const Id& id : to_delete) {
+        backend.remove(Repository::pack_name(id));
+        remove_parity(id);
+    }
+    for (const auto& [id, live] : to_repack) {
+        backend.remove(Repository::pack_name(id));
+        remove_parity(id);
+    }
     for (const std::string& name : orphans) backend.remove(name);
     r.bytes_written = repo.write_stats().stored_bytes_added - before.stored_bytes_added;
     return r;

@@ -32,6 +32,7 @@ struct RepairOptions {
 struct RepairResult {
     std::uint64_t packs = 0;
     std::uint64_t packs_unreadable = 0;
+    std::uint64_t packs_rebuilt = 0;  // damaged, but rebuilt whole from their repair data
     std::uint64_t blobs = 0;          // intact blobs indexed
     std::uint64_t blobs_damaged = 0;  // blobs that failed their check (left out of the index)
     std::uint64_t index_files_replaced = 0;
@@ -41,7 +42,8 @@ struct RepairResult {
     std::uint64_t files_lost = 0;          // left out of the repaired versions (counted per version)
     std::uint64_t folders_lost = 0;
     bool changed() const {
-        return blobs_damaged > 0 || packs_unreadable > 0 || snapshots_removed > 0 || snapshots_repaired > 0;
+        return blobs_damaged > 0 || packs_unreadable > 0 || packs_rebuilt > 0 || snapshots_removed > 0 ||
+               snapshots_repaired > 0;
     }
 };
 
