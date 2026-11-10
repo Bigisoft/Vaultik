@@ -114,8 +114,19 @@ void check_admin_command(const std::string& command, const std::string& what) {
             continue;
         }
         if (word.find('\\') != std::string::npos) refuse(word, "not a full path; write it as C:\\...");
-        if (word.find('/') != std::string::npos && (word[0] != '/' || word.find('/', 1) != std::string::npos))
-            refuse(word, "not a full path; write it as C:\\...");
+        if (word.find('/') != std::string::npos) {
+            // Only a switch such as /c or /q (a slash and up to 4 letters or digits) that is not
+            // also the name of something at the top of the system drive.
+            bool sw = word[0] == '/' && word.size() >= 2 && word.size() <= 5;
+            for (std::size_t k = 1; sw && k < word.size(); ++k)
+                sw = std::isalnum(static_cast<unsigned char>(word[k])) != 0;
+            if (sw) {
+                char drive[MAX_PATH] = {};
+                GetSystemWindowsDirectoryA(drive, MAX_PATH);
+                sw = !os::exists(std::string(drive, 2) + "\\" + word.substr(1));
+            }
+            if (!sw) refuse(word, "not a full path; write it as C:\\...");
+        }
     }
 }
 
