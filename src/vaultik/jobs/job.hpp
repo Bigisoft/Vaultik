@@ -167,6 +167,9 @@ struct RunRecord {
     // Set when old versions must not be removed after this backup for another reason: a backup
     // path could not be read at all, or far fewer files were found than before.
     std::string hold;
+    // Set when the destination drive reported a problem (its health or condition) at the end of
+    // the run, e.g. "WD My Passport 2627: warning (Predictive failure)".
+    std::string drive;
 };
 
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file

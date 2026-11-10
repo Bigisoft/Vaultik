@@ -46,6 +46,7 @@
 #include "vaultik/platform/vss.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/platform/acl.hpp"
+#include "vaultik/platform/drive_health.hpp"
 
 #ifdef _WIN32
 #include <cstdlib>
@@ -154,6 +155,8 @@ Commands:
                                versions (after files were deleted or overwritten)
       --to <time>              Local time, e.g. "2026-11-09 20:30"
       --dry-run                Only list what would be brought back
+  drives                       The health of this computer's drives, as Windows
+                               reports it (details need administrator rights)
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
                                sources, destination, password and resource
@@ -1372,6 +1375,8 @@ private:
     std::thread thread_;
 };
 
+std::string drive_problem(const os::DriveHealth& d);  // below, with the drives command
+
 // After a job's backup: copies its new versions to the job's second destination (creating the
 // repository there on first use, with the job's password), then removes copies beyond the job's
 // retention there. Fills `record` (kind Copy) whatever happens; returns kExitOk or kExitError.
@@ -1559,6 +1564,16 @@ int cmd_run_job(const Args& a) {
                                      !(job->vss_skip_sql || a.has("--vss-skip-sql")));
         }
         refresh_drive_copy(*job);
+        // The destination drive's own health, as the system reports it: a warning here is the
+        // time to copy the backups elsewhere, before the drive fails.
+        if (!is_cloud_location(job->repository)) {
+            for (const os::DriveHealth& d : os::drive_health(job->repository)) {
+                const std::string problem = drive_problem(d);
+                if (problem.empty()) continue;
+                record.drive = problem;
+                warning("the backup drive reports a problem: " + problem);
+            }
+        }
         if (!record.alert.empty() || !record.hold.empty()) {
             // Never thin out the versions from before a possible attack or a missing source.
             if (!job->retention.empty())
@@ -1812,6 +1827,66 @@ int cmd_note(const Args& a) {
 }
 
 // history <path>: the versions of one file or folder (only those where it changed, unless --all).
+// A drive's problem in words ("WD My Passport 2627: warning, Predictive failure"); empty when it
+// reports none.
+std::string drive_problem(const os::DriveHealth& d) {
+    const bool bad = d.status == os::DriveHealth::Status::Warning || d.status == os::DriveHealth::Status::Unhealthy;
+    const bool uncorrected = d.read_errors_uncorrected.value_or(0) > 0;
+    if (!bad && d.condition.empty() && !uncorrected) return {};
+    std::string s = (d.model.empty() ? "disk " + std::to_string(d.disk) : d.model) + ": " + os::to_string(d.status);
+    if (!d.condition.empty()) s += ", " + d.condition;
+    if (uncorrected) s += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
+    return s;
+}
+
+// "drives": the health of this computer's drives, as Windows reports it.
+int cmd_drives() {
+    const std::vector<os::DriveHealth> drives = os::all_drives();
+    // Which drive letters are on each disk.
+    std::map<int, std::string> letters;
+#ifdef _WIN32
+    for (char c = 'A'; c <= 'Z'; ++c) {
+        const std::string root = std::string(1, c) + ":\\";
+        if (!os::exists(root)) continue;
+        for (const int n : os::disk_numbers(root)) letters[n] += (letters[n].empty() ? "" : " ") + root.substr(0, 2);
+    }
+#endif
+    if (g_json) {
+        nlohmann::json list = nlohmann::json::array();
+        for (const os::DriveHealth& d : drives) {
+            nlohmann::json j = {{"disk", d.disk}, {"model", d.model}, {"bus", d.bus}, {"media", d.media},
+                                {"size", d.size}, {"status", os::to_string(d.status)}, {"condition", d.condition},
+                                {"volumes", letters[d.disk]}};
+            if (d.temperature) j["temperature"] = *d.temperature;
+            if (d.wear) j["wear"] = *d.wear;
+            if (d.power_on_hours) j["power_on_hours"] = *d.power_on_hours;
+            if (d.read_errors_uncorrected) j["read_errors_uncorrected"] = *d.read_errors_uncorrected;
+            list.push_back(j);
+        }
+        emit({{"event", "drives"}, {"drives", list}});
+        return kExitOk;
+    }
+    if (drives.empty()) {
+        out("Windows reported no drives (or this system cannot tell).\n");
+        return kExitOk;
+    }
+    bool details = false;
+    for (const os::DriveHealth& d : drives) {
+        std::string line = "Disk " + std::to_string(d.disk) + "  " + d.model + "  (" + d.bus +
+                           (d.media.empty() ? "" : " " + d.media) + ", " + format_bytes(d.size) + ")";
+        if (!letters[d.disk].empty()) line += "  " + letters[d.disk];
+        line += "\n  " + std::string(os::to_string(d.status)) + (d.condition.empty() ? "" : ", " + d.condition);
+        if (d.temperature) line += ", " + std::to_string(*d.temperature) + " C";
+        if (d.wear) line += ", " + std::to_string(*d.wear) + "% worn";
+        if (d.power_on_hours) line += ", " + std::to_string(*d.power_on_hours) + " hours on";
+        if (d.read_errors_uncorrected) line += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
+        details = details || d.temperature || d.wear || d.power_on_hours;
+        out(line + "\n");
+    }
+    if (!details) out("(Temperature, wear and error counts need administrator rights.)\n");
+    return kExitOk;
+}
+
 // "estimate <path>...": how much a first backup of these paths reads, and roughly how long it takes.
 int cmd_estimate(const Args& a) {
     std::vector<std::string> paths = a.positional;
@@ -2155,6 +2230,7 @@ int run(const std::vector<std::string>& argv) {
     if (g_json) start_cancel_watcher();
 
     if (a.command == "jobs") return cmd_jobs(a);
+    if (a.command == "drives") return cmd_drives();
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
     if (a.command == "copy") return cmd_copy(a);

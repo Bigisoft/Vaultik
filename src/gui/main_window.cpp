@@ -1152,6 +1152,28 @@ void MainWindow::show_versions() {
     refresh_overview();
 }
 
+const std::vector<MainWindow::JobDrive>& MainWindow::drives_of(const jobs::Job& job) {
+    DriveCache& cache = drive_cache_[job.id];
+    const auto now = std::chrono::steady_clock::now();
+    if (cache.when != std::chrono::steady_clock::time_point{} && now - cache.when < std::chrono::minutes(10))
+        return cache.drives;
+    cache.when = now;
+    cache.drives.clear();
+    const auto add = [&](DriveRole role, const std::string& path) {
+        if (path.empty() || is_cloud_location(path)) return;
+        for (os::DriveHealth& h : os::drive_health(path)) {
+            const bool seen = std::any_of(cache.drives.begin(), cache.drives.end(), [&](const JobDrive& d) {
+                return d.role == role && d.health.disk == h.disk;
+            });
+            if (!seen) cache.drives.push_back({role, std::move(h)});
+        }
+    };
+    add(DriveRole::Backup, job.repository);
+    add(DriveRole::Copy, job.second_copy.repository);
+    for (const std::string& s : job.sources) add(DriveRole::Source, s);
+    return cache.drives;
+}
+
 void MainWindow::refresh_overview() {
     const jobs::Job* job = current_job();
     if (!job) return;
@@ -1248,6 +1270,46 @@ void MainWindow::refresh_overview() {
         d.warning = tr("The last second copy failed: %1").arg(qs(copy->message));
     } else if (days > 0 && saved > 0 && now > saved && (now - saved) / kDay >= static_cast<std::uint64_t>(days)) {
         d.warning = tr("No version was saved for %1.").arg(count_of((now - saved) / kDay, tr("day"), tr("days")));
+    }
+
+    // The drives involved, and their health.
+    const std::vector<JobDrive>& drives = drives_of(*job);
+    std::set<int> source_disks;
+    for (const JobDrive& jd : drives)
+        if (jd.role == DriveRole::Source) source_disks.insert(jd.health.disk);
+    for (const JobDrive& jd : drives) {
+        const os::DriveHealth& h = jd.health;
+        OverviewData::Drive dr;
+        dr.role = jd.role == DriveRole::Backup ? tr("Backup drive") : jd.role == DriveRole::Copy ? tr("Second copy") : tr("Backed up from");
+        QStringList kind;
+        if (!h.bus.empty()) kind << qs(h.bus);
+        if (!h.media.empty()) kind << qs(h.media);
+        dr.name = (h.model.empty() ? tr("Disk %1").arg(h.disk) : qs(h.model)) + " (" + kind.join(' ') +
+                  (kind.isEmpty() ? QString() : QStringLiteral(", ")) + format_bytes(h.size) + ")";
+        QStringList notes;
+        const bool bad = h.status == os::DriveHealth::Status::Warning || h.status == os::DriveHealth::Status::Unhealthy;
+        switch (h.status) {
+            case os::DriveHealth::Status::Healthy: notes << tr("healthy"); break;
+            case os::DriveHealth::Status::Warning: notes << tr("warning"); break;
+            case os::DriveHealth::Status::Unhealthy: notes << tr("failing"); break;
+            case os::DriveHealth::Status::Unknown: notes << tr("health unknown"); break;
+        }
+        if (!h.condition.empty()) notes << qs(h.condition);
+        if (h.read_errors_uncorrected.value_or(0) > 0)
+            notes << tr("%1 unrecoverable read errors").arg(*h.read_errors_uncorrected);
+        if (h.temperature) notes << tr("%1 °C").arg(*h.temperature);
+        if (h.wear) notes << tr("%1% worn").arg(*h.wear);
+        dr.problem = bad || !h.condition.empty() || h.read_errors_uncorrected.value_or(0) > 0;
+        // A backup on the same disk as what it backs up is lost with it.
+        if (jd.role != DriveRole::Source && source_disks.contains(h.disk)) {
+            notes << tr("the same drive as the backed-up files, so one drive failure loses both");
+            dr.problem = true;
+        }
+        dr.status = notes.join(QStringLiteral(", "));
+        if (dr.problem && d.warning.isEmpty() && (bad || !h.condition.empty()) && jd.role != DriveRole::Source)
+            d.warning = tr("The drive with the backup reports a problem (%1: %2). Copy the backup to another drive "
+                           "soon, before it fails.").arg(dr.name, dr.status);
+        d.drives.push_back(std::move(dr));
     }
 
     // Backup days.

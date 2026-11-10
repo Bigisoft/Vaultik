@@ -11,6 +11,7 @@
 
 #include "repo_handle.h"
 #include "vaultik/jobs/job.hpp"
+#include "vaultik/platform/drive_health.hpp"
 
 class FindPage;
 class QLabel;
@@ -162,6 +163,20 @@ private:
     void close_mounts();
     void update_mounts_button();
     std::vector<Mount> mounts_;
+
+    // The drives of a job (its destination, second copy and sources) with their health, looked
+    // up at most every 10 minutes per job (it takes a moment).
+    enum class DriveRole { Backup, Copy, Source };
+    struct JobDrive {
+        DriveRole role;
+        vaultik::os::DriveHealth health;
+    };
+    struct DriveCache {
+        std::chrono::steady_clock::time_point when{};
+        std::vector<JobDrive> drives;
+    };
+    const std::vector<JobDrive>& drives_of(const vaultik::jobs::Job& job);
+    std::map<std::string, DriveCache> drive_cache_;
     QPushButton* mounts_button_ = nullptr;
 
     Runner* runner_ = nullptr;

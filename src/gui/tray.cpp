@@ -114,6 +114,11 @@ void Tray::check() {
                 // Always shown: this is the one that must not be missed.
                 icon_->showMessage(tr("%1: files may be encrypted by ransomware").arg(name),
                                    qs(r.alert).left(250), QSystemTrayIcon::Critical, 30000);
+            } else if (fresh && settings.notify_failures && !r.drive.empty() && r.status != jobs::RunStatus::Failed) {
+                // Saved, but the drive it is on says it is failing: the time to act is now.
+                icon_->showMessage(tr("The backup drive of %1 reports a problem").arg(name),
+                                   tr("%1. Copy the backup to another drive soon, before it fails.").arg(qs(r.drive)),
+                                   QSystemTrayIcon::Warning, 30000);
             } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed) {
                 icon_->showMessage(tr("Backup failed: %1").arg(name), qs(r.message).left(200), QSystemTrayIcon::Critical,
                                    15000);

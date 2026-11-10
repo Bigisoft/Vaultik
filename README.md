@@ -342,6 +342,15 @@ the new version but warns (`"alert"` in the history and the `done` event), pins 
 before it with a note, and the job skips removing old versions that run. The frontend shows the
 warning and the tray icon turns red.
 
+### Drive health
+
+The Overview shows the drives a job uses (the backup drive, the second copy's and the drives
+backed up from) with the health Windows reports for them, and flags a backup kept on the same
+physical drive as the files it backs up. A backup drive that reports a warning or a failing
+condition puts a banner on the Overview, and `run-job` records it in the history (`"drive"`),
+so the tray says so too. `vaultik drives` lists every drive; temperature, wear and error counts
+need administrator rights.
+
 ### Health checks
 
 After `run-job` saves a version, it runs the job's health check when one is due (`--no-check`

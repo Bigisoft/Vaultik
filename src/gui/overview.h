@@ -34,6 +34,15 @@ struct OverviewData {
     QString check_when;
     QString check_detail;
 
+    // The drives involved, as Windows reports their health.
+    struct Drive {
+        QString role;    // "Backup drive", "Second copy", "Backed up from"
+        QString name;    // "WD My Passport 2627 (USB HDD, 4.55 TiB)"
+        QString status;  // "healthy", or the problem
+        bool problem = false;
+    };
+    std::vector<Drive> drives;
+
     // Backup results per day (the best one of the day).
     enum class Day { None, Saved, Partial, Failed };
     std::map<QDate, Day> days;
@@ -86,5 +95,7 @@ private:
     QLabel* warning_text_ = nullptr;
     Tile last_, next_, versions_, health_;
     BackupCalendar* calendar_ = nullptr;
+    QWidget* drives_box_ = nullptr;
+    QWidget* drives_list_ = nullptr;  // rebuilt on each set_data
     QPushButton* check_ = nullptr;
 };

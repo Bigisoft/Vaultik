@@ -101,6 +101,7 @@ if(WIN32)
         src/vaultik/crypto/crypto_win.cpp
         src/vaultik/platform/os_win.cpp
         src/vaultik/ops/mount_win.cpp
+        src/vaultik/platform/drive_health_win.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
@@ -108,13 +109,14 @@ if(WIN32)
         /W4 /permissive- /utf-8 /EHsc /Zc:__cplusplus /Zc:preprocessor
         $<$<CONFIG:Release>:/O2 /Gy /Gw>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
-                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib)
+                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib wbemuuid oleaut32)
 else()
     target_sources(vaultik_core PRIVATE
         src/vaultik/util/resources_posix.cpp
         src/vaultik/crypto/crypto_openssl.cpp
         src/vaultik/platform/os_posix.cpp
         src/vaultik/ops/mount_posix.cpp
+        src/vaultik/platform/drive_health_posix.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC _GNU_SOURCE _FILE_OFFSET_BITS=64)
     target_compile_options(vaultik_core PUBLIC -Wall -Wextra -Wpedantic $<$<CONFIG:Release>:-O2>)

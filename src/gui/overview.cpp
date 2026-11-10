@@ -9,6 +9,7 @@
 #include <QLocale>
 #include <QPainter>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QToolTip>
 #include <QVBoxLayout>
 
@@ -175,8 +176,20 @@ OverviewView::Tile OverviewView::make_tile(const QString& title, QWidget*& frame
 }
 
 OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 12, 0, 0);
+    // The page scrolls when the window is too low for it, instead of squeezing the tiles.
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto* scroll = new QScrollArea;
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setStyleSheet(QStringLiteral("QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"));
+    auto* content = new QWidget;
+    scroll->setWidget(content);
+    outer->addWidget(scroll);
+
+    auto* layout = new QVBoxLayout(content);
+    layout->setContentsMargins(0, 12, 6, 0);
     layout->setSpacing(12);
 
     // A banner when something needs attention.
@@ -216,6 +229,22 @@ OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
     layout->addLayout(grid);
+
+    // The drives involved and their health; filled by set_data.
+    auto* drives = new QFrame;
+    drives->setProperty("role", "card");
+    auto* dl = new QVBoxLayout(drives);
+    dl->setContentsMargins(16, 14, 16, 14);
+    dl->setSpacing(6);
+    auto* drives_title = new QLabel(tr("Drives"));
+    drives_title->setProperty("role", "section");
+    dl->addWidget(drives_title);
+    drives_list_ = new QWidget;
+    new QGridLayout(drives_list_);
+    drives_list_->layout()->setContentsMargins(0, 0, 0, 0);
+    dl->addWidget(drives_list_);
+    drives_box_ = drives;
+    layout->addWidget(drives_box_);
 
     auto* cal = new QFrame;
     cal->setProperty("role", "card");
@@ -275,4 +304,33 @@ void OverviewView::set_data(const OverviewData& d) {
         health_.detail->setText(tr("A check runs after a backup once a week, or choose Check now."));
     }
     calendar_->set_days(d.days);
+
+    // One row per drive: its role, the drive, and its health (in colour when it has a problem).
+    auto* grid = static_cast<QGridLayout*>(drives_list_->layout());
+    while (QLayoutItem* item = grid->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+    drives_box_->setVisible(!d.drives.empty());
+    const Theme& t = theme();
+    int row = 0;
+    for (const OverviewData::Drive& drive : d.drives) {
+        auto* role = new QLabel(drive.role);
+        role->setProperty("role", "muted");
+        auto* icon_label = new QLabel;
+        icon_label->setPixmap(status_icon(drive.problem ? vaultik::jobs::RunStatus::Failed : vaultik::jobs::RunStatus::Success)
+                                  .pixmap(16, 16));
+        auto* name = new QLabel(drive.name);
+        name->setTextFormat(Qt::PlainText);
+        auto* status = new QLabel(drive.status);
+        status->setTextFormat(Qt::PlainText);
+        status->setWordWrap(true);
+        if (drive.problem) status->setStyleSheet(QStringLiteral("color: %1;").arg(t.danger.name()));
+        grid->addWidget(role, row, 0);
+        grid->addWidget(icon_label, row, 1);
+        grid->addWidget(name, row, 2);
+        grid->addWidget(status, row, 3);
+        ++row;
+    }
+    grid->setColumnStretch(3, 1);
 }
