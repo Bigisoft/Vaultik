@@ -5,6 +5,7 @@
 #include <optional>
 
 #include "vaultik/ops/backup.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 
 namespace vaultik {
@@ -73,6 +74,13 @@ private:
     void restore_link(const Node& node, const std::string& path);
     void ensure_dir(const std::string& path);
     void ensure_dir_chain(const std::string& path);
+    // Whether a real path (File::final_path) lies in the target folder; true when it cannot be
+    // told. Every item is checked once made, so nothing is written where a link led it.
+    bool inside(const std::string& final) const;
+    // Deletes what is at `path` (a file or link, never a folder's content) for an overwrite,
+    // through a handle on exactly that item, once it is known to be in the target folder.
+    // Whether nothing is there now.
+    bool remove_existing(const std::string& path);
     void warn(const std::string& message);
     void report();
     void check_cancel();
@@ -81,9 +89,42 @@ private:
     const RestoreOptions& options_;
     RestoreResult result_;
     std::uint64_t kept_permissions_ = 0;  // existing folders whose stored permissions were not applied
+    std::string root_;                    // the target's real path, for inside()
     RestoreProgress progress_;
     std::chrono::steady_clock::time_point last_report_{};
 };
+
+bool RestoreEngine::inside(const std::string& final) const {
+    if (final.empty() || root_.empty()) return true;
+    const auto lower = [](std::string t) {
+        for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return t;
+    };
+    const std::string f = lower(final);
+    const std::string r = lower(root_);
+    if (f.compare(0, r.size(), r) != 0) return false;
+    return f.size() == r.size() || f[r.size()] == '\\' || f[r.size()] == '/' || r.back() == '\\' || r.back() == '/';
+}
+
+bool RestoreEngine::remove_existing(const std::string& path) {
+    os::ErrorCode err = 0;
+    os::File item = os::File::open_for_delete(path, err);
+    if (!item.valid()) {
+        if (os::is_not_supported(err)) {
+            os::make_writable(path);
+            os::remove_file(path);
+            return !entry_type(path);
+        }
+        return !entry_type(path);
+    }
+    if (!inside(item.final_path())) {
+        warn("skipped " + path + ": it leads outside the folder restored into");
+        return false;
+    }
+    const os::ErrorCode e = item.discard();
+    item.close();
+    return e == 0;
+}
 
 void RestoreEngine::warn(const std::string& message) {
     ++result_.errors;
@@ -131,19 +172,25 @@ void RestoreEngine::restore_file(const Node& node, const std::string& path) {
         // Replace only regular files. A link is removed rather than written through (it could
         // point anywhere); a folder is left alone.
         const std::optional<os::EntryType> existing = entry_type(path);
-        if (existing && *existing != os::EntryType::File) {
-            if (*existing == os::EntryType::Dir || os::remove_file(path) != 0) {
-                warn("cannot replace " + path + ": a folder or link with that name exists");
-                return;
-            }
-        } else if (existing) {
-            os::make_writable(path);  // allow replacing read-only files
+        if (existing && *existing == os::EntryType::Dir) {
+            warn("cannot replace " + path + ": a folder with that name exists");
+            return;
+        }
+        if (existing && !remove_existing(path)) {
+            warn("cannot replace " + path);
+            return;
         }
     }
     os::ErrorCode err = 0;
     // Private until the content and final permissions are in place; snapshots from Windows carry
     // no permissions, so those get the umask default.
     os::File file = os::File::create(path, options_.overwrite, err, node.mode != 0 ? 0600 : 0666);
+    if (file.valid() && !inside(file.final_path())) {
+        file.discard();
+        file.close();
+        warn("skipped " + path + ": a link led it outside the folder restored into");
+        return;
+    }
     if (!file.valid()) {
         if (os::is_exists(err)) {
             ++result_.skipped;
@@ -233,7 +280,7 @@ void RestoreEngine::restore_link(const Node& node, const std::string& path) {
     }
     if (options_.overwrite) {
         const std::optional<os::EntryType> existing = entry_type(path);
-        if (existing && *existing != os::EntryType::Dir) os::remove_file(path);
+        if (existing && *existing != os::EntryType::Dir) remove_existing(path);
     }
     constexpr std::uint32_t kDirectoryAttribute = 0x10;
     const os::ReparseLink link{node.link->tag, node.link->target, node.link->relative};
@@ -253,7 +300,7 @@ void RestoreEngine::restore_link(const Node& node, const std::string& path) {
 void RestoreEngine::restore_symlink(const Node& node, const std::string& path) {
     if (options_.overwrite) {
         const std::optional<os::EntryType> existing = entry_type(path);
-        if (existing && *existing != os::EntryType::Dir) os::remove_file(path);
+        if (existing && *existing != os::EntryType::Dir) remove_existing(path);
     }
     const os::ErrorCode err = os::make_symlink(node.link_target, path);
     if (err != 0) {
@@ -295,6 +342,11 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
             // and its path could lead somewhere else by now.
             os::ErrorCode err = 0;
             os::File made = os::File::create_directory(path, err);
+            if (made.valid() && !inside(made.final_path())) {
+                made.discard();
+                warn("skipped " + path + ": a link led it outside the folder restored into");
+                return;
+            }
             os::File existing;
             if (!made.valid()) {
                 // Only a folder that is there already (or a system without the call) goes on
@@ -314,6 +366,10 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
                 // restored (an elevated restore must not be led into another folder).
                 os::ErrorCode held_err = 0;
                 existing = os::File::hold_directory(path, true, held_err);
+                if (existing.valid() && !inside(existing.final_path())) {
+                    warn("skipped " + path + ": it leads outside the folder restored into");
+                    return;
+                }
                 if (!existing.valid() && !os::is_not_supported(held_err)) {
                     warn("skipped " + path + ": " + (held_err == kStoppedOnLink
                                                           ? std::string("a link or junction is in the folder's place")
@@ -357,7 +413,26 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
     // Work under the target's real path, with any link or junction on the way resolved now, and
     // hold every folder of it open from the top down, so none can be renamed, replaced by a link
     // or repointed during the restore. Every one of them must be a real folder.
-    if (const std::string resolved = os::final_path(root); !resolved.empty()) root = resolved;
+    if (const std::string resolved = os::final_path(root); !resolved.empty()) {
+        // With administrator rights, a link or junction where the user typed a folder could send
+        // the restore anywhere: only the folder itself is accepted then.
+        const auto same = [](const std::string& a, const std::string& b) {
+            const auto trim = [](std::string t) {
+                while (t.size() > 3 && (t.back() == '\\' || t.back() == '/')) t.pop_back();
+                return t;
+            };
+            const std::string x = trim(a);
+            const std::string y = trim(b);
+            return x.size() == y.size() && std::equal(x.begin(), x.end(), y.begin(), [](char p, char q) {
+                       return std::tolower(static_cast<unsigned char>(p)) == std::tolower(static_cast<unsigned char>(q));
+                   });
+        };
+        if (!same(resolved, root) && os::process_elevated())
+            throw Error("cannot restore into " + root + " with administrator rights: it leads to " + resolved +
+                        " through a link or junction; choose " + resolved + " itself");
+        root = resolved;
+        root_ = resolved;
+    }
     std::vector<os::File> held;
     {
         std::vector<std::string> chain;

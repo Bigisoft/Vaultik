@@ -183,6 +183,16 @@ public:
     // Applies a security descriptor through this handle (create_directory's). Without the right
     // to set another owner, the access list alone.
     ErrorCode set_security(ByteSpan descriptor);
+    // Windows: opens a file, folder or link itself (never what a link points to) only to delete
+    // it with discard(), so where it really is can be checked first. Not supported on POSIX.
+    static File open_for_delete(const std::string& path, ErrorCode& err);
+    // Where this file really is, every link and junction on the way resolved ("C:\x\y");
+    // empty when it cannot be told (POSIX).
+    std::string final_path() const;
+    // Deletes the file or empty folder this handle is open on (a read-only one too), whatever its
+    // path leads to now. Needs a handle with delete access: create's, create_directory's or
+    // open_for_delete's. Not supported on POSIX.
+    ErrorCode discard();
 
     bool valid() const;
     void close();

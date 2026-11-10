@@ -331,7 +331,7 @@ File File::create(const std::string& path, bool overwrite, ErrorCode& err, std::
     // the old entry is deleted first rather than truncated: DeleteFileW removes a link itself, not
     // its target, and a fresh file cannot be a hard link to some other file.
     for (int attempt = 0; attempt < 3; ++attempt) {
-        File f(open_handle(path, GENERIC_WRITE, 0, CREATE_NEW, kFlags, err));
+        File f(open_handle(path, GENERIC_WRITE | DELETE, 0, CREATE_NEW, kFlags, err));
         if (f.valid() || !overwrite || !is_exists(err)) return f;
         if (!DeleteFileW(native(path).c_str())) {
             err = GetLastError();
@@ -383,14 +383,17 @@ File File::create_directory(const std::string& path, ErrorCode& err) {
     constexpr ULONG kFileCreate = 2;
     constexpr ULONG kOptions = 0x00000001 /* FILE_DIRECTORY_FILE */ | 0x00000020 /* FILE_SYNCHRONOUS_IO_NONALERT */ |
                                0x00200000 /* FILE_OPEN_REPARSE_POINT */;
-    const ACCESS_MASK base = SYNCHRONIZE | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+    // FILE_TRAVERSE takes part in sharing checks, so with no delete or write sharing nobody can
+    // rename, delete or turn the folder into a junction while it is open; DELETE lets a folder
+    // made in the wrong place be removed again.
+    const ACCESS_MASK base = SYNCHRONIZE | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES |
+                             FILE_TRAVERSE | DELETE;
     // With the right to set another owner (elevated) ask for it too; without, the folder is made
     // with what the account may have.
     for (const ACCESS_MASK access : {base | WRITE_OWNER, base}) {
         HANDLE h = nullptr;
-        const LONG status = nt_create(&h, access, &oa, &iosb, nullptr, FILE_ATTRIBUTE_NORMAL,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE, kFileCreate, kOptions,
-                                      nullptr, 0);
+        const LONG status = nt_create(&h, access, &oa, &iosb, nullptr, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ,
+                                      kFileCreate, kOptions, nullptr, 0);
         if (status >= 0) {
             err = 0;
             return File(reinterpret_cast<std::intptr_t>(h));
@@ -403,10 +406,10 @@ File File::create_directory(const std::string& path, ErrorCode& err) {
 }
 
 File File::hold_directory(const std::string& path, bool real_folder, ErrorCode& err) {
-    // Listing access takes part in sharing checks, and without FILE_SHARE_DELETE nobody can open
-    // the folder to rename or delete it while this handle is open.
-    File f(open_handle(path, FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, err));
+    // Traverse access takes part in sharing checks, and without delete or write sharing nobody
+    // can open the folder to rename or delete it, or to make it a junction, while this is open.
+    File f(open_handle(path, FILE_TRAVERSE | SYNCHRONIZE, FILE_SHARE_READ, OPEN_EXISTING,
+                       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, err));
     if (!f.valid() || !real_folder) return f;
     FILE_ATTRIBUTE_TAG_INFO tag{};
     if (!GetFileInformationByHandleEx(as_handle(f.h_), FileAttributeTagInfo, &tag, sizeof tag)) {
@@ -418,6 +421,43 @@ File File::hold_directory(const std::string& path, bool real_folder, ErrorCode& 
         return File();
     }
     return f;
+}
+
+File File::open_for_delete(const std::string& path, ErrorCode& err) {
+    return File(open_handle(path, DELETE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, err));
+}
+
+std::string File::final_path() const {
+    if (!valid()) return {};
+    std::wstring buf(1024, L'\0');
+    DWORD n = GetFinalPathNameByHandleW(as_handle(h_), buf.data(), static_cast<DWORD>(buf.size()), FILE_NAME_NORMALIZED);
+    if (n >= buf.size()) {
+        buf.resize(n + 1);
+        n = GetFinalPathNameByHandleW(as_handle(h_), buf.data(), static_cast<DWORD>(buf.size()), FILE_NAME_NORMALIZED);
+    }
+    if (n == 0 || n >= buf.size()) return {};
+    buf.resize(n);
+    return narrow(strip_long_prefix(buf));
+}
+
+ErrorCode File::discard() {
+    if (!valid()) return ERROR_INVALID_HANDLE;
+    // FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.
+    FILE_DISPOSITION_INFO_EX ex{0x1 | 0x10};
+    if (SetFileInformationByHandle(as_handle(h_), FileDispositionInfoEx, &ex, sizeof ex)) return 0;
+    // Older Windows: clear read-only first, then the plain way.
+    FILE_BASIC_INFO basic{};
+    if (GetFileInformationByHandleEx(as_handle(h_), FileBasicInfo, &basic, sizeof basic) &&
+        (basic.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0) {
+        basic.FileAttributes &= ~static_cast<DWORD>(FILE_ATTRIBUTE_READONLY);
+        if (basic.FileAttributes == 0) basic.FileAttributes = FILE_ATTRIBUTE_NORMAL;
+        SetFileInformationByHandle(as_handle(h_), FileBasicInfo, &basic, sizeof basic);
+    }
+    FILE_DISPOSITION_INFO plain{TRUE};
+    if (SetFileInformationByHandle(as_handle(h_), FileDispositionInfo, &plain, sizeof plain)) return 0;
+    return GetLastError();
 }
 
 ErrorCode File::set_security(ByteSpan descriptor) {

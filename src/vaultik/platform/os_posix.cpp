@@ -635,6 +635,19 @@ ErrorCode File::set_security(ByteSpan /*descriptor*/) {
     return ENOTSUP;
 }
 
+File File::open_for_delete(const std::string& /*path*/, ErrorCode& err) {
+    err = ENOTSUP;
+    return File();
+}
+
+std::string File::final_path() const {
+    return {};
+}
+
+ErrorCode File::discard() {
+    return ENOTSUP;
+}
+
 std::string final_path(const std::string& /*path*/) {
     return {};
 }
