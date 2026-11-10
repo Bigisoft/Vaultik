@@ -439,6 +439,8 @@ QWidget* JobDialog::build_schedule() {
     form->addRow(QString(), admin_);
     connect(admin_, &QCheckBox::toggled, this, &JobDialog::update_on_connect);
     auto* admin_note = new QLabel(tr("Lets scheduled runs back up open and locked files through a shadow copy. "
+                                     "Scheduled runs use the system account, so they also run when nobody is "
+                                     "signed in, but cannot reach network shares. "
                                      "Windows asks for administrator approval each time the job is saved. "
                                      "Vaultik must be installed in a folder only administrators can change, "
                                      "such as C:\\Program Files\\Vaultik."));

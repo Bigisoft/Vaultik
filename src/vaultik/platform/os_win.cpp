@@ -687,10 +687,11 @@ std::string volume_root(const std::string& volume) {
     return narrow(std::wstring(paths.c_str()));
 }
 
-Bytes protect_secret(ByteSpan plain) {
+Bytes protect_secret(ByteSpan plain, bool machine) {
     DATA_BLOB in{static_cast<DWORD>(plain.size()), const_cast<BYTE*>(plain.data())};
     DATA_BLOB out{};
-    if (!CryptProtectData(&in, L"Vaultik", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out))
+    const DWORD flags = CRYPTPROTECT_UI_FORBIDDEN | (machine ? CRYPTPROTECT_LOCAL_MACHINE : 0);
+    if (!CryptProtectData(&in, L"Vaultik", nullptr, nullptr, nullptr, flags, &out))
         throw_last_error("cannot protect the stored password");
     Bytes sealed(out.pbData, out.pbData + out.cbData);
     LocalFree(out.pbData);

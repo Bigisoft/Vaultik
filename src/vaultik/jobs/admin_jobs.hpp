@@ -6,8 +6,10 @@
 //   - the job and its password are copied, with the user's approval, into an admin-only store,
 //     <ProgramData>\Vaultik\admin\<user SID>\ (jobs/, secrets/, history/ as in JobStore), which the
 //     user can read but not change;
-//   - the scheduled task runs "run-job <id> --admin", which reads only that store, after checking
-//     that it is still admin-only.
+//   - the scheduled task runs as the system account (not the user's own, whose profile, registry
+//     and environment any program of the user's can change), as "run-job <id> --admin --user
+//     <SID>", which reads only that store, after checking that it is still admin-only. Secrets
+//     there are sealed with the computer's key, so the system account can open them.
 // The user's own store keeps the job as edited in the GUI; saving it copies it again.
 
 #include <string>
@@ -19,6 +21,14 @@ namespace vaultik::jobs {
 
 // The admin store of the account `sid` (default: the current one). Throws on POSIX.
 std::string admin_store_dir(const std::string& sid = {});
+
+// In a run as the system account ("run-job --admin --user <SID>"): the admin store used from now on
+// is that account's. Throws Error unless this process runs as the system account and `sid` is an
+// account's SID. No-op on POSIX.
+void act_for_account(const std::string& sid);
+
+// Whether `path` is inside some account's admin store (its secrets are sealed for the machine).
+bool in_admin_store(const std::string& path);
 
 // With administrator rights: the current account's admin store, created when it is missing.
 std::string own_admin_store();

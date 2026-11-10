@@ -278,8 +278,12 @@ TEST_CASE("scheduler definitions") {
     CHECK(xml.find("<StartWhenAvailable>true</StartWhenAvailable>") != std::string::npos);
     CHECK(xml.find("<RunLevel>LeastPrivilege</RunLevel>") != std::string::npos);
     j.run_as_admin = true;
-    CHECK(schedule_definition(j, "C:\\x").find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos);
-    CHECK(schedule_definition(j, "C:\\x").find("--admin</Arguments>") != std::string::npos);
+    const std::string admin = schedule_definition(j, "C:\\x");
+    CHECK(admin.find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos);
+    CHECK(admin.find("<UserId>S-1-5-18</UserId>") != std::string::npos);  // the system account
+    CHECK(admin.find("InteractiveToken") == std::string::npos);
+    CHECK(admin.find("--admin --user " + vaultik::os::current_user_sid() + "</Arguments>") != std::string::npos);
+    CHECK(admin.find("<SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;") != std::string::npos);
     CHECK(xml.find("--admin") == std::string::npos);
     j.run_as_admin = false;
     j.schedule.skip_on_battery = true;
@@ -409,3 +413,21 @@ TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {
     set_alert_secret("telegram", "", tmp.dir());
     CHECK(alert_secret("telegram", tmp.dir()).empty());
 }
+
+#ifdef _WIN32
+TEST_CASE("jobs with administrator rights run as the system account") {
+    using namespace vaultik;
+    // Only a run as the system account works for another account.
+    CHECK_THROWS(jobs::act_for_account(os::current_user_sid()));
+    // The admin store's secrets are sealed with the computer's key; others with the account's.
+    const std::string store = jobs::admin_store_dir("S-1-5-21-1-2-3-1001");
+    CHECK(jobs::in_admin_store(os::join(os::join(store, "secrets"), "x.key")));
+    CHECK_FALSE(jobs::in_admin_store(os::join(os::program_data_dir(), "Vaultik\\other\\x.key")));
+    CHECK_FALSE(jobs::in_admin_store("C:\\Users\\someone\\AppData\\Local\\Vaultik\\secrets\\x.key"));
+    const std::string text = "secret";
+    const ByteSpan plain(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
+    const Bytes machine = os::protect_secret(plain, true);
+    const Bytes back = os::unprotect_secret(machine);
+    CHECK(std::string(back.begin(), back.end()) == text);
+}
+#endif

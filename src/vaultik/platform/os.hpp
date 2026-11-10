@@ -296,7 +296,10 @@ void append_file(const std::string& path, ByteSpan data, std::uint32_t mode = 06
 
 // Encrypts a secret so only the current user can read it back (Windows DPAPI). On POSIX the
 // data is returned unchanged and protection comes from the file mode (0600).
-Bytes protect_secret(ByteSpan plain);
+// `machine`: sealed with the computer's key instead of the account's (Windows), so another account
+// (the system account of a job with administrator rights) can open it; the file's permissions are
+// then all that keeps others out.
+Bytes protect_secret(ByteSpan plain, bool machine = false);
 Bytes unprotect_secret(ByteSpan sealed);  // throws Error when it cannot be decrypted
 
 // ---- process ------------------------------------------------------------------------------

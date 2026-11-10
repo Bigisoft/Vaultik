@@ -1,5 +1,7 @@
 #include "vaultik/jobs/job.hpp"
 
+#include "vaultik/jobs/admin_jobs.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
@@ -654,7 +656,8 @@ std::string copy_secret_path(const std::string& dir, const std::string& id) {
 }
 
 void seal_to(const std::string& path, const std::string& secret) {
-    Bytes sealed = os::protect_secret(bytes_of(secret));
+    // In the admin store the system account reads it (see admin_jobs.hpp).
+    Bytes sealed = os::protect_secret(bytes_of(secret), in_admin_store(path));
     os::write_file_atomic(path, sealed, 0600);
     secure_wipe(sealed.data(), sealed.size());
 }

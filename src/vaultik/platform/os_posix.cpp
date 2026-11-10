@@ -497,7 +497,7 @@ std::string volume_root(const std::string& /*volume*/) {
     return {};
 }
 
-Bytes protect_secret(ByteSpan plain) {
+Bytes protect_secret(ByteSpan plain, bool /*machine*/) {
     return Bytes(plain.begin(), plain.end());  // protected by the 0600 file mode
 }
 

@@ -340,7 +340,8 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
     if (approved && same_secrets && same_alerts && to_json(*approved) == to_json(job)) return;
     if (job.sources.size() > 12 || job.excludes.size() > 12)
         throw Error("the job has too many folders or patterns to show in full for approval (at most 12 of each)");
-    std::wstring text = L"The backup job \"" + shown(job.name, "the job's name") + L"\" will run with administrator rights.\n\n";
+    std::wstring text = L"The backup job \"" + shown(job.name, "the job's name") +
+                        L"\" will run as the system account, with full administrator rights.\n\n";
     if (!job.before_command.empty())
         text += L"Command run before each backup:\n    " + shown(job.before_command, "the command before the backup") + L"\n";
     if (!job.after_command.empty())
@@ -407,8 +408,24 @@ std::string vaultik_root() {
     return os::join(os::program_data_dir(), "Vaultik");
 }
 
+constexpr const char* kSystemSid = "S-1-5-18";
+
+// The account a run as the system account works for (act_for_account).
+std::string& acting_account() {
+    static std::string sid;
+    return sid;
+}
+
 std::string sid_or_current(const std::string& sid) {
-    return sid.empty() ? os::current_user_sid() : sid;
+    if (!sid.empty()) return sid;
+    if (!acting_account().empty()) return acting_account();
+    return os::current_user_sid();
+}
+
+// "S-1-5-21-...": it names folders and goes into task definitions.
+bool account_sid(const std::string& sid) {
+    return sid.size() > 8 && sid.size() <= 184 && sid.starts_with("S-1-5-") && sid != kSystemSid &&
+           std::all_of(sid.begin() + 2, sid.end(), [](unsigned char c) { return (c >= '0' && c <= '9') || c == '-'; });
 }
 
 // The admin store is trusted only when nobody without administrator rights can change it, or
@@ -430,6 +447,7 @@ void check_admin_store(const std::string& dir) {
 // Elevated side: the same account, with its full administrator token.
 void check_elevated_caller(const std::string& user_sid) {
     if (!os::process_elevated()) throw Error("this step needs administrator rights");
+    if (!account_sid(user_sid)) throw Error("not an account: " + user_sid);
     if (os::current_user_sid() != user_sid) {
         throw Error("the approval was given with a different account. A job can run with administrator rights "
                     "only for an account that is an administrator itself");
@@ -452,6 +470,30 @@ std::string prepare_admin_store(const std::string& sid) {
 
 std::string admin_store_dir(const std::string& sid) {
     return os::join(os::join(vaultik_root(), "admin"), sid_or_current(sid));
+}
+
+void act_for_account(const std::string& sid) {
+#ifdef _WIN32
+    if (os::current_user_sid() != kSystemSid) throw Error("--user is only for runs as the system account");
+    if (!account_sid(sid)) throw Error("not an account: " + sid);
+    acting_account() = sid;
+#else
+    (void)sid;
+#endif
+}
+
+bool in_admin_store(const std::string& path) {
+#ifdef _WIN32
+    try {
+        const std::string root = os::fold_case(os::join(os::join(vaultik_root(), "admin"), ""));
+        return os::fold_case(os::absolute_path(path)).starts_with(root);
+    } catch (const Error&) {
+        return false;
+    }
+#else
+    (void)path;
+    return false;
+#endif
 }
 
 std::string admin_error_file(const std::string& sid) {
@@ -529,6 +571,18 @@ namespace {
 // Every file in the program folder admin-only too (below): a library planted there would load
 // into an elevated run.
 void check_whole_program_dir(const std::string& program_dir);
+
+// A network share: "\\server\share\..." or a drive letter mapped to one.
+bool on_network(const std::string& path) {
+    if (path.empty() || is_cloud_location(path)) return false;
+    std::string p = path;
+    if (p.starts_with("\\\\?\\UNC\\") || p.starts_with("//?/UNC/")) return true;
+    if (p.starts_with("\\\\?\\") || p.starts_with("\\\\.\\")) p = p.substr(4);
+    if (p.starts_with("\\\\") || p.starts_with("//")) return true;
+    if (p.size() < 2 || p[1] != ':') return false;
+    const std::wstring root = widen(p.substr(0, 2)) + L"\\";
+    return GetDriveTypeW(root.c_str()) == DRIVE_REMOTE;
+}
 }  // namespace
 #endif
 
@@ -543,6 +597,16 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
     std::optional<Job> job = from.find(id);
     if (!job || job->id != id) throw Error("there is no saved job \"" + id + "\"");
     if (!job->run_as_admin) throw Error("the job \"" + job->name + "\" is not set to run with administrator rights");
+    // The run is the system account's, which has no sign-in for a network share.
+    for (const std::string* where : {&job->repository, &job->second_copy.repository})
+        if (on_network(*where))
+            throw Error("a job with administrator rights runs as the system account, which cannot sign in to the "
+                        "network share " + *where + "; back up to a drive of this computer or to a cloud or SFTP "
+                        "location, or turn off administrator rights for the job");
+    for (const std::string& src : job->sources)
+        if (on_network(src))
+            throw Error("a job with administrator rights runs as the system account, which cannot sign in to the "
+                        "network share " + src + "; turn off administrator rights for the job to back it up");
     std::string pw = from.password(id);
     std::string cloud = from.cloud_secret(id);
     std::string copy = from.copy_secret(id);

@@ -110,18 +110,27 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
         }
     }
     const std::string launcher = os::join(program_dir, "vaultik-task.exe");
-    // The task runs as the user who registers it, while they are logged on. HighestAvailable gives
-    // it the user's full administrator token, LeastPrivilege (the default) the filtered one.
+    // A job without administrator rights runs as the user who registers it, while they are logged
+    // on, with the filtered token. One with them runs as the system account (logged on or not):
+    // the user's own profile, registry and environment, which any program of theirs can change,
+    // play no part. The account it works for is passed on (its admin store); that account may read
+    // the task, and only administrators change it.
+    const std::string sid = job.run_as_admin ? os::current_user_sid() : std::string();
     const std::string principals =
-        std::string("  <Principals>\n    <Principal id=\"Author\">\n      <LogonType>InteractiveToken</LogonType>\n"
-                    "      <RunLevel>") +
-        (job.run_as_admin ? "HighestAvailable" : "LeastPrivilege") +
-        "</RunLevel>\n    </Principal>\n  </Principals>\n";
+        job.run_as_admin
+            ? "  <Principals>\n    <Principal id=\"Author\">\n      <UserId>S-1-5-18</UserId>\n"
+              "      <RunLevel>HighestAvailable</RunLevel>\n    </Principal>\n  </Principals>\n"
+            : "  <Principals>\n    <Principal id=\"Author\">\n      <LogonType>InteractiveToken</LogonType>\n"
+              "      <RunLevel>LeastPrivilege</RunLevel>\n    </Principal>\n  </Principals>\n";
+    const std::string security =
+        job.run_as_admin ? "<SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + xml_escape(sid) +
+                               ")</SecurityDescriptor>"
+                         : std::string();
     return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
            "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
            "  <RegistrationInfo><Description>Vaultik backup job: " +
-           xml_escape(job.name) +
-           "</Description></RegistrationInfo>\n"
+           xml_escape(job.name) + "</Description>" + security +
+           "</RegistrationInfo>\n"
            "  <Triggers>\n" +
            trigger +
            "  </Triggers>\n"
@@ -144,7 +153,7 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
            "    <Exec><Command>" +
            xml_escape(launcher) + "</Command><Arguments>run-job " + xml_escape(job.id) + " --scheduled" +
            // An administrator job reads only the admin-only copy of itself (see admin_jobs.hpp).
-           (job.run_as_admin ? " --admin" : "") +
+           (job.run_as_admin ? " --admin --user " + xml_escape(sid) : std::string()) +
            "</Arguments></Exec>\n"
            "  </Actions>\n"
            "</Task>\n";

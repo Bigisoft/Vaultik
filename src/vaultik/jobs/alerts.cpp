@@ -1,5 +1,7 @@
 #include "vaultik/jobs/alerts.hpp"
 
+#include "vaultik/jobs/admin_jobs.hpp"
+
 #include <chrono>
 #include <thread>
 
@@ -101,7 +103,7 @@ void set_alert_secret(const std::string& which, const std::string& secret, const
         os::remove_file(path);
         return;
     }
-    Bytes sealed = os::protect_secret(bytes_of(secret));
+    Bytes sealed = os::protect_secret(bytes_of(secret), in_admin_store(path));
     os::write_file_atomic(path, sealed, 0600);
 }
 

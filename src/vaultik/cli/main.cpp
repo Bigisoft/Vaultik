@@ -1296,7 +1296,11 @@ int restore_check(const Args& a, const jobs::JobStore& store, Repository& repo, 
 // The job's store: with --admin (the scheduled task of a job with administrator rights) only the
 // admin-only copy of the job is trusted, never the user's own settings.
 jobs::JobStore job_store(const Args& a) {
-    return a.has("--admin") ? jobs::open_admin_store() : jobs::JobStore();
+    if (!a.has("--admin")) return jobs::JobStore();
+    // Run as the system account for the account that approved the job (its admin store). A task
+    // from before that runs as the account itself, with its full token, and has no --user.
+    if (const auto sid = a.value("--user")) jobs::act_for_account(*sid);
+    return jobs::open_admin_store();
 }
 
 std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& store, const jobs::Job& job) {
