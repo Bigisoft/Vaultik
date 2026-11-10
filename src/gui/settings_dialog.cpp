@@ -2,6 +2,8 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDesktopServices>
+#include <QUrl>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -16,6 +18,7 @@
 #include "common.h"
 #include "hello.h"
 #include "translator.h"
+#include "updates.h"
 #include "theme.h"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/platform/acl.hpp"
@@ -184,6 +187,41 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     layout->addWidget(note(tr("Restoring, browsing, searching and comparing versions then need your face, fingerprint "
                               "or PIN, once until Vaultik is hidden again. Scheduled backups are not affected."),
                            26));
+    // Updates: only a question to GitHub; installing stays the user's step.
+    updates_ = new QCheckBox(tr("Check for a new version once a day"));
+    updates_->setChecked(s.check_updates);
+    auto* check_now = new QPushButton(tr("Check now"));
+    check_now->setProperty("role", "flat");
+    connect(check_now, &QPushButton::clicked, this, [this, check_now] {
+        check_now->setEnabled(false);
+        check_now->setText(tr("Checking..."));
+        check_for_update(this, [this, check_now](const UpdateResult& r) {
+            remember_update_check(r);
+            check_now->setEnabled(true);
+            check_now->setText(tr("Check now"));
+            show_update_result(this, r);
+        });
+    });
+    auto* updates_row = new QWidget;
+    auto* ur = new QHBoxLayout(updates_row);
+    ur->setContentsMargins(0, 0, 0, 0);
+    ur->addWidget(updates_);
+    ur->addStretch();
+    ur->addWidget(check_now);
+    layout->addSpacing(12);
+    layout->addWidget(heading(tr("Updates")));
+    layout->addWidget(updates_row);
+    const UpdateResult known = known_update();
+    if (known.newer) {
+        auto* get = new QPushButton(tr("Vaultik %1 is available: open its page").arg(known.version));
+        get->setProperty("role", "flat");
+        connect(get, &QPushButton::clicked, this, [known] { QDesktopServices::openUrl(QUrl(known.url)); });
+        layout->addWidget(get, 0, Qt::AlignLeft);
+    }
+    layout->addWidget(note(tr("Only asks GitHub for the newest version's number; nothing is downloaded or sent "
+                              "about you or your backups."),
+                           26));
+
     layout->addSpacing(10);
     layout->addWidget(buttons);
 
@@ -210,6 +248,7 @@ void SettingsDialog::accept() {
     s.notify_overdue = overdue_->isChecked();
     s.remind_after_days = remind_->value();
     s.require_hello = hello_->isChecked();
+    s.check_updates = updates_->isChecked();
     QSettings().setValue(QStringLiteral("ui/language"), language_->currentData().toString());
     s.save();
 

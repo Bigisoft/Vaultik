@@ -28,6 +28,7 @@ AppSettings AppSettings::load() {
     a.notify_failures = flag("notify/failures", a.notify_failures);
     a.notify_overdue = flag("notify/overdue", a.notify_overdue);
     a.require_hello = flag("security/hello", a.require_hello);
+    a.check_updates = flag("updates/check", a.check_updates);
     a.remind_after_days = std::clamp(s.value(QStringLiteral("notify/remind_after_days"), a.remind_after_days).toInt(), 0, 365);
     return a;
 }
@@ -42,6 +43,7 @@ void AppSettings::save() const {
     s.setValue(QStringLiteral("notify/failures"), notify_failures);
     s.setValue(QStringLiteral("notify/overdue"), notify_overdue);
     s.setValue(QStringLiteral("security/hello"), require_hello);
+    s.setValue(QStringLiteral("updates/check"), check_updates);
     s.setValue(QStringLiteral("notify/remind_after_days"), remind_after_days);
 }
 

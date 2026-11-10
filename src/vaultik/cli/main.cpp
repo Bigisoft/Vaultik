@@ -49,6 +49,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_history.hpp"
+#include "vaultik/jobs/update_check.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
@@ -194,6 +195,8 @@ Commands:
       --full                   Read all of the stored data
   alert-test                   Send a test message to the alert channels set up
                                in Settings (ntfy, Telegram, webhook)
+  update-check                 Ask GitHub whether a newer Vaultik was released
+                               (only asks; nothing is downloaded)
   test-restore <job>           Restore a few files of the newest version into a
                                temporary folder, check them (and compare them with
                                the unchanged files on this PC), then remove them
@@ -1751,6 +1754,20 @@ void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string
     for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
 }
 
+// "update-check": whether a newer Vaultik has been released (nothing is downloaded).
+int cmd_update_check(const Args&) {
+    const std::optional<jobs::Release> r = jobs::newer_release(VAULTIK_VERSION);
+    if (g_json) {
+        emit({{"event", "done"}, {"status", "success"}, {"update", r.has_value()},
+              {"version", r ? r->version : std::string()}, {"url", r ? r->url : std::string()}});
+    } else if (r) {
+        out("Vaultik " + r->version + " is available (this is " + VAULTIK_VERSION + "): " + r->url + "\n");
+    } else {
+        out(std::string("Vaultik ") + VAULTIK_VERSION + " is the newest version.\n");
+    }
+    return kExitOk;
+}
+
 // "alert-test": sends a test message to every alert channel that is set up.
 int cmd_alert_test(const Args&) {
     const jobs::AlertSettings s = jobs::load_alerts();
@@ -2710,6 +2727,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "check-job") return cmd_check_job(a);
     if (a.command == "test-restore") return cmd_test_restore(a);
     if (a.command == "alert-test") return cmd_alert_test(a);
+    if (a.command == "update-check") return cmd_update_check(a);
     if (a.command == "copy") return cmd_copy(a);
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
     if (a.command == "mount") return cmd_mount(a);

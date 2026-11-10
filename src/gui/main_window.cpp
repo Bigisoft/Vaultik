@@ -41,6 +41,7 @@
 #include <QVBoxLayout>
 
 #include "cloud_dialog.h"
+#include "updates.h"
 #include "common.h"
 #include "compare_dialog.h"
 #include "drive_watcher.h"
@@ -371,6 +372,24 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         if (!runner_->running() && QApplication::activeModalWidget() == nullptr) refresh_sidebar();
     });
     timer->start(30000);
+
+    // The daily update check: a few minutes after starting, then looked at every hour.
+    const auto check_updates = [this] {
+        if (!update_check_due()) return;
+        check_for_update(this, [this](const UpdateResult& r) {
+            const QString before = known_update().version;
+            remember_update_check(r);
+            if (!r.ok || !r.newer || r.version == before) return;  // tell about each version once
+            const QString title = tr("Vaultik %1 is available").arg(r.version);
+            const QString text = tr("Settings shows where to get it.");
+            if (tray_ != nullptr) tray_->notify(title, text);
+            status_->showMessage(title + "  " + text, 60000);
+        });
+    };
+    QTimer::singleShot(3 * 60 * 1000, this, check_updates);
+    auto* update_timer = new QTimer(this);
+    connect(update_timer, &QTimer::timeout, this, check_updates);
+    update_timer->start(60 * 60 * 1000);
 
     refresh_icons();
     reload_jobs();

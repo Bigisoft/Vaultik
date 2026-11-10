@@ -32,5 +32,6 @@ private:
     QCheckBox* overdue_ = nullptr;
     QSpinBox* remind_ = nullptr;
     QCheckBox* hello_ = nullptr;
+    QCheckBox* updates_ = nullptr;
     QComboBox* language_ = nullptr;
 };

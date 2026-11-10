@@ -76,6 +76,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/job.cpp
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
+    src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
 )
@@ -182,6 +183,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/image_decode.cpp
             src/gui/app_settings.cpp
             src/gui/settings_dialog.cpp
+            src/gui/updates.cpp
             src/gui/alerts_dialog.cpp
             src/gui/tray.cpp
             src/gui/drive_watcher.cpp

@@ -11,6 +11,7 @@
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/jobs/scheduler.hpp"
+#include "vaultik/jobs/update_check.hpp"
 #include "vaultik/util/hex.hpp"
 
 using namespace vaultik;
@@ -412,6 +413,31 @@ TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {
     CHECK(alert_secret("telegram", tmp.dir()) == "123:abc");
     set_alert_secret("telegram", "", tmp.dir());
     CHECK(alert_secret("telegram", tmp.dir()).empty());
+}
+
+TEST_CASE("update check") {
+    using namespace vaultik::jobs;
+    CHECK(newer_version("0.7.0", "0.6.0"));
+    CHECK(newer_version("v0.10.0", "0.9.9"));
+    CHECK(newer_version("1.0", "0.99.99"));
+    CHECK_FALSE(newer_version("0.6.0", "0.6.0"));
+    CHECK_FALSE(newer_version("0.5.9", "0.6.0"));
+    CHECK_FALSE(newer_version("garbage", "0.6.0"));
+    const auto r = parse_release(R"({"tag_name":"v0.7.0","name":"Vaultik 0.7.0","draft":false,"prerelease":false,
+        "html_url":"https://github.com/Bigisoft/Vaultik/releases/tag/v0.7.0"})");
+    REQUIRE(r.has_value());
+    CHECK(r->version == "0.7.0");
+    CHECK(r->url == "https://github.com/Bigisoft/Vaultik/releases/tag/v0.7.0");
+    CHECK_FALSE(parse_release(R"({"tag_name":"v0.8.0","prerelease":true,
+        "html_url":"https://github.com/Bigisoft/Vaultik/releases/tag/v0.8.0"})"));
+    CHECK_FALSE(parse_release(R"({"tag_name":"v0.8.0","draft":true,
+        "html_url":"https://github.com/Bigisoft/Vaultik/releases/tag/v0.8.0"})"));
+    // Only a page of Vaultik's own releases is ever opened.
+    CHECK_FALSE(parse_release(R"({"tag_name":"v0.8.0","html_url":"https://evil.example/releases/"})"));
+    CHECK_FALSE(parse_release(R"({"tag_name":"v0.8.0","html_url":"https://github.com/Bigisoft/Vaultik/releases/x" y"})"));
+    CHECK_FALSE(parse_release(R"({"tag_name":"latest","html_url":"https://github.com/Bigisoft/Vaultik/releases/x"})"));
+    CHECK_FALSE(parse_release("not json"));
+    CHECK_FALSE(parse_release("[]"));
 }
 
 TEST_CASE("system log entries of runs") {

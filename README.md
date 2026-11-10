@@ -222,6 +222,16 @@ The version is set in `project()` in CMakeLists.txt. The program icon is drawn f
 `src/gui/app_icon.svg`; after changing it, build `vaultik-make-icon` and run
 `vaultik-make-icon src\gui\app_icon.svg src\gui\vaultik.ico`.
 
+### Updates
+
+Once a day (Settings, Updates) Vaultik asks GitHub for the number of the newest release and,
+when there is a newer one, says so in a notification and in Settings with a link to its page.
+Nothing is downloaded or installed by itself and nothing about you or your backups is sent;
+`vaultik update-check` asks the same from the command line. Each release lists the SHA-256 of
+its files (`SHA256SUMS.txt`; compare with `certutil -hashfile <file> SHA256`). `tools/package.ps1`
+signs the programs and the MSI when a code signing certificate is set up (see the top of that
+script); without one, Windows SmartScreen warns when the download is opened.
+
 ## Command line
 
 ```

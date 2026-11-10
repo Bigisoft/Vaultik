@@ -21,6 +21,9 @@ struct AppSettings {
     // Security
     bool require_hello = false;  // Windows Hello before backups are opened (restore, browse, search)
 
+    // Updates
+    bool check_updates = true;  // ask GitHub once a day whether a newer Vaultik was released
+
     static AppSettings load();
     void save() const;
 };
