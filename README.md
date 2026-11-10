@@ -361,6 +361,15 @@ uncorrectable sectors turn the drive's status into a warning, and a drive at 10%
 as a problem. NVMe drives report their wear to anyone. `vaultik drives` lists every drive, and
 `vaultik drives --smart` each drive's attribute table.
 
+Vaultik also keeps a record of each drive's health (in `drive-history.jsonl` in its settings
+folder, matched by the drive's serial number): a reading whenever the Overview, `run-job` or
+`vaultik drives` looks at a drive, at most one a day unless something changed. A drive that got
+worse in the last 90 days (more reallocated, pending or uncorrectable sectors, more unrecoverable
+read errors, or a health percentage at least 5 points lower) counts as a problem even while
+Windows still calls it healthy: the Overview lists what changed and shows a banner (for the
+backup drive: copy the backup elsewhere; for a drive backed up from: keep the backup current),
+and `run-job` records it so the tray warns. `vaultik drives --history` lists the stored readings.
+
 ### Health checks
 
 After `run-job` saves a version, it runs the job's health check when one is due (`--no-check`
