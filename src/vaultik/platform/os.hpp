@@ -349,6 +349,12 @@ void enable_restore_privileges();
 
 std::string hostname();
 std::string username();
+
+// An entry in the system's log: the Windows Event Log (Application, source "Vaultik", which the
+// installer registers; without it Event Viewer still shows the text, after a note that the source
+// is unknown), syslog elsewhere. Never fails: a log that cannot be written is skipped.
+enum class LogLevel { Info, Warning, Error };
+void system_log(LogLevel level, std::uint32_t event_id, const std::string& text);
 std::uint32_t process_id();
 // False only when no process with this id runs on this computer (unknown counts as running).
 bool process_alive(std::uint32_t pid);

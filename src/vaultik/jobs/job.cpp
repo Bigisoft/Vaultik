@@ -824,10 +824,62 @@ CloudCredentials JobStore::cloud_credentials(const Job& job) const {
     return c;
 }
 
+namespace {
+bool g_log_runs = false;
+}  // namespace
+
+void log_runs_to_system(bool on) {
+    g_log_runs = on;
+}
+
+// Event ids: 100s a backup, 200s a health check, 300s the second copy, 400s a test restore; the
+// last digit the result (0 success, 1 partial, 2 failed, 3 cancelled), +5 when it succeeded but
+// warns (ransomware signs, old versions kept, the drive's health). Monitoring tools filter by them.
+SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name, const std::string& job_id) {
+    SystemLogEntry e;
+    std::uint32_t base = 100;
+    std::string what = "Backup";
+    switch (r.kind) {
+        case RunKind::Backup: break;
+        case RunKind::Check: base = 200; what = "Health check"; break;
+        case RunKind::FullCheck: base = 200; what = "Full health check"; break;
+        case RunKind::Copy: base = 300; what = "Second copy"; break;
+        case RunKind::RestoreTest: base = 400; what = "Test restore"; break;
+    }
+    const bool warns = !r.alert.empty() || !r.hold.empty() || !r.drive.empty();
+    std::uint32_t result = 0;
+    switch (r.status) {
+        case RunStatus::Success: result = warns ? 5 : 0; break;
+        case RunStatus::Partial: result = 1; break;
+        case RunStatus::Failed: result = 2; break;
+        case RunStatus::Cancelled: result = 3; break;
+    }
+    e.id = base + result;
+    e.level = r.status == RunStatus::Failed ? 2 : (r.status == RunStatus::Partial || warns) ? 1 : 0;
+    e.text = what + " of the Vaultik job \"" + job_name + "\" (" + job_id + "): " + to_string(r.status);
+    if (!r.message.empty()) e.text += "\n" + r.message;
+    if (r.kind == RunKind::Backup && r.status != RunStatus::Failed && r.status != RunStatus::Cancelled)
+        e.text += "\nFiles: " + std::to_string(r.files) + ", new data: " + std::to_string(r.new_bytes) + " bytes";
+    if (r.errors > 0) e.text += "\nErrors: " + std::to_string(r.errors);
+    if (!r.alert.empty()) e.text += "\nRansomware warning: " + r.alert;
+    if (!r.hold.empty()) e.text += "\nOld versions kept: " + r.hold;
+    if (!r.drive.empty()) e.text += "\nBackup drive: " + r.drive;
+    return e;
+}
+
 void JobStore::append_history(const std::string& id, const RunRecord& record) const {
     check_id(id);
     const std::string path = history_path(dir_, id);
     os::append_file(path, bytes_of(to_json(record) + "\n"));
+    if (g_log_runs) {
+        std::string name = id;
+        try {
+            if (const auto job = find(id)) name = job->name;
+        } catch (const std::exception&) {
+        }
+        const SystemLogEntry e = system_log_entry(record, name, id);
+        os::system_log(static_cast<os::LogLevel>(e.level), e.id, e.text);
+    }
 
     os::FileInfo info;
     os::ErrorCode err = 0;

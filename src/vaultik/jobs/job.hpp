@@ -163,6 +163,18 @@ inline bool is_check(RunKind k) {
     return k == RunKind::Check || k == RunKind::FullCheck;
 }
 
+struct RunRecord;
+// Whether JobStore::append_history also writes each run to the system's log (os::system_log).
+// Off by default (tests); the command line turns it on.
+void log_runs_to_system(bool on);
+// The system log entry for a run: its level, event id and text (see system_log_entry in job.cpp).
+struct SystemLogEntry {
+    int level = 0;  // os::LogLevel
+    std::uint32_t id = 0;
+    std::string text;
+};
+SystemLogEntry system_log_entry(const RunRecord& record, const std::string& job_name, const std::string& job_id);
+
 struct RunRecord {
     RunKind kind = RunKind::Backup;
     bool on_connect = false;  // started because the destination drive was connected

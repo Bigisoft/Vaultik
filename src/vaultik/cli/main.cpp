@@ -2761,6 +2761,7 @@ int fail(const char* status, const std::string& message, int code) {
 int run_main(const std::vector<std::string>& args) {
     using namespace vaultik::cli;
     init_console();
+    vaultik::jobs::log_runs_to_system(true);  // every recorded run also goes to the Event Log
     try {
         return run(args);
     } catch (const vaultik::Cancelled&) {

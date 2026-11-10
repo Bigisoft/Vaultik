@@ -1025,6 +1025,19 @@ std::string hostname() {
     return computer_name();
 }
 
+void system_log(LogLevel level, std::uint32_t event_id, const std::string& text) {
+    HANDLE source = RegisterEventSourceW(nullptr, L"Vaultik");
+    if (source == nullptr) return;
+    // An entry holds at most 31839 characters.
+    std::wstring wide = widen(text.size() > 30000 ? text.substr(0, 30000) : text);
+    const WORD type = level == LogLevel::Error     ? EVENTLOG_ERROR_TYPE
+                      : level == LogLevel::Warning ? EVENTLOG_WARNING_TYPE
+                                                   : EVENTLOG_INFORMATION_TYPE;
+    const wchar_t* strings[] = {wide.c_str()};
+    ReportEventW(source, type, 0, event_id, nullptr, 1, 0, strings, nullptr);
+    DeregisterEventSource(source);
+}
+
 std::string username() {
     return user_name();
 }

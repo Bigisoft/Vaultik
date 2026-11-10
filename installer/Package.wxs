@@ -85,6 +85,16 @@
       </RegistryKey>
     </Component>
 
+    <!-- The Event Log source of Vaultik's entries (every run's result, see README). EventCreate.exe
+         holds messages 1 to 1000 that show the entry's own text, so no message file of our own. -->
+    <Component Id="EventSource" Directory="INSTALLFOLDER" Guid="8A4C2E61-5D3B-4F97-B1E8-26C9D7A03F52">
+      <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\Vaultik">
+        <RegistryValue Name="EventMessageFile" Type="expandable" Value="%SystemRoot%\System32\EventCreate.exe"
+                       KeyPath="yes" />
+        <RegistryValue Name="TypesSupported" Type="integer" Value="7" />
+      </RegistryKey>
+    </Component>
+
     <!-- Removing Vaultik (not upgrading it) also removes its scheduled tasks, every account's, as
          they would only fail without the programs. Jobs, history and backups stay. -->
     <CustomAction Id="RemoveScheduledTasks" FileRef="VaultikTaskExe" ExeCommand="uninstall-cleanup"
@@ -98,6 +108,7 @@
       <ComponentGroupRef Id="Programs" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="ExplorerMenu" />
+      <ComponentRef Id="EventSource" />
       <ComponentRef Id="RememberRoot" />
     </Feature>
   </Package>

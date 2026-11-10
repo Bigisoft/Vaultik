@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <syslog.h>
 #include <time.h>
 #include <signal.h>
 #include <unistd.h>
@@ -573,6 +574,13 @@ std::string executable_path() {
 
 void enable_backup_privileges() {}
 void enable_restore_privileges() {}
+
+void system_log(LogLevel level, std::uint32_t event_id, const std::string& text) {
+    const int priority = level == LogLevel::Error ? LOG_ERR : level == LogLevel::Warning ? LOG_WARNING : LOG_INFO;
+    openlog("vaultik", LOG_PID, LOG_USER);
+    syslog(priority, "[%u] %s", static_cast<unsigned>(event_id), text.c_str());
+    closelog();
+}
 
 std::string hostname() {
     char buf[256] = {};

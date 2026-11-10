@@ -511,6 +511,17 @@ every channel. A job with administrator rights never reads your own alert settin
 copied into the admin-only store with the job, shown in the question before it is approved, and
 updated the next time such a job is saved.
 
+### Event Log
+
+Every run of a job (backup, second copy, health check, test restore) is also written to the
+Windows Event Log (Application, source `Vaultik`; syslog on Linux), so Event Viewer and monitoring
+tools see failed backups without any alert set up. The event id tells what it was: 100s a backup,
+200s a health check, 300s the second copy, 400s a test restore; the last digit is the result
+(0 success, 1 partial, 2 failed, 3 cancelled, 5 succeeded with a warning: ransomware signs, old
+versions kept, or the drive's health). Failures are errors and warnings are warnings. The
+installer registers the source; the portable version writes the same entries, which Event Viewer
+then shows after a note that the source is not registered.
+
 ### Commands before and after a backup
 
 A job can run a command line before its backup and one after it (**What to back up** tab:

@@ -414,6 +414,34 @@ TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {
     CHECK(alert_secret("telegram", tmp.dir()).empty());
 }
 
+TEST_CASE("system log entries of runs") {
+    using namespace vaultik::jobs;
+    RunRecord r;
+    r.files = 12;
+    r.new_bytes = 3000;
+    SystemLogEntry e = system_log_entry(r, "Docs", "docs");
+    CHECK(e.id == 100);
+    CHECK(e.level == 0);
+    CHECK(e.text.find("Backup of the Vaultik job \"Docs\" (docs): success") == 0);
+    CHECK(e.text.find("Files: 12") != std::string::npos);
+    r.alert = "many files look encrypted";
+    e = system_log_entry(r, "Docs", "docs");
+    CHECK(e.id == 105);
+    CHECK(e.level == 1);
+    CHECK(e.text.find("Ransomware warning: many files look encrypted") != std::string::npos);
+    r.alert.clear();
+    r.status = RunStatus::Failed;
+    r.message = "the backup drive is not connected";
+    r.kind = RunKind::Check;
+    e = system_log_entry(r, "Docs", "docs");
+    CHECK(e.id == 202);
+    CHECK(e.level == 2);
+    CHECK(e.text.find("Files:") == std::string::npos);
+    r.kind = RunKind::RestoreTest;
+    r.status = RunStatus::Cancelled;
+    CHECK(system_log_entry(r, "Docs", "docs").id == 403);
+}
+
 #ifdef _WIN32
 TEST_CASE("jobs with administrator rights run as the system account") {
     using namespace vaultik;
