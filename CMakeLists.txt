@@ -110,6 +110,7 @@ if(WIN32)
         src/vaultik/platform/os_win.cpp
         src/vaultik/ops/mount_win.cpp
         src/vaultik/platform/drive_health_win.cpp
+        src/vaultik/platform/usn_journal_win.cpp
         src/vaultik/platform/win_extras.cpp
         src/vaultik/repo/sftp_backend.cpp
     )
@@ -129,6 +130,7 @@ else()
         src/vaultik/platform/os_posix.cpp
         src/vaultik/ops/mount_posix.cpp
         src/vaultik/platform/drive_health_posix.cpp
+        src/vaultik/platform/usn_journal_posix.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC _GNU_SOURCE _FILE_OFFSET_BITS=64)
     target_compile_options(vaultik_core PUBLIC -Wall -Wextra -Wpedantic $<$<CONFIG:Release>:-O2>)
@@ -229,6 +231,7 @@ add_executable(vaultik_tests
     tests/test_main.cpp
     tests/test_util.cpp
     tests/test_drive_health.cpp
+    tests/test_usn_journal.cpp
     tests/test_drive_history.cpp
     tests/test_win_extras.cpp
     tests/test_resources.cpp
