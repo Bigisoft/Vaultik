@@ -381,7 +381,7 @@ File File::create_directory(const std::string& path, ErrorCode& err) {
     for (const ACCESS_MASK access : {base | WRITE_OWNER, base}) {
         HANDLE h = nullptr;
         const LONG status = nt_create(&h, access, &oa, &iosb, nullptr, FILE_ATTRIBUTE_NORMAL,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, kFileCreate, kOptions,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE, kFileCreate, kOptions,
                                       nullptr, 0);
         if (status >= 0) {
             err = 0;
@@ -392,6 +392,24 @@ File File::create_directory(const std::string& path, ErrorCode& err) {
         if (err != ERROR_ACCESS_DENIED && err != ERROR_PRIVILEGE_NOT_HELD && err != ERROR_INVALID_OWNER) break;
     }
     return File();
+}
+
+File File::hold_directory(const std::string& path, bool real_folder, ErrorCode& err) {
+    // Listing access takes part in sharing checks, and without FILE_SHARE_DELETE nobody can open
+    // the folder to rename or delete it while this handle is open.
+    File f(open_handle(path, FILE_LIST_DIRECTORY | FILE_TRAVERSE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, err));
+    if (!f.valid() || !real_folder) return f;
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    if (!GetFileInformationByHandleEx(as_handle(f.h_), FileAttributeTagInfo, &tag, sizeof tag)) {
+        err = GetLastError();
+        return File();
+    }
+    if ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 || (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        err = ERROR_STOPPED_ON_SYMLINK;
+        return File();
+    }
+    return f;
 }
 
 ErrorCode File::set_security(ByteSpan descriptor) {

@@ -172,6 +172,11 @@ public:
     // the folder made, whatever happens to its path. Fails (is_exists) when something is there.
     // Not supported on POSIX.
     static File create_directory(const std::string& path, ErrorCode& err);
+    // Windows: opens an existing folder and keeps it from being renamed, moved or deleted while
+    // the handle is open (no delete sharing), so a path through it keeps leading to it. With
+    // `real_folder`, refuses (ERROR_STOPPED_ON_SYMLINK) a link or junction in its place. Not
+    // supported on POSIX.
+    static File hold_directory(const std::string& path, bool real_folder, ErrorCode& err);
     // Applies a security descriptor through this handle (create_directory's). Without the right
     // to set another owner, the access list alone.
     ErrorCode set_security(ByteSpan descriptor);

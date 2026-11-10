@@ -9,6 +9,9 @@
 
 namespace vaultik {
 
+// ERROR_STOPPED_ON_SYMLINK: what the platform layer reports for a link where a real item belongs.
+constexpr os::ErrorCode kStoppedOnLink = 1281;
+
 namespace {
 
 std::vector<std::string> split_snapshot_path(const std::string& path) {
@@ -292,6 +295,7 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
             // and its path could lead somewhere else by now.
             os::ErrorCode err = 0;
             os::File made = os::File::create_directory(path, err);
+            os::File existing;
             if (!made.valid()) {
                 // Only a folder that is there already (or a system without the call) goes on
                 // without a handle; never make the folder some other way without its permissions.
@@ -306,6 +310,16 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
                     return;
                 }
                 if (os::is_exists(err) && options_.permissions && node.security) ++kept_permissions_;
+                // Keep the existing folder from being swapped for a link while its content is
+                // restored (an elevated restore must not be led into another folder).
+                os::ErrorCode held_err = 0;
+                existing = os::File::hold_directory(path, true, held_err);
+                if (!existing.valid() && !os::is_not_supported(held_err)) {
+                    warn("skipped " + path + ": " + (held_err == kStoppedOnLink
+                                                          ? std::string("a link or junction is in the folder's place")
+                                                          : os::error_message(held_err)));
+                    return;
+                }
             }
             restore_children(node.subtree, path);
             os::set_metadata(path, info_of(node));  // after the children, so times and permissions stick
@@ -340,6 +354,26 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
 
     const std::string root = os::absolute_path(options_.target);
     ensure_dir_chain(root);
+    // Hold every folder from the top down to the target open, so none of them can be renamed and
+    // replaced by a link during the restore; the target itself must be a real folder.
+    std::vector<os::File> held;
+    {
+        std::vector<std::string> chain;
+        for (std::string p = root; !p.empty(); p = os::parent_of(p)) {
+            chain.push_back(p);
+            if (os::parent_of(p) == p) break;
+        }
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            os::ErrorCode err = 0;
+            os::File f = os::File::hold_directory(*it, *it == root, err);
+            if (os::is_not_supported(err)) break;
+            if (!f.valid() && *it == root)
+                throw Error("cannot restore into " + root + ": " +
+                            (err == kStoppedOnLink ? std::string("it is a link or junction, not a folder")
+                                                   : os::error_message(err)));
+            if (f.valid()) held.push_back(std::move(f));
+        }
+    }
 
     if (options_.subpath.empty()) {
         restore_children(start.subtree, root);  // the snapshot root is virtual; restore what is under it

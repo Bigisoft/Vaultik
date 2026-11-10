@@ -622,6 +622,11 @@ File File::create_directory(const std::string& /*path*/, ErrorCode& err) {
     return File();
 }
 
+File File::hold_directory(const std::string& /*path*/, bool /*real_folder*/, ErrorCode& err) {
+    err = ENOTSUP;
+    return File();
+}
+
 ErrorCode File::set_security(ByteSpan /*descriptor*/) {
     return ENOTSUP;
 }

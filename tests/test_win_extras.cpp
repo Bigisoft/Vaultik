@@ -177,4 +177,24 @@ TEST_CASE("restoring permissions and streams never writes through a link") {
     CHECK(os::list_streams(u8(other)).empty());
 }
 
+TEST_CASE("a held folder cannot be renamed away, and a junction is not held as a folder") {
+    TempDir tmp;
+    fs::create_directories(tmp.path / "dir" / "sub");
+    os::ErrorCode err = 0;
+    {
+        os::File held = os::File::hold_directory(u8(tmp.path / "dir"), true, err);
+        REQUIRE(held.valid());
+        std::error_code ec;
+        fs::rename(tmp.path / "dir", tmp.path / "moved", ec);
+        CHECK(ec);  // refused while held
+        CHECK(fs::exists(tmp.path / "dir" / "sub"));
+    }
+    std::error_code ec;
+    fs::rename(tmp.path / "dir", tmp.path / "moved", ec);
+    CHECK_FALSE(ec);  // free again once closed
+    REQUIRE(os::create_link(u8(tmp.path / "jn"), {0xA0000003, u8(tmp.path / "moved"), false}, true) == 0);
+    CHECK_FALSE(os::File::hold_directory(u8(tmp.path / "jn"), true, err).valid());
+    CHECK(err == ERROR_STOPPED_ON_SYMLINK);
+}
+
 #endif  // _WIN32
