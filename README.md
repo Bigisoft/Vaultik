@@ -23,8 +23,27 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
   storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2, MinIO, ...), or a cloud drive
   (pCloud, OneDrive, Google Drive, MEGA), each through its own API with no extra software. The
   cloud only ever sees encrypted chunks.
+- **Watches the drives.** The health of the backup drive and the drives backed up from, with a
+  percentage from S.M.A.R.T. and a warning when a drive gets worse.
+- **Easy to get files back.** A timeline of versions, a search across all of them, the history
+  of any file, a preview of pictures and code without restoring, and each version as a folder in
+  File Explorer.
 
 The on-disk format is specified in [docs/FORMAT.md](docs/FORMAT.md).
+
+## Screenshots
+
+The overview of a job: its last and next backup, the versions kept, the last health check, the
+drives involved with their health, and the days a backup ran.
+
+![Overview](docs/screenshots/overview.png)
+
+| | |
+|---|---|
+| ![Versions](docs/screenshots/versions.png) The versions, each with what changed | ![Find a file](docs/screenshots/find.png) A file's versions, compared with the file on this PC |
+| ![Picture preview](docs/screenshots/preview-photo.png) A picture from a backup, without restoring it | ![Code preview](docs/screenshots/preview-code.png) Text and code with syntax colours |
+| ![Restore](docs/screenshots/restore.png) Restore a file, a folder or everything | ![New backup job](docs/screenshots/job.png) A new backup job |
+| ![Settings](docs/screenshots/settings.png) Settings | |
 
 ## Programs
 
@@ -484,3 +503,9 @@ Priorities only take effect when something else competes for the resource, so on
    and the browser sign-in are Windows-only so far). Packaged as in 6.
 9. Volume image backup, restore to a volume or `.vhdx`
 10. Bare-metal restore from a recovery USB (WinPE on Windows)
+
+## License
+
+Vaultik is free software under the [GNU General Public License, version 3](LICENSE) (or any
+later version). It uses Qt (LGPL-3.0), zstd (BSD), BLAKE3 (CC0 / Apache-2.0), nlohmann/json
+(MIT) and doctest (MIT).
