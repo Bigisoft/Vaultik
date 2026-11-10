@@ -25,8 +25,10 @@ std::string short_hex(const Id& id) {
 bool is_damage(const std::exception& e) {
     if (dynamic_cast<const AuthError*>(&e) != nullptr) return true;
     const std::string what = e.what();
-    for (const char* sign : {"malformed", "blob not found", "unsupported tree version", "unexpected type",
-                             "does not match its id"})
+    for (const char* sign : {"malformed", "blob not found", "unsupported tree version", "unsupported snapshot version",
+                             "unexpected type", "does not match its id", "pack file too small", "not a pack file",
+                             "zstd decompression", "Unknown frame descriptor", "Data corruption detected",
+                             "Src size is incorrect", "Destination buffer is too small"})
         if (what.find(sign) != std::string::npos) return true;
     return false;
 }
