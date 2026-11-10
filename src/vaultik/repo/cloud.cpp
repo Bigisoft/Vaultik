@@ -25,6 +25,7 @@ constexpr KindPrefix kKinds[] = {
     {CloudKind::OneDrive, "onedrive:", "OneDrive"},
     {CloudKind::GoogleDrive, "gdrive:", "Google Drive"},
     {CloudKind::Mega, "mega:", "MEGA"},
+    {CloudKind::WebDav, "webdav:", "WebDAV"},
 };
 
 bool starts_with_nocase(std::string_view s, std::string_view prefix) {
@@ -85,7 +86,8 @@ CloudCredentials::~CloudCredentials() {
 
 CloudCredentials CloudCredentials::from_environment() {
     CloudCredentials c;
-    c.key_id = os::get_env("AWS_ACCESS_KEY_ID");
+    c.key_id = os::get_env("VAULTIK_CLOUD_USER");  // a WebDAV user name
+    if (c.key_id.empty()) c.key_id = os::get_env("AWS_ACCESS_KEY_ID");
     c.secret = os::get_env("VAULTIK_CLOUD_SECRET");
     if (c.secret.empty()) c.secret = os::get_env("AWS_SECRET_ACCESS_KEY");
     c.region = os::get_env("AWS_REGION");

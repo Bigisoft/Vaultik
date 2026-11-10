@@ -21,8 +21,8 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
   round (same format, same crypto).
 - **Local or cloud.** Back up to a disk, a USB drive, a network share, S3-compatible cloud
   storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2, MinIO, ...), or a cloud drive
-  (pCloud, OneDrive, Google Drive, MEGA), each through its own API with no extra software. The
-  cloud only ever sees encrypted chunks.
+  (pCloud, OneDrive, Google Drive, MEGA), or a WebDAV server (Nextcloud, ownCloud, a NAS), each
+  through its own API with no extra software. The cloud only ever sees encrypted chunks.
 - **Watches the drives.** The health of the backup drive and the drives backed up from, with a
   percentage from S.M.A.R.T. and a warning when a drive gets worse.
 - **Easy to get files back.** A timeline of versions, a search across all of them, the history
@@ -251,6 +251,17 @@ keys are used. Each repository file is one object; requests are retried with bac
 errors, throttling and server errors, and `--write-limit` / `--read-limit` cap uploads and
 downloads. Browsing a cloud snapshot in the frontend downloads the folders it shows, so it is
 slower than browsing a local one.
+
+### WebDAV
+
+`webdav:https://<server>/<folder path>` backs up to a folder on a WebDAV server: Nextcloud and
+ownCloud (`https://<host>/remote.php/dav/files/<user>/<folder>`, with an app password),
+Synology and QNAP NAS boxes, Apache or nginx with WebDAV, and many web hosts. The folder and any
+missing folders above it are created. The user name and password are entered in the **Cloud
+storage** dialog (provider WebDAV) and stored like a job's password; on the command line,
+`VAULTIK_CLOUD_USER` and `VAULTIK_CLOUD_SECRET`. They go to the server with every request (HTTP
+Basic authentication), so the URL must use https, except to a private network address (10.x,
+172.16-31.x, 192.168.x, this computer).
 
 ### Cloud drives
 

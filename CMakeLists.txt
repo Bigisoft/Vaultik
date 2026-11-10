@@ -68,6 +68,7 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/oauth.cpp
     src/vaultik/repo/s3_backend.cpp
     src/vaultik/repo/pcloud_backend.cpp
+    src/vaultik/repo/webdav_backend.cpp
     src/vaultik/repo/onedrive_backend.cpp
     src/vaultik/repo/gdrive_backend.cpp
     src/vaultik/repo/mega_backend.cpp

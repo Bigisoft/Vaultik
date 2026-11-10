@@ -28,13 +28,14 @@
 #include "vaultik/repo/onedrive_backend.hpp"
 #include "vaultik/repo/pcloud_backend.hpp"
 #include "vaultik/repo/s3_backend.hpp"
+#include "vaultik/repo/webdav_backend.hpp"
 
 using namespace vaultik;
 
 namespace {
 
 // Index order of the provider combo box.
-enum Provider { kR2, kB2, kAws, kOther, kPCloud, kOneDrive, kGDrive, kMega };
+enum Provider { kR2, kB2, kAws, kOther, kPCloud, kOneDrive, kGDrive, kMega, kWebDav };
 
 const char* kEndpointHints[] = {
     "https://<account id>.r2.cloudflarestorage.com",
@@ -57,6 +58,7 @@ Provider provider_of(CloudKind kind) {
         case CloudKind::OneDrive: return kOneDrive;
         case CloudKind::GoogleDrive: return kGDrive;
         case CloudKind::Mega: return kMega;
+        case CloudKind::WebDav: return kWebDav;
         default: return kR2;
     }
 }
@@ -145,7 +147,8 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     provider_ = new QComboBox;
     provider_->addItems({tr("Cloudflare R2"), tr("Backblaze B2"), tr("Amazon S3"),
                          tr("Other S3-compatible storage (MinIO, Wasabi, IDrive e2, ...)"), tr("pCloud"),
-                         tr("OneDrive"), tr("Google Drive"), tr("MEGA")});
+                         tr("OneDrive"), tr("Google Drive"), tr("MEGA"),
+                         tr("WebDAV (Nextcloud, ownCloud, a NAS, a web host)")});
     endpoint_ = new QLineEdit;
     bucket_ = new QLineEdit;
     bucket_->setPlaceholderText(tr("an existing bucket"));
@@ -221,7 +224,13 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     layout->addWidget(buttons);
 
     const CloudKind kind = cloud_kind(u8(initial.location));
-    if (kind == CloudKind::S3) {
+    if (kind == CloudKind::WebDav) {
+        stored_secret_ = initial.secret;
+        key_id_->setText(initial.key_id);
+        endpoint_->setText(initial.location.mid(7));  // after "webdav:"
+        provider_->setCurrentIndex(kWebDav);
+        if (!stored_secret_.isEmpty()) secret_->setPlaceholderText(tr("stored (leave empty to keep it)"));
+    } else if (kind == CloudKind::S3) {
         stored_secret_ = initial.secret;
         key_id_->setText(initial.key_id);
         region_->setText(initial.region);
@@ -258,7 +267,7 @@ CloudDialog::~CloudDialog() {
 }
 
 bool CloudDialog::is_drive() const {
-    return provider_->currentIndex() >= kPCloud;
+    return provider_->currentIndex() >= kPCloud && provider_->currentIndex() != kWebDav;
 }
 
 CloudKind CloudDialog::drive_kind() const {
@@ -305,17 +314,30 @@ void CloudDialog::show_account() {
 }
 
 void CloudDialog::provider_changed(int index) {
-    const bool drive = index >= kPCloud;
+    const bool webdav = index == kWebDav;
+    const bool drive = index >= kPCloud && !webdav;
     for (QWidget* w : {static_cast<QWidget*>(endpoint_), static_cast<QWidget*>(bucket_), static_cast<QWidget*>(folder_),
                        static_cast<QWidget*>(key_id_), static_cast<QWidget*>(secret_), static_cast<QWidget*>(region_),
                        static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_)})
         form_->setRowVisible(w, !drive);
+    // WebDAV: a folder's URL, a user name and a password.
+    for (QWidget* w : {static_cast<QWidget*>(bucket_), static_cast<QWidget*>(folder_), static_cast<QWidget*>(region_),
+                       static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_)})
+        if (webdav) form_->setRowVisible(w, false);
+    if (webdav) lock_days_->setValue(0);
+    const auto label = [this](QWidget* field, const QString& text) {
+        if (auto* l = qobject_cast<QLabel*>(form_->labelForField(field))) l->setText(text);
+    };
+    label(endpoint_, webdav ? tr("Folder URL:") : tr("Endpoint:"));
+    label(key_id_, webdav ? tr("User name:") : tr("Access key ID:"));
+    label(secret_, webdav ? tr("Password:") : tr("Secret access key:"));
     form_->setRowVisible(drive_folder_, drive);
     form_->setRowVisible(sign_in_->parentWidget(), drive);
     const bool oauth = index == kPCloud || index == kOneDrive || index == kGDrive;
     form_->setRowVisible(app_id_, oauth);
     form_->setRowVisible(app_secret_, index == kPCloud || index == kGDrive);
-    if (!drive) endpoint_->setPlaceholderText(QString::fromLatin1(kEndpointHints[index]));
+    if (webdav) endpoint_->setPlaceholderText(tr("e.g. https://cloud.example.com/remote.php/dav/files/me/Backups/pc"));
+    else if (!drive) endpoint_->setPlaceholderText(QString::fromLatin1(kEndpointHints[index]));
     if (drive) {
         load_app();
         show_account();
@@ -358,6 +380,13 @@ void CloudDialog::provider_changed(int index) {
                               "and published (otherwise the sign-in lapses after 7 days), and an OAuth client ID of "
                               "type \"Desktop app\". Enter its client ID and client secret. Vaultik only sees the "
                               "folders it creates; the folder is from the top of My Drive."));
+            break;
+        case kWebDav:
+            hint_->setText(tr("The URL of the folder for the backup on a WebDAV server (it is created if it is "
+                              "missing). Nextcloud: Files, Settings at the bottom left, the WebDAV address, followed "
+                              "by a folder name; use an app password. Synology and QNAP: turn on WebDAV and use "
+                              "https. The password is sent to the server with each request, so use https:// (plain "
+                              "http:// only works on your own network)."));
             break;
         case kMega:
             hint_->setText(tr("Sign in with your MEGA email and password (and the two-factor code if you use "
@@ -437,6 +466,23 @@ void CloudDialog::sign_in() {
 }
 
 QString CloudDialog::build_location(QString* error) const {
+    if (provider_->currentIndex() == kWebDav) {
+        QString url = endpoint_->text().trimmed();
+        while (url.endsWith('/')) url.chop(1);
+        if (url.isEmpty()) {
+            *error = tr("Enter the folder URL.");
+            return {};
+        }
+        if (!url.contains(QStringLiteral("://"))) url.prepend(QStringLiteral("https://"));
+        const QString location = QStringLiteral("webdav:") + url;
+        try {
+            WebDavBackend check(u8(location), CloudCredentials());
+        } catch (const Error& e) {
+            *error = QString::fromUtf8(e.what());
+            return {};
+        }
+        return location;
+    }
     if (is_drive()) {
         const QString location = qs(cloud_prefix(drive_kind())) + drive_folder_->text().trimmed();
         try {
@@ -507,7 +553,9 @@ void CloudDialog::accept() {
             return;
         }
     } else if (key_id_->text().trimmed().isEmpty() || (secret_->text().isEmpty() && stored_secret_.isEmpty())) {
-        QMessageBox::warning(this, windowTitle(), tr("Enter the access key ID and the secret access key."));
+        QMessageBox::warning(this, windowTitle(), provider_->currentIndex() == kWebDav
+                                                      ? tr("Enter the user name and the password.")
+                                                      : tr("Enter the access key ID and the secret access key."));
         return;
     }
     if (!is_drive() && lock_days_->value() > 0) {

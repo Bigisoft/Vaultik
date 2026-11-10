@@ -4,6 +4,7 @@
 #include "vaultik/repo/mega_backend.hpp"
 #include "vaultik/repo/onedrive_backend.hpp"
 #include "vaultik/repo/pcloud_backend.hpp"
+#include "vaultik/repo/webdav_backend.hpp"
 
 namespace vaultik {
 
@@ -22,6 +23,7 @@ std::unique_ptr<Backend> open_backend(const std::string& location, const CloudCr
         case CloudKind::OneDrive: return std::make_unique<OneDriveBackend>(location, std::move(c));
         case CloudKind::GoogleDrive: return std::make_unique<GoogleDriveBackend>(location, std::move(c));
         case CloudKind::Mega: return std::make_unique<MegaBackend>(location, std::move(c));
+        case CloudKind::WebDav: return std::make_unique<WebDavBackend>(location, std::move(c));
         case CloudKind::None: break;
     }
     throw Error("unknown storage location: " + location);

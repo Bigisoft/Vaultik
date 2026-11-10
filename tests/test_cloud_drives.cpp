@@ -6,6 +6,7 @@
 #include "vaultik/repo/cloud.hpp"
 #include "vaultik/repo/mega_backend.hpp"
 #include "vaultik/repo/oauth.hpp"
+#include "vaultik/repo/webdav_backend.hpp"
 #include "vaultik/util/base64.hpp"
 #include "vaultik/util/hex.hpp"
 
@@ -143,4 +144,25 @@ TEST_CASE("MEGA file encryption") {
     CHECK(nk.size() == 32);
     CHECK(mega::file_aes_key(nk) == key);
     CHECK(mega::file_nonce(nk) == nonce);
+}
+
+TEST_CASE("WebDAV folder listings are read whatever the namespace prefix") {
+    const std::string xml =
+        "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">"
+        "<d:response><d:href>/dav/backups/pc/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/>"
+        "</d:resourcetype></d:prop></d:propstat></d:response>"
+        "<d:response><d:href>/dav/backups/pc/data/</d:href><d:propstat><d:prop><d:resourcetype><d:collection />"
+        "</d:resourcetype></d:prop></d:propstat></d:response>"
+        "<d:response><d:href>https://cloud.example.com/dav/backups/pc/config</d:href><d:propstat><d:prop>"
+        "<d:resourcetype/></d:prop></d:propstat></d:response>"
+        "<D:response xmlns:D=\"DAV:\"><D:href>/dav/backups/pc/my%20file&amp;x</D:href></D:response>"
+        "</d:multistatus>";
+    const std::vector<std::string> paths = parse_propfind(xml);
+    REQUIRE(paths.size() == 4);
+    CHECK(paths[0] == "/dav/backups/pc/");
+    CHECK(paths[1] == "/dav/backups/pc/data/");
+    CHECK(paths[2] == "/dav/backups/pc/config");
+    CHECK(paths[3] == "/dav/backups/pc/my file&x");
+    CHECK_THROWS(WebDavBackend("webdav:http://cloud.example.com/x", {}));  // passwords only over https
+    CHECK_NOTHROW(WebDavBackend("webdav:http://192.168.1.10/x", {}));      // or on the own network
 }
