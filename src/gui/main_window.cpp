@@ -213,6 +213,23 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             log_->appendPlainText(check_result_);
             return;
         }
+        if (type == "repair_progress") {
+            running_label_->setText(tr("Repairing the backup..."));
+            const QString current = ev.value("current").toString();
+            static const QRegularExpression packs(QStringLiteral("^pack (\\d+)/(\\d+)$"));
+            const QRegularExpressionMatch m = packs.match(current);
+            if (m.hasMatch()) {
+                bar_->setRange(0, m.captured(2).toInt());
+                bar_->setValue(m.captured(1).toInt());
+                progress_text_->setText(tr("Checking stored data: part %1 of %2").arg(m.captured(1), m.captured(2)));
+            } else {
+                bar_->setRange(0, 0);
+                progress_text_->setText(current == "writing the new index" ? tr("Writing the new index")
+                                                                            : tr("Checking every version"));
+            }
+            current_file_->clear();
+            return;
+        }
         if (type == "test_progress") {
             running_label_->setText(tr("Testing a restore..."));
             bar_->setRange(0, 0);
@@ -255,10 +272,22 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         running_job_.clear();
         const bool check = check_run_;
         const bool test = test_run_;
+        const bool repair = repair_run_;
         check_run_ = false;
         test_run_ = false;
+        repair_run_ = false;
         set_running(false);
         QString msg;
+        if (repair) {
+            msg = result == "success"   ? tr("Repair: %1").arg(ev.value("message").toString())
+                  : result == "cancelled" ? tr("Repair cancelled; nothing was changed yet.")
+                                          : tr("Repair failed: %1").arg(ev.value("message").toString());
+            log_->appendPlainText(msg);
+            statusBar()->showMessage(msg, 30000);
+            repos_.erase(id);  // the index and maybe the versions changed
+            reload_jobs(current_job() ? current_job()->id : id);
+            return;
+        }
         if (test) {
             msg = result == "success"   ? tr("Test restore: %1").arg(ev.value("message").toString())
                   : result == "cancelled" ? tr("Test restore cancelled.")
@@ -848,6 +877,10 @@ QWidget* MainWindow::build_job_page() {
     menu->addAction(tr("Check the backup now"), this, [this] { check_job(false); })
         ->setToolTip(tr("Read part of the stored data back and check every version"));
     menu->addAction(tr("Full health check..."), this, [this] { check_job(true); });
+    menu->addAction(tr("Test a restore"), this, &MainWindow::test_restore)
+        ->setToolTip(tr("Restore a few files into a temporary folder and check them"));
+    menu->addAction(tr("Repair the backup..."), this, &MainWindow::repair_backup)
+        ->setToolTip(tr("When a check found damage: rebuild the index and keep what is intact"));
     menu->setToolTipsVisible(true);
     menu->addAction(tr("Refresh"), this, [this] {
         repos_.clear();
@@ -1323,8 +1356,9 @@ void MainWindow::refresh_overview() {
     if (backup && !backup->alert.empty()) {
         d.warning = tr("The last backup found files that may be encrypted by ransomware: %1").arg(qs(backup->alert));
     } else if (check && jobs::found_damage(*check)) {
-        d.warning = tr("The last health check found damaged or missing data. Back up again soon, and check the "
-                       "destination drive. %1").arg(qs(check->message));
+        d.warning = tr("The last health check found damaged or missing data. Check the destination drive, then "
+                       "choose Repair the backup (in the ... menu) to keep what is intact, and back up again. %1")
+                        .arg(qs(check->message));
     } else if (test != nullptr && !d.test_ok) {
         d.warning = tr("The last test restore found files that did not come back right: %1. Check the backup "
                        "drive, and back up again soon.").arg(qs(test->message));
@@ -1662,6 +1696,28 @@ void MainWindow::test_restore() {
     if (running_job_.empty()) test_run_ = false;  // did not start (no password)
 }
 
+void MainWindow::repair_backup() {
+    const jobs::Job* job = current_job();
+    if (!job || runner_->running()) return;
+    QMessageBox box(QMessageBox::Question, tr("Repair the backup"), QString(), QMessageBox::Yes | QMessageBox::Cancel,
+                    this);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(tr("Repair reads all of the backup's stored data, checks every part and rebuilds the index from "
+                   "what is intact. Versions that point at damaged data are saved again without the files that "
+                   "were lost (their note says so); the next backup stores those files again if they are still "
+                   "on this PC.") +
+                "\n\n" +
+                (is_cloud_location(job->repository)
+                     ? tr("From cloud storage this downloads everything the backup holds.") + "\n\n"
+                     : QString()) +
+                tr("Only needed when a health check or a restore found damage. Repair now?"));
+    box.setDefaultButton(QMessageBox::Cancel);
+    if (box.exec() != QMessageBox::Yes) return;
+    repair_run_ = true;
+    start_run({"repair", "--job", qs(job->id)}, true);
+    if (running_job_.empty()) repair_run_ = false;
+}
+
 void MainWindow::start_run(const QStringList& args, bool check) {
     const jobs::Job* current = current_job();
     if (!current) return;
@@ -1672,13 +1728,15 @@ void MainWindow::start_run(const QStringList& args, bool check) {
     check_run_ = check;
     check_result_.clear();
     run_started_ = std::chrono::steady_clock::now();
-    log_->appendPlainText((test_run_ ? tr("--- %1: test restore started")
-                           : check   ? tr("--- %1: health check started")
-                                     : tr("--- %1: backup started"))
+    log_->appendPlainText((repair_run_ ? tr("--- %1: repair started")
+                           : test_run_ ? tr("--- %1: test restore started")
+                           : check     ? tr("--- %1: health check started")
+                                       : tr("--- %1: backup started"))
                               .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm")));
-    running_label_->setText(test_run_ ? tr("Testing a restore...")
-                            : check   ? tr("Checking the backup...")
-                                      : tr("Backing up..."));
+    running_label_->setText(repair_run_ ? tr("Repairing the backup...")
+                            : test_run_ ? tr("Testing a restore...")
+                            : check     ? tr("Checking the backup...")
+                                        : tr("Backing up..."));
     bar_->setRange(0, 0);
     progress_text_->setText(tr("Starting..."));
     current_file_->clear();

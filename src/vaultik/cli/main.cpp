@@ -28,6 +28,7 @@
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
+#include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/restore_test.hpp"
 #include "vaultik/ops/verify.hpp"
@@ -142,6 +143,11 @@ Commands:
                                containing the text
   prune                        Delete data no snapshot uses any more
       --dry-run                Only show what would be deleted
+  repair                       Rebuild the index from the stored data, checking
+                               every chunk, and save damaged versions again
+                               without what was lost (use --job <job> or -r)
+      --quick                  Trust the packs' own headers; read no chunks
+      --dry-run                Only show what would be done
   unlock                       Remove locks left by runs that ended abnormally
   key passwd                   Set a new password (asks for the current one, or
                                use --recovery-key); saved jobs using this
@@ -250,7 +256,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--smart", "--history"};
+                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -439,13 +445,13 @@ std::unique_ptr<Backend> backend_for(const Args& a, bool create = false) {
     return open_backend(repo_path(a), &cloud, create);
 }
 
-std::unique_ptr<Repository> open_repo(const Args& a) {
+std::unique_ptr<Repository> open_repo(const Args& a, bool load_index = true) {
     auto backend = backend_for(a);
     std::string pw = get_password(a, false);
     status("Opening repository...");
     std::unique_ptr<Repository> repo;
     try {
-        repo = Repository::open(std::move(backend), pw);
+        repo = Repository::open(std::move(backend), pw, load_index);
     } catch (...) {
         secure_wipe(pw.data(), pw.size());
         clear_status();
@@ -1856,6 +1862,49 @@ int cmd_prune(const Args& a) {
     return kExitOk;
 }
 
+// "repair [--quick] [--dry-run]": see ops/repair.hpp. Opens the repository without its index, so
+// a damaged index file cannot stop it.
+int cmd_repair(const Args& a) {
+    RepairOptions o;
+    o.quick = a.has("--quick");
+    o.dry_run = a.has("--dry-run");
+    auto repo = open_repo(a, false);
+    RepoLock lock(*repo, RepoLock::Mode::Exclusive, "repair", lock_wait(a));
+    o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
+    o.on_progress = [](const std::string& msg) {
+        if (g_json) emit({{"event", "repair_progress"}, {"current", msg}});
+        else status("Repair: " + msg);
+    };
+    o.on_warning = [](const std::string& msg) { warning(msg); };
+    const auto start = std::chrono::steady_clock::now();
+    if (!g_json) out(o.quick ? "Repair: rebuilding the index from the packs' headers...\n"
+                             : "Repair: reading and checking all stored data...\n");
+    const RepairResult r = run_repair(*repo, o);
+    if (!g_json) clear_status();
+    std::string summary = std::to_string(r.blobs) + " intact chunk(s) in " + std::to_string(r.packs) + " pack(s)";
+    if (r.packs_unreadable) summary += ", " + std::to_string(r.packs_unreadable) + " pack(s) unreadable";
+    if (r.blobs_damaged) summary += ", " + std::to_string(r.blobs_damaged) + " damaged chunk(s)";
+    summary += "; " + std::to_string(r.snapshots) + " version(s)";
+    if (r.snapshots_repaired)
+        summary += ", " + std::to_string(r.snapshots_repaired) + " saved again without " +
+                   std::to_string(r.files_lost) + " lost file(s) and " + std::to_string(r.folders_lost) + " folder(s)";
+    if (r.snapshots_removed) summary += ", " + std::to_string(r.snapshots_removed) + " removed";
+    if (!r.changed()) summary += "; nothing was damaged";
+    if (g_json) {
+        emit({{"event", "done"}, {"status", "success"}, {"dry_run", o.dry_run}, {"packs", r.packs},
+              {"packs_unreadable", r.packs_unreadable}, {"blobs", r.blobs}, {"blobs_damaged", r.blobs_damaged},
+              {"snapshots", r.snapshots}, {"snapshots_repaired", r.snapshots_repaired},
+              {"snapshots_removed", r.snapshots_removed}, {"files_lost", r.files_lost},
+              {"folders_lost", r.folders_lost}, {"message", summary}});
+        return kExitOk;
+    }
+    out((o.dry_run ? "Repair (dry run, nothing changed): " : "Repair done in " + format_duration(seconds_since(start)) + ": ") +
+        summary + "\n");
+    if (r.changed() && !o.dry_run)
+        out("Back up again soon: files still on this computer are stored again by the next backup.\n");
+    return kExitOk;
+}
+
 int cmd_unlock(const Args& a) {
     auto repo = open_repo(a);
     const std::size_t removed = remove_locks(*repo, a.has("--all"));
@@ -2485,6 +2534,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "stats") return cmd_stats(a);
     if (a.command == "forget") return cmd_forget(a);
     if (a.command == "prune") return cmd_prune(a);
+    if (a.command == "repair") return cmd_repair(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
     if (a.command == "pin") return cmd_pin(a, true);

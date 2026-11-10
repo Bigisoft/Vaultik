@@ -56,6 +56,7 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/copy.cpp
     src/vaultik/ops/verify.cpp
     src/vaultik/ops/prune.cpp
+    src/vaultik/ops/repair.cpp
     src/vaultik/platform/os_common.cpp
     src/vaultik/platform/vss.cpp
     src/vaultik/platform/acl.cpp

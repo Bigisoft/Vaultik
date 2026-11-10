@@ -11,7 +11,9 @@
 #include "vaultik/ops/copy.hpp"
 #include "vaultik/ops/diff.hpp"
 #include "vaultik/ops/restore.hpp"
+#include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore_test.hpp"
+#include "vaultik/repo/pack.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -594,4 +596,99 @@ TEST_CASE("snapshot paths map back to their place on this computer") {
     CHECK(original_location("home/me/a.txt") == "/home/me/a.txt");
 #endif
     CHECK(original_location("").empty());
+}
+
+TEST_CASE("repair rebuilds a damaged index from the packs") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "a.txt", text("alpha"));
+    write_file(src / "b.bin", random_data(300000, 3));
+    init_repo(repo_dir);
+    {
+        auto repo = open_repo(repo_dir);
+        BackupOptions options;
+        options.paths = {u8(src)};
+        run_backup(*repo, options);
+    }
+    // Garble every index file: a normal open now fails.
+    for (const auto& e : fs::recursive_directory_iterator(repo_dir / "index"))
+        if (e.is_regular_file()) write_file(e.path(), random_data(200, 9));
+    CHECK_THROWS(open_repo(repo_dir));
+
+    auto bare = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), kPassword, false);
+    const RepairResult r = run_repair(*bare, {});
+    CHECK(r.blobs_damaged == 0);
+    CHECK(r.snapshots == 1);
+    CHECK(r.snapshots_repaired == 0);
+    CHECK(r.index_files_replaced >= 1);
+    bare.reset();
+
+    auto repo = open_repo(repo_dir);
+    VerifyOptions vo;
+    vo.read_data = true;
+    CHECK(run_verify(*repo, vo).errors == 0);
+    const fs::path out = tmp.path / "out";
+    RestoreOptions ro;
+    ro.target = u8(out);
+    run_restore(*repo, repo->load_snapshot(repo->list_snapshot_ids().at(0)), ro);
+    CHECK(read_file(restored_location(out, src / "a.txt")) == text("alpha"));
+}
+
+TEST_CASE("repair saves a version again without a file whose data is damaged") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "small.txt", text("still here"));
+    write_file(src / "big.bin", random_data(400000, 4));
+    init_repo(repo_dir);
+    {
+        auto repo = open_repo(repo_dir);
+        BackupOptions options;
+        options.paths = {u8(src)};
+        run_backup(*repo, options);
+    }
+    // Flip a byte inside the big file's data in its pack.
+    {
+        auto repo = open_repo(repo_dir);
+        bool done = false;
+        for (const std::string& name : repo->backend().list("data")) {
+            for (const BlobEntry& e : read_pack_header(repo->backend(), name, repo->aead())) {
+                if (e.type != BlobType::Data || e.raw_len < 100000 || done) continue;
+                Bytes pack = repo->backend().get(name);
+                pack[e.offset + e.length / 2] ^= 0x55;
+                repo->backend().put(name, pack);
+                done = true;
+            }
+        }
+        REQUIRE(done);
+    }
+
+    RepairOptions dry;
+    dry.dry_run = true;
+    {
+        auto bare = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), kPassword, false);
+        const RepairResult r = run_repair(*bare, dry);
+        CHECK(r.blobs_damaged == 1);
+        CHECK(r.snapshots_repaired == 1);
+    }
+    auto bare = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), kPassword, false);
+    const RepairResult r = run_repair(*bare, {});
+    CHECK(r.blobs_damaged == 1);
+    CHECK(r.snapshots_repaired == 1);
+    CHECK(r.files_lost == 1);
+    CHECK(r.snapshots_removed == 0);
+    bare.reset();
+
+    auto repo = open_repo(repo_dir);
+    const std::vector<Id> ids = repo->list_snapshot_ids();
+    REQUIRE(ids.size() == 1);
+    const Snapshot s = repo->load_snapshot(ids[0]);
+    CHECK(s.note.find("repaired") != std::string::npos);
+    const fs::path out = tmp.path / "out";
+    RestoreOptions ro;
+    ro.target = u8(out);
+    CHECK(run_restore(*repo, s, ro).errors == 0);
+    CHECK(read_file(restored_location(out, src / "small.txt")) == text("still here"));
+    CHECK_FALSE(fs::exists(restored_location(out, src / "big.bin")));
 }

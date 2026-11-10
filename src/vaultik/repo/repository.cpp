@@ -72,12 +72,13 @@ void Repository::init(Backend& backend, std::string_view password, const InitOpt
     backend.put(kConfigName, serialize_config(config));
 }
 
-std::unique_ptr<Repository> Repository::open(std::unique_ptr<Backend> backend, std::string_view password) {
+std::unique_ptr<Repository> Repository::open(std::unique_ptr<Backend> backend, std::string_view password,
+                                             bool load_index) {
     if (!backend->exists(kConfigName)) throw Error("no Vaultik repository at " + backend->location());
     RepoConfig config = parse_config(backend->get(kConfigName));
     const MasterKey key = unwrap_master_key(config, password);
     std::unique_ptr<Repository> repo(new Repository(std::move(backend), std::move(config), key));
-    repo->load_indexes();
+    if (load_index) repo->load_indexes();
     return repo;
 }
 
@@ -247,6 +248,10 @@ void Repository::copy_blob(BlobType type, const Id& id, ByteSpan sealed, std::ui
 void Repository::flush() {
     finish_pack();
     write_index();
+}
+
+void Repository::clear_index() {
+    index_ = Index();
 }
 
 void Repository::load_indexes() {

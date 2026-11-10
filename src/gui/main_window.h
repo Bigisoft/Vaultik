@@ -77,6 +77,7 @@ private:
     // A health check of the current job now: its weekly share of the data, or all of it.
     void check_job(bool full);
     void test_restore();
+    void repair_backup();
     void start_run(const QStringList& args, bool check);
     void open_restore(int snapshot_index, const QString& select_path = {});
     void restore_from_folder();
@@ -187,6 +188,7 @@ private:
     std::chrono::steady_clock::time_point run_started_{};
     bool check_run_ = false;  // the running job is a health check on its own (check-job)
     bool test_run_ = false;   // ... or a test restore on its own (test-restore)
+    bool repair_run_ = false; // ... or a repair (repair --job)
     QString check_result_;    // what the health check after a backup found
 
     // Opened repositories per job id, with the job's versions (newest first).

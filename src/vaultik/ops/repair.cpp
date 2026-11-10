@@ -1,0 +1,204 @@
+#include "vaultik/ops/repair.hpp"
+
+#include <map>
+#include <unordered_map>
+#include <unordered_set>
+
+#include "vaultik/model/snapshot.hpp"
+#include "vaultik/model/tree.hpp"
+#include "vaultik/ops/backup.hpp"
+#include "vaultik/repo/pack.hpp"
+#include "vaultik/util/hex.hpp"
+
+namespace vaultik {
+
+namespace {
+
+
+std::string short_hex(const Id& id) {
+    return id_hex(id).substr(0, 8);
+}
+
+// What became of a folder listing: unreadable, unchanged, or saved again without what was lost.
+struct TreeFix {
+    bool ok = false;
+    bool changed = false;
+    Id id{};
+    std::uint64_t files_lost = 0;
+    std::uint64_t folders_lost = 0;
+};
+
+class TreeFixer {
+public:
+    TreeFixer(Repository& repo, bool dry_run) : repo_(repo), dry_run_(dry_run) {}
+
+    TreeFix fix(const Id& id) {
+        if (const auto it = done_.find(id); it != done_.end()) return it->second;
+        TreeFix r;
+        Tree tree;
+        try {
+            tree = parse_tree(repo_.load_blob(BlobType::Tree, id));
+        } catch (const std::exception&) {
+            return done_[id] = r;  // not ok
+        }
+        r.ok = true;
+        Tree out;
+        for (const Node& n : tree.nodes) {
+            if (n.kind == NodeKind::Dir) {
+                const TreeFix sub = fix(n.subtree);
+                if (!sub.ok) {
+                    r.changed = true;
+                    ++r.folders_lost;
+                    continue;
+                }
+                r.files_lost += sub.files_lost;
+                r.folders_lost += sub.folders_lost;
+                Node m = n;
+                if (sub.changed) {
+                    m.subtree = sub.id;
+                    r.changed = true;
+                }
+                out.nodes.push_back(std::move(m));
+            } else if (n.kind == NodeKind::File) {
+                bool whole = true;
+                for (const Id& c : n.content)
+                    if (!repo_.has_blob(c)) {
+                        whole = false;
+                        break;
+                    }
+                if (!whole) {
+                    r.changed = true;
+                    ++r.files_lost;
+                    continue;
+                }
+                out.nodes.push_back(n);
+            } else {
+                out.nodes.push_back(n);
+            }
+        }
+        r.id = id;
+        if (r.changed && !dry_run_) repo_.save_blob(BlobType::Tree, serialize_tree(out), r.id);
+        return done_[id] = r;
+    }
+
+private:
+    Repository& repo_;
+    bool dry_run_;
+    std::unordered_map<Id, TreeFix, IdHash> done_;
+};
+
+}  // namespace
+
+RepairResult run_repair(Repository& repo, const RepairOptions& o) {
+    auto progress = [&](const std::string& m) {
+        if (o.on_progress) o.on_progress(m);
+    };
+    auto warn = [&](const std::string& m) {
+        if (o.on_warning) o.on_warning(m);
+    };
+    auto cancelled = [&] { return o.should_cancel && o.should_cancel(); };
+    Backend& backend = repo.backend();
+    RepairResult r;
+
+    // 1. The index, from the packs themselves.
+    const std::vector<std::string> pack_names = backend.list("data");
+    IndexFileContent fresh;
+    std::unordered_set<Id, IdHash> seen;
+    std::size_t n = 0;
+    for (const std::string& name : pack_names) {
+        if (cancelled()) throw Cancelled();
+        ++n;
+        progress("pack " + std::to_string(n) + "/" + std::to_string(pack_names.size()));
+        const std::string hex = name.substr(name.find_last_of('/') + 1);
+        if (hex.size() != 64) continue;  // not a pack (a temporary file left by a crash)
+        ++r.packs;
+        Bytes pack;
+        std::vector<BlobEntry> entries;
+        try {
+            if (o.quick) {
+                entries = read_pack_header(backend, name, repo.aead());
+            } else {
+                pack = backend.get(name);
+                entries = parse_pack_header(pack, repo.aead());
+            }
+        } catch (const std::exception& e) {
+            ++r.packs_unreadable;
+            warn("pack " + hex.substr(0, 8) + " cannot be read, its data is lost: " + e.what());
+            continue;
+        }
+        std::vector<BlobEntry> good;
+        for (const BlobEntry& e : entries) {
+            if (seen.contains(e.id)) continue;  // the same blob stored twice: the first copy serves
+            if (!o.quick) {
+                try {
+                    if (e.offset + e.length > pack.size()) throw Error("it lies outside the pack");
+                    repo.decode_blob(e.type, e.id, ByteSpan(pack.data() + e.offset, e.length));
+                } catch (const std::exception& ex) {
+                    ++r.blobs_damaged;
+                    warn("damaged data in pack " + hex.substr(0, 8) + " (" + short_hex(e.id) + "): " + ex.what());
+                    continue;
+                }
+            }
+            seen.insert(e.id);
+            good.push_back(e);
+        }
+        r.blobs += good.size();
+        if (!good.empty()) fresh.emplace_back(id_from_hex(hex), std::move(good));
+    }
+    repo.clear_index();
+    for (const auto& [pack_id, entries] : fresh) repo.index_pack(pack_id, entries);
+
+    // 2. Replace the index files: new ones first, so a crash in between leaves both (the old ones
+    // only add blobs that are also listed again, or damaged ones a later repair drops again).
+    const std::vector<std::string> old_index = repo.list_index_files();
+    r.index_files_replaced = old_index.size();
+    if (!o.dry_run) {
+        progress("writing the new index");
+        for (std::size_t i = 0; i < fresh.size(); i += kPacksPerIndexFile) {
+            const auto end = fresh.begin() + static_cast<std::ptrdiff_t>(std::min(fresh.size(), i + kPacksPerIndexFile));
+            repo.write_index_file(IndexFileContent(fresh.begin() + static_cast<std::ptrdiff_t>(i), end));
+        }
+        for (const std::string& name : old_index) backend.remove(name);
+    }
+
+    // 3. The versions.
+    progress("checking every version");
+    TreeFixer fixer(repo, o.dry_run);
+    const std::vector<Id> ids = repo.list_snapshot_ids();
+    for (const Id& sid : ids) {
+        ++r.snapshots;
+        Snapshot s;
+        try {
+            s = repo.load_snapshot(sid);
+        } catch (const std::exception& e) {
+            ++r.snapshots_removed;
+            warn("version " + short_hex(sid) + " cannot be read and is removed: " + e.what());
+            if (!o.dry_run) backend.remove(Repository::snapshot_name(sid));
+            continue;
+        }
+        const TreeFix root = fixer.fix(s.tree);
+        if (!root.ok) {
+            ++r.snapshots_removed;
+            warn("version " + short_hex(sid) + " lost its top folder listing and is removed");
+            if (!o.dry_run) backend.remove(Repository::snapshot_name(sid));
+            continue;
+        }
+        if (!root.changed) continue;
+        ++r.snapshots_repaired;
+        r.files_lost += root.files_lost;
+        r.folders_lost += root.folders_lost;
+        const std::string lost = std::to_string(root.files_lost) + " file(s) and " + std::to_string(root.folders_lost) +
+                                 " folder(s) were lost";
+        warn("version " + short_hex(sid) + ": " + lost + "; saved again without them");
+        if (o.dry_run) continue;
+        Snapshot fixed = s;
+        fixed.tree = root.id;
+        fixed.note = (s.note.empty() ? std::string() : s.note + " ") + "(repaired: " + lost + ")";
+        repo.save_snapshot(fixed);  // flushes the new folder listings first
+        backend.remove(Repository::snapshot_name(sid));
+    }
+    if (!o.dry_run) repo.flush();
+    return r;
+}
+
+}  // namespace vaultik

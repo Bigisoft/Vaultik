@@ -421,6 +421,24 @@ restore of a few files" (off by default) runs one after a backup when the last i
 The temporary folder is made in Vaultik's settings folder, or for a run with administrator rights
 in the admin-only store, never in a folder a less privileged program could tamper with.
 
+### Repairing a damaged backup
+
+When a check or a restore found damage (a bad sector on the backup drive, a file changed by
+something else), **Repair the backup...** in a job's ... menu, or `vaultik repair --job <job>` (or
+`-r <repository>`), keeps whatever is intact:
+
+1. It opens the backup without its index (so a damaged index file cannot stop it), reads every
+   pack, checks every chunk in it against its hash, and builds the index again from the intact
+   ones (`--quick` trusts the packs' own headers instead, reading no chunks). Packs that cannot be
+   read at all stay where they are.
+2. It writes the new index files, then deletes the old ones.
+3. A version whose manifest cannot be read is removed. A version with files whose data is gone,
+   or folders whose listing is gone, is saved again without them, with a note saying what was
+   lost; pins stay. The next backup stores those files again when they are still on the PC.
+
+`--dry-run` shows what it would do. It holds the exclusive lock, like prune. From cloud storage
+it downloads everything (with `--quick`, only the pack headers).
+
 ### Running side by side
 
 Backups, restores and checks of the same repository can run at the same time, also from several

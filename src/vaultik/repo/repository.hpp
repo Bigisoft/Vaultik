@@ -43,7 +43,9 @@ public:
     static void init(Backend& backend, std::string_view password, const InitOptions& options = {});
 
     // Opens an existing repository and loads its index. Throws AuthError on a wrong password.
-    static std::unique_ptr<Repository> open(std::unique_ptr<Backend> backend, std::string_view password);
+    // Without `load_index` the index files are not read at all (repair, when one is damaged).
+    static std::unique_ptr<Repository> open(std::unique_ptr<Backend> backend, std::string_view password,
+                                            bool load_index = true);
 
     ~Repository();
     Repository(const Repository&) = delete;
@@ -90,6 +92,8 @@ public:
     // Adds a pack that no index file lists to the in-memory index (prune, after reading the
     // pack's own header), so its blobs can be loaded.
     void index_pack(const Id& pack_id, const std::vector<BlobEntry>& entries);
+    // Empties the in-memory index (repair builds it again from the packs).
+    void clear_index();
 
     // Index files, for prune: their names ("index/<hex>"), one file's content, and a new file.
     std::vector<std::string> list_index_files();

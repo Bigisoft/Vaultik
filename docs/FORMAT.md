@@ -246,3 +246,15 @@ packs that are mostly unused (sealed blobs are copied as they are, after authent
 (3) write fresh index files for every pack that stays; (4) delete the old index files; (5) delete
 the packs nothing uses any more. Packs that no index file lists are read through their own
 header: kept and indexed again if they hold blobs in use, deleted otherwise.
+
+## Repair
+
+Repair (`vaultik repair`) holds the exclusive lock and opens the repository without reading the
+index files. In this order, so a crash at any point leaves a repository that opens: (1) read
+every pack's header and (unless `--quick`) decode and hash-check every blob; the first intact
+copy of each blob goes into the new index, packs that cannot be read are left in place and not
+indexed; (2) write new index files for that index, then delete every old index file; (3) delete
+snapshot files that cannot be opened or whose root tree is lost; for the others, rewrite every
+tree that references a lost blob (dropping the file nodes whose chunks are missing and the
+directory nodes whose tree is missing), save the snapshot again with the new root tree and a note
+"(repaired: N file(s) and M folder(s) were lost)", then delete the old snapshot file.
