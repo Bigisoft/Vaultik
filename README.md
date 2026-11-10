@@ -518,7 +518,10 @@ Windows Event Log (Application, source `Vaultik`; syslog on Linux), so Event Vie
 tools see failed backups without any alert set up. The event id tells what it was: 100s a backup,
 200s a health check, 300s the second copy, 400s a test restore; the last digit is the result
 (0 success, 1 partial, 2 failed, 3 cancelled, 5 succeeded with a warning: ransomware signs, old
-versions kept, or the drive's health). Failures are errors and warnings are warnings. The
+versions kept, or the drive's health). Failures are errors and warnings are warnings. Every
+account of the computer can read that log, so an entry says only which job ran, what kind of
+run it was, how it ended and how many files it saved, never its messages (which name files);
+those stay in the Activity tab. The
 installer registers the source; the portable version writes the same entries, which Event Viewer
 then shows after a note that the source is not registered.
 

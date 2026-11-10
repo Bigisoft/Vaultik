@@ -578,7 +578,7 @@ void enable_restore_privileges() {}
 void system_log(LogLevel level, std::uint32_t event_id, const std::string& text) {
     const int priority = level == LogLevel::Error ? LOG_ERR : level == LogLevel::Warning ? LOG_WARNING : LOG_INFO;
     openlog("vaultik", LOG_PID, LOG_USER);
-    syslog(priority, "[%u] %s", static_cast<unsigned>(event_id), text.c_str());
+    syslog(priority, "[%u] %.30000s", static_cast<unsigned>(event_id), text.c_str());
     closelog();
 }
 

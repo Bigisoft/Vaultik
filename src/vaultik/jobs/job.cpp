@@ -835,6 +835,8 @@ void log_runs_to_system(bool on) {
 // Event ids: 100s a backup, 200s a health check, 300s the second copy, 400s a test restore; the
 // last digit the result (0 success, 1 partial, 2 failed, 3 cancelled), +5 when it succeeded but
 // warns (ransomware signs, old versions kept, the drive's health). Monitoring tools filter by them.
+// Every account of the computer can read the Application log, so an entry holds only what the run
+// was and how it ended, never its messages (which name files and folders).
 SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name, const std::string& job_id) {
     SystemLogEntry e;
     std::uint32_t base = 100;
@@ -856,14 +858,17 @@ SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name,
     }
     e.id = base + result;
     e.level = r.status == RunStatus::Failed ? 2 : (r.status == RunStatus::Partial || warns) ? 1 : 0;
-    e.text = what + " of the Vaultik job \"" + job_name + "\" (" + job_id + "): " + to_string(r.status);
-    if (!r.message.empty()) e.text += "\n" + r.message;
+    std::string name = job_name.substr(0, 100);
+    for (char& c : name)
+        if (static_cast<unsigned char>(c) < 0x20) c = ' ';
+    e.text = what + " of the Vaultik job \"" + name + "\" (" + job_id + "): " + to_string(r.status);
     if (r.kind == RunKind::Backup && r.status != RunStatus::Failed && r.status != RunStatus::Cancelled)
         e.text += "\nFiles: " + std::to_string(r.files) + ", new data: " + std::to_string(r.new_bytes) + " bytes";
     if (r.errors > 0) e.text += "\nErrors: " + std::to_string(r.errors);
-    if (!r.alert.empty()) e.text += "\nRansomware warning: " + r.alert;
-    if (!r.hold.empty()) e.text += "\nOld versions kept: " + r.hold;
-    if (!r.drive.empty()) e.text += "\nBackup drive: " + r.drive;
+    if (!r.alert.empty()) e.text += "\nWarning: it saw signs of ransomware";
+    if (!r.hold.empty()) e.text += "\nWarning: old versions were kept";
+    if (!r.drive.empty()) e.text += "\nWarning: the backup drive reports a problem";
+    e.text += "\nThe details are in Vaultik's Activity tab.";
     return e;
 }
 
@@ -872,13 +877,17 @@ void JobStore::append_history(const std::string& id, const RunRecord& record) co
     const std::string path = history_path(dir_, id);
     os::append_file(path, bytes_of(to_json(record) + "\n"));
     if (g_log_runs) {
-        std::string name = id;
         try {
-            if (const auto job = find(id)) name = job->name;
-        } catch (const std::exception&) {
+            std::string name = id;
+            try {
+                if (const auto job = find(id)) name = job->name;
+            } catch (const std::exception&) {
+            }
+            const SystemLogEntry e = system_log_entry(record, name, id);
+            os::system_log(static_cast<os::LogLevel>(e.level), e.id, e.text);
+        } catch (...) {
+            // the history above is what counts
         }
-        const SystemLogEntry e = system_log_entry(record, name, id);
-        os::system_log(static_cast<os::LogLevel>(e.level), e.id, e.text);
     }
 
     os::FileInfo info;

@@ -428,7 +428,8 @@ TEST_CASE("system log entries of runs") {
     e = system_log_entry(r, "Docs", "docs");
     CHECK(e.id == 105);
     CHECK(e.level == 1);
-    CHECK(e.text.find("Ransomware warning: many files look encrypted") != std::string::npos);
+    CHECK(e.text.find("signs of ransomware") != std::string::npos);
+    CHECK(e.text.find("many files look encrypted") == std::string::npos);  // no messages: others read the log
     r.alert.clear();
     r.status = RunStatus::Failed;
     r.message = "the backup drive is not connected";
@@ -437,6 +438,7 @@ TEST_CASE("system log entries of runs") {
     CHECK(e.id == 202);
     CHECK(e.level == 2);
     CHECK(e.text.find("Files:") == std::string::npos);
+    CHECK(e.text.find("not connected") == std::string::npos);
     r.kind = RunKind::RestoreTest;
     r.status = RunStatus::Cancelled;
     CHECK(system_log_entry(r, "Docs", "docs").id == 403);
