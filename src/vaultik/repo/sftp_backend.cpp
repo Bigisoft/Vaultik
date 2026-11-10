@@ -289,9 +289,21 @@ void SftpBackend::put(const std::string& name, ByteSpan data) {
                                         LIBSSH2_SFTP_RENAME_OVERWRITE | LIBSSH2_SFTP_RENAME_ATOMIC |
                                             LIBSSH2_SFTP_RENAME_NATIVE);
         if (rc != 0) {
-            libssh2_sftp_unlink_ex(c.sftp, final_path.c_str(), static_cast<unsigned>(final_path.size()));
+            // Without overwriting renames: move the old file aside, put the new one in place, and
+            // only then remove the old one; if that fails, the old one goes back. At no point is
+            // neither in place (the config or a snapshot must never be lost).
+            const std::string old = final_path + ".old-" + to_hex(ByteSpan(rnd, sizeof rnd));
+            const bool had_old = libssh2_sftp_rename_ex(c.sftp, final_path.c_str(), static_cast<unsigned>(final_path.size()),
+                                                        old.c_str(), static_cast<unsigned>(old.size()),
+                                                        LIBSSH2_SFTP_RENAME_NATIVE) == 0;
             rc = libssh2_sftp_rename_ex(c.sftp, tmp.c_str(), static_cast<unsigned>(tmp.size()), final_path.c_str(),
                                         static_cast<unsigned>(final_path.size()), LIBSSH2_SFTP_RENAME_NATIVE);
+            if (rc == 0) {
+                if (had_old) libssh2_sftp_unlink_ex(c.sftp, old.c_str(), static_cast<unsigned>(old.size()));
+            } else if (had_old) {
+                libssh2_sftp_rename_ex(c.sftp, old.c_str(), static_cast<unsigned>(old.size()), final_path.c_str(),
+                                       static_cast<unsigned>(final_path.size()), LIBSSH2_SFTP_RENAME_NATIVE);
+            }
         }
         if (rc != 0) {
             libssh2_sftp_unlink_ex(c.sftp, tmp.c_str(), static_cast<unsigned>(tmp.size()));
@@ -369,7 +381,8 @@ std::vector<std::string> SftpBackend::list(const std::string& dir) {
                 if (entry == "." || entry == "..") continue;
                 const std::string full = rel.empty() ? entry : rel + "/" + entry;
                 if (LIBSSH2_SFTP_S_ISDIR(attrs.permissions)) folders.push_back(full);
-                else if (entry.find(".tmp-") == std::string::npos) out.push_back(full);
+                else if (entry.find(".tmp-") == std::string::npos && entry.find(".old-") == std::string::npos)
+                    out.push_back(full);
             }
             libssh2_sftp_close(h);
             for (const std::string& f : folders) walk(f);

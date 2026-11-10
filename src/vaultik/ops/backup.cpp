@@ -331,7 +331,9 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         parent->mtime == node.mtime && parent->ctime == node.ctime && all_present(parent->content) &&
         streams_present(*parent)) {
         node.content = parent->content;
-        node.streams = parent->streams;
+        // A version made before streams were kept has none for any file: look once more.
+        if (parent->streams.empty()) scan_streams(path, node);
+        else node.streams = parent->streams;
         stats_.bytes += node.size;
         report();
         return true;

@@ -253,6 +253,7 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
 }
 
 void Repository::check_pipeline() {
+    if (!write_failed_.empty()) throw Error(write_failed_);
     if (!pipe_) return;
     std::string failed;
     {
@@ -409,13 +410,24 @@ void Repository::finish_pack() {
     std::vector<BlobEntry> entries;
     const Bytes bytes = pack_.finish(*aead_, entries);
     const Id pack_id = blake3(bytes);
-    // Known at once (deduplication), but listed in an index file only once the pack is written.
+    const bool background = pipe_ && pipe_->max_uploads > 0;
+    if (!background) {
+        // Written before its blobs count as stored; a failed write is final, like a failed
+        // background one, since those blobs are in no pack now.
+        try {
+            backend_->put(pack_name(pack_id), bytes);
+        } catch (const std::exception& e) {
+            write_failed_ = std::string("cannot write a pack: ") + e.what();
+            throw;
+        }
+    }
+    // Known at once (deduplication); listed in an index file once the pack is written.
     const std::uint32_t pos = index_.add_pack(pack_id);
     for (const BlobEntry& e : entries) {
         index_.add(e, pos);
         pack_pending_.erase(e.id);  // (others may still be with the workers)
     }
-    if (pipe_ && pipe_->max_uploads > 0) {
+    if (background) {
         Pipeline& p = *pipe_;
         {
             std::unique_lock lk(p.mu);
@@ -428,7 +440,6 @@ void Repository::finish_pack() {
         collect_uploads(false);
         return;
     }
-    backend_->put(pack_name(pack_id), bytes);
     write_stats_.stored_bytes_added += bytes.size();
     ++write_stats_.packs_written;
     index_pending_.emplace_back(pack_id, std::move(entries));

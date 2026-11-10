@@ -287,7 +287,11 @@ std::uint64_t WebDavBackend::size(const std::string& name) {
     if (r.status != 200) fail("checking " + name, r);
     const std::string length = r.header("content-length");
     if (length.empty()) throw Error(location_ + ": the server did not say the size of " + name);
-    return std::stoull(length);
+    try {
+        return std::stoull(length);
+    } catch (const std::exception&) {
+        throw Error(location_ + ": the server gave no valid size for " + name);
+    }
 }
 
 std::vector<std::string> WebDavBackend::list(const std::string& dir) {

@@ -130,6 +130,7 @@ private:
     void check_pipeline();
     std::unique_ptr<Pipeline> pipe_;
     Key32 enc_key_{};  // for the workers' own ciphers
+    std::string write_failed_;  // a pack written in line failed: nothing more may count as stored
     void write_index();
     Bytes seal_object(ByteSpan plain, ByteSpan aad, bool compress);
     Bytes open_object(ByteSpan sealed, ByteSpan aad);
