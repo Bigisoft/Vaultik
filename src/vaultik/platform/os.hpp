@@ -295,6 +295,10 @@ int run_command_elevated(const std::vector<std::string>& argv);
 // /bin/sh -c), without a window, and returns its exit code. Captures stdout and stderr into
 // `output` when given (its first 64 KiB). Throws OsError when the shell cannot be started.
 int run_shell(const std::string& command, std::string* output = nullptr);
+// Whether the current internet connection is metered (paid by the byte or capped, as Windows
+// reports it for mobile data or a connection the user marked so). False when it cannot tell, and
+// on POSIX.
+bool metered_connection();
 // Sets an environment variable of this process (and so of the programs it starts).
 void set_env(const std::string& name, const std::string& value);
 

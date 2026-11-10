@@ -263,7 +263,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick", "--permissions", "--no-links"};
+                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1732,6 +1732,18 @@ int cmd_run_job(const Args& a) {
         after_due = false;
         run_job_command(*job, "after", job->after_command, result);
     };
+    // A scheduled run of a cloud job waits for an unmetered connection, if the job says so. It is
+    // recorded (as cancelled), so the Activity tab shows why no version was saved.
+    if (a.has("--scheduled") && job->schedule.skip_metered && is_cloud_location(job->repository) &&
+        os::metered_connection()) {
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Cancelled;
+        record.message = "skipped: the internet connection is metered";
+        store.append_history(job->id, record);
+        if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", record.message}});
+        else out("Job \"" + job->name + "\": " + record.message + "\n");
+        return kExitOk;
+    }
     try {
         if (!jobs::drive_connected(*job))
             throw Error("the backup drive is not connected (" + job->repository + ")");

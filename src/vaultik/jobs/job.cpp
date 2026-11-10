@@ -349,7 +349,10 @@ std::string to_json(const Job& job) {
           {"hour", job.schedule.hour},
           {"minute", job.schedule.minute},
           {"weekdays", job.schedule.weekdays},
-          {"every_hours", job.schedule.every_hours}}},
+          {"every_hours", job.schedule.every_hours},
+          {"skip_on_battery", job.schedule.skip_on_battery},
+          {"wake_computer", job.schedule.wake_computer},
+          {"skip_metered", job.schedule.skip_metered}}},
         {"resources",
          {{"cpu", vaultik::to_string(r.cpu)},
           {"io", vaultik::to_string(r.io)},
@@ -420,6 +423,9 @@ Job job_from_json(const std::string& text) {
             job.schedule.minute = s.value("minute", 0);
             job.schedule.weekdays = s.value("weekdays", static_cast<std::uint8_t>(0x7F));
             job.schedule.every_hours = s.value("every_hours", 1);
+            job.schedule.skip_on_battery = s.value("skip_on_battery", false);
+            job.schedule.wake_computer = s.value("wake_computer", false);
+            job.schedule.skip_metered = s.value("skip_metered", false);
         }
         if (j.contains("resources")) {
             const json& r = j.at("resources");

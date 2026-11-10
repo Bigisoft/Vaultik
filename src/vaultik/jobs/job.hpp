@@ -27,6 +27,10 @@ struct Schedule {
     int minute = 0;       // all kinds (Hourly: minute past the hour)
     std::uint8_t weekdays = 0x7F;  // Weekly: bit 0 = Monday ... bit 6 = Sunday
     int every_hours = 1;  // Hourly: 1-23
+    // Conditions for scheduled runs (a backup started by hand always runs):
+    bool skip_on_battery = false;  // not while the computer runs on battery
+    bool wake_computer = false;    // wake it from sleep at the scheduled time
+    bool skip_metered = false;     // cloud storage: not over a metered (paid by the byte) connection
 };
 
 // Health checks run after a scheduled backup when they are due: a weekly check reads a share of

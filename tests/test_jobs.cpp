@@ -271,7 +271,9 @@ TEST_CASE("scheduler definitions") {
     CHECK(xml.find("<Monday/><Wednesday/>") != std::string::npos);
     CHECK(xml.find("<StartBoundary>2026-01-01T21:30:00</StartBoundary>") != std::string::npos);
     CHECK(xml.find("<Command>C:\\Program Files\\Vaultik\\vaultik-task.exe</Command>") != std::string::npos);
-    CHECK(xml.find("<Arguments>run-job docs</Arguments>") != std::string::npos);
+    CHECK(xml.find("<Arguments>run-job docs --scheduled</Arguments>") != std::string::npos);
+    CHECK(xml.find("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>") != std::string::npos);
+    CHECK(xml.find("<WakeToRun>false</WakeToRun>") != std::string::npos);
     CHECK(xml.find("<StartWhenAvailable>true</StartWhenAvailable>") != std::string::npos);
     CHECK(xml.find("<RunLevel>LeastPrivilege</RunLevel>") != std::string::npos);
     j.run_as_admin = true;
@@ -279,6 +281,11 @@ TEST_CASE("scheduler definitions") {
     CHECK(schedule_definition(j, "C:\\x").find("--admin</Arguments>") != std::string::npos);
     CHECK(xml.find("--admin") == std::string::npos);
     j.run_as_admin = false;
+    j.schedule.skip_on_battery = true;
+    j.schedule.wake_computer = true;
+    const std::string conditions = schedule_definition(j, "D:/x");
+    CHECK(conditions.find("<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>") != std::string::npos);
+    CHECK(conditions.find("<WakeToRun>true</WakeToRun>") != std::string::npos);
     j.schedule.kind = Schedule::Kind::Hourly;
     j.schedule.every_hours = 6;
     CHECK(schedule_definition(j, "C:\\x").find("<Interval>PT6H</Interval>") != std::string::npos);

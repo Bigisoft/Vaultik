@@ -13,6 +13,7 @@
 
 // After <windows.h> (pulled in by win_handle.hpp).
 #include <dpapi.h>
+#include <netlistmgr.h>
 #include <shellapi.h>
 #include <winioctl.h>
 
@@ -751,6 +752,24 @@ int run_command(const std::vector<std::string>& argv, std::string* output) {
     DWORD code = 0;
     GetExitCodeProcess(process.get(), &code);
     return static_cast<int>(code);
+}
+
+bool metered_connection() {
+    // The Network List Manager knows the cost of the preferred connection.
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    bool metered = false;
+    INetworkCostManager* costs = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_NetworkListManager, nullptr, CLSCTX_ALL, IID_INetworkCostManager,
+                                   reinterpret_cast<void**>(&costs)))) {
+        DWORD cost = 0;
+        if (SUCCEEDED(costs->GetCost(&cost, nullptr)))
+            metered = (cost & (NLM_CONNECTION_COST_FIXED | NLM_CONNECTION_COST_VARIABLE |
+                               NLM_CONNECTION_COST_OVERDATALIMIT | NLM_CONNECTION_COST_CONGESTED |
+                               NLM_CONNECTION_COST_ROAMING | NLM_CONNECTION_COST_APPROACHINGDATALIMIT)) != 0;
+        costs->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+    return metered;
 }
 
 void set_env(const std::string& name, const std::string& value) {

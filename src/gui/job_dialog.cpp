@@ -387,6 +387,15 @@ QWidget* JobDialog::build_schedule() {
     form->addRow(tr("Days:"), days_row_);
 
     // Also when the destination drive is plugged in (an external disk that is not always there).
+    // Conditions for scheduled runs; "Back up now" always runs.
+    skip_battery_ = new QCheckBox(tr("Not while the computer runs on battery"));
+    wake_ = new QCheckBox(tr("Wake the computer from sleep to back up"));
+    skip_metered_ = new QCheckBox(tr("Cloud storage: not over a metered connection (mobile data)"));
+    skip_metered_->setToolTip(tr("A skipped run shows in the Activity tab; the next scheduled run tries again."));
+    form->addRow(tr("Scheduled runs:"), skip_battery_);
+    form->addRow(QString(), wake_);
+    form->addRow(QString(), skip_metered_);
+
     on_connect_ = new QCheckBox(tr("Also back up when the destination drive is connected"));
     form->addRow(QString(), on_connect_);
     on_connect_note_ = new QLabel;
@@ -714,6 +723,9 @@ void JobDialog::load(const jobs::Job& job) {
     every_hours_->setValue(job.schedule.every_hours);
     minute_->setValue(job.schedule.minute);
     for (int d = 0; d < 7; ++d) days_[d]->setChecked((job.schedule.weekdays >> d) & 1u);
+    skip_battery_->setChecked(job.schedule.skip_on_battery);
+    wake_->setChecked(job.schedule.wake_computer);
+    skip_metered_->setChecked(job.schedule.skip_metered);
     update_schedule_fields();
 
     const ResourcePolicy& r = job.resources;
@@ -812,6 +824,9 @@ jobs::Job JobDialog::collect() const {
     j.schedule.weekdays = 0;
     for (int d = 0; d < 7; ++d)
         if (days_[d]->isChecked()) j.schedule.weekdays |= static_cast<std::uint8_t>(1u << d);
+    j.schedule.skip_on_battery = skip_battery_->isChecked();
+    j.schedule.wake_computer = wake_->isChecked();
+    j.schedule.skip_metered = skip_metered_->isChecked();
 
     ResourcePolicy& r = j.resources;
     r.cpu = static_cast<CpuPriority>(cpu_->currentIndex());

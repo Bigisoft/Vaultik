@@ -507,6 +507,10 @@ Bytes unprotect_secret(ByteSpan sealed) {
 
 // ---- process ------------------------------------------------------------------------------
 
+bool metered_connection() {
+    return false;
+}
+
 void set_env(const std::string& name, const std::string& value) {
     ::setenv(name.c_str(), value.c_str(), 1);
 }

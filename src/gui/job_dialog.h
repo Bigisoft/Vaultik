@@ -79,6 +79,9 @@ private:
     QSpinBox* check_percent_ = nullptr;
     QCheckBox* check_monthly_ = nullptr;
     QCheckBox* check_restore_ = nullptr;
+    QCheckBox* skip_battery_ = nullptr;
+    QCheckBox* wake_ = nullptr;
+    QCheckBox* skip_metered_ = nullptr;
     QLineEdit* before_command_ = nullptr;
     QLineEdit* after_command_ = nullptr;
     bool check_monthly_touched_ = false;  // otherwise a new job follows its destination's default

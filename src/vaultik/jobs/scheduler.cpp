@@ -127,9 +127,14 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
            "  </Triggers>\n"
            "  <Settings>\n"
            "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
-           "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+           "    <DisallowStartIfOnBatteries>" +
+           std::string(job.schedule.skip_on_battery ? "true" : "false") +
+           "</DisallowStartIfOnBatteries>\n"
            "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
            "    <StartWhenAvailable>true</StartWhenAvailable>\n"
+           "    <WakeToRun>" +
+           std::string(job.schedule.wake_computer ? "true" : "false") +
+           "</WakeToRun>\n"
            "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
            "    <Priority>7</Priority>\n"
            "    <Enabled>true</Enabled>\n"
@@ -137,7 +142,7 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
            principals +
            "  <Actions Context=\"Author\">\n"
            "    <Exec><Command>" +
-           xml_escape(launcher) + "</Command><Arguments>run-job " + xml_escape(job.id) +
+           xml_escape(launcher) + "</Command><Arguments>run-job " + xml_escape(job.id) + " --scheduled" +
            // An administrator job reads only the admin-only copy of itself (see admin_jobs.hpp).
            (job.run_as_admin ? " --admin" : "") +
            "</Arguments></Exec>\n"
@@ -278,13 +283,15 @@ void apply_schedule(const Job& job, const std::string& program_dir) {
         remove_schedule(job.id);
         return;
     }
-    const std::string service = "[Unit]\nDescription=Vaultik backup job: " + job.name +
-                                "\n\n[Service]\nType=oneshot\nExecStart=" +
+    const std::string service = "[Unit]\nDescription=Vaultik backup job: " + job.name + "\n" +
+                                (job.schedule.skip_on_battery ? "ConditionACPower=true\n" : "") +
+                                "\n[Service]\nType=oneshot\nExecStart=" +
                                 unit_quote(os::join(program_dir, "vaultik")) + " run-job " + unit_quote(job.id) +
-                                "\n";
+                                " --scheduled\n";
     const std::string timer = "[Unit]\nDescription=Schedule for Vaultik backup job: " + job.name +
                               "\n\n[Timer]\nOnCalendar=" + schedule_definition(job, program_dir) +
-                              "\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n";
+                              "\nPersistent=true\n" + (job.schedule.wake_computer ? "WakeSystem=true\n" : "") +
+                              "\n[Install]\nWantedBy=timers.target\n";
     os::write_file_atomic(os::join(dir, base + ".service"), bytes_of(service));
     os::write_file_atomic(os::join(dir, base + ".timer"), bytes_of(timer));
 
