@@ -1,5 +1,6 @@
 #include "vaultik/ops/restore_test.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <optional>
 #include <random>
@@ -142,6 +143,21 @@ RestoreTestResult test_restore(Repository& repo, const Snapshot& snapshot, const
         chosen.push_back(std::move(c));
     }
 
+    // Folders left by a test that was cut short (the computer went off) go first, once a day old,
+    // so a test running at the same time in another process keeps its own.
+    {
+        std::error_code ec;
+        const auto day_ago = std::filesystem::file_time_type::clock::now() - std::chrono::hours(24);
+        for (std::filesystem::directory_iterator it(fs_path(options.work_dir), ec), end; !ec && it != end;
+             it.increment(ec)) {
+            std::error_code e2;
+            if (!it->path().filename().native().starts_with(fs_path("restore-test-").native()) || !it->is_directory(e2) ||
+                it->is_symlink(e2))
+                continue;
+            const auto when = it->last_write_time(e2);
+            if (!e2 && when < day_ago) std::filesystem::remove_all(it->path(), e2);
+        }
+    }
     std::uint8_t rnd[8];
     random_bytes(rnd);
     const std::string work = os::join(options.work_dir, "restore-test-" + to_hex(ByteSpan(rnd, sizeof rnd)));
