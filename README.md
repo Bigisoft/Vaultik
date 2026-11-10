@@ -190,13 +190,17 @@ backup folder made before the change still opens with the old password.
 
 `powershell -File tools\package.ps1` builds the release programs and makes, in `dist\`:
 
-- `Vaultik-<version>.msi`: the installer. It shows the license and lets you pick the folder
-  (`C:\Program Files\Vaultik` by default), adds a Start menu entry and puts `vaultik` on PATH; a
-  newer version replaces an older one, and removing Vaultik also removes its scheduled tasks
-  (jobs, history and backups stay). The installer makes the folder administrator-only wherever
-  it is, which jobs with administrator rights and "Start Vaultik as administrator" need; outside
-  Program Files those also need every folder above it to be administrator-only (a folder like
-  `D:\Apps` usually lets any user change it, so they then refuse to run).
+- `Vaultik-<version>.msi`: the installer. It shows the license and lets you pick where to
+  install: Vaultik goes into a new folder named `Vaultik` inside the folder you pick
+  (`C:\Program Files` by default, so `C:\Program Files\Vaultik`), adds a Start menu entry and puts
+  `vaultik` on PATH. A newer version replaces an older one in the same place (the choice is
+  remembered), and removing Vaultik also removes its scheduled tasks (jobs, history and backups
+  stay). The installer makes the `Vaultik` folder (never the one you picked) administrator-only,
+  which jobs with administrator rights and "Start Vaultik as administrator" need; outside Program
+  Files those also need every folder above it to be administrator-only (a folder like `D:\Apps`
+  usually lets any user change it, so they then refuse to run). The programs load the system
+  libraries they need from System32 only, and administrator jobs check every file in the
+  program folder, so nothing placed next to the programs loads into an elevated run.
 - `Vaultik-<version>-portable.zip`: a Vaultik folder to unzip anywhere, e.g. on an external
   drive. The file `portable` next to the programs keeps jobs, history, passwords and settings in
   `Settings` there, so nothing is written to the PC. Passwords are sealed for the Windows account
@@ -566,7 +570,8 @@ Priorities only take effect when something else competes for the resource, so on
   folder only administrators can change. The backup destination of such a job is still a folder
   you can change; keep it on a drive used for backups only.
 - Windows: file content, attributes, creation and modification times, permissions (owner, group
-  and access list), alternate data streams and symlink/junction targets are kept. Restores bring
+  and access list), alternate data streams of files (not of folders) and symlink/junction
+  targets are kept. Restores bring
   streams and links back always, permissions when restoring to the original location (or with
   `--permissions`): restored into another folder, another account's permissions could lock you
   out of your own files. Setting another account as owner needs administrator rights; without

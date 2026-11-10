@@ -246,3 +246,13 @@ target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # check would report.
 target_compile_definitions(vaultik_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
 add_test(NAME vaultik_tests COMMAND vaultik_tests)
+
+# The programs load the system libraries they need from System32 only, never from their own folder
+# (a library planted next to them would otherwise load into an elevated run).
+if(WIN32)
+    foreach(program vaultik vaultik-task vaultik-gui)
+        if(TARGET ${program})
+            target_link_options(${program} PRIVATE /DEPENDENTLOADFLAG:0x800)
+        endif()
+    endforeach()
+endif()

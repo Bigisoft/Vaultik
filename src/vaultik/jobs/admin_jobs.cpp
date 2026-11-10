@@ -343,11 +343,19 @@ bool has_admin_copy(const std::string& id) {
 #endif
 }
 
+#ifdef _WIN32
+namespace {
+// Every file in the program folder admin-only too (below): a library planted there would load
+// into an elevated run.
+void check_whole_program_dir(const std::string& program_dir);
+}  // namespace
+#endif
+
 void install_admin_job(const JobStore& from, const std::string& id, const std::string& user_sid) {
 #ifdef _WIN32
     check_elevated_caller(user_sid);
     const std::string program_dir = os::parent_of(os::executable_path());
-    check_program_dir(program_dir);
+    check_whole_program_dir(program_dir);
 
     // The job as the user saved it. Its password must open with this account's DPAPI key, so a
     // file planted in place of the user's secret cannot be passed through.

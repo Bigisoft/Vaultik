@@ -1,7 +1,9 @@
-<!-- Vaultik's installer: the three programs in a folder the user picks (Program Files\Vaultik by
-     default), a Start menu entry, and the folder on PATH so "vaultik" works in any terminal. The
-     folder is made administrator-only wherever it is (jobs with administrator rights and "Start
-     Vaultik as administrator" require that). A newer version replaces an older one. -->
+<!-- Vaultik's installer: the three programs in a folder named Vaultik inside the folder the user
+     picks (Program Files by default), a Start menu entry, and that folder on PATH so "vaultik"
+     works in any terminal. The Vaultik folder (never the one picked, which may be a drive or
+     Program Files itself) is made administrator-only wherever it is: jobs with administrator
+     rights and "Start Vaultik as administrator" require that. The folder picked is remembered,
+     so a newer version replaces an older one in the same place. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="Vaultik" Manufacturer="Vaultik" Version="$(var.Version)" Scope="perMachine"
            UpgradeCode="7F3C2B1E-5A4D-4C8E-9B21-6D0E8F4A3C57" Compressed="yes">
@@ -12,13 +14,25 @@
     <Icon Id="VaultikIcon" SourceFile="$(var.IconFile)" />
     <Property Id="ARPPRODUCTICON" Value="VaultikIcon" />
 
-    <!-- The usual pages: welcome, license, the install folder (changeable), install. -->
-    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <!-- The usual pages: welcome, license, where to install (changeable), install. The folder
+         picked is the one that gets a Vaultik folder (see the wording in Package.wxl). -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLROOT" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
 
+    <!-- Where an earlier version was installed, so an upgrade goes to the same place. -->
+    <Property Id="INSTALLROOT">
+      <RegistrySearch Id="PreviousRoot" Root="HKLM" Key="Software\Vaultik" Name="InstallRoot" Type="directory" />
+    </Property>
+
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Vaultik" />
+      <Directory Id="INSTALLROOT" Name=".">
+        <Directory Id="INSTALLFOLDER" Name="Vaultik" />
+      </Directory>
     </StandardDirectory>
+    <Component Id="RememberRoot" Directory="INSTALLFOLDER" Guid="6C3D8E15-2A4B-4F70-9D2E-81B5C7A40F26">
+      <RegistryValue Root="HKLM" Key="Software\Vaultik" Name="InstallRoot" Type="string" Value="[INSTALLROOT]"
+                     KeyPath="yes" />
+    </Component>
     <StandardDirectory Id="ProgramMenuFolder">
       <!-- For all users; a machine-wide value marks it installed. -->
       <Component Id="StartMenuShortcut" Guid="9B4E1C27-6F03-4A8D-B5E2-7C19D0A36F84">
@@ -83,6 +97,7 @@
       <ComponentGroupRef Id="Programs" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="ExplorerMenu" />
+      <ComponentRef Id="RememberRoot" />
     </Feature>
   </Package>
 </Wix>

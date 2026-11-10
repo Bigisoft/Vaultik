@@ -50,7 +50,8 @@ dotnet build (Join-Path $root 'installer\Vaultik.wixproj') -c Release -nologo -v
     "-p:Version=$version" "-p:BinDir=$bin" -o $out
 if ($LASTEXITCODE -ne 0) { throw "the installer build failed" }
 $msi = Join-Path $dist "Vaultik-$version.msi"
-Copy-Item -Force (Join-Path $out 'Vaultik.msi') $msi
+# (with the folder page's wording in Package.wxl the MSI is built per language)
+Copy-Item -Force (Join-Path (Join-Path $out 'en-US') 'Vaultik.msi') $msi
 Remove-Item -Recurse -Force $out
 
 Get-Item $zip, $msi | ForEach-Object { '{0}  {1:N1} MB' -f $_.Name, ($_.Length / 1MB) }
