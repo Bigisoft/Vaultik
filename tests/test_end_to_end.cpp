@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +25,12 @@
 #include "vaultik/repo/repository.hpp"
 #include "vaultik/util/hex.hpp"
 #include "vaultik/platform/os.hpp"
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+#endif
 
 using namespace vaultik;
 namespace fs = std::filesystem;
@@ -474,50 +482,56 @@ TEST_CASE("move to this PC finds an old account's folders") {
 }
 
 TEST_CASE("folders the change journal calls unchanged are taken from the parent") {
-    TempDir tmp;
-    const fs::path src = tmp.path / "src";
-    const fs::path repo_dir = tmp.path / "repo";
-    write_file(src / "a" / "one.txt", text("one"));
-    write_file(src / "b" / "two.txt", text("two"));
-    write_file(src / "b" / "deeper" / "three.txt", text("three"));
-    init_repo(repo_dir);
-    auto repo = open_repo(repo_dir);
-    BackupOptions options;
-    options.paths = {u8(src)};
-    const BackupResult first = run_backup(*repo, options);
-    CHECK(first.dirs_reused == 0);
-    const auto restored = [&](const Id& snapshot, const std::string& name) {
-        const fs::path out = tmp.path / ("out-" + name);
-        RestoreOptions ro;
-        ro.target = u8(out);
-        run_restore(*repo, repo->load_snapshot(snapshot), ro);
-        return snapshot_of_dir(restored_location(out, src));
-    };
+    // With one reader and with several, which list folders ahead but never one the journal may
+    // let the backup reuse.
+    for (const unsigned readers : {0u, 4u}) {
+        CAPTURE(readers);
+        TempDir tmp;
+        const fs::path src = tmp.path / "src";
+        const fs::path repo_dir = tmp.path / "repo";
+        write_file(src / "a" / "one.txt", text("one"));
+        write_file(src / "b" / "two.txt", text("two"));
+        write_file(src / "b" / "deeper" / "three.txt", text("three"));
+        init_repo(repo_dir);
+        auto repo = open_repo(repo_dir);
+        BackupOptions options;
+        options.paths = {u8(src)};
+        options.read_threads = readers;
+        const BackupResult first = run_backup(*repo, options);
+        CHECK(first.dirs_reused == 0);
+        const auto restored = [&](const Id& snapshot, const std::string& name) {
+            const fs::path out = tmp.path / ("out-" + name);
+            RestoreOptions ro;
+            ro.target = u8(out);
+            run_restore(*repo, repo->load_snapshot(snapshot), ro);
+            return snapshot_of_dir(restored_location(out, src));
+        };
 
-    // Changed behind the journal's back: a journal that calls every folder unchanged keeps the
-    // parent's listing, which shows the folders were not read.
-    write_file(src / "b" / "two.txt", text("TWO, longer"));
-    options.journal_parent = first.snapshot_id;
-    options.dir_unchanged = [](const std::string&) { return true; };
-    const BackupResult second = run_backup(*repo, options);
-    CHECK(second.dirs_reused >= 3);
-    CHECK(second.snapshot.stats.files == 3);
-    CHECK(restored(second.snapshot_id, "2")["b/two.txt"] == text("two"));
+        // Changed behind the journal's back: a journal that calls every folder unchanged keeps the
+        // parent's listing, which shows the folders were not read.
+        write_file(src / "b" / "two.txt", text("TWO, longer"));
+        options.journal_parent = first.snapshot_id;
+        options.dir_unchanged = [](const std::string&) { return true; };
+        const BackupResult second = run_backup(*repo, options);
+        CHECK(second.dirs_reused >= 3);
+        CHECK(second.snapshot.stats.files == 3);
+        CHECK(restored(second.snapshot_id, "2")["b/two.txt"] == text("two"));
 
-    // A folder the journal names is read again, with the folders below it asked in turn.
-    options.journal_parent = second.snapshot_id;
-    options.dir_unchanged = [](const std::string& dir) { return !(dir.ends_with("\\b") || dir.ends_with("/b")); };
-    const BackupResult third = run_backup(*repo, options);
-    CHECK(third.dirs_reused >= 1);
-    const auto files = restored(third.snapshot_id, "3");
-    CHECK(files.at("b/two.txt") == text("TWO, longer"));
-    CHECK(files.at("b/deeper/three.txt") == text("three"));
-    CHECK(files.at("a/one.txt") == text("one"));
+        // A folder the journal names is read again, with the folders below it asked in turn.
+        options.journal_parent = second.snapshot_id;
+        options.dir_unchanged = [](const std::string& dir) { return !(dir.ends_with("\\b") || dir.ends_with("/b")); };
+        const BackupResult third = run_backup(*repo, options);
+        CHECK(third.dirs_reused >= 1);
+        const auto files = restored(third.snapshot_id, "3");
+        CHECK(files.at("b/two.txt") == text("TWO, longer"));
+        CHECK(files.at("b/deeper/three.txt") == text("three"));
+        CHECK(files.at("a/one.txt") == text("one"));
 
-    // A journal read against another version than the parent answers nothing.
-    options.journal_parent = first.snapshot_id;
-    options.dir_unchanged = [](const std::string&) { return true; };
-    CHECK(run_backup(*repo, options).dirs_reused == 0);
+        // A journal read against another version than the parent answers nothing.
+        options.journal_parent = first.snapshot_id;
+        options.dir_unchanged = [](const std::string&) { return true; };
+        CHECK(run_backup(*repo, options).dirs_reused == 0);
+    }
 }
 
 TEST_CASE("files that look encrypted by ransomware raise the alarm") {
@@ -1006,4 +1020,168 @@ TEST_CASE("only when something changed: an unchanged backup saves no version") {
     options.skip_unchanged = false;  // without the option every run saves one
     CHECK_FALSE(run_backup(*repo, options).unchanged);
     CHECK(repo->list_snapshot_ids().size() == 3);
+}
+
+namespace {
+
+// A tree of many files of mixed sizes: empty, tiny, one chunk, several chunks, and duplicates.
+void make_mixed_tree(const fs::path& src) {
+    std::mt19937 rng(77);
+    for (int d = 0; d < 6; ++d) {
+        const fs::path dir = src / ("dir" + std::to_string(d));
+        for (int i = 0; i < 30; ++i) {
+            std::size_t size = 0;
+            switch (i % 6) {
+                case 0: size = 0; break;
+                case 1: size = 1 + rng() % 100; break;
+                case 2: size = 4096 + rng() % 60000; break;
+                case 3: size = 200 * 1024; break;  // below the minimum chunk size: one chunk
+                case 4: size = rng() % 300000; break;
+                default: size = (i == 5 && d % 2 == 0) ? (3u << 20) + rng() % (2u << 20) : 1000; break;
+            }
+            write_file(dir / ("f" + std::to_string(i) + ".bin"), random_data(size, rng()));
+        }
+        write_file(dir / "sub" / "deep" / "x.txt", text("folder " + std::to_string(d)));
+    }
+    write_file(src / "multi.bin", random_data(9u << 20, 5));
+    write_file(src / "dir1" / "copy-of-multi.bin", random_data(9u << 20, 5));  // stored once
+    write_file(src / "empty.bin", {});
+    write_file(src / "gone.bin", text("read_path sends this one nowhere"));
+    write_file(src / "locked.bin", random_data(70000, 6));
+}
+
+}  // namespace
+
+TEST_CASE("several readers make the same snapshot as one") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    make_mixed_tree(src);
+
+#ifdef _WIN32
+    // Held open without sharing, so the backup cannot open it (the same for every reader count).
+    int locked_fd = -1;
+    REQUIRE(_wsopen_s(&locked_fd, (src / "locked.bin").c_str(), _O_RDONLY | _O_BINARY, _SH_DENYRW, 0) == 0);
+    struct CloseFd {
+        int fd;
+        ~CloseFd() { _close(fd); }
+    } close_locked{locked_fd};
+    const std::uint64_t expected_errors = 2;
+#else
+    const std::uint64_t expected_errors = 1;
+#endif
+
+    const std::string gone = u8(src / "gone.bin");
+    const auto make_options = [&](unsigned readers) {
+        BackupOptions o;
+        o.paths = {u8(src)};
+        o.read_threads = readers;
+        o.use_parent = false;
+        // A file that disappears between the listing and its reading.
+        o.read_path = [gone](const std::string& p) { return p == gone ? p + ".missing" : p; };
+        return o;
+    };
+
+    init_repo(tmp.path / "one");
+    init_repo(tmp.path / "four");
+    auto one = open_repo(tmp.path / "one");
+    auto four = open_repo(tmp.path / "four");
+    four->set_parallelism(2, 0);
+
+    std::vector<std::string> warnings_one, warnings_four;
+    BackupOptions o1 = make_options(1);
+    o1.on_warning = [&](const std::string& w) { warnings_one.push_back(w); };
+    BackupOptions o4 = make_options(4);
+    o4.on_warning = [&](const std::string& w) { warnings_four.push_back(w); };
+    const BackupResult r1 = run_backup(*one, o1);
+    const BackupResult r4 = run_backup(*four, o4);
+
+    const SnapshotStats& a = r1.snapshot.stats;
+    const SnapshotStats& b = r4.snapshot.stats;
+    CHECK(a.errors == expected_errors);
+    CHECK(a.files == b.files);
+    CHECK(a.dirs == b.dirs);
+    CHECK(a.bytes == b.bytes);
+    CHECK(a.new_bytes == b.new_bytes);
+    CHECK(a.errors == b.errors);
+    CHECK(a.skipped == b.skipped);
+    CHECK(a.files_new == b.files_new);
+    CHECK(a.files_changed == b.files_changed);
+    std::sort(warnings_one.begin(), warnings_one.end());
+    std::sort(warnings_four.begin(), warnings_four.end());
+    CHECK(warnings_one == warnings_four);
+    CHECK(a.new_bytes < a.bytes);  // the copy of multi.bin added nothing
+
+    // In the same repository (same keys) four readers make the very same root tree. Compared with
+    // a second run, not the first: NTFS updates a folder's modification time lazily, so the
+    // first listing after the files were written can still see older folder times.
+    const BackupResult same = run_backup(*one, make_options(1));
+    const BackupResult again = run_backup(*one, make_options(4));
+    CHECK(again.snapshot.tree == same.snapshot.tree);
+    CHECK(again.snapshot.stats.new_bytes == 0);
+    CHECK(again.snapshot.stats.bytes == a.bytes);
+
+    // With a parent: a changed, an added and a removed file.
+    append_file(src / "dir2" / "f5.bin", random_data(5000, 9));
+    write_file(src / "dir3" / "new.bin", random_data(300000, 10));
+    fs::remove(src / "dir4" / "f3.bin");
+    BackupOptions p1 = make_options(1);
+    p1.use_parent = true;
+    BackupOptions p4 = make_options(4);
+    p4.use_parent = true;
+    const BackupResult i1 = run_backup(*one, p1);
+    const BackupResult i4 = run_backup(*four, p4);
+    CHECK(i1.snapshot.stats.files_new == 1);
+    CHECK(i1.snapshot.stats.files_changed == 1);
+    CHECK(i1.snapshot.stats.files_new == i4.snapshot.stats.files_new);
+    CHECK(i1.snapshot.stats.files_changed == i4.snapshot.stats.files_changed);
+    CHECK(i1.snapshot.stats.items_removed == i4.snapshot.stats.items_removed);
+    CHECK(i1.snapshot.stats.new_bytes == i4.snapshot.stats.new_bytes);
+    CHECK(i1.snapshot.stats.bytes == i4.snapshot.stats.bytes);
+
+    // What four readers stored restores to the source (less the files that could not be read).
+    const fs::path out = tmp.path / "out";
+    RestoreOptions ro;
+    ro.target = u8(out);
+    CHECK(run_restore(*four, four->load_snapshot(i4.snapshot_id), ro).errors == 0);
+    std::map<std::string, Bytes> expected = snapshot_of_dir(src);
+    expected.erase("gone.bin");
+#ifdef _WIN32
+    expected.erase("locked.bin");
+#endif
+    CHECK(snapshot_of_dir(restored_location(out, src)) == expected);
+
+    VerifyOptions vo;
+    vo.read_data = true;
+    CHECK(run_verify(*four, vo).errors == 0);
+}
+
+TEST_CASE("a backup with several readers stops promptly when cancelled") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    for (int i = 0; i < 12; ++i)
+        write_file(src / ("d" + std::to_string(i % 3)) / ("big" + std::to_string(i) + ".bin"),
+                   random_data(3u << 20, static_cast<std::uint32_t>(100 + i)));
+    init_repo(tmp.path / "repo");
+    auto repo = open_repo(tmp.path / "repo");
+    repo->set_parallelism(2, 0);
+
+    BackupOptions o;
+    o.paths = {u8(src)};
+    o.read_threads = 4;
+    // While listing, part way into a folder's files, and in a later folder.
+    for (const int after : {4, 12, 30}) {
+        CAPTURE(after);
+        int polls = 0;
+        o.should_cancel = [&polls, after] { return ++polls > after; };
+        const auto start = std::chrono::steady_clock::now();
+        CHECK_THROWS_AS(run_backup(*repo, o), Cancelled);
+        CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(60));
+        CHECK(repo->list_snapshot_ids().empty());
+    }
+
+    // The repository is still usable: a full run afterwards works.
+    o.should_cancel = {};
+    const BackupResult r = run_backup(*repo, o);
+    CHECK(r.snapshot.stats.files == 12);
+    CHECK(r.snapshot.stats.errors == 0);
 }

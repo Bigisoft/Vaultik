@@ -46,6 +46,13 @@ struct BackupOptions {
     // messages always use the real path. Unset: read the path itself.
     std::function<std::string(const std::string&)> read_path;
 
+    // Files to read are opened, chunked and hashed on this many threads at once (0 or 1: on the
+    // calling thread, one after the other). The repository is still only used from the calling
+    // thread, which stores each file's chunks in listing order, so the snapshot is the same
+    // either way. Each reader holds its own read buffer (twice the largest chunk, 8 MiB by
+    // default), and at most 2 x read_threads files wait with up to 4 MiB of chunks each.
+    unsigned read_threads = 0;
+
     std::function<void(const BackupProgress&)> on_progress;  // called at most ~5 times per second
     std::function<void(const std::string&)> on_warning;
     // Polled between files; returning true stops the backup with a Cancelled error.

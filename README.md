@@ -6,7 +6,8 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
 - **Small and idle-free.** The engine is one static ~1 MB executable: no service, no kernel driver.
   Scheduled backups are started by the system scheduler, run, and exit. Peak RAM stays around
   100 MB however much data there is (measured: 101 MB for a 9.7 GB folder with the worker threads,
-  9 MB for an unchanged re-run; uploads to cloud storage add 32 MiB per pack in flight). The frontend only uses memory while it is open.
+  9 MB for an unchanged re-run; uploads to cloud storage add 32 MiB per pack in flight, and the
+  4 parallel file readers about 45 MB more). The frontend only uses memory while it is open.
 - **Deduplicated.** Files are split into content-defined chunks (FastCDC, ~1 MiB average). A chunk
   already stored, from any file in any earlier snapshot, is never stored again. Every snapshot looks
   like a full backup but only adds what changed.
@@ -622,13 +623,16 @@ vaultik restore -r E:\Backups\vaultik latest --target D:\Restore --priority high
 | `--max-memory` | size, at least `128M` | Hard cap on committed memory (Job Object) | address-space limit |
 | `--read-limit` | rate, e.g. `50M` | Max read speed per second | same |
 | `--write-limit` | rate, e.g. `20M` | Max write speed per second, also to network shares | same |
+| `--threads` | `0`-`16` | Threads that compress and encrypt (default up to 4, 0 at background priority or with `--max-memory`) | same |
+| `--read-threads` | `1`-`16` | Files read, chunked and hashed at once (default up to 4, 1 at background priority or with `--max-memory`); each reader holds up to about 16 MiB | same |
 
 Presets: `background` = CPU idle, I/O background, RAM low; `low` = CPU low, I/O low, RAM low;
 `high` = CPU high. Individual options override the preset (`--priority low --cpu normal`).
 `run-job` uses the job's saved settings; options given on its command line override them.
 
 Priorities only take effect when something else competes for the resource, so on an idle PC a
-`low` backup runs at full speed. Limits apply all the time. Sizes and rates use binary units
+`low` backup runs at full speed. Limits apply all the time; `--read-limit` and `--write-limit`
+are totals, shared by all of a backup's threads. Sizes and rates use binary units
 (`512K`, `64M`, `1.5G`). Restores from the frontend run at normal priority without limits.
 
 ## Current limits
@@ -658,11 +662,17 @@ Priorities only take effect when something else competes for the resource, so on
 - Restores and backups check for links planted in the folders they work on, but a parent folder
   swapped for a link during the run by someone who can write there is not detected. Run elevated
   restores into folders only you can write to.
-- Compression and encryption run on up to 4 worker threads (`--threads`), but reading, chunking
-  and hashing stay on one: on a 12-core PC a fresh 9.7 GB backup took 1m43s instead of 2m12s
-  single-threaded (peak memory 101 MB). For cloud storage, 2 packs upload in the background
-  while the next is built (`--uploads`; each holds 32 MiB in memory). At background CPU priority
-  or with `--max-memory`, a backup stays on one thread and uploads one pack at a time.
+- Compression and encryption run on up to 4 worker threads (`--threads`), and up to 4 files are
+  read, chunked and hashed at once (`--read-threads`): on a 12-core PC a fresh 9.7 GB backup
+  took 1m43s instead of 2m12s single-threaded (peak memory 101 MB, before the parallel reading).
+  Everything that touches the backup itself (storing chunks, the snapshot's listing) stays on
+  one thread, and files are stored in folder order, so the result is the same with any number
+  of readers. Several readers help most with many small and middle-sized files on a fast disk;
+  one very large file is still read by a single thread, and a backup to a folder spends much of
+  its time writing packs. For cloud storage, 2 packs upload in the background while the next is
+  built (`--uploads`; each holds 32 MiB in memory). At background CPU priority or with
+  `--max-memory`, a backup stays on one thread, reads one file at a time and uploads one pack
+  at a time.
 
 ## Roadmap
 

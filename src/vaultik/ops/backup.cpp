@@ -2,9 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <deque>
+#include <exception>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 #include "vaultik/chunker/fastcdc.hpp"
 #include "vaultik/model/tree.hpp"
@@ -96,6 +103,249 @@ std::string paths_key(const std::vector<std::string>& paths) {
     return key;
 }
 
+// Reads, chunks and hashes several files at once (BackupOptions::read_threads). The repository
+// is not thread-safe, so the readers only use what never changes in it (the chunker and the
+// keyed hasher) and hand each chunk with its id to the engine's thread through a small queue
+// per file; the engine takes the files in the order they were submitted and stores everything
+// there. Readers start a file only while it is among the next 2 x threads ones the engine has
+// not finished, so memory stays bounded however many files are submitted. Because readers take
+// files strictly in order, the file the engine waits for (the oldest one) was always taken
+// before any file a reader is blocked on, so there is no deadlock.
+class ReaderPool {
+public:
+    struct Piece {
+        Bytes data;
+        Id id{};
+    };
+
+    // One file to read. Everything but io_path is guarded by the pool's mutex until `done`.
+    struct FileJob {
+        std::string io_path;
+        bool opened = false;  // opening was tried (open_error says how it went)
+        os::ErrorCode open_error = 0;
+        std::deque<Piece> pieces;
+        std::size_t queued = 0;      // bytes in `pieces`
+        bool random_start = false;   // the first chunk looks like encrypted data
+        bool done = false;           // no more pieces will come
+        std::string read_error;      // reading failed part way (an os::OsError)
+        std::exception_ptr failure;  // anything else, thrown again on the engine's thread
+        bool abandoned = false;      // the engine no longer wants it (an error, or a cancel)
+    };
+
+    ReaderPool(const Repository& repo, unsigned threads) : repo_(repo), window_(2 * std::size_t{threads}) {
+        try {
+            for (unsigned i = 0; i < threads; ++i) threads_.emplace_back([this] { run(); });
+        } catch (...) {
+            shutdown();
+            throw;
+        }
+    }
+    ~ReaderPool() { shutdown(); }
+    ReaderPool(const ReaderPool&) = delete;
+    ReaderPool& operator=(const ReaderPool&) = delete;
+
+    // Queues files to read after those submitted before; the engine takes them in this order.
+    void submit(std::vector<std::shared_ptr<FileJob>> jobs) {
+        if (jobs.empty()) return;
+        {
+            std::lock_guard g(mu_);
+            for (auto& job : jobs) queue_.push_back(std::move(job));
+        }
+        to_readers_.notify_all();
+    }
+
+    // Drops every file the engine has not finished (it is unwinding, or will not take them).
+    void abandon_all() {
+        {
+            std::lock_guard g(mu_);
+            abandon_locked();
+        }
+        to_readers_.notify_all();
+    }
+
+    // Files submitted that the engine has not finished yet.
+    std::size_t pending() {
+        std::lock_guard g(mu_);
+        return queue_.size();
+    }
+
+    // Whether `job` is the oldest unfinished file, the only one the engine may take next.
+    bool is_next(const FileJob* job) {
+        std::lock_guard g(mu_);
+        return !queue_.empty() && queue_.front().get() == job;
+    }
+
+    // Waits until the file was opened and returns the error (0 when it opened). `idle` runs
+    // every 100 ms while waiting, so a cancel is seen even while a read hangs.
+    os::ErrorCode wait_open(FileJob& job, const std::function<void()>& idle) {
+        std::unique_lock lk(mu_);
+        wait(lk, idle, [&] { return job.opened; });
+        return job.open_error;
+    }
+
+    // The file's next chunk; false at its end (then see read_error and failure).
+    bool next(FileJob& job, Piece& out, const std::function<void()>& idle) {
+        std::unique_lock lk(mu_);
+        wait(lk, idle, [&] { return !job.pieces.empty() || job.done; });
+        if (job.pieces.empty()) return false;
+        out = std::move(job.pieces.front());
+        job.pieces.pop_front();
+        job.queued -= out.data.size();
+        lk.unlock();
+        to_readers_.notify_all();
+        return true;
+    }
+
+    // The engine is done with the oldest file: one more may be started.
+    void finish() {
+        {
+            std::lock_guard g(mu_);
+            queue_.pop_front();
+            --taken_;  // a file the engine finished was always taken (opened) by a reader
+        }
+        to_readers_.notify_all();
+    }
+
+private:
+    // Chunks one file may have waiting (a single larger chunk is always let through).
+    static constexpr std::size_t kQueueBytes = 4u << 20;
+
+    template <class Ready>
+    void wait(std::unique_lock<std::mutex>& lk, const std::function<void()>& idle, Ready ready) {
+        while (!ready()) {
+            if (to_engine_.wait_for(lk, std::chrono::milliseconds(100)) == std::cv_status::timeout && !ready()) {
+                lk.unlock();
+                idle();  // may throw (Cancelled); the lock is not held then
+                lk.lock();
+            }
+        }
+    }
+
+    void abandon_locked() {
+        for (const auto& job : queue_) job->abandoned = true;
+        queue_.clear();
+        taken_ = 0;
+    }
+
+    void shutdown() {
+        {
+            std::lock_guard g(mu_);
+            stop_ = true;
+            abandon_locked();
+        }
+        to_readers_.notify_all();
+        for (std::thread& t : threads_)
+            if (t.joinable()) t.join();
+    }
+
+    void run() {
+        Bytes buffer;  // each reader chunks with its own buffer
+        for (;;) {
+            std::shared_ptr<FileJob> job;
+            {
+                std::unique_lock lk(mu_);
+                to_readers_.wait(lk, [&] { return stop_ || (taken_ < queue_.size() && taken_ < window_); });
+                if (stop_) return;
+                job = queue_[taken_++];
+            }
+            read(*job, buffer);
+        }
+    }
+
+    void read(FileJob& job, Bytes& buffer) {
+        try {
+            os::ErrorCode err = 0;
+            os::File file = os::File::open_source(job.io_path, err);
+            {
+                std::lock_guard g(mu_);
+                job.opened = true;
+                job.open_error = file.valid() ? 0 : err;
+                job.done = !file.valid();
+            }
+            to_engine_.notify_all();
+            if (!file.valid()) return;
+            ChunkReader reader(
+                repo_.chunker(), [&file](std::uint8_t* dst, std::size_t max) { return file.read(dst, max); },
+                buffer);
+            bool first = true;
+            ByteSpan chunk;
+            try {
+                while (reader.next(chunk)) {
+                    Piece p;
+                    p.id = repo_.blob_id(BlobType::Data, chunk);
+                    p.data.assign(chunk.begin(), chunk.end());
+                    const bool random =
+                        first && byte_entropy(chunk.first(std::min<std::size_t>(chunk.size(), 65536))) > 7.9;
+                    if (!push(job, std::move(p), first, random)) return;
+                    first = false;
+                }
+            } catch (const os::OsError& e) {
+                complete(job, e.what(), nullptr);
+                return;
+            }
+            complete(job, {}, nullptr);
+        } catch (...) {
+            complete(job, {}, std::current_exception());
+        }
+    }
+
+    // Waits for room in the file's queue; false when the file is no longer wanted.
+    bool push(FileJob& job, Piece p, bool first, bool random) {
+        std::unique_lock lk(mu_);
+        to_readers_.wait(lk, [&] {
+            return stop_ || job.abandoned || job.queued == 0 || job.queued + p.data.size() <= kQueueBytes;
+        });
+        if (stop_ || job.abandoned) return false;
+        if (first) job.random_start = random;
+        job.queued += p.data.size();
+        job.pieces.push_back(std::move(p));
+        lk.unlock();
+        to_engine_.notify_all();
+        return true;
+    }
+
+    void complete(FileJob& job, std::string read_error, std::exception_ptr failure) {
+        {
+            std::lock_guard g(mu_);
+            job.opened = true;
+            job.done = true;
+            job.read_error = std::move(read_error);
+            job.failure = std::move(failure);
+        }
+        to_engine_.notify_all();
+    }
+
+    const Repository& repo_;
+    const std::size_t window_;
+    std::mutex mu_;
+    std::condition_variable to_readers_;  // work, or room in a queue
+    std::condition_variable to_engine_;   // a file opened, a chunk, or a file's end
+    std::deque<std::shared_ptr<FileJob>> queue_;  // submitted, not finished by the engine, oldest first
+    std::size_t taken_ = 0;                       // how many of them readers have taken
+    bool stop_ = false;
+    std::vector<std::thread> threads_;
+};
+
+// A folder listed ahead (with several readers), its files to read already submitted to them.
+struct PreparedDir {
+    struct Entry {
+        std::string path;
+        os::FileInfo info;
+        Node node;
+        const Node* pnode = nullptr;  // the entry in the parent snapshot
+        std::shared_ptr<ReaderPool::FileJob> job;
+    };
+    std::string dir;
+    std::uint64_t device = 0;
+    std::optional<Tree> own_parent;  // the parent snapshot's listing, when loaded ahead
+    const Tree* parent = nullptr;
+    bool unlisted = false;  // could not be listed at all
+    os::ErrorCode list_error = 0;
+    bool stopped_early = false;  // the listing broke off
+    os::ErrorCode stop_error = 0;
+    std::vector<Entry> entries;
+};
+
 class BackupEngine {
 public:
     BackupEngine(Repository& repo, const BackupOptions& options)
@@ -120,9 +370,39 @@ private:
     std::optional<Id> reuse_dir(const std::string& dir, std::uint64_t device, const Tree& parent);
     bool use_journal_ = false;
     std::uint64_t dirs_reused_ = 0;
+    // `job`: a file the readers are reading (read_threads > 1), taken from them instead of
+    // opened here.
     bool scan_entry(const std::string& path, const os::FileInfo& info, std::uint64_t parent_device, Node& node,
-                    const Node* pnode);
-    bool scan_file(const std::string& path, Node& node, const Node* parent);
+                    const Node* pnode, ReaderPool::FileJob* job = nullptr);
+    bool scan_file(const std::string& path, Node& node, const Node* parent, ReaderPool::FileJob* job);
+    // Whether a file is unchanged since the parent snapshot, so its chunk list can be reused.
+    bool reusable(const Node& node, const Node* parent) const;
+    bool take_file(const std::string& path, Node& node, const Node* parent, ReaderPool::FileJob& job);
+    bool file_read(const std::string& path, Node& node, const Node* parent, std::uint64_t total, bool random_start);
+    // With several readers, folders are listed ahead of the engine (see look_ahead) and their
+    // files submitted to the readers in exactly the order the engine will take them: a folder's
+    // files in listing order, then its subfolders one by one, depth first.
+    std::unique_ptr<ReaderPool> pool_;
+    std::shared_ptr<PreparedDir> prepare(const std::string& dir, std::uint64_t device, const Tree* parent,
+                                         std::optional<Tree> own_parent);
+    // The folder the engine enters now: the one listed ahead, or listed here.
+    std::shared_ptr<PreparedDir> take_prepared(const std::string& dir, std::uint64_t device, const Tree* parent);
+    // The next folder listed ahead, when it is `dir`.
+    const PreparedDir* upcoming(const std::string& dir) const {
+        return !ahead_.empty() && ahead_.front()->dir == dir ? ahead_.front().get() : nullptr;
+    }
+    // Lists folders ahead of the engine, depth first, while few files wait for the readers. It
+    // stops at a folder the engine may not read (one the change journal may let it reuse, or
+    // another file system), since what the engine does there cannot be told in advance.
+    void look_ahead();
+    void drop_lookahead();
+    void scan_listing(PreparedDir& dir, Tree& tree);
+    struct WalkFrame {
+        std::shared_ptr<PreparedDir> dir;
+        std::size_t next = 0;  // the next entry to look at for a subfolder
+    };
+    std::deque<std::shared_ptr<PreparedDir>> ahead_;  // listed, not yet entered by the engine
+    std::vector<WalkFrame> walk_;
     // Windows extras: the security descriptor (stored once per distinct one), the alternate
     // data streams of a file, and the target of a symlink or junction.
     void scan_security(const std::string& path, Node& node);
@@ -325,16 +605,70 @@ void BackupEngine::scan_streams(const std::string& path, Node& node) {
     }
 }
 
-bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* parent) {
+bool BackupEngine::reusable(const Node& node, const Node* parent) const {
     // Unchanged since the parent snapshot: reuse its chunk list without reading the file. Its
     // streams too: writing a stream changes the file's modification time.
     const auto streams_present = [&](const Node& p) {
         return std::all_of(p.streams.begin(), p.streams.end(),
                            [&](const DataStream& s) { return all_present(s.content); });
     };
-    if (parent != nullptr && parent->kind == NodeKind::File && parent->size == node.size &&
-        parent->mtime == node.mtime && parent->ctime == node.ctime && all_present(parent->content) &&
-        streams_present(*parent)) {
+    return parent != nullptr && parent->kind == NodeKind::File && parent->size == node.size &&
+           parent->mtime == node.mtime && parent->ctime == node.ctime && all_present(parent->content) &&
+           streams_present(*parent);
+}
+
+bool BackupEngine::take_file(const std::string& path, Node& node, const Node* parent, ReaderPool::FileJob& job) {
+    assert(pool_->is_next(&job));
+    const std::function<void()> idle = [this] { check_cancel(); };
+    const os::ErrorCode err = pool_->wait_open(job, idle);
+    if (err != 0) {
+        pool_->finish();
+        warn("skipped " + path + ": " + os::error_message(err));
+        return false;
+    }
+    progress_.current = path;
+    report();
+    std::uint64_t total = 0;
+    ReaderPool::Piece piece;
+    while (pool_->next(job, piece, idle)) {
+        check_cancel();  // also inside a large file: a pause or stop does not wait for its end
+        if (repo_.save_blob_with_id(BlobType::Data, piece.data, piece.id)) stats_.new_bytes += piece.data.size();
+        node.content.push_back(piece.id);
+        total += piece.data.size();
+        stats_.bytes += piece.data.size();
+        report();
+    }
+    pool_->finish();
+    // The reader is done with the job: what it left there is no longer written to.
+    if (job.failure) std::rethrow_exception(job.failure);
+    if (!job.read_error.empty()) {
+        warn("skipped " + path + ": " + job.read_error);
+        return false;
+    }
+    return file_read(path, node, parent, total, job.random_start);
+}
+
+bool BackupEngine::file_read(const std::string& path, Node& node, const Node* parent, std::uint64_t total,
+                             bool random_start) {
+    const bool is_new = parent == nullptr || parent->kind != NodeKind::File;
+    node.size = total;  // the file may have changed size since it was listed
+    scan_streams(path, node);
+    if (is_new) {
+        ++stats_.files_new;
+    } else if (node.content != parent->content) {  // a touched but identical file is not a change
+        ++stats_.files_changed;
+        if (random_start && total >= 16384 && was_compressible(parent->content)) {
+            ++alarm_.became_random;
+            suspicious(path);
+        }
+    }
+    return true;
+}
+
+bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* parent, ReaderPool::FileJob* job) {
+    // The readers took this file because it could not be reused when the folder was listed.
+    if (job != nullptr) return take_file(path, node, parent, *job);
+    if (reusable(node, parent)) {
         node.content = parent->content;
         // A version made before streams were kept has no extras for any file: look once more.
         // (One made since carries the file's security descriptor, so an empty list is real.)
@@ -351,7 +685,6 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         warn("skipped " + path + ": " + os::error_message(err));
         return false;
     }
-    const bool is_new = parent == nullptr || parent->kind != NodeKind::File;
 
     progress_.current = path;
     report();
@@ -376,22 +709,11 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         warn("skipped " + path + ": " + e.what());
         return false;
     }
-    node.size = total;  // the file may have changed size since it was listed
-    scan_streams(path, node);
-    if (is_new) {
-        ++stats_.files_new;
-    } else if (node.content != parent->content) {  // a touched but identical file is not a change
-        ++stats_.files_changed;
-        if (random_start && total >= 16384 && was_compressible(parent->content)) {
-            ++alarm_.became_random;
-            suspicious(path);
-        }
-    }
-    return true;
+    return file_read(path, node, parent, total, random_start);
 }
 
 bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info, std::uint64_t parent_device,
-                              Node& node, const Node* pnode) {
+                              Node& node, const Node* pnode, ReaderPool::FileJob* job) {
     scan_security(path, node);
     switch (info.type) {
         case os::EntryType::Other: {
@@ -425,21 +747,28 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
                 return true;
             }
             std::optional<Tree> ptree;
-            if (pnode != nullptr && pnode->kind == NodeKind::Dir) ptree = load_tree(pnode->subtree);
-            if (ptree && use_journal_ && options_.dir_unchanged(path)) {
-                if (const std::optional<Id> id = reuse_dir(path, info.device, *ptree)) {
-                    node.subtree = *id;
-                    ++stats_.dirs;
-                    return true;
+            const Tree* pt = nullptr;
+            if (const PreparedDir* pre = upcoming(path)) {
+                // Listed ahead, together with its parent listing; never one the journal may reuse.
+                pt = pre->parent;
+            } else {
+                if (pnode != nullptr && pnode->kind == NodeKind::Dir) ptree = load_tree(pnode->subtree);
+                pt = ptree ? &*ptree : nullptr;
+                if (pt != nullptr && use_journal_ && options_.dir_unchanged(path)) {
+                    if (const std::optional<Id> id = reuse_dir(path, info.device, *pt)) {
+                        node.subtree = *id;
+                        ++stats_.dirs;
+                        return true;
+                    }
                 }
             }
-            node.subtree = scan_dir(path, info.device, ptree ? &*ptree : nullptr);
+            node.subtree = scan_dir(path, info.device, pt);
             ++stats_.dirs;
             return true;
         }
         case os::EntryType::File:
             node.kind = NodeKind::File;
-            if (!scan_file(path, node, pnode)) return false;
+            if (!scan_file(path, node, pnode, job)) return false;
             ++stats_.files;
             return true;
     }
@@ -448,25 +777,37 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
 
 Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, const Tree* parent) {
     Tree tree;
-    os::DirReader reader(io(dir));
-    if (!reader.ok()) {
-        warn("cannot list " + dir + ": " + os::error_message(reader.error()));
-        return tree;
-    }
-    std::string name;
-    os::FileInfo info;
-    while (reader.next(name, info)) {
-        check_cancel();
-        const std::string child = os::join(dir, name);
-        if (excluder_.excluded(name, child)) continue;
-        Node node = node_from_info(info, name);
-        const Node* pnode = parent != nullptr ? parent->find(node.name) : nullptr;
-        if (scan_entry(child, info, device, node, pnode)) {
-            note_change(node, pnode);
-            tree.nodes.push_back(std::move(node));
+    // Listed ahead, it also owns `parent` (the parent snapshot's listing), used below.
+    std::shared_ptr<PreparedDir> listed;
+    if (pool_) {
+        listed = take_prepared(dir, device, parent);
+        if (listed->unlisted) {
+            warn("cannot list " + dir + ": " + os::error_message(listed->list_error));
+            return tree;
         }
+        scan_listing(*listed, tree);
+        if (listed->stopped_early) warn("listing " + dir + " stopped early: " + os::error_message(listed->stop_error));
+    } else {
+        os::DirReader reader(io(dir));
+        if (!reader.ok()) {
+            warn("cannot list " + dir + ": " + os::error_message(reader.error()));
+            return tree;
+        }
+        std::string name;
+        os::FileInfo info;
+        while (reader.next(name, info)) {
+            check_cancel();
+            const std::string child = os::join(dir, name);
+            if (excluder_.excluded(name, child)) continue;
+            Node node = node_from_info(info, name);
+            const Node* pnode = parent != nullptr ? parent->find(node.name) : nullptr;
+            if (scan_entry(child, info, device, node, pnode)) {
+                note_change(node, pnode);
+                tree.nodes.push_back(std::move(node));
+            }
+        }
+        if (!reader.ok()) warn("listing " + dir + " stopped early: " + os::error_message(reader.error()));
     }
-    if (!reader.ok()) warn("listing " + dir + " stopped early: " + os::error_message(reader.error()));
     tree.sort();
     if (parent != nullptr) {
         for (const Node& old : parent->nodes)
@@ -486,6 +827,125 @@ Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, c
         }
     }
     return tree;
+}
+
+std::shared_ptr<PreparedDir> BackupEngine::prepare(const std::string& dir, std::uint64_t device,
+                                                   const Tree* parent, std::optional<Tree> own_parent) {
+    auto listed = std::make_shared<PreparedDir>();
+    listed->dir = dir;
+    listed->device = device;
+    listed->own_parent = std::move(own_parent);
+    listed->parent = listed->own_parent ? &*listed->own_parent : parent;
+    os::DirReader reader(io(dir));
+    if (!reader.ok()) {
+        listed->unlisted = true;
+        listed->list_error = reader.error();
+        return listed;
+    }
+    std::string name;
+    os::FileInfo info;
+    while (reader.next(name, info)) {
+        check_cancel();
+        std::string child = os::join(dir, name);
+        if (excluder_.excluded(name, child)) continue;
+        PreparedDir::Entry e;
+        e.path = std::move(child);
+        e.info = info;
+        e.node = node_from_info(info, name);
+        e.pnode = listed->parent != nullptr ? listed->parent->find(e.node.name) : nullptr;
+        listed->entries.push_back(std::move(e));
+    }
+    if (!reader.ok()) {
+        listed->stopped_early = true;
+        listed->stop_error = reader.error();
+    }
+    // Files that cannot be reused go to the readers now, in listing order.
+    std::vector<std::shared_ptr<ReaderPool::FileJob>> jobs;
+    for (PreparedDir::Entry& e : listed->entries) {
+        if (e.info.type != os::EntryType::File || reusable(e.node, e.pnode)) continue;
+        e.job = std::make_shared<ReaderPool::FileJob>();
+        e.job->io_path = io(e.path);
+        jobs.push_back(e.job);
+    }
+    pool_->submit(std::move(jobs));
+    return listed;
+}
+
+std::shared_ptr<PreparedDir> BackupEngine::take_prepared(const std::string& dir, std::uint64_t device,
+                                                         const Tree* parent) {
+    if (!ahead_.empty() && ahead_.front()->dir == dir) {
+        std::shared_ptr<PreparedDir> listed = std::move(ahead_.front());
+        ahead_.pop_front();
+        return listed;
+    }
+    // Nothing listed ahead for this folder (a backup path, a folder inside one the journal let
+    // the engine reuse, or where the lookahead stopped): it starts again from here.
+    drop_lookahead();
+    std::shared_ptr<PreparedDir> listed = prepare(dir, device, parent, std::nullopt);
+    walk_.push_back(WalkFrame{listed, 0});
+    return listed;
+}
+
+void BackupEngine::look_ahead() {
+    // Enough to keep every reader busy across folder ends, without listing far ahead.
+    constexpr std::size_t kMaxFoldersAhead = 64;
+    const std::size_t max_files = 4 * std::size_t{options_.read_threads};
+    while (!walk_.empty() && ahead_.size() < kMaxFoldersAhead && pool_->pending() < max_files) {
+        WalkFrame& frame = walk_.back();
+        if (frame.next >= frame.dir->entries.size()) {
+            walk_.pop_back();
+            continue;
+        }
+        const PreparedDir::Entry& e = frame.dir->entries[frame.next];
+        if (e.info.type != os::EntryType::Dir) {
+            ++frame.next;
+            continue;
+        }
+        // What the engine does with this folder depends on more than its listing: stop here.
+        if (e.info.device != frame.dir->device || (use_journal_ && options_.dir_unchanged(e.path))) {
+            walk_.clear();
+            return;
+        }
+        ++frame.next;
+        std::optional<Tree> ptree;
+        if (e.pnode != nullptr && e.pnode->kind == NodeKind::Dir) ptree = load_tree(e.pnode->subtree);
+        std::shared_ptr<PreparedDir> listed = prepare(e.path, e.info.device, nullptr, std::move(ptree));
+        ahead_.push_back(listed);
+        walk_.push_back(WalkFrame{std::move(listed), 0});  // `frame` is not used after this
+    }
+}
+
+void BackupEngine::drop_lookahead() {
+    ahead_.clear();
+    walk_.clear();
+    pool_->abandon_all();
+}
+
+void BackupEngine::scan_listing(PreparedDir& dir, Tree& tree) {
+    // Left by an exception (Cancelled, a write error): the readers stop on what was listed ahead.
+    struct DropOnError {
+        BackupEngine& engine;
+        int exceptions = std::uncaught_exceptions();
+        ~DropOnError() {
+            if (std::uncaught_exceptions() > exceptions) engine.drop_lookahead();
+        }
+    } drop_on_error{*this};
+
+    const auto scan = [&](PreparedDir::Entry& e) {
+        look_ahead();
+        check_cancel();
+        if (scan_entry(e.path, e.info, dir.device, e.node, e.pnode, e.job.get())) {
+            note_change(e.node, e.pnode);
+            tree.nodes.push_back(std::move(e.node));
+        }
+        e.job.reset();
+    };
+    // Its files first, then its subfolders: no reader then waits on a file the engine reaches
+    // only after deeper folders.
+    for (PreparedDir::Entry& e : dir.entries)
+        if (e.info.type != os::EntryType::Dir) scan(e);
+    for (PreparedDir::Entry& e : dir.entries)
+        if (e.info.type == os::EntryType::Dir) scan(e);
 }
 
 Id BackupEngine::scan_dir(const std::string& dir, std::uint64_t device, const Tree* parent) {
@@ -603,6 +1063,8 @@ BackupResult BackupEngine::run() {
         }
     }
 
+    if (options_.read_threads > 1) pool_ = std::make_unique<ReaderPool>(repo_, options_.read_threads);
+
     // The journal answers only for changes since the snapshot it was read against.
     use_journal_ = options_.dir_unchanged && options_.journal_parent && snap.parent &&
                    *snap.parent == *options_.journal_parent && parent_root.has_value();
@@ -640,6 +1102,7 @@ BackupResult BackupEngine::run() {
         for (std::size_t i = 0; i + 1 < s.comps.size(); ++i) cur = &cur->dirs[s.comps[i]];
         cur->leaves.push_back(std::move(node));
     }
+    pool_.reset();  // every file is read: the readers and their buffers go
 
     snap.tree = save_virtual(root);
     repo_.flush();

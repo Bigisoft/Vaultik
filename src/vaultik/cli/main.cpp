@@ -94,6 +94,9 @@ Commands:
       --skip-unchanged         Save no snapshot when nothing changed since it
       --threads <n>            Compress and encrypt on n worker threads (default: up
                                to 4; 0 at background priority or with --max-memory)
+      --read-threads <n>       Read, chunk and hash n files at once (default: up to
+                               4; 1 at background priority or with --max-memory;
+                               also accepted by run-job)
       --uploads <n>            Upload n packs in the background (default 2 for cloud
                                storage, 0 for folders; also accepted by run-job)
       --vss <mode>             Windows: read from a Volume Shadow Copy, so open and
@@ -282,7 +285,8 @@ const std::set<std::string> kValueOptions = {
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
-    "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads"};
+    "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
+    "--read-threads"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -872,28 +876,40 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
 }
 
 // How many worker threads compress and encrypt, and how many packs upload in the background:
-// --threads / --uploads, or by default up to 4 threads (one core is left for reading and
-// hashing; none at background CPU priority or under a memory cap, where the work stays on one
+// --threads / --uploads, or by default up to 4 threads (one core is left for the backup's own
+// thread; none at background CPU priority or under a memory cap, where the work stays on one
 // thread) and, for cloud storage, 2 uploads in flight (each holds a 32 MiB pack in memory).
-void apply_parallelism(Repository& repo, const Args& a, const std::string& location, const ResourcePolicy& policy) {
+// Returns how many files a backup reads, chunks and hashes at once (--read-threads): by default
+// 4 (fewer on a PC with fewer cores), matching the seal threads, so neither side waits on the
+// other on a fast disk; one at background priority or under a memory cap, like the sealing
+// (each reader holds up to about 16 MiB: its read buffer and the chunks of two files).
+unsigned apply_parallelism(Repository& repo, const Args& a, const std::string& location,
+                           const ResourcePolicy& policy) {
     const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
     unsigned threads = std::min(4u, cores > 1 ? cores - 1 : 1u);
-    if (policy.cpu == CpuPriority::Idle || policy.max_memory != 0) threads = 0;
+    unsigned readers = std::min(4u, cores);
+    if (policy.cpu == CpuPriority::Idle || policy.max_memory != 0) {
+        threads = 0;
+        readers = 1;
+    }
     unsigned uploads = is_cloud_location(location) && policy.max_memory == 0 ? 2 : 0;
     if (auto v = a.value("--threads")) threads = static_cast<unsigned>(std::clamp(std::stoi(*v), 0, 16));
     if (auto v = a.value("--uploads")) uploads = static_cast<unsigned>(std::clamp(std::stoi(*v), 0, 8));
+    if (auto v = a.value("--read-threads")) readers = static_cast<unsigned>(std::clamp(std::stoi(*v), 1, 16));
     repo.set_parallelism(threads, uploads);
+    return readers;
 }
 
 int cmd_backup(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik backup -r <repo> <path>...");
     auto repo = open_repo(a);
-    apply_parallelism(*repo, a, repo_path(a), resource_policy(a));
+    const unsigned readers = apply_parallelism(*repo, a, repo_path(a), resource_policy(a));
     RepoLock lock(*repo, RepoLock::Mode::Shared, "backup", lock_wait(a));
     repo->reload_index();  // a prune may have finished before the lock was granted
 
     BackupOptions o;
     o.paths = a.positional;
+    o.read_threads = readers;
     o.excludes = a.all("--exclude");
     o.tags = a.all("--tag");
     o.use_parent = !a.has("--no-parent");
@@ -1902,7 +1918,7 @@ int cmd_run_job(const Args& a) {
         if (!jobs::drive_connected(*job))
             throw Error("the backup drive is not connected (" + job->repository + ")");
         repo = open_job_repo(a, store, *job);
-        apply_parallelism(*repo, a, job->repository, policy);
+        const unsigned readers = apply_parallelism(*repo, a, job->repository, policy);
         if (on_connect && backup_running(*repo, *job)) {
             if (!g_json) out("Job \"" + job->name + "\" is already backing up.\n");
             return kExitOk;
@@ -1918,6 +1934,7 @@ int cmd_run_job(const Args& a) {
 
         BackupOptions o;
         o.paths = job->sources;
+        o.read_threads = readers;
         o.excludes = job->excludes;
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);

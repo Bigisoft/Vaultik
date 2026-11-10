@@ -63,11 +63,16 @@ public:
 
     // BLAKE3-keyed(id_key, type || plain): the same bytes stored as data and as a tree get
     // different ids, so deduplication can never return a blob of the wrong type.
+    // Unlike the rest of this class, blob_id and chunker() may be used from other threads while
+    // the repository is busy: the keyed hasher and the chunker never change after open, and
+    // each hash works on its own copy of the hasher state.
     Id blob_id(BlobType type, ByteSpan plain) const;
     bool has_blob(const Id& id) const;
 
     // Stores a blob unless an identical one already exists. Returns true when it was new.
     bool save_blob(BlobType type, ByteSpan plain, Id& id_out);
+    // The same with the id already computed by blob_id (on another thread); it must match.
+    bool save_blob_with_id(BlobType type, ByteSpan plain, const Id& id);
 
     // Loads and authenticates a blob, and checks that its content matches its id.
     Bytes load_blob(BlobType type, const Id& id);

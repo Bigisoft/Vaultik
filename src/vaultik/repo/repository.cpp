@@ -1,6 +1,7 @@
 #include "vaultik/repo/repository.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -440,8 +441,16 @@ bool Repository::has_blob(const Id& id) const {
 }
 
 bool Repository::save_blob(BlobType type, ByteSpan plain, Id& id_out) {
-    check_pipeline();  // after a failed background write nothing more may count as stored
     id_out = blob_id(type, plain);
+    return save_blob_with_id(type, plain, id_out);
+}
+
+bool Repository::save_blob_with_id(BlobType type, ByteSpan plain, const Id& id) {
+    // A wrong id would store the content under another blob's name; the backup's readers compute
+    // it with the same hasher, so this only checks the caller in debug builds.
+    assert(id == blob_id(type, plain));
+    check_pipeline();  // after a failed background write nothing more may count as stored
+    const Id& id_out = id;
     if (has_blob(id_out)) return false;
 
     pack_pending_.insert(id_out);
