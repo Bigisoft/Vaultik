@@ -125,7 +125,7 @@ struct Repository::Pipeline {
     std::vector<std::pair<Id, std::vector<BlobEntry>>> uploaded;  // written, not yet indexed
     std::uint64_t uploaded_bytes = 0;
     std::set<Id> in_flight;  // packs queued or being written
-    std::exception_ptr upload_error;
+    std::exception_ptr failed;  // the first failure of a worker; never cleared
     bool stop = false;
     unsigned threads = 0;
     unsigned max_uploads = 0;
@@ -208,6 +208,7 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
                 secure_wipe(job->plain.data(), job->plain.size());
                 job->plain = Bytes();
                 lk.lock();
+                if (job->error && !p->failed) p->failed = job->error;
                 job->done = true;
                 p->done.notify_all();
             }
@@ -233,7 +234,7 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
                 lk.lock();
                 --p->uploading;
                 if (error) {
-                    if (!p->upload_error) p->upload_error = error;
+                    if (!p->failed) p->failed = error;
                     p->in_flight.erase(u.pack_id);
                 } else {
                     p->uploaded_bytes += u.bytes.size();
@@ -245,8 +246,19 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
     }
 }
 
+void Repository::check_pipeline() {
+    if (!pipe_) return;
+    std::exception_ptr failed;
+    {
+        std::lock_guard g(pipe_->mu);
+        failed = pipe_->failed;
+    }
+    if (failed) std::rethrow_exception(failed);
+}
+
 void Repository::drain(bool all) {
     if (!pipe_) return;
+    check_pipeline();
     Pipeline& p = *pipe_;
     for (;;) {
         std::shared_ptr<Pipeline::Job> job;
@@ -274,11 +286,7 @@ void Repository::collect_uploads(bool all) {
     {
         std::unique_lock lk(p.mu);
         if (all) p.done.wait(lk, [&p] { return p.uploads.empty() && p.uploading == 0; });
-        if (p.upload_error) {
-            const std::exception_ptr e = p.upload_error;
-            p.upload_error = nullptr;
-            std::rethrow_exception(e);
-        }
+        if (p.failed) std::rethrow_exception(p.failed);
         ready.swap(p.uploaded);
         bytes = p.uploaded_bytes;
         p.uploaded_bytes = 0;
@@ -327,6 +335,7 @@ bool Repository::has_blob(const Id& id) const {
 }
 
 bool Repository::save_blob(BlobType type, ByteSpan plain, Id& id_out) {
+    check_pipeline();  // after a failed background write nothing more may count as stored
     id_out = blob_id(type, plain);
     if (has_blob(id_out)) return false;
 
@@ -372,6 +381,7 @@ Bytes Repository::decode_blob(BlobType type, const Id& id, ByteSpan sealed) {
 }
 
 Bytes Repository::load_blob(BlobType type, const Id& id) {
+    check_pipeline();
     if (pack_pending_.contains(id)) flush();  // the blob is still in memory; write it out first
     const BlobLocation* loc = index_.find(id);
     if (loc == nullptr) throw Error(std::string(blob_type_name(type)) + " blob not found: " + id_hex(id));
@@ -403,7 +413,8 @@ void Repository::finish_pack() {
         Pipeline& p = *pipe_;
         {
             std::unique_lock lk(p.mu);
-            p.done.wait(lk, [&p] { return p.uploads.size() + p.uploading < p.max_uploads || p.upload_error; });
+            p.done.wait(lk, [&p] { return p.uploads.size() + p.uploading < p.max_uploads || p.failed; });
+            if (p.failed) std::rethrow_exception(p.failed);
             p.in_flight.insert(pack_id);
             p.uploads.push_back({pack_id, std::move(bytes), std::move(entries)});
         }
@@ -468,6 +479,7 @@ void Repository::copy_blob(BlobType type, const Id& id, ByteSpan sealed, std::ui
 }
 
 void Repository::flush() {
+    check_pipeline();
     drain(true);
     finish_pack();
     collect_uploads(true);

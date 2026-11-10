@@ -78,8 +78,10 @@ public:
     // Speeds up writing: new blobs are compressed and encrypted on `threads` worker threads (0:
     // on the calling thread; their order in the packs stays the same), and up to `uploads` packs
     // are written in the background while the next one is built (0: each pack is written before
-    // the backup goes on). Each upload in flight holds a pack (about 32 MiB) in memory. An error
-    // of a background step is thrown by a later save_blob or flush.
+    // the backup goes on). Each upload in flight holds a pack (about 32 MiB) in memory. A failed
+    // background step is final: its blobs count as stored in memory only, so every later
+    // save_blob, load_blob and flush throws that error again, and no snapshot can be saved that
+    // would point at them.
     void set_parallelism(unsigned threads, unsigned uploads);
 
     Id save_snapshot(const Snapshot& snapshot);
@@ -124,6 +126,8 @@ private:
     void drain(bool all);
     // Takes finished uploads into the index files to write (`all`: waits for every one).
     void collect_uploads(bool all);
+    // Throws the first failure of a background step, if there was one.
+    void check_pipeline();
     std::unique_ptr<Pipeline> pipe_;
     Key32 enc_key_{};  // for the workers' own ciphers
     void write_index();

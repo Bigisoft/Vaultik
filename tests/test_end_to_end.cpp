@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -733,4 +734,47 @@ TEST_CASE("a backup with worker threads and background uploads stores the same d
     again->set_parallelism(2, 1);
     const BackupResult c = run_backup(*again, options);
     CHECK(c.snapshot.stats.new_bytes == 0);
+}
+
+namespace {
+
+// Writes packs until `allowed` of them were written, then fails every further pack upload.
+class FailingPacks final : public Backend {
+public:
+    FailingPacks(const fs::path& dir, int allowed) : inner_(u8(dir)), allowed_(allowed) {}
+    std::string location() const override { return inner_.location(); }
+    bool exists(const std::string& name) override { return inner_.exists(name); }
+    void put(const std::string& name, ByteSpan data) override {
+        if (name.starts_with("data/") && allowed_.fetch_sub(1) <= 0) throw Error("simulated network failure");
+        inner_.put(name, data);
+    }
+    Bytes get(const std::string& name) override { return inner_.get(name); }
+    Bytes get_range(const std::string& name, std::uint64_t offset, std::size_t length) override {
+        return inner_.get_range(name, offset, length);
+    }
+    std::uint64_t size(const std::string& name) override { return inner_.size(name); }
+    std::vector<std::string> list(const std::string& dir) override { return inner_.list(dir); }
+    void remove(const std::string& name) override { inner_.remove(name); }
+
+private:
+    LocalBackend inner_;
+    std::atomic<int> allowed_;
+};
+
+}  // namespace
+
+TEST_CASE("a failed background upload fails the backup and saves no version") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    // Incompressible data, enough for several 32 MiB packs.
+    for (int i = 0; i < 6; ++i) write_file(src / ("f" + std::to_string(i) + ".bin"), random_data(20u << 20, 70 + i));
+    init_repo(repo_dir);
+    auto repo = Repository::open(std::make_unique<FailingPacks>(repo_dir, 1), kPassword);
+    repo->set_parallelism(2, 1);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    CHECK_THROWS(run_backup(*repo, options));
+    CHECK(repo->list_snapshot_ids().empty());
+    CHECK_THROWS(repo->flush());  // still failed: nothing written later can count as stored
 }
