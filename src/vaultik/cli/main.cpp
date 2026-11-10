@@ -1771,7 +1771,9 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
     os::ShellOptions o;
     std::string output;
     o.output = &output;
-    o.cancelled = [] { return stop_requested(); };
+    // Stopping the backup stops the "before" command; the "after" one (often a cleanup, such as
+    // restarting a service) still runs to the end, within its time limit.
+    if (which == "before") o.cancelled = [] { return stop_requested(); };
     const std::vector<std::pair<std::string, std::string>> vars = {
         {"VAULTIK_JOB", job.id}, {"VAULTIK_JOB_NAME", job.name}, {"VAULTIK_RESULT", result}};
     if (admin) {
