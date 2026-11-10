@@ -1297,7 +1297,9 @@ void MainWindow::refresh_overview() {
         }
         if (const auto p = h.health_percent()) notes << tr("health %1%").arg(*p);
         if (!h.condition.empty()) notes << qs(h.condition);
-        if (h.read_errors_uncorrected.value_or(0) > 0)
+        for (const std::string& issue : h.smart_issues)
+            if (issue != h.condition) notes << qs(issue);
+        if (h.read_errors_uncorrected.value_or(0) > 0 && h.smart.empty())  // (else among the issues)
             notes << tr("%1 unrecoverable read errors").arg(*h.read_errors_uncorrected);
         if (h.temperature) notes << tr("%1 °C").arg(*h.temperature);
         dr.problem = bad || !h.condition.empty() || h.read_errors_uncorrected.value_or(0) > 0 || h.worn_out();

@@ -157,6 +157,7 @@ Commands:
       --dry-run                Only list what would be brought back
   drives                       The health of this computer's drives, as Windows
                                reports it (details need administrator rights)
+      --smart                  Also list each drive's S.M.A.R.T. attributes
   jobs                         List saved backup jobs (created in vaultik-gui)
   run-job <job>                Run a saved job by ID or name, with its own
                                sources, destination, password and resource
@@ -241,7 +242,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect"};
+                                              "--full", "--no-check", "--on-connect", "--smart"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1847,8 +1848,10 @@ std::string drive_problem(const os::DriveHealth& d) {
     return s;
 }
 
-// "drives": the health of this computer's drives, as Windows reports it.
-int cmd_drives() {
+// "drives [--smart]": the health of this computer's drives, as Windows reports it, and with
+// --smart each ATA drive's attribute table.
+int cmd_drives(const Args& a) {
+    const bool smart = a.has("--smart");
     const std::vector<os::DriveHealth> drives = os::all_drives();
     // Which drive letters are on each disk.
     std::map<int, std::string> letters;
@@ -1870,6 +1873,15 @@ int cmd_drives() {
             if (const auto p = d.health_percent()) j["health_percent"] = *p;
             if (d.power_on_hours) j["power_on_hours"] = *d.power_on_hours;
             if (d.read_errors_uncorrected) j["read_errors_uncorrected"] = *d.read_errors_uncorrected;
+            if (!d.smart_issues.empty()) j["issues"] = d.smart_issues;
+            if (smart && !d.smart.empty()) {
+                nlohmann::json attrs = nlohmann::json::array();
+                for (const os::SmartAttribute& s : d.smart)
+                    attrs.push_back({{"id", s.id}, {"name", os::smart_attribute_name(s.id)}, {"value", s.value},
+                                     {"worst", s.worst}, {"threshold", s.threshold}, {"raw", s.raw},
+                                     {"prefail", s.prefail}});
+                j["smart"] = attrs;
+            }
             list.push_back(j);
         }
         emit({{"event", "drives"}, {"drives", list}});
@@ -1889,14 +1901,30 @@ int cmd_drives() {
         if (!d.condition.empty()) line += ", " + d.condition;
         if (d.temperature) line += ", " + std::to_string(*d.temperature) + " C";
         if (d.power_on_hours) line += ", " + std::to_string(*d.power_on_hours) + " hours on";
-        if (d.read_errors_uncorrected) line += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
-        // Only SSDs count their wear; a hard disk has no percentage to show.
-        missing = missing || (d.media != "HDD" && !d.health_percent()) || !d.power_on_hours;
+        if (d.read_errors_uncorrected.value_or(0) > 0 && d.smart.empty())  // (else among the issues)
+            line += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
+        for (const std::string& issue : d.smart_issues)
+            if (issue != d.condition) line += ", " + issue;
+        missing = missing || !d.health_percent() || !d.power_on_hours;
         out(line + "\n");
+        if (smart && !d.smart.empty()) {
+            out("    ID  Attribute                       Value Worst Thresh  Raw\n");
+            for (const os::SmartAttribute& s : d.smart) {
+                const char* name = os::smart_attribute_name(s.id);
+                char row[160];
+                std::snprintf(row, sizeof row, "   %3d  %-30s  %4d  %4d  %4d   %llu%s\n", s.id, *name ? name : "?",
+                              s.value, s.worst, s.threshold, static_cast<unsigned long long>(s.raw),
+                              s.prefail ? "  (pre-fail)" : "");
+                out(row);
+            }
+        } else if (smart && d.bus != "NVMe") {
+            out(os::process_elevated() ? "    (the drive or its enclosure did not hand out its S.M.A.R.T. attributes)\n"
+                                       : "    (S.M.A.R.T. attributes need administrator rights)\n");
+        }
     }
     if (missing && !os::process_elevated())
-        out("(Health percentages of SATA SSDs, power-on hours and error counts need administrator rights;\n"
-            " hard disks have no health percentage.)\n");
+        out("(Run as administrator for the health percentage of hard disks and SATA SSDs, power-on hours\n"
+            " and error counts.)\n");
     return kExitOk;
 }
 
@@ -2243,7 +2271,7 @@ int run(const std::vector<std::string>& argv) {
     if (g_json) start_cancel_watcher();
 
     if (a.command == "jobs") return cmd_jobs(a);
-    if (a.command == "drives") return cmd_drives();
+    if (a.command == "drives") return cmd_drives(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
     if (a.command == "copy") return cmd_copy(a);

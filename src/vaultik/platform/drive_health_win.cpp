@@ -4,6 +4,7 @@
 #include <winioctl.h>
 #include <wbemidl.h>
 #include <nvme.h>
+#include <ntddscsi.h>
 
 #include <algorithm>
 #include <cstddef>
@@ -11,6 +12,7 @@
 #include <map>
 #include <vector>
 
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/win.hpp"
 
@@ -179,13 +181,157 @@ void nvme_health(DriveHealth& d) {
     std::memcpy(&critical, &log.CriticalWarning, 1);
     if (critical != 0 && d.status == DriveHealth::Status::Healthy) {
         d.status = DriveHealth::Status::Warning;
-        if (d.condition.empty())
-            d.condition = (critical & 0x04) ? "Reliability degraded"
-                          : (critical & 0x08) ? "Read-only"
-                          : (critical & 0x01) ? "Spare space low"
-                          : (critical & 0x02) ? "Temperature out of range"
-                                              : "Critical warning";
+        // The bits of the critical warning, most serious first (several can be set at once).
+        static constexpr std::pair<std::uint8_t, const char*> kWarnings[] = {
+            {0x04, "Reliability degraded"},
+            {0x08, "Read-only"},
+            {0x01, "Spare space low"},
+            {0x02, "Temperature out of range"},
+        };
+        if (d.condition.empty()) {
+            d.condition = "Critical warning";
+            for (const auto& [bit, text] : kWarnings)
+                if (critical & bit) {
+                    d.condition = text;
+                    break;
+                }
+        }
     }
+}
+
+// ATA S.M.A.R.T. commands: SMART READ DATA (feature 0xD0) and READ THRESHOLDS (0xD1), each
+// answering one 512-byte sector.
+constexpr std::uint8_t kSmartCommand = 0xB0;
+constexpr std::uint8_t kReadData = 0xD0;
+constexpr std::uint8_t kReadThresholds = 0xD1;
+
+// The classic SMART interface of the storage drivers (SATA on the standard AHCI driver).
+bool smart_rcv(HANDLE h, std::uint8_t feature, std::uint8_t* out512) {
+    SENDCMDINPARAMS in{};
+    in.cBufferSize = 512;
+    in.irDriveRegs.bFeaturesReg = feature;
+    in.irDriveRegs.bSectorCountReg = 1;
+    in.irDriveRegs.bSectorNumberReg = 1;
+    in.irDriveRegs.bCylLowReg = SMART_CYL_LOW;
+    in.irDriveRegs.bCylHighReg = SMART_CYL_HI;
+    in.irDriveRegs.bDriveHeadReg = 0xA0;
+    in.irDriveRegs.bCommandReg = kSmartCommand;
+    std::vector<std::uint8_t> buffer(sizeof(SENDCMDOUTPARAMS) - 1 + 512);
+    DWORD got = 0;
+    if (!DeviceIoControl(h, SMART_RCV_DRIVE_DATA, &in, sizeof(in) - 1, buffer.data(), static_cast<DWORD>(buffer.size()),
+                         &got, nullptr))
+        return false;
+    const auto* answer = reinterpret_cast<const SENDCMDOUTPARAMS*>(buffer.data());
+    if (answer->DriverStatus.bDriverError != 0 || got < sizeof(SENDCMDOUTPARAMS) - 1 + 512) return false;
+    std::memcpy(out512, answer->bBuffer, 512);
+    return true;
+}
+
+// ATA pass-through (drivers that do not offer the classic interface, some RAID drivers).
+bool ata_pass_through(HANDLE h, std::uint8_t feature, std::uint8_t* out512) {
+    struct {
+        ATA_PASS_THROUGH_EX apt;
+        ULONG filler;
+        std::uint8_t data[512];
+    } buffer{};
+    buffer.apt.Length = sizeof(ATA_PASS_THROUGH_EX);
+    buffer.apt.AtaFlags = ATA_FLAGS_DATA_IN | ATA_FLAGS_DRDY_REQUIRED;
+    buffer.apt.DataTransferLength = 512;
+    buffer.apt.TimeOutValue = 5;
+    buffer.apt.DataBufferOffset = offsetof(decltype(buffer), data);
+    // Features, sector count, LBA low, LBA mid, LBA high, device, command.
+    UCHAR* task = buffer.apt.CurrentTaskFile;
+    task[0] = feature;
+    task[1] = 1;
+    task[2] = 1;
+    task[3] = SMART_CYL_LOW;
+    task[4] = SMART_CYL_HI;
+    task[5] = 0xA0;
+    task[6] = kSmartCommand;
+    DWORD got = 0;
+    if (!DeviceIoControl(h, IOCTL_ATA_PASS_THROUGH, &buffer, sizeof buffer, &buffer, sizeof buffer, &got, nullptr))
+        return false;
+    if ((buffer.apt.CurrentTaskFile[6] & 0x01) != 0) return false;  // the drive's status: error
+    std::memcpy(out512, buffer.data, 512);
+    return true;
+}
+
+// SCSI-ATA translation (SAT): what USB enclosures understand. The 12-byte ATA PASS-THROUGH
+// command first, the 16-byte one for bridges that only know that.
+bool sat_pass_through(HANDLE h, std::uint8_t feature, std::uint8_t* out512, bool sixteen) {
+    struct {
+        SCSI_PASS_THROUGH spt;
+        ULONG filler;
+        std::uint8_t sense[32];
+        std::uint8_t data[512];
+    } buffer{};
+    buffer.spt.Length = sizeof(SCSI_PASS_THROUGH);
+    buffer.spt.CdbLength = sixteen ? 16 : 12;
+    buffer.spt.SenseInfoLength = sizeof buffer.sense;
+    buffer.spt.DataIn = SCSI_IOCTL_DATA_IN;
+    buffer.spt.DataTransferLength = 512;
+    buffer.spt.TimeOutValue = 5;
+    buffer.spt.DataBufferOffset = offsetof(decltype(buffer), data);
+    buffer.spt.SenseInfoOffset = offsetof(decltype(buffer), sense);
+    UCHAR* cdb = buffer.spt.Cdb;
+    if (!sixteen) {
+        cdb[0] = 0xA1;  // ATA PASS-THROUGH (12)
+        cdb[1] = 4 << 1;  // protocol: PIO data-in
+        cdb[2] = 0x0E;  // to the host, length in sectors, from the sector count
+        cdb[3] = feature;
+        cdb[4] = 1;
+        cdb[5] = 1;
+        cdb[6] = SMART_CYL_LOW;
+        cdb[7] = SMART_CYL_HI;
+        cdb[8] = 0xA0;
+        cdb[9] = kSmartCommand;
+    } else {
+        cdb[0] = 0x85;  // ATA PASS-THROUGH (16)
+        cdb[1] = 4 << 1;
+        cdb[2] = 0x0E;
+        cdb[4] = feature;
+        cdb[6] = 1;
+        cdb[8] = 1;
+        cdb[10] = SMART_CYL_LOW;
+        cdb[12] = SMART_CYL_HI;
+        cdb[13] = 0xA0;
+        cdb[14] = kSmartCommand;
+    }
+    DWORD got = 0;
+    if (!DeviceIoControl(h, IOCTL_SCSI_PASS_THROUGH, &buffer, sizeof buffer, &buffer, sizeof buffer, &got, nullptr))
+        return false;
+    if (buffer.spt.ScsiStatus != 0 || buffer.spt.DataTransferLength < 512) return false;
+    std::memcpy(out512, buffer.data, 512);
+    return true;
+}
+
+// An ATA drive's attribute table, through whichever interface its driver answers (needs
+// administrator rights: the drive is opened for reading and writing to send commands).
+void ata_smart(DriveHealth& d) {
+    const std::wstring device = L"\\\\.\\PhysicalDrive" + std::to_wstring(d.disk);
+    const HANDLE h = CreateFileW(device.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                 nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    std::uint8_t values[512];
+    std::uint8_t thresholds[512];
+    const auto try_all = [&](auto&& read) {
+        if (!read(kReadData, values)) return false;
+        std::vector<SmartAttribute> table = parse_smart(values, read(kReadThresholds, thresholds) ? thresholds : nullptr);
+        if (table.empty()) return false;
+        d.smart = std::move(table);
+        return true;
+    };
+    const auto rcv = [&](std::uint8_t f, std::uint8_t* o) { return smart_rcv(h, f, o); };
+    const auto ata = [&](std::uint8_t f, std::uint8_t* o) { return ata_pass_through(h, f, o); };
+    const auto sat12 = [&](std::uint8_t f, std::uint8_t* o) { return sat_pass_through(h, f, o, false); };
+    const auto sat16 = [&](std::uint8_t f, std::uint8_t* o) { return sat_pass_through(h, f, o, true); };
+    // A USB enclosure is asked in its own language first; other drives through their driver.
+    const bool usb = d.bus == "USB";
+    bool ok = !usb && (try_all(rcv) || try_all(ata));
+    if (!ok) ok = try_all(sat12) || try_all(sat16);
+    if (!ok && usb) try_all(ata);
+    CloseHandle(h);
+    apply_smart(d);
 }
 
 std::vector<DriveHealth> query(const std::wstring& where) {
@@ -250,8 +396,11 @@ std::vector<DriveHealth> query(const std::wstring& where) {
                 if (const auto h = number(row, L"PowerOnHours"); h && *h > 0) d.power_on_hours = *h;
                 if (const auto e = number(row, L"ReadErrorsUncorrected")) d.read_errors_uncorrected = *e;
             });
-        for (DriveHealth& d : out)
+        const bool elevated = process_elevated();
+        for (DriveHealth& d : out) {
             if (d.bus == "NVMe" || d.media == "SSD") nvme_health(d);
+            if (elevated && d.bus != "NVMe") ata_smart(d);
+        }
     } catch (...) {
         // best effort
     }

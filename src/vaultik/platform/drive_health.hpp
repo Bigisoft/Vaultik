@@ -11,6 +11,16 @@
 
 namespace vaultik::os {
 
+// One entry of an ATA drive's S.M.A.R.T. attribute table.
+struct SmartAttribute {
+    int id = 0;
+    bool prefail = false;  // the drive counts it as a sign of coming failure
+    int value = 0;         // normalized, usually 100 (or 200, 253) when new, falling with wear
+    int worst = 0;
+    int threshold = 0;     // at or below it the drive itself says the attribute failed (0: none known)
+    std::uint64_t raw = 0; // 48 bits, the drive's own count (meaning varies by attribute)
+};
+
 struct DriveHealth {
     enum class Status { Healthy, Warning, Unhealthy, Unknown };
 
@@ -27,14 +37,21 @@ struct DriveHealth {
     std::optional<int> wear;         // percent of an SSD's rated life used (can pass 100)
     std::optional<std::uint64_t> power_on_hours;
     std::optional<std::uint64_t> read_errors_uncorrected;
+    // An ATA drive's attribute table (administrators only), and what apply_smart made of it.
+    std::vector<SmartAttribute> smart;
+    std::optional<int> smart_health;       // 100 minus the penalties for bad sectors and the like
+    std::vector<std::string> smart_issues; // "3 reallocated sectors", ...
 
-    // The health as a percentage: the part of an SSD's rated life left. Unknown for hard disks
-    // (they have no such counter) and for SSDs whose wear could not be read.
+    // The health as a percentage: for an SSD the part of its rated life left, for any ATA drive
+    // whose attributes could be read also lowered by bad sectors (the lower of the two). Unknown
+    // when neither could be read.
     std::optional<int> health_percent() const {
-        if (!wear) return std::nullopt;
-        return *wear >= 100 ? 0 : 100 - (*wear < 0 ? 0 : *wear);
+        std::optional<int> out;
+        if (wear) out = *wear >= 100 ? 0 : 100 - (*wear < 0 ? 0 : *wear);
+        if (smart_health && (!out || *smart_health < *out)) out = smart_health;
+        return out;
     }
-    // An SSD this close to the end of its rated life is a problem even while it still works.
+    // A drive this close to the end of its life is a problem even while it still works.
     bool worn_out() const { return health_percent().value_or(100) <= 10; }
 };
 
@@ -47,5 +64,21 @@ std::vector<DriveHealth> all_drives();
 std::vector<int> disk_numbers(const std::string& path);
 
 const char* to_string(DriveHealth::Status status);
+
+// The attribute table in a 512-byte SMART READ DATA answer, with the thresholds from a SMART READ
+// THRESHOLDS answer when there is one. Empty when the data does not look like an attribute table.
+std::vector<SmartAttribute> parse_smart(const std::uint8_t* values, const std::uint8_t* thresholds);
+// The common name of an attribute ("Reallocated sectors"), or empty.
+const char* smart_attribute_name(int id);
+// Fills smart_health, smart_issues and the details still unknown (temperature, power-on hours,
+// an SSD's wear, uncorrectable errors) from d.smart, and turns bad sectors or a failed attribute
+// into a warning (or Unhealthy) when the system still called the drive healthy.
+//
+// The health starts at 100% and loses, for each kind of trouble, weight * log2(1 + count):
+// reallocated sectors 6, pending (unstable) sectors 8, offline uncorrectable sectors 8, spin
+// retries 10, end-to-end errors 10, reported uncorrectable errors 4, reallocation events 2. So
+// the first bad sectors cost the most, as they are the first sign; one reallocated sector gives
+// 94%, ten give 79%, a hundred 60%. An attribute at or below its threshold caps it at 10%.
+void apply_smart(DriveHealth& d);
 
 }  // namespace vaultik::os

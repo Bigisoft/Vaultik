@@ -348,11 +348,18 @@ The Overview shows the drives a job uses (the backup drive, the second copy's an
 backed up from) with the health Windows reports for them, and flags a backup kept on the same
 physical drive as the files it backs up. A backup drive that reports a warning or a failing
 condition puts a banner on the Overview, and `run-job` records it in the history (`"drive"`),
-so the tray says so too. An SSD's health is shown as a percentage: the part of its rated life
-left, from the wear the drive counts (an SSD at 10% or less counts as a problem). NVMe drives
-report it to anyone; a SATA SSD's needs administrator rights, and hard disks have no such
-counter. `vaultik drives` lists every drive; power-on hours and error counts need
-administrator rights.
+so the tray says so too.
+
+Each drive gets a health percentage where it can be worked out. For an SSD it is the part of its
+rated life left, from the wear the drive counts. With administrator rights (see "Start Vaultik as
+administrator" in Settings) Vaultik also reads the S.M.A.R.T. attributes of SATA and USB drives,
+hard disks included: the health starts at 100% and loses weight x log2(1 + count) for each kind
+of bad sector or error (reallocated 6, pending 8, offline uncorrectable 8, spin retries 10,
+end-to-end errors 10, reported uncorrectable 4, reallocation events 2), so one reallocated sector
+gives 94% and a hundred 60%; an attribute at its threshold caps it at 10%. Reallocated, pending or
+uncorrectable sectors turn the drive's status into a warning, and a drive at 10% or less counts
+as a problem. NVMe drives report their wear to anyone. `vaultik drives` lists every drive, and
+`vaultik drives --smart` each drive's attribute table.
 
 ### Health checks
 

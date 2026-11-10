@@ -58,6 +58,7 @@ add_library(vaultik_core STATIC
     src/vaultik/platform/os_common.cpp
     src/vaultik/platform/vss.cpp
     src/vaultik/platform/acl.cpp
+    src/vaultik/platform/drive_health.cpp
     src/vaultik/platform/http.cpp
     src/vaultik/platform/loopback.cpp
     src/vaultik/util/base64.cpp
@@ -214,6 +215,7 @@ enable_testing()
 add_executable(vaultik_tests
     tests/test_main.cpp
     tests/test_util.cpp
+    tests/test_drive_health.cpp
     tests/test_resources.cpp
     tests/test_crypto.cpp
     tests/test_chunker.cpp
