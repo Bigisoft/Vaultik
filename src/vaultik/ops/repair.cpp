@@ -20,6 +20,17 @@ std::string short_hex(const Id& id) {
     return id_hex(id).substr(0, 8);
 }
 
+// Whether a failure means the data is damaged (it failed authentication or its hash, is
+// malformed, or is gone from the packs), rather than that it could not be read just now.
+bool is_damage(const std::exception& e) {
+    if (dynamic_cast<const AuthError*>(&e) != nullptr) return true;
+    const std::string what = e.what();
+    for (const char* sign : {"malformed", "blob not found", "unsupported tree version", "unexpected type",
+                             "does not match its id"})
+        if (what.find(sign) != std::string::npos) return true;
+    return false;
+}
+
 // What became of a folder listing: unreadable, unchanged, or saved again without what was lost.
 struct TreeFix {
     bool ok = false;
@@ -39,7 +50,12 @@ public:
         Tree tree;
         try {
             tree = parse_tree(repo_.load_blob(BlobType::Tree, id));
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+            // Only damage makes a folder lost; a read that failed now stops the repair (and is not
+            // remembered for the other versions sharing the folder).
+            if (!is_damage(e))
+                throw Error(std::string("repair stopped, nothing was changed: reading failed (") + e.what() +
+                            "); try again when the destination can be read");
             return done_[id] = r;  // not ok
         }
         r.ok = true;
@@ -54,7 +70,7 @@ public:
                 }
                 r.files_lost += sub.files_lost;
                 r.folders_lost += sub.folders_lost;
-                Node m = n;
+                Node m = keep_intact_extras(n, r);  // a folder's own descriptor may be lost too
                 if (sub.changed) {
                     m.subtree = sub.id;
                     r.changed = true;
@@ -113,10 +129,17 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
         if (o.on_warning) o.on_warning(m);
     };
     auto cancelled = [&] { return o.should_cancel && o.should_cancel(); };
+    // A failure to read (the network, the disk, a server) is not damage: stop, change nothing.
+    const auto stop_unless_damage = [](const std::exception& e) {
+        if (!is_damage(e))
+            throw Error(std::string("repair stopped, nothing was changed: reading failed (") + e.what() +
+                        "); try again when the destination can be read");
+    };
     Backend& backend = repo.backend();
     RepairResult r;
 
-    // 1. The index, from the packs themselves.
+    // A. Read and judge everything, writing nothing yet.
+    // A1. The index, from the packs themselves.
     const std::vector<std::string> pack_names = backend.list("data");
     IndexFileContent fresh;
     std::unordered_set<Id, IdHash> seen;
@@ -138,8 +161,9 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
                 entries = parse_pack_header(pack, repo.aead());
             }
         } catch (const std::exception& e) {
+            stop_unless_damage(e);
             ++r.packs_unreadable;
-            warn("pack " + hex.substr(0, 8) + " cannot be read, its data is lost: " + e.what());
+            warn("pack " + hex.substr(0, 8) + " is damaged, its data is lost: " + e.what());
             continue;
         }
         std::vector<BlobEntry> good;
@@ -147,9 +171,10 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
             if (seen.contains(e.id)) continue;  // the same blob stored twice: the first copy serves
             if (!o.quick) {
                 try {
-                    if (e.offset + e.length > pack.size()) throw Error("it lies outside the pack");
+                    if (e.offset + e.length > pack.size()) throw Error("malformed pack: a blob lies outside it");
                     repo.decode_blob(e.type, e.id, ByteSpan(pack.data() + e.offset, e.length));
                 } catch (const std::exception& ex) {
+                    stop_unless_damage(ex);
                     ++r.blobs_damaged;
                     warn("damaged data in pack " + hex.substr(0, 8) + " (" + short_hex(e.id) + "): " + ex.what());
                     continue;
@@ -164,56 +189,81 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
     repo.clear_index();
     for (const auto& [pack_id, entries] : fresh) repo.index_pack(pack_id, entries);
 
-    // 2. Replace the index files: new ones first, so a crash in between leaves both (the old ones
-    // only add blobs that are also listed again, or damaged ones a later repair drops again).
+    // A2. The versions, against that index.
+    progress("checking every version");
+    struct Plan {
+        Id id{};
+        Snapshot snapshot;
+        bool remove = false;  // else: save again without what was lost
+        std::string lost;
+    };
+    std::vector<Plan> plans;
+    {
+        TreeFixer judge(repo, true);
+        for (const Id& sid : repo.list_snapshot_ids()) {
+            if (cancelled()) throw Cancelled();
+            ++r.snapshots;
+            Plan p;
+            p.id = sid;
+            try {
+                p.snapshot = repo.load_snapshot(sid);
+            } catch (const std::exception& e) {
+                stop_unless_damage(e);
+                p.remove = true;
+                ++r.snapshots_removed;
+                warn("version " + short_hex(sid) + " cannot be read and is removed: " + e.what());
+                plans.push_back(std::move(p));
+                continue;
+            }
+            const TreeFix root = judge.fix(p.snapshot.tree);
+            if (!root.ok) {
+                p.remove = true;
+                ++r.snapshots_removed;
+                warn("version " + short_hex(sid) + " lost its top folder listing and is removed");
+                plans.push_back(std::move(p));
+                continue;
+            }
+            if (!root.changed) continue;
+            ++r.snapshots_repaired;
+            r.files_lost += root.files_lost;
+            r.folders_lost += root.folders_lost;
+            p.lost = std::to_string(root.files_lost) + " file(s) and " + std::to_string(root.folders_lost) +
+                     " folder(s) were lost";
+            warn("version " + short_hex(sid) + ": " + p.lost + "; saved again without them");
+            plans.push_back(std::move(p));
+        }
+    }
     const std::vector<std::string> old_index = repo.list_index_files();
     r.index_files_replaced = old_index.size();
-    if (!o.dry_run) {
-        progress("writing the new index");
-        for (std::size_t i = 0; i < fresh.size(); i += kPacksPerIndexFile) {
-            const auto end = fresh.begin() + static_cast<std::ptrdiff_t>(std::min(fresh.size(), i + kPacksPerIndexFile));
-            repo.write_index_file(IndexFileContent(fresh.begin() + static_cast<std::ptrdiff_t>(i), end));
-        }
-        for (const std::string& name : old_index) backend.remove(name);
-    }
+    if (o.dry_run) return r;
 
-    // 3. The versions.
-    progress("checking every version");
-    TreeFixer fixer(repo, o.dry_run);
-    const std::vector<Id> ids = repo.list_snapshot_ids();
-    for (const Id& sid : ids) {
-        ++r.snapshots;
-        Snapshot s;
-        try {
-            s = repo.load_snapshot(sid);
-        } catch (const std::exception& e) {
-            ++r.snapshots_removed;
-            warn("version " + short_hex(sid) + " cannot be read and is removed: " + e.what());
-            if (!o.dry_run) backend.remove(Repository::snapshot_name(sid));
-            continue;
-        }
-        const TreeFix root = fixer.fix(s.tree);
-        if (!root.ok) {
-            ++r.snapshots_removed;
-            warn("version " + short_hex(sid) + " lost its top folder listing and is removed");
-            if (!o.dry_run) backend.remove(Repository::snapshot_name(sid));
-            continue;
-        }
-        if (!root.changed) continue;
-        ++r.snapshots_repaired;
-        r.files_lost += root.files_lost;
-        r.folders_lost += root.folders_lost;
-        const std::string lost = std::to_string(root.files_lost) + " file(s) and " + std::to_string(root.folders_lost) +
-                                 " folder(s) were lost";
-        warn("version " + short_hex(sid) + ": " + lost + "; saved again without them");
-        if (o.dry_run) continue;
-        Snapshot fixed = s;
-        fixed.tree = root.id;
-        fixed.note = (s.note.empty() ? std::string() : s.note + " ") + "(repaired: " + lost + ")";
-        repo.save_snapshot(fixed);  // flushes the new folder listings first
-        backend.remove(Repository::snapshot_name(sid));
+    // B. Change: new index files first (a crash in between leaves both; the old ones only add
+    // blobs listed again, or damaged ones a later repair drops again), then the old ones go, then
+    // the versions. A failure now leaves an index that matches the packs; versions not reached
+    // yet keep pointing at what was lost, and the next repair continues.
+    progress("writing the new index");
+    for (std::size_t i = 0; i < fresh.size(); i += kPacksPerIndexFile) {
+        const auto end = fresh.begin() + static_cast<std::ptrdiff_t>(std::min(fresh.size(), i + kPacksPerIndexFile));
+        repo.write_index_file(IndexFileContent(fresh.begin() + static_cast<std::ptrdiff_t>(i), end));
     }
-    if (!o.dry_run) repo.flush();
+    for (const std::string& name : old_index) backend.remove(name);
+
+    TreeFixer fixer(repo, false);
+    for (const Plan& p : plans) {
+        if (cancelled()) throw Cancelled();
+        if (p.remove) {
+            backend.remove(Repository::snapshot_name(p.id));
+            continue;
+        }
+        const TreeFix root = fixer.fix(p.snapshot.tree);
+        if (!root.ok) continue;  // (judged before; not removed now without a fresh judgement)
+        Snapshot fixed = p.snapshot;
+        fixed.tree = root.id;
+        fixed.note = (p.snapshot.note.empty() ? std::string() : p.snapshot.note + " ") + "(repaired: " + p.lost + ")";
+        repo.save_snapshot(fixed);  // flushes the new folder listings first
+        backend.remove(Repository::snapshot_name(p.id));
+    }
+    repo.flush();
     return r;
 }
 
