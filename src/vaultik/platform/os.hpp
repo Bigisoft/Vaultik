@@ -147,6 +147,10 @@ public:
     // an existing file or link is deleted and a new file created (never written through).
     // `mode` sets POSIX permissions (ignored on Windows).
     static File create(const std::string& path, bool overwrite, ErrorCode& err, std::uint32_t mode = 0644);
+    // Windows: creates (or replaces) the alternate data stream `name` of the file at `path`,
+    // without following a link: fails when `path` is a link, a folder or a file with other hard
+    // links, so a restore cannot be redirected into another file. Not supported on POSIX.
+    static File create_stream(const std::string& path, const std::string& name, ErrorCode& err);
 
     bool valid() const;
     void close();

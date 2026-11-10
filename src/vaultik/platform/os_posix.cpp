@@ -597,6 +597,11 @@ std::string get_env(const char* name) {
     return v != nullptr ? std::string(v) : std::string();
 }
 
+File File::create_stream(const std::string& /*path*/, const std::string& /*name*/, ErrorCode& err) {
+    err = ENOTSUP;
+    return File();
+}
+
 // Windows extras: POSIX keeps permissions in the node itself (mode, uid, gid).
 Bytes read_security(const std::string& /*path*/) {
     return {};

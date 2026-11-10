@@ -133,4 +133,31 @@ TEST_CASE("permissions, streams and junctions come back on Windows") {
     CHECK(run_restore(*repo, b.snapshot, plain).errors == 0);
 }
 
+TEST_CASE("restoring permissions and streams never writes through a link") {
+    TempDir tmp;
+    const fs::path victim = tmp.path / "victim.txt";
+    write_text(victim, "someone else's file");
+    const Bytes sd = descriptor(L"D:P(A;;FA;;;OW)");
+
+    // A restored file swapped for a hard link to another file.
+    const fs::path swapped = tmp.path / "restored.txt";
+    REQUIRE(CreateHardLinkW(swapped.c_str(), victim.c_str(), nullptr));
+    CHECK(os::write_security(u8(swapped), sd) != 0);
+    os::ErrorCode err = 0;
+    CHECK_FALSE(os::File::create_stream(u8(swapped), "x", err).valid());
+    CHECK(os::list_streams(u8(victim)).empty());
+
+    // A restored folder swapped for a junction to another folder.
+    fs::create_directories(tmp.path / "elsewhere");
+    REQUIRE(os::create_link(u8(tmp.path / "jn"), {0xA0000003, u8(tmp.path / "elsewhere"), false}, true) == 0);
+    CHECK(os::write_security(u8(tmp.path / "jn"), sd) == ERROR_STOPPED_ON_SYMLINK);
+
+    // A plain file of its own is fine.
+    const fs::path own = tmp.path / "own.txt";
+    write_text(own, "mine");
+    CHECK(os::write_security(u8(own), sd) == 0);
+    os::File s = os::File::create_stream(u8(own), "x", err);
+    CHECK(s.valid());
+}
+
 #endif  // _WIN32

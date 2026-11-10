@@ -332,6 +332,26 @@ File File::create(const std::string& path, bool overwrite, ErrorCode& err, std::
     return File();
 }
 
+File File::create_stream(const std::string& path, const std::string& name, ErrorCode& err) {
+    // CREATE_NEW: the file was just restored, so the stream cannot exist yet; if it does, the
+    // file is not ours and an existing stream of someone else's file is never truncated.
+    File f(open_handle(path + ":" + name, GENERIC_WRITE | DELETE, 0, CREATE_NEW,
+                       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, err));
+    if (!f.valid()) return f;
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    FILE_STANDARD_INFO standard{};
+    const bool known = GetFileInformationByHandleEx(as_handle(f.h_), FileAttributeTagInfo, &tag, sizeof tag) &&
+                       GetFileInformationByHandleEx(as_handle(f.h_), FileStandardInfo, &standard, sizeof standard);
+    if (known && (tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
+        standard.NumberOfLinks == 1)
+        return f;
+    err = known ? ERROR_STOPPED_ON_SYMLINK : GetLastError();
+    // Not our file after all: take the stream just made away again.
+    FILE_DISPOSITION_INFO gone{TRUE};
+    SetFileInformationByHandle(as_handle(f.h_), FileDispositionInfo, &gone, sizeof gone);
+    return File();
+}
+
 bool File::valid() const {
     return h_ != -1 && h_ != 0;
 }

@@ -61,11 +61,36 @@ ErrorCode write_security(const std::string& path, ByteSpan descriptor) {
     Bytes sd(descriptor.begin(), descriptor.end());  // the API wants a non-const pointer
     auto* psd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data());
     if (!IsValidSecurityDescriptor(psd)) return ERROR_INVALID_SECURITY_DESCR;
+    // Through a handle on the item itself, never through a link: someone who can change the
+    // restore folder could swap the item for a link between its creation and this call, and an
+    // elevated restore would then rewrite the permissions of whatever the link points at.
     const std::wstring p = native_path(path);
-    if (SetFileSecurityW(p.c_str(), kSecurityParts, psd)) return 0;
-    // Setting another account as owner needs the restore privilege (administrators): keep the
-    // access list at least.
-    if (SetFileSecurityW(p.c_str(), DACL_SECURITY_INFORMATION, psd)) return 0;
+    const auto open = [&](DWORD access) {
+        return UniqueHandle(CreateFileW(p.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr, OPEN_EXISTING,
+                                        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    };
+    // Setting another account as owner needs the restore privilege (administrators): without
+    // it, keep the access list at least.
+    SECURITY_INFORMATION parts = kSecurityParts;
+    UniqueHandle h = open(READ_CONTROL | WRITE_DAC | WRITE_OWNER);
+    if (!h.valid()) {
+        parts = DACL_SECURITY_INFORMATION;
+        h = open(READ_CONTROL | WRITE_DAC);
+    }
+    if (!h.valid()) return GetLastError();
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    FILE_STANDARD_INFO standard{};
+    if (!GetFileInformationByHandleEx(h.get(), FileAttributeTagInfo, &tag, sizeof tag) ||
+        !GetFileInformationByHandleEx(h.get(), FileStandardInfo, &standard, sizeof standard))
+        return GetLastError();
+    // A link, or a file with another name elsewhere (a hard link to some other file).
+    if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+        ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && standard.NumberOfLinks != 1))
+        return ERROR_STOPPED_ON_SYMLINK;
+    if (SetKernelObjectSecurity(h.get(), parts, psd)) return 0;
+    if (parts != DACL_SECURITY_INFORMATION && SetKernelObjectSecurity(h.get(), DACL_SECURITY_INFORMATION, psd))
+        return 0;
     return GetLastError();
 }
 

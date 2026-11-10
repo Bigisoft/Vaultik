@@ -180,9 +180,8 @@ void RestoreEngine::restore_streams(const Node& node, const std::string& path) {
             warn("skipped a stream with an invalid name on " + path);
             continue;
         }
-        const std::string where = os::stream_path(path, s.name);
         os::ErrorCode err = 0;
-        os::File f = os::File::create(where, true, err);
+        os::File f = os::File::create_stream(path, s.name, err);
         if (!f.valid()) {
             warn("cannot restore the stream " + s.name + " of " + path + ": " + os::error_message(err));
             continue;
