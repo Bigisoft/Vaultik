@@ -47,6 +47,7 @@
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/vss.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
@@ -190,6 +191,8 @@ Commands:
   check-job <job>              Read the job's share of its stored data back and
                                check every version now (added to its history)
       --full                   Read all of the stored data
+  alert-test                   Send a test message to the alert channels set up
+                               in Settings (ntfy, Telegram, webhook)
   test-restore <job>           Restore a few files of the newest version into a
                                temporary folder, check them (and compare them with
                                the unchanged files on this PC), then remove them
@@ -1679,6 +1682,72 @@ int cmd_test_restore(const Args& a) {
     return code;
 }
 
+// Sends the alert a run calls for (see jobs/alerts.hpp), if the user set up alerts and wants this
+// kind. A failure to send is a warning, never a reason for the run to fail.
+void alert_for(const jobs::Job& job, const jobs::RunRecord& r) {
+    const jobs::AlertSettings s = jobs::load_alerts();
+    if (!s.any()) return;
+    jobs::Alert a;
+    a.job = job.name;
+    a.message = r.message;
+    const bool check = jobs::is_check(r.kind) || r.kind == jobs::RunKind::RestoreTest;
+    if (check) {
+        // Damage found (not a check that could not run: the backup before it said so).
+        if (!s.on_damage || r.status != jobs::RunStatus::Failed || r.errors == 0) return;
+        a.level = jobs::Alert::Level::Critical;
+        a.event = "damage";
+        a.title = (r.kind == jobs::RunKind::RestoreTest ? "Test restore of " : "Health check of ") + job.name +
+                  " found damage";
+    } else if (!r.alert.empty()) {
+        a.level = jobs::Alert::Level::Critical;
+        a.event = "ransomware";
+        a.title = job.name + ": files may be encrypted by ransomware";
+        a.message = r.alert;
+    } else if (r.status == jobs::RunStatus::Failed) {
+        if (!s.on_failure) return;
+        a.level = jobs::Alert::Level::Critical;
+        a.event = "failed";
+        a.title = "Backup of " + job.name + " failed";
+    } else if (!r.drive.empty() && s.on_damage) {
+        a.level = jobs::Alert::Level::Warning;
+        a.event = "drive";
+        a.title = "The backup drive of " + job.name + " reports a problem";
+        a.message = r.drive + ". Copy the backup to another drive soon, before it fails.";
+    } else if (r.status == jobs::RunStatus::Partial) {
+        if (!s.on_failure) return;
+        a.level = jobs::Alert::Level::Warning;
+        a.event = "partial";
+        a.title = "Backup of " + job.name + " skipped " + std::to_string(r.errors) + " item(s)";
+    } else if (r.status == jobs::RunStatus::Success && r.kind == jobs::RunKind::Backup && s.on_success) {
+        a.level = jobs::Alert::Level::Info;
+        a.event = "success";
+        a.title = "Backup of " + job.name + " completed";
+        if (a.message.empty())
+            a.message = std::to_string(r.files) + " files, " + format_bytes(r.new_bytes) + " new";
+    } else {
+        return;
+    }
+    a.title += " (" + os::hostname() + ")";
+    for (const std::string& f : jobs::send_alert(s, a)) warning("could not send the alert: " + f);
+}
+
+// "alert-test": sends a test message to every alert channel that is set up.
+int cmd_alert_test(const Args&) {
+    const jobs::AlertSettings s = jobs::load_alerts();
+    if (!s.any()) throw Error("no alerts are set up (Settings in Vaultik)");
+    jobs::Alert a;
+    a.level = jobs::Alert::Level::Info;
+    a.event = "test";
+    a.job = "test";
+    a.title = "Vaultik on " + os::hostname() + ": a test alert";
+    a.message = "Alerts reach you here when a backup fails or finds damage.";
+    const std::vector<std::string> failed = jobs::send_alert(s, a);
+    for (const std::string& f : failed) err(f + "\n");
+    if (g_json) emit({{"event", "done"}, {"status", failed.empty() ? "success" : "failed"}, {"failed", failed}});
+    else if (failed.empty()) out("The test alert was sent.\n");
+    return failed.empty() ? kExitOk : kExitError;
+}
+
 // Runs a job's "before" or "after" command line (see Job::before_command). Returns its exit code;
 // its output goes to the log (the start of it), each line as a warning when it failed.
 int run_job_command(const jobs::Job& job, const std::string& which, const std::string& command,
@@ -1809,10 +1878,12 @@ int cmd_run_job(const Args& a) {
         } catch (const Error&) {
         }
         run_after(jobs::to_string(record.status));
+        alert_for(*job, record);
         throw;
     }
     store.append_history(job->id, record);
     run_after(jobs::to_string(record.status));
+    alert_for(*job, record);
 
     // The second copy, after a backup that saved a version. Its result is its own history entry.
     if (!job->second_copy.repository.empty() && !g_cancel.load() && record.status != jobs::RunStatus::Failed) {
@@ -1846,6 +1917,7 @@ int cmd_run_job(const Args& a) {
         } catch (const Error& e) {
             warning(std::string("could not record the health check: ") + e.what());
         }
+        alert_for(*job, check);
     }
 
     // And the monthly test restore, when it is on and due. Like the check, its own entry.
@@ -1866,6 +1938,7 @@ int cmd_run_job(const Args& a) {
     } catch (const Error& e) {
         warning(std::string("could not record the test restore: ") + e.what());
     }
+    alert_for(*job, test);
     return code;
 }
 
@@ -2592,6 +2665,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
     if (a.command == "test-restore") return cmd_test_restore(a);
+    if (a.command == "alert-test") return cmd_alert_test(a);
     if (a.command == "copy") return cmd_copy(a);
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
     if (a.command == "mount") return cmd_mount(a);

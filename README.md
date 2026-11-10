@@ -446,6 +446,24 @@ something else), **Repair the backup...** in a job's ... menu, or `vaultik repai
 `--dry-run` shows what it would do. It holds the exclusive lock, like prune. From cloud storage
 it downloads everything (with `--quick`, only the pack headers).
 
+### Alerts when you are away
+
+Windows notifications only reach someone at the computer. **Settings > Alerts when you are
+away** sets up alerts that the backup sends itself (so Vaultik need not be open), when a backup
+fails or skips files, when a check or test restore finds damage or the backup drive is failing,
+and optionally after every backup:
+
+- **ntfy** (a free push notification app, [ntfy.sh](https://ntfy.sh) or an own server): the topic
+  URL, an optional access token, and optionally an email address ntfy forwards the alert to.
+- **Telegram**: a bot token (from @BotFather) and the chat id it writes to.
+- **Webhook**: a JSON POST (`source`, `event`, `level`, `job`, `title`, `message`, `computer`,
+  `time`) to any https URL.
+
+Alerts name the computer and the job and say what happened, never file names or content (the
+ransomware warning names the suspicious files). Settings are in `alerts.json` in Vaultik's settings
+folder; the tokens are sealed like job passwords. URLs must use https (http only to this
+computer). **Save and send a test**, or `vaultik alert-test`, checks every channel.
+
 ### Commands before and after a backup
 
 A job can run a command line before its backup and one after it (**What to back up** tab:

@@ -6,6 +6,7 @@
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
@@ -386,4 +387,25 @@ TEST_CASE("a job with control or text-direction characters is refused") {
     j = sample();
     j.before_command = std::string("echo a") + char(13) + "echo b";
     CHECK_THROWS(validate(j));
+}
+
+TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {
+    TempStore tmp;
+    AlertSettings s;
+    CHECK_FALSE(load_alerts(tmp.dir()).any());
+    s.ntfy_url = "http://ntfy.example.com/topic";
+    CHECK_THROWS(save_alerts(s, tmp.dir()));  // tokens and messages only over https
+    s.ntfy_url = "https://ntfy.example.com/my-long-topic";
+    s.telegram_chat = "12345";
+    s.on_success = true;
+    save_alerts(s, tmp.dir());
+    const AlertSettings back = load_alerts(tmp.dir());
+    CHECK(back.ntfy_url == s.ntfy_url);
+    CHECK(back.telegram_chat == "12345");
+    CHECK(back.on_success);
+    CHECK(back.any());
+    set_alert_secret("telegram", "123:abc", tmp.dir());
+    CHECK(alert_secret("telegram", tmp.dir()) == "123:abc");
+    set_alert_secret("telegram", "", tmp.dir());
+    CHECK(alert_secret("telegram", tmp.dir()).empty());
 }

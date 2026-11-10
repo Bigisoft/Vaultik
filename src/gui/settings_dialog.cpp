@@ -6,10 +6,12 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QSettings>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+#include "alerts_dialog.h"
 #include "app_settings.h"
 #include "common.h"
 #include "hello.h"
@@ -130,6 +132,13 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     layout->addWidget(failures_);
     layout->addWidget(overdue_);
     layout->addWidget(remind_box);
+    auto* alerts = new QPushButton(tr("Alerts when you are away (phone, email, chat)..."));
+    alerts->setProperty("role", "flat");
+    connect(alerts, &QPushButton::clicked, this, [this] {
+        AlertsDialog dialog(this);
+        dialog.exec();
+    });
+    layout->addWidget(alerts, 0, Qt::AlignLeft);
     layout->addWidget(note(tr("Scheduled jobs count as overdue after about twice their interval: two days for a daily "
                               "job, a day for an hourly one. With Windows' Do Not Disturb on, notifications go quietly "
                               "to the notification centre."),
