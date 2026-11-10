@@ -248,12 +248,15 @@ std::string SftpBackend::os_parent(const std::string& path) {
 
 bool SftpBackend::exists(const std::string& name) {
     return with_retry("checking", name, [&](Connection& c) {
-        const std::string p = path_of(name);
-        LIBSSH2_SFTP_ATTRIBUTES attrs{};
-        const int rc = libssh2_sftp_stat_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()), LIBSSH2_SFTP_STAT, &attrs);
-        if (rc == 0) return !LIBSSH2_SFTP_S_ISDIR(attrs.permissions);
-        if (c.sftp_error() == LIBSSH2_FX_NO_SUCH_FILE || c.sftp_error() == LIBSSH2_FX_NO_SUCH_PATH) return false;
-        c.fail(location_ + ": checking " + name, rc);
+        // A replace cut short on a server without overwriting renames leaves only "<name>.old".
+        for (const std::string& p : {path_of(name), path_of(name) + ".old"}) {
+            LIBSSH2_SFTP_ATTRIBUTES attrs{};
+            const int rc = libssh2_sftp_stat_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()), LIBSSH2_SFTP_STAT, &attrs);
+            if (rc == 0) return !LIBSSH2_SFTP_S_ISDIR(attrs.permissions);
+            if (c.sftp_error() != LIBSSH2_FX_NO_SUCH_FILE && c.sftp_error() != LIBSSH2_FX_NO_SUCH_PATH)
+                c.fail(location_ + ": checking " + name, rc);
+        }
+        return false;
     });
 }
 
@@ -289,10 +292,23 @@ void SftpBackend::put(const std::string& name, ByteSpan data) {
                                         LIBSSH2_SFTP_RENAME_OVERWRITE | LIBSSH2_SFTP_RENAME_ATOMIC |
                                             LIBSSH2_SFTP_RENAME_NATIVE);
         if (rc != 0) {
-            // Without overwriting renames: move the old file aside, put the new one in place, and
-            // only then remove the old one; if that fails, the old one goes back. At no point is
-            // neither in place (the config or a snapshot must never be lost).
-            const std::string old = final_path + ".old-" + to_hex(ByteSpan(rnd, sizeof rnd));
+            // Without overwriting renames: move the old file aside as "<name>.old", put the new one
+            // in place, and only then remove the old one; if that fails, the old one goes back.
+            // Readers fall back to "<name>.old" while the name itself is missing, so a replace cut
+            // short in between loses nothing, and the next one finishes it.
+            const std::string old = final_path + ".old";
+            LIBSSH2_SFTP_ATTRIBUTES attrs{};
+            const bool final_there = libssh2_sftp_stat_ex(c.sftp, final_path.c_str(),
+                                                          static_cast<unsigned>(final_path.size()), LIBSSH2_SFTP_STAT,
+                                                          &attrs) == 0;
+            // Left from an earlier replace: with the name in place it is stale, without it it is the
+            // only copy and goes back first.
+            if (final_there) {
+                libssh2_sftp_unlink_ex(c.sftp, old.c_str(), static_cast<unsigned>(old.size()));
+            } else {
+                libssh2_sftp_rename_ex(c.sftp, old.c_str(), static_cast<unsigned>(old.size()), final_path.c_str(),
+                                       static_cast<unsigned>(final_path.size()), LIBSSH2_SFTP_RENAME_NATIVE);
+            }
             const bool had_old = libssh2_sftp_rename_ex(c.sftp, final_path.c_str(), static_cast<unsigned>(final_path.size()),
                                                         old.c_str(), static_cast<unsigned>(old.size()),
                                                         LIBSSH2_SFTP_RENAME_NATIVE) == 0;
@@ -316,13 +332,15 @@ void SftpBackend::put(const std::string& name, ByteSpan data) {
 Bytes SftpBackend::get_range(const std::string& name, std::uint64_t offset, std::size_t length) {
     if (length == 0) return {};
     return with_retry("downloading", name, [&](Connection& c) {
-        const std::string p = path_of(name);
-        LIBSSH2_SFTP_HANDLE* h = libssh2_sftp_open_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()),
-                                                      LIBSSH2_FXF_READ, 0, LIBSSH2_SFTP_OPENFILE);
-        if (h == nullptr) {
-            if (c.sftp_error() == LIBSSH2_FX_NO_SUCH_FILE) throw Error(location_ + ": repository file " + name + " is missing");
-            c.fail(location_ + ": downloading " + name, libssh2_session_last_errno(c.session));
+        LIBSSH2_SFTP_HANDLE* h = nullptr;
+        for (const std::string& p : {path_of(name), path_of(name) + ".old"}) {  // (see exists)
+            h = libssh2_sftp_open_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()), LIBSSH2_FXF_READ, 0,
+                                     LIBSSH2_SFTP_OPENFILE);
+            if (h != nullptr) break;
+            if (c.sftp_error() != LIBSSH2_FX_NO_SUCH_FILE)
+                c.fail(location_ + ": downloading " + name, libssh2_session_last_errno(c.session));
         }
+        if (h == nullptr) throw Error(location_ + ": repository file " + name + " is missing");
         libssh2_sftp_seek64(h, offset);
         Bytes out(length);
         std::size_t done = 0;
@@ -347,14 +365,13 @@ Bytes SftpBackend::get(const std::string& name) {
 
 std::uint64_t SftpBackend::size(const std::string& name) {
     return with_retry("checking", name, [&](Connection& c) -> std::uint64_t {
-        const std::string p = path_of(name);
-        LIBSSH2_SFTP_ATTRIBUTES attrs{};
-        const int rc = libssh2_sftp_stat_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()), LIBSSH2_SFTP_STAT, &attrs);
-        if (rc != 0) {
-            if (c.sftp_error() == LIBSSH2_FX_NO_SUCH_FILE) throw Error(location_ + ": repository file " + name + " is missing");
-            c.fail(location_ + ": checking " + name, rc);
+        for (const std::string& p : {path_of(name), path_of(name) + ".old"}) {  // (see exists)
+            LIBSSH2_SFTP_ATTRIBUTES attrs{};
+            const int rc = libssh2_sftp_stat_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()), LIBSSH2_SFTP_STAT, &attrs);
+            if (rc == 0) return attrs.filesize;
+            if (c.sftp_error() != LIBSSH2_FX_NO_SUCH_FILE) c.fail(location_ + ": checking " + name, rc);
         }
-        return attrs.filesize;
+        throw Error(location_ + ": repository file " + name + " is missing");
     });
 }
 
@@ -381,6 +398,7 @@ std::vector<std::string> SftpBackend::list(const std::string& dir) {
                 if (entry == "." || entry == "..") continue;
                 const std::string full = rel.empty() ? entry : rel + "/" + entry;
                 if (LIBSSH2_SFTP_S_ISDIR(attrs.permissions)) folders.push_back(full);
+                else if (entry.ends_with(".old")) out.push_back(full.substr(0, full.size() - 4));  // (see exists)
                 else if (entry.find(".tmp-") == std::string::npos && entry.find(".old-") == std::string::npos)
                     out.push_back(full);
             }
@@ -389,15 +407,17 @@ std::vector<std::string> SftpBackend::list(const std::string& dir) {
         };
         walk(dir);
         std::sort(out.begin(), out.end());
+        out.erase(std::unique(out.begin(), out.end()), out.end());
         return out;
     });
 }
 
 void SftpBackend::remove(const std::string& name) {
     with_retry("deleting", name, [&](Connection& c) {
-        const std::string p = path_of(name);
-        const int rc = libssh2_sftp_unlink_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()));
-        if (rc != 0 && c.sftp_error() != LIBSSH2_FX_NO_SUCH_FILE) c.fail(location_ + ": deleting " + name, rc);
+        for (const std::string& p : {path_of(name), path_of(name) + ".old"}) {  // (see exists)
+            const int rc = libssh2_sftp_unlink_ex(c.sftp, p.c_str(), static_cast<unsigned>(p.size()));
+            if (rc != 0 && c.sftp_error() != LIBSSH2_FX_NO_SUCH_FILE) c.fail(location_ + ": deleting " + name, rc);
+        }
         return 0;
     });
 }
