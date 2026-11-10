@@ -5,14 +5,19 @@
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QSettings>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
 #include "app_settings.h"
+#include "common.h"
 #include "hello.h"
 #include "translator.h"
 #include "theme.h"
+#include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/platform/acl.hpp"
+#include "vaultik/util/error.hpp"
 
 namespace {
 
@@ -59,6 +64,14 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
         start_->setChecked(false);
         start_->setToolTip(tr("Not for a portable copy: install Vaultik on this computer to start it at sign-in."));
     }
+    admin_ = new QCheckBox(tr("Start Vaultik as administrator"));
+    admin_was_ = !portable && vaultik::jobs::elevated_gui_installed();
+    admin_->setChecked(admin_was_);
+    if (portable) {
+        // Its folder is not protected: a task with administrator rights would run whatever is put there.
+        admin_->setEnabled(false);
+        admin_->setToolTip(tr("Not for a portable copy: install Vaultik on this computer to start it as administrator."));
+    }
 
     tray_icon_ = new QCheckBox(tr("Show Vaultik's icon in the notification area"));
     tray_icon_->setChecked(s.tray_icon);
@@ -97,6 +110,11 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     layout->addWidget(heading(tr("Startup")));
     layout->addWidget(start_);
     layout->addWidget(indented(start_hidden_));
+    layout->addWidget(admin_);
+    layout->addWidget(note(tr("Windows asks for approval once, then never again. Vaultik can then read all of a "
+                              "drive's health details, but everything it starts, also every backup, runs with "
+                              "administrator rights, and files can no longer be dragged into it from File Explorer."),
+                           26));
     layout->addSpacing(12);
     layout->addWidget(heading(tr("Notification area")));
     layout->addWidget(tray_icon_);
@@ -191,6 +209,20 @@ void SettingsDialog::accept() {
         startup.enabled = start_->isChecked();
         startup.hidden = startup.enabled && start_hidden_->isChecked();
         set_startup_setting(startup);
+        if (admin_->isChecked() != admin_was_) {
+            const bool on = admin_->isChecked();
+            try {
+                vaultik::jobs::set_elevated_gui(on);
+                QSettings().setValue(QStringLiteral("startup/admin"), on);
+                if (on != vaultik::os::process_elevated())
+                    QMessageBox::information(this, tr("Settings"),
+                                             on ? tr("Vaultik starts as administrator from the next time it starts.")
+                                                : tr("Vaultik starts without administrator rights from the next time it starts."));
+            } catch (const vaultik::Error& e) {
+                plain_warning(this, tr("Start Vaultik as administrator"), QString::fromUtf8(e.what()));
+                return;  // the dialog stays open, the box as it was chosen
+            }
+        }
     }
     QDialog::accept();
 }

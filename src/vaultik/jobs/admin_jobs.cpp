@@ -1,12 +1,18 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/error.hpp"
+#include "vaultik/util/hex.hpp"
+#ifdef _WIN32
+#include "vaultik/util/win.hpp"
+#endif
 
 namespace vaultik::jobs {
 
@@ -206,6 +212,149 @@ void remove_admin_job(const std::string& id, const std::string& user_sid) {
     (void)id;
     (void)user_sid;
     throw Error("jobs with administrator rights are only available on Windows");
+#endif
+}
+
+std::string elevated_gui_task(const std::string& sid) {
+    return "\\Vaultik\\Vaultik as administrator " + sid_or_current(sid);
+}
+
+bool elevated_gui_installed() {
+#ifdef _WIN32
+    try {
+        std::string ignored;
+        return os::run_command({"schtasks.exe", "/Query", "/TN", elevated_gui_task()}, &ignored) == 0;
+    } catch (const Error&) {
+        return false;
+    }
+#else
+    return false;
+#endif
+}
+
+void set_elevated_gui(bool on) {
+#ifdef _WIN32
+    const std::string sid = os::current_user_sid();
+    const std::string engine = os::join(os::parent_of(os::executable_path()), "vaultik.exe");
+    const int code = os::run_command_elevated({engine, "admin-job", on ? "gui-on" : "gui-off", "--user", sid});
+    if (code == 0) return;
+    std::string message;
+    try {
+        const Bytes text = os::read_file(admin_error_file(sid), 64 * 1024);
+        message.assign(text.begin(), text.end());
+        while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) message.pop_back();
+    } catch (const Error&) {
+    }
+    throw Error(message.empty() ? "the administrator step failed (exit code " + std::to_string(code) + ")" : message);
+#else
+    (void)on;
+    throw Error("starting Vaultik as administrator is only available on Windows");
+#endif
+}
+
+#ifdef _WIN32
+namespace {
+
+// Every file and folder of the program folder (Qt's libraries and plugins included: the app
+// loads them all) must be admin-only, besides the checks of check_program_dir.
+void check_whole_program_dir(const std::string& program_dir) {
+    check_program_dir(program_dir);
+    std::string why;
+    if (!os::admin_only(os::join(program_dir, "vaultik-gui.exe"), false, &why))
+        throw Error("Vaultik runs from " + program_dir + ", but " + why);
+    std::error_code ec;
+    namespace fs = std::filesystem;
+    // Links are not followed: a linked folder is checked as the link itself.
+    for (fs::recursive_directory_iterator it(fs::path(widen(program_dir)), ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const std::string path = narrow(it->path().native());
+        if (!os::admin_only(path, false, &why))
+            throw Error("Vaultik runs from " + program_dir + ", but " + why +
+                        ". Starting it as administrator would run whatever is put there, so install Vaultik in "
+                        "a folder only administrators can change, such as C:\\Program Files\\Vaultik");
+    }
+    if (ec) throw Error("cannot check the program folder " + program_dir + ": " + ec.message());
+}
+
+std::string elevated_gui_definition(const std::string& program_dir, const std::string& sid) {
+    const std::string gui = os::join(program_dir, "vaultik-gui.exe");
+    // The account may run the task (that is the point) but not change it; SYSTEM and
+    // administrators keep full control.
+    return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
+           "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
+           "  <RegistrationInfo>\n"
+           "    <Description>Starts Vaultik with administrator rights, without an approval prompt.</Description>\n"
+           "    <SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;" + sid + ")</SecurityDescriptor>\n"
+           "  </RegistrationInfo>\n"
+           "  <Triggers />\n"
+           "  <Settings>\n"
+           "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+           "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\n"
+           "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+           "    <AllowStartOnDemand>true</AllowStartOnDemand>\n"
+           "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
+           "    <Priority>4</Priority>\n"
+           "    <Enabled>true</Enabled>\n"
+           "  </Settings>\n"
+           "  <Principals>\n    <Principal id=\"Author\">\n      <UserId>" + sid +
+           "</UserId>\n      <LogonType>InteractiveToken</LogonType>\n"
+           "      <RunLevel>HighestAvailable</RunLevel>\n    </Principal>\n  </Principals>\n"
+           "  <Actions Context=\"Author\">\n"
+           "    <Exec><Command>" + gui + "</Command><Arguments>--tray</Arguments></Exec>\n"
+           "  </Actions>\n"
+           "</Task>\n";
+}
+
+}  // namespace
+#endif
+
+void install_elevated_gui(const std::string& user_sid) {
+#ifdef _WIN32
+    check_elevated_caller(user_sid);
+    const std::string program_dir = os::parent_of(os::executable_path());
+    check_whole_program_dir(program_dir);
+    if (program_dir.find_first_of("<>&\"") != std::string::npos)
+        throw Error("the program folder's name cannot be put in a task: " + program_dir);
+    // The XML goes into the admin store, where nobody else can swap it before schtasks reads it.
+    const std::string dir = prepare_admin_store(user_sid);
+    const std::string xml = elevated_gui_definition(program_dir, user_sid);
+    const std::wstring wide = widen(xml);
+    Bytes data = {0xFF, 0xFE};  // schtasks reads task XML as UTF-16 with a byte order mark
+    for (const wchar_t c : wide) {
+        data.push_back(static_cast<std::uint8_t>(c & 0xFF));
+        data.push_back(static_cast<std::uint8_t>(c >> 8));
+    }
+    std::uint8_t rnd[6];
+    random_bytes(rnd);
+    const std::string tmp = os::join(dir, "gui-task-" + to_hex(rnd) + ".xml");
+    os::write_file_atomic(tmp, data);
+    std::string output;
+    int code = -1;
+    try {
+        code = os::run_command({"schtasks.exe", "/Create", "/TN", elevated_gui_task(user_sid), "/XML", tmp, "/F"}, &output);
+    } catch (...) {
+        os::remove_file(tmp);
+        throw;
+    }
+    os::remove_file(tmp);
+    if (code != 0) {
+        while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
+        throw Error("Task Scheduler refused the task: " + output);
+    }
+#else
+    (void)user_sid;
+    throw Error("starting Vaultik as administrator is only available on Windows");
+#endif
+}
+
+void remove_elevated_gui(const std::string& user_sid) {
+#ifdef _WIN32
+    check_elevated_caller(user_sid);
+    std::string ignored;
+    os::run_command({"schtasks.exe", "/Delete", "/TN", elevated_gui_task(user_sid), "/F"}, &ignored);
+#else
+    (void)user_sid;
+    throw Error("starting Vaultik as administrator is only available on Windows");
 #endif
 }
 

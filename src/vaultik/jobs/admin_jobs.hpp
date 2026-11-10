@@ -49,4 +49,19 @@ void remove_admin_job(const std::string& id, const std::string& user_sid);
 // user can read). Empty on POSIX.
 std::string admin_error_file(const std::string& sid = {});
 
+// "Start Vaultik as administrator" (Windows). An on-demand task "\Vaultik\Vaultik as
+// administrator <SID>" starts vaultik-gui.exe --tray with the account's full token; the app,
+// started normally, runs that task (no approval prompt) and ends, handing over to it. Like an
+// administrator job, it needs every file of the program folder to be admin-only, since the task
+// would otherwise run whatever an unprivileged program put there.
+std::string elevated_gui_task(const std::string& sid = {});
+// Whether the account's task exists.
+bool elevated_gui_installed();
+// Registers or removes the task with administrator approval (the elevated side below); a declined
+// approval or a failure throws Error with the reason.
+void set_elevated_gui(bool on);
+// The elevated side, run as "vaultik admin-job gui-on|gui-off --user <sid>". Throws Error.
+void install_elevated_gui(const std::string& user_sid);
+void remove_elevated_gui(const std::string& user_sid);
+
 }  // namespace vaultik::jobs

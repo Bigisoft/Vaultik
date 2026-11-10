@@ -57,6 +57,7 @@
 #include "tray.h"
 #include "versions_view.h"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/backends.hpp"
@@ -172,7 +173,7 @@ QFrame* card() {
 }  // namespace
 
 MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
-    setWindowTitle(QStringLiteral("Vaultik"));
+    setWindowTitle(os::process_elevated() ? tr("Vaultik (Administrator)") : QStringLiteral("Vaultik"));
     setWindowIcon(app_icon());
     resize(1180, 760);
     setMinimumSize(900, 560);

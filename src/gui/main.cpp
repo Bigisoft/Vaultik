@@ -28,8 +28,11 @@ extern "C" HRESULT WINAPI UiaDisconnectAllProviders();
 #include "main_window.h"
 #include "theme.h"
 #include "translator.h"
+#include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/job.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/util/error.hpp"
 #include "vaultik/version.hpp"
 
 namespace {
@@ -69,6 +72,71 @@ std::wstring instance_name(const wchar_t* base) {
     wchar_t suffix[24];
     swprintf(suffix, 24, L".%016llx", static_cast<unsigned long long>(h));
     return std::wstring(base) + suffix;
+}
+
+// The window of the running instance (marked with its property), or null.
+HWND instance_window(const wchar_t* prop_base) {
+    struct Find {
+        std::wstring prop;
+        HWND found = nullptr;
+    } find{instance_name(prop_base)};
+    EnumWindows(
+        [](HWND hwnd, LPARAM p) -> BOOL {
+            auto* f = reinterpret_cast<Find*>(p);
+            if (GetPropW(hwnd, f->prop.c_str()) == nullptr) return TRUE;
+            f->found = hwnd;
+            return FALSE;
+        },
+        reinterpret_cast<LPARAM>(&find));
+    return find.found;
+}
+
+// Whether "Start Vaultik as administrator" is on (Settings). Never for a portable copy: its
+// program folder is not protected, so the task could not exist anyway.
+bool wants_elevation() {
+    if (vaultik::jobs::is_portable()) return false;
+    const QSettings s(QSettings::NativeFormat, QSettings::UserScope, QStringLiteral("Vaultik"), QStringLiteral("Vaultik"));
+    return s.value(QStringLiteral("startup/admin"), false).toBool();
+}
+
+// Starts the elevated copy through its task (no approval prompt) and, unless this start is the
+// hidden one from sign-in, shows its window once it is there. False when the task could not be
+// started, so this copy carries on itself.
+bool start_elevated(bool tray) {
+    std::string ignored;
+    try {
+        if (vaultik::os::run_command({"schtasks.exe", "/Run", "/TN", vaultik::jobs::elevated_gui_task()}, &ignored) != 0)
+            return false;
+    } catch (const vaultik::Error&) {
+        return false;
+    }
+    if (tray) return true;
+    const UINT show = RegisterWindowMessageW(instance_name(L"Vaultik.ShowWindow").c_str());
+    for (int i = 0; i < 100; ++i) {  // up to 20 seconds
+        if (const HWND w = instance_window(L"Vaultik.Window")) {
+            DWORD pid = 0;
+            GetWindowThreadProcessId(w, &pid);
+            AllowSetForegroundWindow(pid);
+            PostMessageW(w, show, 0, 0);
+            break;
+        }
+        Sleep(200);
+    }
+    return true;
+}
+
+// With administrator rights, settings from the environment (which programs without those rights
+// can change, through the account's environment variables) must not load code: Qt finds its
+// plugins only next to the program.
+void clean_environment() {
+    for (const wchar_t* name : {L"QT_PLUGIN_PATH", L"QT_QPA_PLATFORM_PLUGIN_PATH", L"QT_QPA_PLATFORM",
+                                L"QT_QPA_PLATFORMTHEME", L"QT_QPA_GENERIC_PLUGINS", L"QT_STYLE_OVERRIDE",
+                                L"QT_OPENGL", L"QT_OPENGL_DLL", L"QT_ANGLE_PLATFORM", L"QSG_RHI_BACKEND",
+                                L"QT_LOGGING_CONF", L"QT_DEBUG_PLUGINS", L"QT_ACCESSIBILITY", L"QT_IM_MODULE",
+                                L"QML_IMPORT_PATH", L"QML2_IMPORT_PATH"}) {
+        SetEnvironmentVariableW(name, nullptr);
+        _wputenv_s(name, L"");
+    }
 }
 
 // The path after "--history", read from the Unicode command line (argv holds the ANSI code page,
@@ -134,8 +202,16 @@ int main(int argc, char** argv) {
     const QString history = history_argument();  // from File Explorer's right-click menu
 
 #ifdef Q_OS_WIN
+    const bool elevated = vaultik::os::process_elevated();
+    if (elevated) clean_environment();
     // Released by Windows when this process ends.
-    CreateMutexW(nullptr, FALSE, instance_name(L"Local\\Vaultik.Gui").c_str());
+    HANDLE instance = CreateMutexW(nullptr, FALSE, instance_name(L"Local\\Vaultik.Gui").c_str());
+    if (GetLastError() != ERROR_ALREADY_EXISTS && !elevated && history.isEmpty() && wants_elevation()) {
+        // "Start Vaultik as administrator": the elevated copy takes over; this one ends.
+        CloseHandle(instance);
+        if (start_elevated(tray)) return 0;
+        instance = CreateMutexW(nullptr, FALSE, instance_name(L"Local\\Vaultik.Gui").c_str());
+    }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         AllowSetForegroundWindow(ASFW_ANY);
         if (!history.isEmpty()) {
@@ -186,8 +262,15 @@ int main(int argc, char** argv) {
     ShowRequests requests(window);
     app.installNativeEventFilter(&requests);
     // Marks this instance's window, so a second start can hand it a path.
-    SetPropW(reinterpret_cast<HWND>(window.winId()), instance_name(ShowRequests::kWindowProp).c_str(),
-             reinterpret_cast<HANDLE>(1));
+    const HWND hwnd = reinterpret_cast<HWND>(window.winId());
+    SetPropW(hwnd, instance_name(ShowRequests::kWindowProp).c_str(), reinterpret_cast<HANDLE>(1));
+    if (elevated) {
+        // Windows drops messages from programs without administrator rights to this window; a
+        // second start (from the Start menu or File Explorer) must still reach it.
+        ChangeWindowMessageFilterEx(hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+        ChangeWindowMessageFilterEx(hwnd, RegisterWindowMessageW(instance_name(L"Vaultik.ShowWindow").c_str()),
+                                    MSGFLT_ALLOW, nullptr);
+    }
 #endif
     if (!tray || !history.isEmpty()) window.show();
     if (!history.isEmpty())

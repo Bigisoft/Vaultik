@@ -1034,10 +1034,13 @@ int cmd_uninstall_cleanup() {
 // the frontend or `schedule` through a Windows approval prompt, without a visible console, so a
 // failure is also written where the caller can read it.
 int cmd_admin_job(const Args& a) {
-    if (a.positional.size() != 2 || !a.value("--user"))
-        throw Error("usage: vaultik admin-job install|remove <job id> --user <account SID> [--from <folder>]");
+    // gui-on|gui-off: the task behind "Start Vaultik as administrator" (no job id).
+    const bool gui = !a.positional.empty() && (a.positional[0] == "gui-on" || a.positional[0] == "gui-off");
+    if (a.positional.size() != (gui ? 1u : 2u) || !a.value("--user"))
+        throw Error("usage: vaultik admin-job install|remove <job id> --user <account SID> [--from <folder>]\n"
+                    "       vaultik admin-job gui-on|gui-off --user <account SID>");
     const std::string& verb = a.positional[0];
-    const std::string& id = a.positional[1];
+    const std::string id = gui ? std::string() : a.positional[1];
     const std::string sid = *a.value("--user");
     std::string error_file;
     try {
@@ -1056,8 +1059,12 @@ int cmd_admin_job(const Args& a) {
             jobs::install_admin_job(jobs::JobStore(*from), id, sid);
         } else if (verb == "remove") {
             jobs::remove_admin_job(id, sid);
+        } else if (verb == "gui-on") {
+            jobs::install_elevated_gui(sid);
+        } else if (verb == "gui-off") {
+            jobs::remove_elevated_gui(sid);
         } else {
-            throw Error("admin-job takes install or remove");
+            throw Error("admin-job takes install, remove, gui-on or gui-off");
         }
     } catch (const std::exception& e) {
         if (error_file.empty()) {

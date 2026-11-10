@@ -21,6 +21,8 @@ private:
 
     QCheckBox* start_ = nullptr;
     QCheckBox* start_hidden_ = nullptr;
+    QCheckBox* admin_ = nullptr;
+    bool admin_was_ = false;
     QCheckBox* tray_icon_ = nullptr;
     QCheckBox* tray_status_ = nullptr;
     QCheckBox* close_to_tray_ = nullptr;
