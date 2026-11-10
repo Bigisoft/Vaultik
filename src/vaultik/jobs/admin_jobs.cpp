@@ -214,8 +214,10 @@ void check_admin_command(const std::string& command, const std::string& what) {
                                    // Changing what later commands find, or where.
                                    "set", "setlocal", "path", "cd", "chdir", "pushd",
                                    // Reading their settings from the user's own profile.
-                                   "ssh", "scp", "sftp", "git"})
-            if (base == banned)
+                                   "ssh", "scp", "sftp", "git", "scalar", "plink", "pscp", "psftp", "tortoiseplink",
+                                   // Adds the user's own module folder whatever the environment says.
+                                   "pwsh"})
+            if (base == banned || (base.starts_with("git-")))
                 refuse(word, "it can start programs these checks do not see; put the steps in a .cmd file in a "
                              "folder only administrators can change");
         return base;
@@ -237,10 +239,25 @@ void check_admin_command(const std::string& command, const std::string& what) {
             continue;
         }
         const std::string base = check_program(program);
-        if (base == "powershell" || base == "pwsh") {
-            // Its profile scripts are files the user can change.
-            if (i + 1 >= words.size() || !no_profile(words[i + 1].text))
+        if (base == "powershell") {
+            // Its profile scripts are files the user can change, and text after -Command would be
+            // a second command line these checks do not read: only "-NoProfile -File <full path>"
+            // (the script in a folder only administrators can change), then its arguments.
+            const auto is_file = [&](const std::string& w) {
+                const std::string l = lower(w);
+                return l == "-file" || l == "-f" || l == "/file" || l == "/f";
+            };
+            std::size_t k = i + 1;
+            if (k >= words.size() || !no_profile(words[k].text))
                 refuse(words[i].text, "PowerShell must be started with -NoProfile first");
+            for (++k; k < words.size() && !is_file(words[k].text); ++k) {
+                const std::string l = lower(words[k].text);
+                if (l != "-noninteractive" && l != "-noni" && l != "-nologo" && l != "-executionpolicy" &&
+                    l != "-ep" && l != "bypass" && l != "remotesigned" && l != "allsigned")
+                    refuse(words[k].text, "PowerShell can only run a script: -NoProfile -File C:\\...\\x.ps1");
+            }
+            if (k + 1 >= words.size() || words[k + 1].text.size() < 3 || words[k + 1].text[1] != ':')
+                refuse(words[i].text, "PowerShell can only run a script: -NoProfile -File C:\\...\\x.ps1");
         } else if (base == "cmd") {
             // A cmd inside the command: without /d it runs the user's AutoRun command, without
             // /v:off it may expand !names!; what follows its /c or /k is a command again.

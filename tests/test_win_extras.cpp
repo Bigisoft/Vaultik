@@ -223,9 +223,15 @@ TEST_CASE("commands of administrator jobs: only safe ones, checked") {
     CHECK_NOTHROW(check_admin_command("vssadmin list shadows", "the command"));
     CHECK_NOTHROW(check_admin_command("net stop spooler & net start spooler", "the command"));
     CHECK_NOTHROW(check_admin_command("ver > nul 2>&1", "the command"));
-    CHECK_NOTHROW(check_admin_command("powershell -NoProfile -Command Get-Date", "the command"));
-    CHECK_NOTHROW(check_admin_command("pwsh.exe -nop -c Get-Date", "the command"));
-    CHECK_THROWS(check_admin_command("powershell -Command Get-Date", "the command"));  // runs the user's profile
+    const std::string script = std::string(windows) + "\\System32\\WindowsPowerShell\\v1.0\\Modules";
+    CHECK_NOTHROW(check_admin_command("powershell -NoProfile -ExecutionPolicy Bypass -File " + script + "\\x.ps1",
+                                      "the command"));
+    CHECK_THROWS(check_admin_command("powershell -NoProfile -Command Get-Date", "the command"));  // unread
+    CHECK_THROWS(check_admin_command("powershell -NoProfile -File x.ps1", "the command"));  // not a full path
+    CHECK_THROWS(check_admin_command("pwsh.exe -nop -File " + script + "\\x.ps1", "the command"));
+    CHECK_THROWS(check_admin_command("powershell -File " + script + "\\x.ps1", "the command"));  // the user's profile
+    CHECK_THROWS(check_admin_command("plink nas", "the command"));
+    CHECK_THROWS(check_admin_command("git-upload-pack x", "the command"));
     CHECK_THROWS(check_admin_command("ver & run.vbs", "the command"));  // opened by the user's file types
     CHECK_THROWS(check_admin_command("ver | (task.js)", "the command"));
     CHECK_THROWS(check_admin_command("call x.ps1", "the command"));
