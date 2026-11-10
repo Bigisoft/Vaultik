@@ -166,6 +166,13 @@ public:
                               ErrorCode& err);
     // This file's id; empty when it cannot be told (POSIX).
     std::optional<FileId> id() const;
+    // Windows: creates a new folder and keeps it open, so its permissions can be set on exactly
+    // the folder made, whatever happens to its path. Fails (is_exists) when something is there.
+    // Not supported on POSIX.
+    static File create_directory(const std::string& path, ErrorCode& err);
+    // Applies a security descriptor through this handle (create_directory's). Without the right
+    // to set another owner, the access list alone.
+    ErrorCode set_security(ByteSpan descriptor);
 
     bool valid() const;
     void close();

@@ -90,6 +90,8 @@ TEST_CASE("permissions, streams and junctions come back on Windows") {
     // Owner and everyone may read, only the owner may change; not inherited from the folder.
     REQUIRE(os::write_security(u8(src / "a.txt"), descriptor(L"D:P(A;;FA;;;OW)(A;;FR;;;WD)(A;;FA;;;SY)")) == 0);
     const std::string dacl = dacl_of(src / "a.txt");
+    REQUIRE(os::write_security(u8(src / "target"), descriptor(L"D:P(A;OICI;FA;;;OW)(A;OICI;FA;;;SY)(A;OICI;FR;;;BU)")) == 0);
+    const std::string folder_dacl = dacl_of(src / "target");
     REQUIRE(os::create_link(u8(src / "jn"), {0xA0000003, u8(src / "target"), false}, true) == 0);
 
     const auto streams = os::list_streams(u8(src / "a.txt"));
@@ -122,6 +124,7 @@ TEST_CASE("permissions, streams and junctions come back on Windows") {
     CHECK(read_text(out / "a.txt") == "main content");
     CHECK(read_text(fs::path(u8(out / "a.txt") + ":notes")) == "stream content");
     CHECK(dacl_of(out / "a.txt") == dacl);
+    CHECK(dacl_of(out / "target") == folder_dacl);
     os::ReparseLink back;
     REQUIRE(os::read_link(u8(out / "jn"), back));
     CHECK(back.tag == 0xA0000003u);

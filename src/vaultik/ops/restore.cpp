@@ -285,21 +285,33 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
     }
     const std::string path = os::join(parent_dir, node.name);
     switch (node.kind) {
-        case NodeKind::Dir:
-            try {
-                ensure_dir(path);
-            } catch (const Error& e) {
-                warn(e.what());
-                return;
+        case NodeKind::Dir: {
+            // A new folder is made and kept open, so its permissions go on exactly that folder.
+            // A folder that is there already keeps its own: it is not this restore's to change,
+            // and its path could lead somewhere else by now.
+            os::ErrorCode err = 0;
+            os::File made = os::File::create_directory(path, err);
+            if (!made.valid()) {
+                try {
+                    ensure_dir(path);
+                } catch (const Error& e) {
+                    warn(e.what());
+                    return;
+                }
             }
-            {
-                const std::optional<os::FileId> id = os::file_id(path);  // as made (or found) now
-                restore_children(node.subtree, path);
-                os::set_metadata(path, info_of(node));  // after the children, so times and permissions stick
-                restore_security(node, path, id);
+            restore_children(node.subtree, path);
+            os::set_metadata(path, info_of(node));  // after the children, so times and permissions stick
+            if (made.valid() && options_.permissions && node.security) {
+                try {
+                    const os::ErrorCode e = made.set_security(repo_.load_blob(BlobType::Data, *node.security));
+                    if (e != 0) warn("cannot restore the permissions of " + path + ": " + os::error_message(e));
+                } catch (const Error& e) {
+                    warn("cannot restore the permissions of " + path + ": " + e.what());
+                }
             }
             ++result_.dirs;
             break;
+        }
         case NodeKind::File:
             restore_file(node, path);
             break;

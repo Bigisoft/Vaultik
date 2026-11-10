@@ -332,6 +332,75 @@ File File::create(const std::string& path, bool overwrite, ErrorCode& err, std::
     return File();
 }
 
+File File::create_directory(const std::string& path, ErrorCode& err) {
+    // NtCreateFile is the one call that both creates a folder and returns a handle to it.
+    using NtCreateFileFn = LONG(NTAPI*)(PHANDLE, ACCESS_MASK, PVOID, PVOID, PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG,
+                                        PVOID, ULONG);
+    using StatusToError = ULONG(NTAPI*)(LONG);
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    const auto nt_create = reinterpret_cast<NtCreateFileFn>(
+        reinterpret_cast<void*>(GetProcAddress(ntdll, "NtCreateFile")));
+    const auto to_error = reinterpret_cast<StatusToError>(
+        reinterpret_cast<void*>(GetProcAddress(ntdll, "RtlNtStatusToDosError")));
+    if (nt_create == nullptr || to_error == nullptr) {
+        err = ERROR_NOT_SUPPORTED;
+        return File();
+    }
+    // "\\?\C:\x" -> "\??\C:\x" (and "\\?\UNC\..." -> "\??\UNC\..."), the NT name of the path.
+    std::wstring name = native(path);
+    if (name.starts_with(L"\\\\?\\")) name[1] = L'?';
+    struct UnicodeString {
+        USHORT Length;
+        USHORT MaximumLength;
+        PWSTR Buffer;
+    } us{static_cast<USHORT>(name.size() * sizeof(wchar_t)), static_cast<USHORT>(name.size() * sizeof(wchar_t)),
+         name.data()};
+    struct ObjectAttributes {
+        ULONG Length;
+        HANDLE RootDirectory;
+        UnicodeString* ObjectName;
+        ULONG Attributes;
+        PVOID SecurityDescriptor;
+        PVOID SecurityQualityOfService;
+    } oa{sizeof(ObjectAttributes), nullptr, &us, 0x40 /* OBJ_CASE_INSENSITIVE */, nullptr, nullptr};
+    struct IoStatus {
+        ULONG_PTR Status;
+        ULONG_PTR Information;
+    } iosb{};
+    constexpr ULONG kFileCreate = 2;
+    constexpr ULONG kOptions = 0x00000001 /* FILE_DIRECTORY_FILE */ | 0x00000020 /* FILE_SYNCHRONOUS_IO_NONALERT */ |
+                               0x00200000 /* FILE_OPEN_REPARSE_POINT */;
+    const ACCESS_MASK base = SYNCHRONIZE | READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES;
+    // With the right to set another owner (elevated) ask for it too; without, the folder is made
+    // with what the account may have.
+    for (const ACCESS_MASK access : {base | WRITE_OWNER, base}) {
+        HANDLE h = nullptr;
+        const LONG status = nt_create(&h, access, &oa, &iosb, nullptr, FILE_ATTRIBUTE_NORMAL,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, kFileCreate, kOptions,
+                                      nullptr, 0);
+        if (status >= 0) {
+            err = 0;
+            return File(reinterpret_cast<std::intptr_t>(h));
+        }
+        err = to_error(status);
+        if (err != ERROR_ACCESS_DENIED) break;
+    }
+    return File();
+}
+
+ErrorCode File::set_security(ByteSpan descriptor) {
+    if (!valid()) return ERROR_INVALID_HANDLE;
+    if (descriptor.empty()) return 0;
+    Bytes sd(descriptor.begin(), descriptor.end());
+    auto* psd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data());
+    if (!IsValidSecurityDescriptor(psd)) return ERROR_INVALID_SECURITY_DESCR;
+    if (SetKernelObjectSecurity(as_handle(h_), OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                                    DACL_SECURITY_INFORMATION, psd))
+        return 0;
+    if (SetKernelObjectSecurity(as_handle(h_), DACL_SECURITY_INFORMATION, psd)) return 0;
+    return GetLastError();
+}
+
 std::optional<FileId> File::id() const {
     FILE_ID_INFO info{};
     if (!valid() || !GetFileInformationByHandleEx(as_handle(h_), FileIdInfo, &info, sizeof info)) return std::nullopt;

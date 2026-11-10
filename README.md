@@ -493,8 +493,10 @@ Priorities only take effect when something else competes for the resource, so on
   streams and links back always, permissions when restoring to the original location (or with
   `--permissions`): restored into another folder, another account's permissions could lock you
   out of your own files. Setting another account as owner needs administrator rights; without
-  them the access list is applied alone. Audit settings (SACLs) are not kept. Backups with these
-  extras need Vaultik 0.6 or later to restore.
+  them the access list is applied alone. Permissions go only on files and folders the restore
+  creates itself, checked by their file id (or through the handle the folder was made with), never
+  on a folder that was there already or on whatever a link put in their place points at. Audit
+  settings (SACLs) are not kept. Backups with these extras need Vaultik 0.6 or later to restore.
   Linux: content, permissions, owner (restored when running as root), modification time and
   symlinks are kept; extended attributes and ACLs are not. Kernel file systems (`/proc`, `/sys`,
   `/dev`, tmpfs) are skipped.

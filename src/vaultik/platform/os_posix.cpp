@@ -601,6 +601,15 @@ std::optional<FileId> File::id() const {
     return std::nullopt;
 }
 
+File File::create_directory(const std::string& /*path*/, ErrorCode& err) {
+    err = ENOTSUP;
+    return File();
+}
+
+ErrorCode File::set_security(ByteSpan /*descriptor*/) {
+    return ENOTSUP;
+}
+
 std::optional<FileId> file_id(const std::string& /*path*/) {
     return std::nullopt;
 }
