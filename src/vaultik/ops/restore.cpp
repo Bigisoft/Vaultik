@@ -63,8 +63,10 @@ private:
     void restore_children(const Id& tree_id, const std::string& dir);
     void restore_file(const Node& node, const std::string& path);
     void restore_symlink(const Node& node, const std::string& path);
-    void restore_streams(const Node& node, const std::string& path);
-    void restore_security(const Node& node, const std::string& path);
+    // `id` is the restored item as created; the writes are refused when the path now names
+    // anything else (see os::write_security).
+    void restore_streams(const Node& node, const std::string& path, const std::optional<os::FileId>& id);
+    void restore_security(const Node& node, const std::string& path, const std::optional<os::FileId>& id);
     void restore_link(const Node& node, const std::string& path);
     void ensure_dir(const std::string& path);
     void ensure_dir_chain(const std::string& path);
@@ -166,22 +168,27 @@ void RestoreEngine::restore_file(const Node& node, const std::string& path) {
         warn(std::string("failed to restore ") + path + ": " + e.what());
         return;
     }
+    const std::optional<os::FileId> id = file.id();
     file.close();
-    restore_streams(node, path);
+    restore_streams(node, path, id);
     os::set_metadata(path, info_of(node));
-    restore_security(node, path);
+    restore_security(node, path, id);
     ++result_.files;
     report();
 }
 
-void RestoreEngine::restore_streams(const Node& node, const std::string& path) {
+void RestoreEngine::restore_streams(const Node& node, const std::string& path, const std::optional<os::FileId>& id) {
+    if (!node.streams.empty() && !id) {
+        warn("cannot restore the streams of " + path + ": the restored file cannot be identified");
+        return;
+    }
     for (const DataStream& s : node.streams) {
         if (s.name.empty() || s.name.find_first_of(":/\\") != std::string::npos) {
             warn("skipped a stream with an invalid name on " + path);
             continue;
         }
         os::ErrorCode err = 0;
-        os::File f = os::File::create_stream(path, s.name, err);
+        os::File f = os::File::create_stream(path, s.name, *id, err);
         if (!f.valid()) {
             warn("cannot restore the stream " + s.name + " of " + path + ": " + os::error_message(err));
             continue;
@@ -200,11 +207,15 @@ void RestoreEngine::restore_streams(const Node& node, const std::string& path) {
     }
 }
 
-void RestoreEngine::restore_security(const Node& node, const std::string& path) {
+void RestoreEngine::restore_security(const Node& node, const std::string& path, const std::optional<os::FileId>& id) {
     if (!options_.permissions || !node.security) return;
+    if (!id) {
+        warn("cannot restore the permissions of " + path + ": the restored item cannot be identified");
+        return;
+    }
     try {
         const Bytes sd = repo_.load_blob(BlobType::Data, *node.security);
-        const os::ErrorCode err = os::write_security(path, sd);
+        const os::ErrorCode err = os::write_security(path, sd, &*id);
         if (err != 0) warn("cannot restore the permissions of " + path + ": " + os::error_message(err));
     } catch (const Error& e) {
         warn("cannot restore the permissions of " + path + ": " + e.what());
@@ -281,9 +292,12 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
                 warn(e.what());
                 return;
             }
-            restore_children(node.subtree, path);
-            os::set_metadata(path, info_of(node));  // after the children, so times and permissions stick
-            restore_security(node, path);
+            {
+                const std::optional<os::FileId> id = os::file_id(path);  // as made (or found) now
+                restore_children(node.subtree, path);
+                os::set_metadata(path, info_of(node));  // after the children, so times and permissions stick
+                restore_security(node, path, id);
+            }
             ++result_.dirs;
             break;
         case NodeKind::File:

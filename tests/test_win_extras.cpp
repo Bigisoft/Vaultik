@@ -144,7 +144,8 @@ TEST_CASE("restoring permissions and streams never writes through a link") {
     REQUIRE(CreateHardLinkW(swapped.c_str(), victim.c_str(), nullptr));
     CHECK(os::write_security(u8(swapped), sd) != 0);
     os::ErrorCode err = 0;
-    CHECK_FALSE(os::File::create_stream(u8(swapped), "x", err).valid());
+    const os::FileId any{};
+    CHECK_FALSE(os::File::create_stream(u8(swapped), "x", any, err).valid());
     CHECK(os::list_streams(u8(victim)).empty());
 
     // A restored folder swapped for a junction to another folder.
@@ -152,12 +153,25 @@ TEST_CASE("restoring permissions and streams never writes through a link") {
     REQUIRE(os::create_link(u8(tmp.path / "jn"), {0xA0000003, u8(tmp.path / "elsewhere"), false}, true) == 0);
     CHECK(os::write_security(u8(tmp.path / "jn"), sd) == ERROR_STOPPED_ON_SYMLINK);
 
-    // A plain file of its own is fine.
+    // A plain file of its own is fine, as long as it is the one expected.
     const fs::path own = tmp.path / "own.txt";
     write_text(own, "mine");
-    CHECK(os::write_security(u8(own), sd) == 0);
-    os::File s = os::File::create_stream(u8(own), "x", err);
-    CHECK(s.valid());
+    const std::optional<os::FileId> own_id = os::file_id(u8(own));
+    REQUIRE(own_id);
+    CHECK(os::write_security(u8(own), sd, &*own_id) == 0);
+    {
+        os::File s = os::File::create_stream(u8(own), "x", *own_id, err);
+        CHECK(s.valid());
+    }
+
+    // The same name now naming another file (a folder on the way swapped for a link): refused.
+    const fs::path other = tmp.path / "other.txt";
+    write_text(other, "other");
+    const std::optional<os::FileId> other_id = os::file_id(u8(other));
+    REQUIRE(other_id);
+    CHECK(os::write_security(u8(other), sd, &*own_id) == ERROR_STOPPED_ON_SYMLINK);
+    CHECK_FALSE(os::File::create_stream(u8(other), "y", *own_id, err).valid());
+    CHECK(os::list_streams(u8(other)).empty());
 }
 
 #endif  // _WIN32

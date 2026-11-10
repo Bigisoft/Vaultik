@@ -597,7 +597,16 @@ std::string get_env(const char* name) {
     return v != nullptr ? std::string(v) : std::string();
 }
 
-File File::create_stream(const std::string& /*path*/, const std::string& /*name*/, ErrorCode& err) {
+std::optional<FileId> File::id() const {
+    return std::nullopt;
+}
+
+std::optional<FileId> file_id(const std::string& /*path*/) {
+    return std::nullopt;
+}
+
+File File::create_stream(const std::string& /*path*/, const std::string& /*name*/, const FileId& /*expected*/,
+                         ErrorCode& err) {
     err = ENOTSUP;
     return File();
 }
@@ -607,7 +616,7 @@ Bytes read_security(const std::string& /*path*/) {
     return {};
 }
 
-ErrorCode write_security(const std::string& /*path*/, ByteSpan /*descriptor*/) {
+ErrorCode write_security(const std::string& /*path*/, ByteSpan /*descriptor*/, const FileId* /*expected*/) {
     return ENOTSUP;
 }
 

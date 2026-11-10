@@ -56,7 +56,19 @@ Bytes read_security(const std::string& path) {
     return sd;
 }
 
-ErrorCode write_security(const std::string& path, ByteSpan descriptor) {
+std::optional<FileId> file_id(const std::string& path) {
+    UniqueHandle h(CreateFileW(native_path(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                               nullptr));
+    FILE_ID_INFO info{};
+    if (!h.valid() || !GetFileInformationByHandleEx(h.get(), FileIdInfo, &info, sizeof info)) return std::nullopt;
+    FileId out;
+    out.volume = info.VolumeSerialNumber;
+    std::memcpy(out.id.data(), info.FileId.Identifier, out.id.size());
+    return out;
+}
+
+ErrorCode write_security(const std::string& path, ByteSpan descriptor, const FileId* expected) {
     if (descriptor.empty()) return 0;
     Bytes sd(descriptor.begin(), descriptor.end());  // the API wants a non-const pointer
     auto* psd = reinterpret_cast<PSECURITY_DESCRIPTOR>(sd.data());
@@ -88,6 +100,14 @@ ErrorCode write_security(const std::string& path, ByteSpan descriptor) {
     if ((tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
         ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 && standard.NumberOfLinks != 1))
         return ERROR_STOPPED_ON_SYMLINK;
+    // Another item than the one restored: a folder on the way was swapped for a link.
+    if (expected != nullptr) {
+        FILE_ID_INFO info{};
+        if (!GetFileInformationByHandleEx(h.get(), FileIdInfo, &info, sizeof info) ||
+            info.VolumeSerialNumber != expected->volume ||
+            std::memcmp(info.FileId.Identifier, expected->id.data(), expected->id.size()) != 0)
+            return ERROR_STOPPED_ON_SYMLINK;
+    }
     if (SetKernelObjectSecurity(h.get(), parts, psd)) return 0;
     if (parts != DACL_SECURITY_INFORMATION && SetKernelObjectSecurity(h.get(), DACL_SECURITY_INFORMATION, psd))
         return 0;

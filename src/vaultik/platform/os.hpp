@@ -9,7 +9,9 @@
 // Times are FILETIME ticks (100 ns since 1601-01-01 UTC) on every platform, because that is the
 // unit the repository format stores.
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -124,6 +126,14 @@ private:
 
 // Move-only file handle. Every handle gets the resource policy's I/O priority, and reads and
 // writes count against its read and write rate limits.
+// Which file an open handle or a path is (Windows: volume serial number and 128-bit file id),
+// to make sure a path reopened later still names the item created earlier.
+struct FileId {
+    std::uint64_t volume = 0;
+    std::array<std::uint8_t, 16> id{};
+    bool operator==(const FileId&) const = default;
+};
+
 class File {
 public:
     File() = default;
@@ -150,7 +160,12 @@ public:
     // Windows: creates (or replaces) the alternate data stream `name` of the file at `path`,
     // without following a link: fails when `path` is a link, a folder or a file with other hard
     // links, so a restore cannot be redirected into another file. Not supported on POSIX.
-    static File create_stream(const std::string& path, const std::string& name, ErrorCode& err);
+    // `expected` is the id of the file as restored (from id() before it was closed): the stream
+    // is refused when the path now names another file, whatever link was put in on the way.
+    static File create_stream(const std::string& path, const std::string& name, const FileId& expected,
+                              ErrorCode& err);
+    // This file's id; empty when it cannot be told (POSIX).
+    std::optional<FileId> id() const;
 
     bool valid() const;
     void close();
@@ -193,7 +208,11 @@ ErrorCode read_symlink(const std::string& path, std::string& target);
 // Empty when it cannot be read.
 Bytes read_security(const std::string& path);
 // Applies one. Without the right to set another owner, applies the access list alone.
-ErrorCode write_security(const std::string& path, ByteSpan descriptor);
+// Refused (ERROR_STOPPED_ON_SYMLINK) when the item is a link, a hard-linked file, or, with
+// `expected`, any item other than that one: an elevated restore must not be redirected.
+ErrorCode write_security(const std::string& path, ByteSpan descriptor, const FileId* expected = nullptr);
+// The id of the item at `path` itself (a link is not followed); empty when it cannot be read.
+std::optional<FileId> file_id(const std::string& path);
 
 // The alternate data streams of a file or folder (not its own content).
 struct StreamEntry {
