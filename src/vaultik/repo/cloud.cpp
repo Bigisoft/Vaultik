@@ -26,6 +26,7 @@ constexpr KindPrefix kKinds[] = {
     {CloudKind::GoogleDrive, "gdrive:", "Google Drive"},
     {CloudKind::Mega, "mega:", "MEGA"},
     {CloudKind::WebDav, "webdav:", "WebDAV"},
+    {CloudKind::Sftp, "sftp:", "SFTP"},
 };
 
 bool starts_with_nocase(std::string_view s, std::string_view prefix) {
@@ -87,10 +88,12 @@ CloudCredentials::~CloudCredentials() {
 CloudCredentials CloudCredentials::from_environment() {
     CloudCredentials c;
     c.key_id = os::get_env("VAULTIK_CLOUD_USER");  // a WebDAV user name
+    if (c.key_id.empty()) c.key_id = os::get_env("VAULTIK_SFTP_KEY");  // an SFTP private key file
     if (c.key_id.empty()) c.key_id = os::get_env("AWS_ACCESS_KEY_ID");
     c.secret = os::get_env("VAULTIK_CLOUD_SECRET");
     if (c.secret.empty()) c.secret = os::get_env("AWS_SECRET_ACCESS_KEY");
-    c.region = os::get_env("AWS_REGION");
+    c.region = os::get_env("VAULTIK_SFTP_HOST_KEY");  // an SFTP server's trusted key, "SHA256:..."
+    if (c.region.empty()) c.region = os::get_env("AWS_REGION");
     if (c.region.empty()) c.region = os::get_env("AWS_DEFAULT_REGION");
     // A lock cannot be undone (in compliance mode not even by the account owner): a typo must
     // not lock data for decades, or in the wrong mode.

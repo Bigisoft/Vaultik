@@ -21,8 +21,9 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
   round (same format, same crypto).
 - **Local or cloud.** Back up to a disk, a USB drive, a network share, S3-compatible cloud
   storage (Cloudflare R2, Backblaze B2, Amazon S3, IDrive e2, MinIO, ...), or a cloud drive
-  (pCloud, OneDrive, Google Drive, MEGA), or a WebDAV server (Nextcloud, ownCloud, a NAS), each
-  through its own API with no extra software. The cloud only ever sees encrypted chunks.
+  (pCloud, OneDrive, Google Drive, MEGA), a WebDAV server (Nextcloud, ownCloud, a NAS), or an SSH
+  server over SFTP, each through its own API with no extra software. The cloud only ever sees
+  encrypted chunks.
 - **Watches the drives.** The health of the backup drive and the drives backed up from, with a
   percentage from S.M.A.R.T. and a warning when a drive gets worse.
 - **Easy to get files back.** A timeline of versions, a search across all of them, the history
@@ -251,6 +252,22 @@ keys are used. Each repository file is one object; requests are retried with bac
 errors, throttling and server errors, and `--write-limit` / `--read-limit` cap uploads and
 downloads. Browsing a cloud snapshot in the frontend downloads the folders it shows, so it is
 slower than browsing a local one.
+
+### SFTP
+
+`sftp:<user>@<server>[:<port>]/<folder>` backs up to a folder on any server you reach with SSH
+(a NAS, a Linux server, a rented storage box); the folder and any missing folders above it are
+created, and every file is written under a temporary name and renamed into place. Sign in with a
+password, or with a private key file (RSA or ECDSA, in OpenSSH or PEM format; ed25519 keys are not
+supported yet) and its passphrase. Windows only so far (libssh2 with Windows' own crypto).
+
+Nothing is sent before the server has shown the key that was trusted for it: the first connection
+(**Test connection** in the **Cloud storage** dialog, provider SFTP) shows the server's key as
+OpenSSH does (`SHA256:...`); compare it with the one the server's owner gives you (`ssh-keygen
+-lf` on the server) before you trust it. The trusted key is kept with the job, and a server that
+shows another one later is refused with both keys named. On the command line: `VAULTIK_SFTP_KEY`
+(the key file), `VAULTIK_CLOUD_SECRET` (the password or passphrase) and `VAULTIK_SFTP_HOST_KEY`
+(the trusted key).
 
 ### WebDAV
 
@@ -609,4 +626,4 @@ Priorities only take effect when something else competes for the resource, so on
 
 Vaultik is free software under the [GNU General Public License, version 3](LICENSE) (or any
 later version). It uses Qt (LGPL-3.0), zstd (BSD), BLAKE3 (CC0 / Apache-2.0), nlohmann/json
-(MIT) and doctest (MIT).
+(MIT), libssh2 (BSD) and doctest (MIT).

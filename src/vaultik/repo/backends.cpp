@@ -5,6 +5,9 @@
 #include "vaultik/repo/onedrive_backend.hpp"
 #include "vaultik/repo/pcloud_backend.hpp"
 #include "vaultik/repo/webdav_backend.hpp"
+#ifdef _WIN32
+#include "vaultik/repo/sftp_backend.hpp"
+#endif
 
 namespace vaultik {
 
@@ -24,6 +27,11 @@ std::unique_ptr<Backend> open_backend(const std::string& location, const CloudCr
         case CloudKind::GoogleDrive: return std::make_unique<GoogleDriveBackend>(location, std::move(c));
         case CloudKind::Mega: return std::make_unique<MegaBackend>(location, std::move(c));
         case CloudKind::WebDav: return std::make_unique<WebDavBackend>(location, std::move(c));
+#ifdef _WIN32
+        case CloudKind::Sftp: return std::make_unique<SftpBackend>(location, std::move(c));
+#else
+        case CloudKind::Sftp: throw Error("SFTP is only supported on Windows so far");
+#endif
         case CloudKind::None: break;
     }
     throw Error("unknown storage location: " + location);

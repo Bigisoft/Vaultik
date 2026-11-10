@@ -28,6 +28,7 @@
 #include "vaultik/repo/onedrive_backend.hpp"
 #include "vaultik/repo/pcloud_backend.hpp"
 #include "vaultik/repo/s3_backend.hpp"
+#include "vaultik/repo/sftp_backend.hpp"
 #include "vaultik/repo/webdav_backend.hpp"
 
 using namespace vaultik;
@@ -35,7 +36,7 @@ using namespace vaultik;
 namespace {
 
 // Index order of the provider combo box.
-enum Provider { kR2, kB2, kAws, kOther, kPCloud, kOneDrive, kGDrive, kMega, kWebDav };
+enum Provider { kR2, kB2, kAws, kOther, kPCloud, kOneDrive, kGDrive, kMega, kWebDav, kSftp };
 
 const char* kEndpointHints[] = {
     "https://<account id>.r2.cloudflarestorage.com",
@@ -59,6 +60,7 @@ Provider provider_of(CloudKind kind) {
         case CloudKind::GoogleDrive: return kGDrive;
         case CloudKind::Mega: return kMega;
         case CloudKind::WebDav: return kWebDav;
+        case CloudKind::Sftp: return kSftp;
         default: return kR2;
     }
 }
@@ -148,7 +150,8 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     provider_->addItems({tr("Cloudflare R2"), tr("Backblaze B2"), tr("Amazon S3"),
                          tr("Other S3-compatible storage (MinIO, Wasabi, IDrive e2, ...)"), tr("pCloud"),
                          tr("OneDrive"), tr("Google Drive"), tr("MEGA"),
-                         tr("WebDAV (Nextcloud, ownCloud, a NAS, a web host)")});
+                         tr("WebDAV (Nextcloud, ownCloud, a NAS, a web host)"),
+                         tr("SFTP (an SSH server, a NAS, a storage box)")});
     endpoint_ = new QLineEdit;
     bucket_ = new QLineEdit;
     bucket_->setPlaceholderText(tr("an existing bucket"));
@@ -224,7 +227,14 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     layout->addWidget(buttons);
 
     const CloudKind kind = cloud_kind(u8(initial.location));
-    if (kind == CloudKind::WebDav) {
+    if (kind == CloudKind::Sftp) {
+        stored_secret_ = initial.secret;
+        key_id_->setText(initial.key_id);
+        region_->setText(initial.region);  // the server's trusted key
+        endpoint_->setText(initial.location.mid(5));  // after "sftp:"
+        provider_->setCurrentIndex(kSftp);
+        if (!stored_secret_.isEmpty()) secret_->setPlaceholderText(tr("stored (leave empty to keep it)"));
+    } else if (kind == CloudKind::WebDav) {
         stored_secret_ = initial.secret;
         key_id_->setText(initial.key_id);
         endpoint_->setText(initial.location.mid(7));  // after "webdav:"
@@ -267,7 +277,8 @@ CloudDialog::~CloudDialog() {
 }
 
 bool CloudDialog::is_drive() const {
-    return provider_->currentIndex() >= kPCloud && provider_->currentIndex() != kWebDav;
+    return provider_->currentIndex() >= kPCloud && provider_->currentIndex() != kWebDav &&
+           provider_->currentIndex() != kSftp;
 }
 
 CloudKind CloudDialog::drive_kind() const {
@@ -314,8 +325,11 @@ void CloudDialog::show_account() {
 }
 
 void CloudDialog::provider_changed(int index) {
-    const bool webdav = index == kWebDav;
+    const bool sftp = index == kSftp;
+    const bool webdav = index == kWebDav || sftp;  // (both: a server address, a user, a password)
     const bool drive = index >= kPCloud && !webdav;
+    // For SFTP the hidden region field holds the server's trusted key; never mix it with an S3 region.
+    if (sftp != region_->text().startsWith(QStringLiteral("SHA256:"))) region_->clear();
     for (QWidget* w : {static_cast<QWidget*>(endpoint_), static_cast<QWidget*>(bucket_), static_cast<QWidget*>(folder_),
                        static_cast<QWidget*>(key_id_), static_cast<QWidget*>(secret_), static_cast<QWidget*>(region_),
                        static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_)})
@@ -328,15 +342,17 @@ void CloudDialog::provider_changed(int index) {
     const auto label = [this](QWidget* field, const QString& text) {
         if (auto* l = qobject_cast<QLabel*>(form_->labelForField(field))) l->setText(text);
     };
-    label(endpoint_, webdav ? tr("Folder URL:") : tr("Endpoint:"));
-    label(key_id_, webdav ? tr("User name:") : tr("Access key ID:"));
-    label(secret_, webdav ? tr("Password:") : tr("Secret access key:"));
+    label(endpoint_, sftp ? tr("Server and folder:") : webdav ? tr("Folder URL:") : tr("Endpoint:"));
+    label(key_id_, sftp ? tr("Private key file:") : webdav ? tr("User name:") : tr("Access key ID:"));
+    label(secret_, sftp ? tr("Password or key passphrase:") : webdav ? tr("Password:") : tr("Secret access key:"));
+    key_id_->setPlaceholderText(sftp ? tr("optional, e.g. C:\\Users\\me\\.ssh\\id_rsa (RSA or ECDSA)") : QString());
     form_->setRowVisible(drive_folder_, drive);
     form_->setRowVisible(sign_in_->parentWidget(), drive);
     const bool oauth = index == kPCloud || index == kOneDrive || index == kGDrive;
     form_->setRowVisible(app_id_, oauth);
     form_->setRowVisible(app_secret_, index == kPCloud || index == kGDrive);
-    if (webdav) endpoint_->setPlaceholderText(tr("e.g. https://cloud.example.com/remote.php/dav/files/me/Backups/pc"));
+    if (sftp) endpoint_->setPlaceholderText(tr("user@server[:port]/folder, e.g. me@nas.local/volume1/backups/pc"));
+    else if (webdav) endpoint_->setPlaceholderText(tr("e.g. https://cloud.example.com/remote.php/dav/files/me/Backups/pc"));
     else if (!drive) endpoint_->setPlaceholderText(QString::fromLatin1(kEndpointHints[index]));
     if (drive) {
         load_app();
@@ -380,6 +396,13 @@ void CloudDialog::provider_changed(int index) {
                               "and published (otherwise the sign-in lapses after 7 days), and an OAuth client ID of "
                               "type \"Desktop app\". Enter its client ID and client secret. Vaultik only sees the "
                               "folders it creates; the folder is from the top of My Drive."));
+            break;
+        case kSftp:
+            hint_->setText(tr("A folder on a server you reach with SSH: user name, server, optional port and the "
+                              "folder (created if it is missing). Sign in with the password, or with a private key "
+                              "file (RSA or ECDSA; ed25519 keys are not supported yet) and its passphrase. The first "
+                              "connection shows the server's key: compare it with the one the server's owner gives "
+                              "you (ssh-keygen -lf on the server) before you trust it."));
             break;
         case kWebDav:
             hint_->setText(tr("The URL of the folder for the backup on a WebDAV server (it is created if it is "
@@ -466,6 +489,16 @@ void CloudDialog::sign_in() {
 }
 
 QString CloudDialog::build_location(QString* error) const {
+    if (provider_->currentIndex() == kSftp) {
+        const QString location = QStringLiteral("sftp:") + endpoint_->text().trimmed();
+        try {
+            parse_sftp_location(u8(location));
+        } catch (const Error& e) {
+            *error = QString::fromUtf8(e.what());
+            return {};
+        }
+        return location;
+    }
     if (provider_->currentIndex() == kWebDav) {
         QString url = endpoint_->text().trimmed();
         while (url.endsWith('/')) url.chop(1);
@@ -552,11 +585,23 @@ void CloudDialog::accept() {
             QMessageBox::warning(this, windowTitle(), tr("Sign in first."));
             return;
         }
+    } else if (provider_->currentIndex() == kSftp) {
+        // A password, or a key file (whose passphrase may be empty).
+        const bool password = !secret_->text().isEmpty() || !stored_secret_.isEmpty();
+        if (!password && key_id_->text().trimmed().isEmpty()) {
+            QMessageBox::warning(this, windowTitle(), tr("Enter the password, or a private key file."));
+            return;
+        }
     } else if (key_id_->text().trimmed().isEmpty() || (secret_->text().isEmpty() && stored_secret_.isEmpty())) {
         QMessageBox::warning(this, windowTitle(), provider_->currentIndex() == kWebDav
                                                       ? tr("Enter the user name and the password.")
                                                       : tr("Enter the access key ID and the secret access key."));
         return;
+    }
+    if (provider_->currentIndex() == kSftp && region_->text().isEmpty()) {
+        // The server's key must be checked and trusted once; Test connection does that.
+        test_connection();
+        if (region_->text().isEmpty()) return;
     }
     if (!is_drive() && lock_days_->value() > 0) {
         // Locked uploads fail on a bucket without Object Lock: find out now, not at the first backup.
@@ -592,7 +637,7 @@ void CloudDialog::test_connection() {
         QMessageBox::warning(this, windowTitle(), error);
         return;
     }
-    if (t.secret.isEmpty()) {
+    if (t.secret.isEmpty() && !(provider_->currentIndex() == kSftp && !t.key_id.isEmpty())) {
         QMessageBox::warning(this, windowTitle(), is_drive() ? tr("Sign in first.") : tr("Enter the secret access key."));
         return;
     }
@@ -603,11 +648,33 @@ void CloudDialog::test_connection() {
     std::string renewed;
     keys.on_secret_changed = [&renewed](const std::string& s) { renewed = s; };
     bool has_repo = false;
+    std::string offered_key;  // SFTP: the server showed a key that is not trusted
+    bool key_changed = false;
     error = run_signin_busy(this, tr("Connecting..."), [&](const std::function<bool()>&) {
-        const std::unique_ptr<Backend> backend = open_backend(location, &keys);
-        has_repo = backend->exists("config");
-        backend->list("locks");  // needs listing rights too
+        try {
+            const std::unique_ptr<Backend> backend = open_backend(location, &keys);
+            has_repo = backend->exists("config");
+            backend->list("locks");  // needs listing rights too
+        } catch (const SftpHostKeyError& e) {
+            offered_key = e.fingerprint();
+            key_changed = e.changed();
+        }
     });
+    if (!offered_key.empty()) {
+        QMessageBox box(QMessageBox::Warning, windowTitle(), QString(), QMessageBox::Yes | QMessageBox::Cancel, this);
+        box.setTextFormat(Qt::PlainText);
+        box.setText((key_changed ? tr("The server's key has CHANGED. This can be another computer pretending to be the "
+                                      "server, or the server was set up again. Trust the new key only if its owner "
+                                      "confirms it.")
+                                 : tr("This is the first connection to this server. Compare its key with the one the "
+                                      "server's owner gives you before you trust it.")) +
+                    "\n\n" + qs(offered_key));
+        box.setDefaultButton(QMessageBox::Cancel);
+        if (box.exec() != QMessageBox::Yes) return;
+        region_->setText(qs(offered_key));
+        test_connection();  // again, with the key trusted
+        return;
+    }
     if (!renewed.empty() && is_drive()) {
         drive_secret_ = qs(renewed);
         secure_wipe(renewed.data(), renewed.size());

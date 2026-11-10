@@ -109,14 +109,17 @@ if(WIN32)
         src/vaultik/ops/mount_win.cpp
         src/vaultik/platform/drive_health_win.cpp
         src/vaultik/platform/win_extras.cpp
+        src/vaultik/repo/sftp_backend.cpp
     )
+    find_package(libssh2 CONFIG REQUIRED)
     target_compile_definitions(vaultik_core PUBLIC
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
     target_compile_options(vaultik_core PUBLIC
         /W4 /permissive- /utf-8 /EHsc /Zc:__cplusplus /Zc:preprocessor
         $<$<CONFIG:Release>:/O2 /Gy /Gw>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
-                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib wbemuuid oleaut32)
+                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib wbemuuid oleaut32
+                          libssh2::libssh2)
 else()
     target_sources(vaultik_core PRIVATE
         src/vaultik/util/resources_posix.cpp

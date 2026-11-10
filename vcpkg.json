@@ -9,7 +9,15 @@
     "blake3",
     "doctest",
     "nlohmann-json",
-    { "name": "openssl", "platform": "linux" }
+    {
+      "name": "libssh2",
+      "default-features": false,
+      "platform": "windows"
+    },
+    {
+      "name": "openssl",
+      "platform": "linux"
+    }
   ],
   "features": {
     "gui": {
@@ -18,7 +26,11 @@
         {
           "name": "qtbase",
           "default-features": false,
-          "features": [ "gui", "widgets", "png" ],
+          "features": [
+            "gui",
+            "widgets",
+            "png"
+          ],
           "platform": "windows"
         },
         {

@@ -7,6 +7,9 @@
 #include "vaultik/repo/mega_backend.hpp"
 #include "vaultik/repo/oauth.hpp"
 #include "vaultik/repo/webdav_backend.hpp"
+#ifdef _WIN32
+#include "vaultik/repo/sftp_backend.hpp"
+#endif
 #include "vaultik/util/base64.hpp"
 #include "vaultik/util/hex.hpp"
 
@@ -170,3 +173,23 @@ TEST_CASE("WebDAV folder listings are read whatever the namespace prefix") {
     CHECK_THROWS(WebDavBackend("webdav:http://192.168.1.10.example.com/x", {}));
     CHECK_THROWS(WebDavBackend("webdav:http://172.32.0.1/x", {}));
 }
+
+#ifdef _WIN32
+TEST_CASE("SFTP locations: user, server, port and folder") {
+    SftpLocation l = parse_sftp_location("sftp:me@nas.local/volume1/backups/pc/");
+    CHECK(l.user == "me");
+    CHECK(l.host == "nas.local");
+    CHECK(l.port == 22);
+    CHECK(l.folder == "/volume1/backups/pc");
+    l = parse_sftp_location("sftp://backup@[fd00::5]:2200/D:/Backups");
+    CHECK(l.host == "fd00::5");
+    CHECK(l.port == 2200);
+    CHECK(l.folder == "/D:/Backups");
+    CHECK(parse_sftp_location("sftp:u@h:2222/").folder == "/");
+    CHECK_THROWS(parse_sftp_location("sftp:nas.local/x"));         // no user
+    CHECK_THROWS(parse_sftp_location("sftp:me@nas.local"));        // no folder
+    CHECK_THROWS(parse_sftp_location("sftp:me@nas.local:99999/x")); // no such port
+    CHECK_THROWS(parse_sftp_location("sftp:me@nas.local/a/../b"));
+    CHECK(cloud_kind("sftp:me@nas/x") == CloudKind::Sftp);
+}
+#endif

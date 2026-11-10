@@ -26,7 +26,7 @@ struct Request;
 struct Response;
 }  // namespace http
 
-enum class CloudKind { None, S3, PCloud, OneDrive, GoogleDrive, Mega, WebDav };
+enum class CloudKind { None, S3, PCloud, OneDrive, GoogleDrive, Mega, WebDav, Sftp };
 
 // The service a location names; None for a folder on this computer.
 CloudKind cloud_kind(std::string_view location);
