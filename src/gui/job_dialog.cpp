@@ -312,6 +312,23 @@ QWidget* JobDialog::build_sources() {
     layout->addLayout(skip_row);
     connect(vss_, &QCheckBox::toggled, skip_sql_, &QWidget::setEnabled);
 #endif
+
+    // Commands around the backup (scheduled and manual runs).
+    auto* commands = new QFormLayout;
+    before_command_ = new QLineEdit;
+    before_command_->setPlaceholderText(tr("Optional, e.g. a database dump"));
+    after_command_ = new QLineEdit;
+    after_command_->setPlaceholderText(tr("Optional, e.g. starting a stopped program again"));
+    commands->addRow(tr("Before the backup, run:"), before_command_);
+    commands->addRow(tr("After it, run:"), after_command_);
+    layout->addLayout(commands);
+    auto* commands_note = new QLabel(tr("Command lines as in a command prompt. When the first one fails (an exit "
+                                        "code other than 0), nothing is backed up. The second runs after the "
+                                        "backup whatever happened; VAULTIK_RESULT tells it the result (success, "
+                                        "partial, failed or cancelled). They run with the job's rights."));
+    commands_note->setWordWrap(true);
+    commands_note->setForegroundRole(QPalette::PlaceholderText);
+    layout->addWidget(commands_note);
     return page;
 }
 
@@ -689,6 +706,8 @@ void JobDialog::load(const jobs::Job& job) {
     check_percent_->setEnabled(job.health.weekly);
     check_monthly_->setChecked(job.health.monthly);
     check_restore_->setChecked(job.health.restore_test);
+    before_command_->setText(qs(job.before_command));
+    after_command_->setText(qs(job.after_command));
 
     schedule_kind_->setCurrentIndex(static_cast<int>(job.schedule.kind));
     time_->setTime(QTime(job.schedule.hour, job.schedule.minute));
@@ -778,6 +797,8 @@ jobs::Job JobDialog::collect() const {
         if (std::find(j.excludes.begin(), j.excludes.end(), u8(e)) == j.excludes.end()) j.excludes.push_back(u8(e));
     if (vss_ != nullptr) j.vss = vss_->isChecked();
     if (skip_sql_ != nullptr) j.vss_skip_sql = skip_sql_->isChecked();
+    j.before_command = u8(before_command_->text().trimmed());
+    j.after_command = u8(after_command_->text().trimmed());
     if (admin_ != nullptr) j.run_as_admin = admin_->isChecked();
 
     j.schedule.kind = static_cast<jobs::Schedule::Kind>(schedule_kind_->currentIndex());

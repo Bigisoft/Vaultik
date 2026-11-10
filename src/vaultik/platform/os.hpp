@@ -291,6 +291,13 @@ int run_command(const std::vector<std::string>& argv, std::string* output = null
 // approval is declined or the program cannot start; on POSIX it always throws.
 int run_command_elevated(const std::vector<std::string>& argv);
 
+// Runs a command line as typed by the user, through the shell (Windows: cmd.exe /s /c; POSIX:
+// /bin/sh -c), without a window, and returns its exit code. Captures stdout and stderr into
+// `output` when given (its first 64 KiB). Throws OsError when the shell cannot be started.
+int run_shell(const std::string& command, std::string* output = nullptr);
+// Sets an environment variable of this process (and so of the programs it starts).
+void set_env(const std::string& name, const std::string& value);
+
 // Full path of the running executable.
 std::string executable_path();
 

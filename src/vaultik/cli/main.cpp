@@ -1679,6 +1679,32 @@ int cmd_test_restore(const Args& a) {
     return code;
 }
 
+// Runs a job's "before" or "after" command line (see Job::before_command). Returns its exit code;
+// its output goes to the log (the start of it), each line as a warning when it failed.
+int run_job_command(const jobs::Job& job, const std::string& which, const std::string& command,
+                    const std::string& result) {
+    os::set_env("VAULTIK_JOB", job.id);
+    os::set_env("VAULTIK_JOB_NAME", job.name);
+    os::set_env("VAULTIK_RESULT", result);
+    if (!g_json) out("Running the command " + which + " the backup: " + command + "\n");
+    std::string output;
+    int code = 0;
+    try {
+        code = os::run_shell(command, &output);
+    } catch (const std::exception& e) {
+        warning("the command " + which + " the backup could not start: " + e.what());
+        return -1;
+    }
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
+    if (code != 0) {
+        warning("the command " + which + " the backup failed (exit code " + std::to_string(code) + ")" +
+                (output.empty() ? std::string() : ": " + output.substr(0, 500)));
+    } else if (!output.empty() && !g_json) {
+        out(output.substr(0, 2000) + "\n");
+    }
+    return code;
+}
+
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
     const jobs::JobStore store = job_store(a);
@@ -1699,6 +1725,13 @@ int cmd_run_job(const Args& a) {
     record.started = os::now();
     int code = kExitError;
     std::unique_ptr<Repository> repo;
+    // The "after" command runs once the "before" one did (or there is none), whatever happens.
+    bool after_due = false;
+    const auto run_after = [&](const std::string& result) {
+        if (!after_due || job->after_command.empty()) return;
+        after_due = false;
+        run_job_command(*job, "after", job->after_command, result);
+    };
     try {
         if (!jobs::drive_connected(*job))
             throw Error("the backup drive is not connected (" + job->repository + ")");
@@ -1709,6 +1742,13 @@ int cmd_run_job(const Args& a) {
             return kExitOk;
         }
         if (!g_json) out("Job \"" + job->name + "\": backing up to " + job->repository + "\n");
+        if (!job->before_command.empty()) {
+            const int before = run_job_command(*job, "before", job->before_command, "");
+            if (before != 0)
+                throw Error("the command before the backup failed (exit code " + std::to_string(before) +
+                            "), so nothing was backed up");
+        }
+        after_due = true;
 
         BackupOptions o;
         o.paths = job->sources;
@@ -1756,9 +1796,11 @@ int cmd_run_job(const Args& a) {
             store.append_history(job->id, record);
         } catch (const Error&) {
         }
+        run_after(jobs::to_string(record.status));
         throw;
     }
     store.append_history(job->id, record);
+    run_after(jobs::to_string(record.status));
 
     // The second copy, after a backup that saved a version. Its result is its own history entry.
     if (!job->second_copy.repository.empty() && !g_cancel.load() && record.status != jobs::RunStatus::Failed) {

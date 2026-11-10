@@ -507,6 +507,14 @@ Bytes unprotect_secret(ByteSpan sealed) {
 
 // ---- process ------------------------------------------------------------------------------
 
+void set_env(const std::string& name, const std::string& value) {
+    ::setenv(name.c_str(), value.c_str(), 1);
+}
+
+int run_shell(const std::string& command, std::string* output) {
+    return run_command({"/bin/sh", "-c", command}, output);
+}
+
 int run_command_elevated(const std::vector<std::string>&) {
     throw Error("running as administrator is only supported on Windows");
 }

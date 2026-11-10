@@ -337,6 +337,8 @@ std::string to_json(const Job& job) {
           {"max_bytes", job.retention.max_bytes}}},
         {"volume", {{"id", job.repository_volume}, {"path", job.repository_relative}}},
         {"backup_on_connect", job.backup_on_connect},
+        {"before_command", job.before_command},
+        {"after_command", job.after_command},
         {"second_copy",
          {{"repository", job.second_copy.repository},
           {"cloud_key_id", job.second_copy.cloud_key_id},
@@ -414,6 +416,8 @@ Job job_from_json(const std::string& text) {
         }
         // Saved by 0.5.0 together with administrator rights, which it no longer allows: off.
         job.backup_on_connect = j.value("backup_on_connect", false) && !job.run_as_admin;
+        job.before_command = j.value("before_command", std::string());
+        job.after_command = j.value("after_command", std::string());
         if (j.contains("second_copy")) {
             const json& c = j.at("second_copy");
             job.second_copy.repository = c.value("repository", std::string());

@@ -753,6 +753,50 @@ int run_command(const std::vector<std::string>& argv, std::string* output) {
     return static_cast<int>(code);
 }
 
+void set_env(const std::string& name, const std::string& value) {
+    SetEnvironmentVariableW(widen(name).c_str(), widen(value).c_str());
+}
+
+int run_shell(const std::string& command, std::string* output) {
+    // "cmd /s /c "<command>"": cmd drops the outer quotes and runs the rest exactly as typed.
+    std::wstring cmdline = L"cmd.exe /d /s /c \"" + widen(command) + L"\"";
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE read_end = nullptr;
+    HANDLE write_end = nullptr;
+    if (output != nullptr) {
+        if (!CreatePipe(&read_end, &write_end, &sa, 0)) throw_last_error("cannot create pipe");
+        SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
+    }
+    UniqueHandle r(read_end);
+    UniqueHandle w(write_end);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    if (output != nullptr) {
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        si.hStdOutput = w.get();
+        si.hStdError = w.get();
+    }
+    const std::wstring program = program_path("cmd.exe");
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, output != nullptr, CREATE_NO_WINDOW, nullptr,
+                        nullptr, &si, &pi))
+        throw_last_error("cannot start the command");
+    UniqueHandle process(pi.hProcess);
+    UniqueHandle thread(pi.hThread);
+    w.reset();
+    if (output != nullptr) {
+        char buf[4096];
+        DWORD n = 0;
+        while (ReadFile(r.get(), buf, sizeof buf, &n, nullptr) && n > 0)
+            if (output->size() < (64u << 10)) output->append(buf, n);  // the start is enough for a log
+    }
+    WaitForSingleObject(process.get(), INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(process.get(), &code);
+    return static_cast<int>(code);
+}
+
 std::string executable_path() {
     std::wstring buf(MAX_PATH, L'\0');
     for (;;) {

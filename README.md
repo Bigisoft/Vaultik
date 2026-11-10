@@ -4,9 +4,9 @@ Lightweight, deduplicating, compressed and encrypted backups for Windows, writte
 Qt 6 frontend. Linux support is planned: the platform code is written but not yet built or tested.
 
 - **Small and idle-free.** The engine is one static ~1 MB executable: no service, no kernel driver.
-  Scheduled backups are started by the system scheduler, run, and exit. Peak RAM stays under
-  ~100 MB however much data there is (measured: 77 MB for a 6.8 GB folder, 9 MB for an unchanged
-  re-run). The frontend only uses memory while it is open.
+  Scheduled backups are started by the system scheduler, run, and exit. Peak RAM stays around
+  100 MB however much data there is (measured: 101 MB for a 9.7 GB folder with the worker threads,
+  9 MB for an unchanged re-run; uploads to cloud storage add 32 MiB per pack in flight). The frontend only uses memory while it is open.
 - **Deduplicated.** Files are split into content-defined chunks (FastCDC, ~1 MiB average). A chunk
   already stored, from any file in any earlier snapshot, is never stored again. Every snapshot looks
   like a full backup but only adds what changed.
@@ -438,6 +438,20 @@ something else), **Repair the backup...** in a job's ... menu, or `vaultik repai
 
 `--dry-run` shows what it would do. It holds the exclusive lock, like prune. From cloud storage
 it downloads everything (with `--quick`, only the pack headers).
+
+### Commands before and after a backup
+
+A job can run a command line before its backup and one after it (**What to back up** tab:
+"Before the backup, run" and "After it, run"), as typed in a command prompt (`cmd.exe` on
+Windows, `/bin/sh` on Linux): for example a database dump into a backed-up folder before, or
+starting a program again that the first command stopped. When the "before" command fails (an
+exit code other than 0), nothing is backed up and the run fails with that reason. The "after"
+command runs once the "before" one succeeded (or there is none), whatever the backup's result,
+before the second copy and the checks; `VAULTIK_RESULT` holds the result (`success`, `partial`,
+`failed`, `cancelled`), and `VAULTIK_JOB` and `VAULTIK_JOB_NAME` the job. The start of their
+output goes to the log; a failing "after" command is a warning. They run with the job's rights:
+for a job with administrator rights, as administrator, from the approved copy of the job in the
+admin-only store, so a program running as you cannot change what they are.
 
 ### Running side by side
 
