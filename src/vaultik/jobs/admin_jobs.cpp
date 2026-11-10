@@ -62,6 +62,46 @@ std::wstring shown(const std::string& utf8, const std::string& what) {
     return out;
 }
 
+}  // namespace
+
+void check_admin_command(const std::string& command, const std::string& what) {
+    if (command.empty()) return;
+    if (command.find_first_of("%^") != std::string::npos)
+        throw Error(what + " of a job with administrator rights must not use %variables% or ^");
+    if (command.find("..") != std::string::npos)
+        throw Error(what + " of a job with administrator rights must not use \"..\"");
+    if (command.find("\\\\") != std::string::npos || command.find("//") != std::string::npos)
+        throw Error(what + " of a job with administrator rights must not use network paths");
+    // Every absolute path in it: "C:\x\y.cmd" (quoted or not), up to a separator of cmd.
+    for (std::size_t i = 0; i + 2 < command.size(); ++i) {
+        const char c = command[i];
+        if (!(((c | 0x20) >= 'a' && (c | 0x20) <= 'z') && command[i + 1] == ':' &&
+              (command[i + 2] == '\\' || command[i + 2] == '/')))
+            continue;
+        if (i > 0 && std::isalnum(static_cast<unsigned char>(command[i - 1]))) continue;
+        const bool quoted = i > 0 && command[i - 1] == '"';
+        std::size_t end = i;
+        while (end < command.size()) {
+            const char d = command[end];
+            if (quoted ? d == '"' : (d == ' ' || d == '\t' || d == '"' || d == '&' || d == '|' || d == '<' ||
+                                      d == '>' || d == '(' || d == ')' || d == ',' || d == ';' || d == '='))
+                break;
+            ++end;
+        }
+        std::string path = command.substr(i, end - i);
+        // A file that does not exist yet could still be put there: judge its folder then.
+        std::string probe = path;
+        while (!probe.empty() && !os::exists(probe)) probe = os::parent_of(probe);
+        std::string why;
+        if (probe.empty() || !os::admin_only_chain(probe, &why))
+            throw Error(what + " of a job with administrator rights names " + path +
+                        ", which programs without administrator rights can change" + (why.empty() ? "" : " (" + why + ")"));
+        i = end;
+    }
+}
+
+namespace {
+
 // A job with administrator rights reads any file (a shadow copy included), writes the backup where
 // the job says, and runs its commands, all as administrator. The job is copied from the user's
 // own job file, which any program running as the user could have changed (the backup password is
@@ -124,6 +164,10 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
 }
 
 }  // namespace
+#endif
+
+#ifndef _WIN32
+void check_admin_command(const std::string&, const std::string&) {}
 #endif
 
 namespace {
@@ -296,6 +340,8 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
         secure_wipe(old_ntfy.data(), old_ntfy.size());
         secure_wipe(old_telegram.data(), old_telegram.size());
         try {
+            check_admin_command(job->before_command, "the command before the backup");
+            check_admin_command(job->after_command, "the command after the backup");
             confirm_job(*job, to.find(id), same_secrets, alerts, same_alerts);
             save_alerts(alerts, dir);
             set_alert_secret("ntfy", ntfy, dir);

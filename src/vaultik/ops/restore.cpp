@@ -352,10 +352,12 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
     if (!resolve_snapshot_path(repo_, snapshot, options_.subpath, start))
         throw Error("path not found in snapshot: " + options_.subpath);
 
-    const std::string root = os::absolute_path(options_.target);
+    std::string root = os::absolute_path(options_.target);
     ensure_dir_chain(root);
-    // Hold every folder from the top down to the target open, so none of them can be renamed and
-    // replaced by a link during the restore; the target itself must be a real folder.
+    // Work under the target's real path, with any link or junction on the way resolved now, and
+    // hold every folder of it open from the top down, so none can be renamed, replaced by a link
+    // or repointed during the restore. Every one of them must be a real folder.
+    if (const std::string resolved = os::final_path(root); !resolved.empty()) root = resolved;
     std::vector<os::File> held;
     {
         std::vector<std::string> chain;
@@ -365,11 +367,12 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
         }
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
             os::ErrorCode err = 0;
-            os::File f = os::File::hold_directory(*it, *it == root, err);
+            const bool top = os::parent_of(*it) == *it || os::parent_of(*it).empty();  // a drive or share root
+            os::File f = os::File::hold_directory(*it, !top, err);
             if (os::is_not_supported(err)) break;
-            if (!f.valid() && *it == root)
+            if (!f.valid() && !top)
                 throw Error("cannot restore into " + root + ": " +
-                            (err == kStoppedOnLink ? std::string("it is a link or junction, not a folder")
+                            (err == kStoppedOnLink ? *it + " is a link or junction, not a folder"
                                                    : os::error_message(err)));
             if (f.valid()) held.push_back(std::move(f));
         }

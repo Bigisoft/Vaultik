@@ -36,6 +36,13 @@ std::vector<RunRecord> combined_history(const JobStore& store, const std::string
 // connection several times, and the drive may have been plugged straight back in).
 bool connect_backup_due(const JobStore& store, const Job& job);
 
+// Throws Error unless `command` is safe to run with administrator rights from an approved job:
+// no %variables% or ^ escapes (which a user's environment or a later edit could turn into another
+// command), no "..", no network paths, and every file or folder it names by an absolute path, and
+// every folder above those, changeable by administrators only. run_job_command also runs such a
+// command with a fixed environment, in the admin store. No-op on POSIX.
+void check_admin_command(const std::string& command, const std::string& what);
+
 // Whether the admin store holds the job (so removing it needs administrator rights).
 bool has_admin_copy(const std::string& id);
 

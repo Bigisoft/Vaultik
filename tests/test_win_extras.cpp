@@ -8,10 +8,12 @@
 
 #include <sddl.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/restore.hpp"
@@ -195,6 +197,48 @@ TEST_CASE("a held folder cannot be renamed away, and a junction is not held as a
     REQUIRE(os::create_link(u8(tmp.path / "jn"), {0xA0000003, u8(tmp.path / "moved"), false}, true) == 0);
     CHECK_FALSE(os::File::hold_directory(u8(tmp.path / "jn"), true, err).valid());
     CHECK(err == ERROR_STOPPED_ON_SYMLINK);
+}
+
+TEST_CASE("commands of administrator jobs: only safe ones, checked") {
+    using vaultik::jobs::check_admin_command;
+    char windows[MAX_PATH] = {};
+    GetSystemWindowsDirectoryA(windows, MAX_PATH);
+    const std::string cmd = std::string(windows) + "\\System32\\cmd.exe";
+    CHECK_NOTHROW(check_admin_command(cmd + " /c echo hello", "the command"));
+    CHECK_NOTHROW(check_admin_command("\"" + cmd + "\" /c ver", "the command"));
+    CHECK_THROWS(check_admin_command("%TOOLS%\\dump.cmd", "the command"));
+    CHECK_THROWS(check_admin_command("C:^\\Users\\x.cmd", "the command"));
+    CHECK_THROWS(check_admin_command(cmd + " /c ..\\..\\x.cmd", "the command"));
+    CHECK_THROWS(check_admin_command("\\\\server\\share\\x.cmd", "the command"));
+    TempDir tmp;  // in the user's temp folder: anyone running as the user can change it
+    CHECK_THROWS(check_admin_command(cmd + " /c " + u8(tmp.path / "dump.cmd"), "the command"));
+    CHECK_THROWS(check_admin_command("\"" + u8(tmp.path / "not yet there.cmd") + "\"", "the command"));
+}
+
+TEST_CASE("a command runs with a time limit, and programs it leaves running are not waited for") {
+    os::ShellOptions o;
+    o.timeout = std::chrono::seconds(2);
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_THROWS(os::run_shell("ping -n 30 127.0.0.1 > nul", o));  // stopped after 2 s
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(15));
+
+    std::string out;
+    os::ShellOptions o2;
+    o2.output = &out;
+    const auto start2 = std::chrono::steady_clock::now();
+    CHECK(os::run_shell("start /b ping -n 20 127.0.0.1 & echo started", o2) == 0);
+    CHECK(std::chrono::steady_clock::now() - start2 < std::chrono::seconds(10));
+    CHECK(out.find("started") != std::string::npos);
+
+    // The fixed environment of administrator runs: the user's variables are not there.
+    std::string env;
+    os::ShellOptions o3;
+    o3.output = &env;
+    o3.clean_environment = true;
+    o3.extra_environment = {{"VAULTIK_RESULT", "success"}};
+    CHECK(os::run_shell("echo [%USERPROFILE%] [%VAULTIK_RESULT%]", o3) == 0);
+    CHECK(env.find("[%USERPROFILE%]") != std::string::npos);
+    CHECK(env.find("[success]") != std::string::npos);
 }
 
 #endif  // _WIN32

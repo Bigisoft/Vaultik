@@ -1767,17 +1767,34 @@ int cmd_alert_test(const Args&) {
 // Runs a job's "before" or "after" command line (see Job::before_command). Returns its exit code;
 // its output goes to the log (the start of it), each line as a warning when it failed.
 int run_job_command(const jobs::Job& job, const std::string& which, const std::string& command,
-                    const std::string& result) {
-    os::set_env("VAULTIK_JOB", job.id);
-    os::set_env("VAULTIK_JOB_NAME", job.name);
-    os::set_env("VAULTIK_RESULT", result);
-    if (!g_json) out("Running the command " + which + " the backup: " + command + "\n");
+                    const std::string& result, bool admin, const std::string& store_dir) {
+    os::ShellOptions o;
     std::string output;
+    o.output = &output;
+    o.cancelled = [] { return stop_requested(); };
+    const std::vector<std::pair<std::string, std::string>> vars = {
+        {"VAULTIK_JOB", job.id}, {"VAULTIK_JOB_NAME", job.name}, {"VAULTIK_RESULT", result}};
+    if (admin) {
+        // With administrator rights: only an approved, checked command, with a fixed environment
+        // and the admin-only store as its folder, so nothing the user can change decides what runs.
+        try {
+            jobs::check_admin_command(command, "the command " + which + " the backup");
+        } catch (const Error& e) {
+            warning(e.what());
+            return -1;
+        }
+        o.clean_environment = true;
+        o.extra_environment = vars;
+        o.directory = store_dir;
+    } else {
+        for (const auto& [name, value] : vars) os::set_env(name, value);
+    }
+    if (!g_json) out("Running the command " + which + " the backup\n");
     int code = 0;
     try {
-        code = os::run_shell(command, &output);
+        code = os::run_shell(command, o);
     } catch (const std::exception& e) {
-        warning("the command " + which + " the backup could not start: " + e.what());
+        warning("the command " + which + " the backup did not run to the end: " + std::string(e.what()));
         return -1;
     }
     while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) output.pop_back();
@@ -1815,7 +1832,7 @@ int cmd_run_job(const Args& a) {
     const auto run_after = [&](const std::string& result) {
         if (!after_due || job->after_command.empty()) return;
         after_due = false;
-        run_job_command(*job, "after", job->after_command, result);
+        run_job_command(*job, "after", job->after_command, result, a.has("--admin"), store.dir());
     };
     // A scheduled run of a cloud job waits for an unmetered connection, if the job says so. It is
     // recorded (as cancelled), so the Activity tab shows why no version was saved.
@@ -1840,7 +1857,7 @@ int cmd_run_job(const Args& a) {
         }
         if (!g_json) out("Job \"" + job->name + "\": backing up to " + job->repository + "\n");
         if (!job->before_command.empty()) {
-            const int before = run_job_command(*job, "before", job->before_command, "");
+            const int before = run_job_command(*job, "before", job->before_command, "", a.has("--admin"), store.dir());
             if (before != 0)
                 throw Error("the command before the backup failed (exit code " + std::to_string(before) +
                             "), so nothing was backed up");

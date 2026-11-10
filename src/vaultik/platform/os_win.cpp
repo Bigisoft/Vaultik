@@ -3,6 +3,9 @@
 #include "vaultik/platform/os.hpp"
 
 #include <algorithm>
+#include <thread>
+#include <map>
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -795,40 +798,128 @@ void set_env(const std::string& name, const std::string& value) {
 }
 
 int run_shell(const std::string& command, std::string* output) {
+    ShellOptions o;
+    o.output = output;
+    return run_shell(command, o);
+}
+
+int run_shell(const std::string& command, const ShellOptions& o) {
     // "cmd /s /c "<command>"": cmd drops the outer quotes and runs the rest exactly as typed.
     std::wstring cmdline = L"cmd.exe /d /s /c \"" + widen(command) + L"\"";
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     HANDLE read_end = nullptr;
     HANDLE write_end = nullptr;
-    if (output != nullptr) {
-        if (!CreatePipe(&read_end, &write_end, &sa, 0)) throw_last_error("cannot create pipe");
-        SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
-    }
+    if (!CreatePipe(&read_end, &write_end, &sa, 0)) throw_last_error("cannot create pipe");
+    SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
     UniqueHandle r(read_end);
     UniqueHandle w(write_end);
-    STARTUPINFOW si{};
-    si.cb = sizeof si;
-    if (output != nullptr) {
-        si.dwFlags = STARTF_USESTDHANDLES;
-        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        si.hStdOutput = w.get();
-        si.hStdError = w.get();
+    // No input: a command that asks for something gets end-of-file instead of waiting forever.
+    UniqueHandle nul(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr));
+    if (!nul.valid()) throw_last_error("cannot open NUL");
+
+    // Only these two handles are passed on, not every inheritable handle of this process (such
+    // as the frontend's pipes), so nothing the command leaves running keeps them open.
+    HANDLE inherit[2] = {w.get(), nul.get()};
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<std::uint8_t> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size)) throw_last_error("cannot start the command");
+    struct AttrGuard {
+        LPPROC_THREAD_ATTRIBUTE_LIST a;
+        ~AttrGuard() { DeleteProcThreadAttributeList(a); }
+    } attr_guard{attrs};
+    if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof inherit, nullptr,
+                                   nullptr))
+        throw_last_error("cannot start the command");
+
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = nul.get();
+    si.StartupInfo.hStdOutput = w.get();
+    si.StartupInfo.hStdError = w.get();
+    si.lpAttributeList = attrs;
+
+    // A fixed, minimal environment when asked (commands run with administrator rights): the
+    // system's own folders only, nothing the user's settings could point elsewhere.
+    std::wstring env;
+    if (o.clean_environment) {
+        wchar_t windows[MAX_PATH] = {};
+        GetSystemWindowsDirectoryW(windows, MAX_PATH);
+        const std::wstring root = windows;
+        std::map<std::wstring, std::wstring, std::less<>> vars = {
+            {L"SystemRoot", root},
+            {L"windir", root},
+            {L"SystemDrive", root.substr(0, 2)},
+            {L"ComSpec", root + L"\\System32\\cmd.exe"},
+            {L"PATHEXT", L".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC"},
+            {L"Path", root + L"\\System32;" + root + L";" + root + L"\\System32\\Wbem;" + root +
+                          L"\\System32\\WindowsPowerShell\\v1.0;" + root + L"\\System32\\OpenSSH"},
+            {L"TEMP", root + L"\\Temp"},
+            {L"TMP", root + L"\\Temp"},
+        };
+        for (const auto& [name, value] : o.extra_environment) vars[widen(name)] = widen(value);
+        for (const auto& [name, value] : vars) env += name + L"=" + value + L'\0';
+        env += L'\0';
     }
+    const std::wstring directory = o.directory.empty() ? std::wstring() : widen(o.directory);
+
     const std::wstring program = program_path("cmd.exe");
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, output != nullptr, CREATE_NO_WINDOW, nullptr,
-                        nullptr, &si, &pi))
+    if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED |
+                            (o.clean_environment ? CREATE_UNICODE_ENVIRONMENT : 0),
+                        o.clean_environment ? env.data() : nullptr, directory.empty() ? nullptr : directory.c_str(),
+                        &si.StartupInfo, &pi))
         throw_last_error("cannot start the command");
     UniqueHandle process(pi.hProcess);
     UniqueHandle thread(pi.hThread);
+    // Everything the command starts is in this job, so a command that runs too long can be
+    // stopped with all it started. (Not killed when the job handle closes: a command may start a
+    // program that is meant to keep running, such as a database it stopped before the backup.)
+    UniqueHandle job(CreateJobObjectW(nullptr, nullptr));
+    if (job.valid()) AssignProcessToJobObject(job.get(), process.get());
+    ResumeThread(thread.get());
     w.reset();
-    if (output != nullptr) {
+    nul.reset();
+
+    // The output is read on its own thread, so waiting can time out and a program the command
+    // left running (holding the pipe open) does not keep this from returning.
+    std::string captured;
+    std::atomic<bool> stop_reading{false};
+    std::atomic<bool> reader_done{false};
+    std::thread reader([&] {
         char buf[4096];
         DWORD n = 0;
-        while (ReadFile(r.get(), buf, sizeof buf, &n, nullptr) && n > 0)
-            if (output->size() < (64u << 10)) output->append(buf, n);  // the start is enough for a log
+        while (!stop_reading && ReadFile(r.get(), buf, sizeof buf, &n, nullptr) && n > 0)
+            if (captured.size() < (64u << 10)) captured.append(buf, n);  // the start is enough for a log
+        reader_done = true;
+    });
+    const auto deadline = std::chrono::steady_clock::now() + o.timeout;
+    bool stopped = false;
+    while (WaitForSingleObject(process.get(), 500) == WAIT_TIMEOUT) {
+        if (std::chrono::steady_clock::now() >= deadline || (o.cancelled && o.cancelled())) {
+            if (job.valid()) TerminateJobObject(job.get(), 1);
+            else TerminateProcess(process.get(), 1);
+            stopped = true;
+            WaitForSingleObject(process.get(), 5000);
+            break;
+        }
     }
-    WaitForSingleObject(process.get(), INFINITE);
+    // Give the last output a moment to arrive, then stop reading: a program the command left
+    // running may hold the pipe open. (No PeekNamedPipe here: it would wait behind the reader's
+    // ReadFile on the same handle.)
+    Sleep(200);
+    stop_reading = true;
+    while (!reader_done) {  // (repeated: the reader may not be blocked in ReadFile yet)
+        CancelSynchronousIo(reader.native_handle());
+        Sleep(20);
+    }
+    reader.join();
+    if (o.output != nullptr) *o.output = std::move(captured);
+    if (stopped) throw Error(o.cancelled && o.cancelled() ? "the command was cancelled"
+                                                          : "the command did not finish in time and was stopped");
     DWORD code = 0;
     GetExitCodeProcess(process.get(), &code);
     return static_cast<int>(code);

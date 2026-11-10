@@ -56,6 +56,21 @@ Bytes read_security(const std::string& path) {
     return sd;
 }
 
+std::string final_path(const std::string& path) {
+    UniqueHandle h(CreateFileW(native_path(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!h.valid()) return {};
+    std::wstring buf(1024, L'\0');
+    DWORD n = GetFinalPathNameByHandleW(h.get(), buf.data(), static_cast<DWORD>(buf.size()), FILE_NAME_NORMALIZED);
+    if (n >= buf.size()) {
+        buf.resize(n + 1);
+        n = GetFinalPathNameByHandleW(h.get(), buf.data(), static_cast<DWORD>(buf.size()), FILE_NAME_NORMALIZED);
+    }
+    if (n == 0 || n >= buf.size()) return {};
+    buf.resize(n);
+    return narrow(strip_long_prefix(buf));
+}
+
 std::optional<FileId> file_id(const std::string& path) {
     UniqueHandle h(CreateFileW(native_path(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,

@@ -519,6 +519,10 @@ int run_shell(const std::string& command, std::string* output) {
     return run_command({"/bin/sh", "-c", command}, output);
 }
 
+int run_shell(const std::string& command, const ShellOptions& options) {
+    return run_command({"/bin/sh", "-c", command}, options.output);  // (no timeout yet on POSIX)
+}
+
 int run_command_elevated(const std::vector<std::string>&) {
     throw Error("running as administrator is only supported on Windows");
 }
@@ -629,6 +633,10 @@ File File::hold_directory(const std::string& /*path*/, bool /*real_folder*/, Err
 
 ErrorCode File::set_security(ByteSpan /*descriptor*/) {
     return ENOTSUP;
+}
+
+std::string final_path(const std::string& /*path*/) {
+    return {};
 }
 
 std::optional<FileId> file_id(const std::string& /*path*/) {

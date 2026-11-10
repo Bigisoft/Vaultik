@@ -11,6 +11,9 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
+#include <functional>
+#include <chrono>
 #include <optional>
 #include <memory>
 #include <string>
@@ -225,6 +228,9 @@ Bytes read_security(const std::string& path);
 // Refused (ERROR_STOPPED_ON_SYMLINK) when the item is a link, a hard-linked file, or, with
 // `expected`, any item other than that one: an elevated restore must not be redirected.
 ErrorCode write_security(const std::string& path, ByteSpan descriptor, const FileId* expected = nullptr);
+// The path of a folder with every link and junction on the way resolved ("C:\Users\me\Docs"
+// for a junction that points there); empty when it cannot be told (and on POSIX).
+std::string final_path(const std::string& path);
 // The id of the item at `path` itself (a link is not followed); empty when it cannot be read.
 std::optional<FileId> file_id(const std::string& path);
 
@@ -300,6 +306,19 @@ int run_command_elevated(const std::vector<std::string>& argv);
 // /bin/sh -c), without a window, and returns its exit code. Captures stdout and stderr into
 // `output` when given (its first 64 KiB). Throws OsError when the shell cannot be started.
 int run_shell(const std::string& command, std::string* output = nullptr);
+struct ShellOptions {
+    std::string* output = nullptr;  // stdout and stderr, the first 64 KiB
+    // Stopped (with everything it started) after this long, or when `cancelled` says so; then
+    // run_shell throws Error. Programs it starts and leaves running are not waited for.
+    std::chrono::seconds timeout = std::chrono::hours(4);
+    std::function<bool()> cancelled;
+    // Windows: a fixed minimal environment (the system folders on Path) instead of this
+    // process's, plus `extra_environment`; for commands run with administrator rights.
+    bool clean_environment = false;
+    std::vector<std::pair<std::string, std::string>> extra_environment;
+    std::string directory;  // the working folder (empty: this process's)
+};
+int run_shell(const std::string& command, const ShellOptions& options);
 // Whether the current internet connection is metered (paid by the byte or capped, as Windows
 // reports it for mobile data or a connection the user marked so). False when it cannot tell, and
 // on POSIX.
