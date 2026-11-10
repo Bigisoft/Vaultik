@@ -107,7 +107,7 @@ struct Repository::Pipeline {
         Bytes sealed;
         std::uint32_t raw_len = 0;
         bool done = false;
-        std::exception_ptr error;
+        std::string error;  // empty: sealed
     };
     struct Upload {
         Id pack_id{};
@@ -125,7 +125,9 @@ struct Repository::Pipeline {
     std::vector<std::pair<Id, std::vector<BlobEntry>>> uploaded;  // written, not yet indexed
     std::uint64_t uploaded_bytes = 0;
     std::set<Id> in_flight;  // packs queued or being written
-    std::exception_ptr failed;  // the first failure of a worker; never cleared
+    // The first failure of a worker, as text (an exception object is not passed between threads);
+    // never cleared.
+    std::string failed;
     bool stop = false;
     unsigned threads = 0;
     unsigned max_uploads = 0;
@@ -202,13 +204,15 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
                 lk.unlock();
                 try {
                     job->sealed = seal_with(compressor, aead, job->plain, blob_aad(job->type, job->id), true);
+                } catch (const std::exception& e) {
+                    job->error = std::string("cannot encrypt data: ") + e.what();
                 } catch (...) {
-                    job->error = std::current_exception();
+                    job->error = "cannot encrypt data";
                 }
                 secure_wipe(job->plain.data(), job->plain.size());
                 job->plain = Bytes();
                 lk.lock();
-                if (job->error && !p->failed) p->failed = job->error;
+                if (!job->error.empty() && p->failed.empty()) p->failed = job->error;
                 job->done = true;
                 p->done.notify_all();
             }
@@ -225,16 +229,18 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
                 p->uploads.pop_front();
                 ++p->uploading;
                 lk.unlock();
-                std::exception_ptr error;
+                std::string error;
                 try {
                     backend->put(pack_name(u.pack_id), u.bytes);
+                } catch (const std::exception& e) {
+                    error = std::string("cannot write a pack: ") + e.what();
                 } catch (...) {
-                    error = std::current_exception();
+                    error = "cannot write a pack";
                 }
                 lk.lock();
                 --p->uploading;
-                if (error) {
-                    if (!p->failed) p->failed = error;
+                if (!error.empty()) {
+                    if (p->failed.empty()) p->failed = error;
                     p->in_flight.erase(u.pack_id);
                 } else {
                     p->uploaded_bytes += u.bytes.size();
@@ -248,12 +254,12 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
 
 void Repository::check_pipeline() {
     if (!pipe_) return;
-    std::exception_ptr failed;
+    std::string failed;
     {
         std::lock_guard g(pipe_->mu);
         failed = pipe_->failed;
     }
-    if (failed) std::rethrow_exception(failed);
+    if (!failed.empty()) throw Error(failed);
 }
 
 void Repository::drain(bool all) {
@@ -272,7 +278,7 @@ void Repository::drain(bool all) {
             job = p.order.front();
             p.order.pop_front();
         }
-        if (job->error) std::rethrow_exception(job->error);
+        if (!job->error.empty()) throw Error(job->error);
         pack_.add(job->type, job->id, job->sealed, job->raw_len);
         if (pack_.size() >= kPackTargetSize) finish_pack();
     }
@@ -286,7 +292,7 @@ void Repository::collect_uploads(bool all) {
     {
         std::unique_lock lk(p.mu);
         if (all) p.done.wait(lk, [&p] { return p.uploads.empty() && p.uploading == 0; });
-        if (p.failed) std::rethrow_exception(p.failed);
+        if (!p.failed.empty()) throw Error(p.failed);
         ready.swap(p.uploaded);
         bytes = p.uploaded_bytes;
         p.uploaded_bytes = 0;
@@ -413,8 +419,8 @@ void Repository::finish_pack() {
         Pipeline& p = *pipe_;
         {
             std::unique_lock lk(p.mu);
-            p.done.wait(lk, [&p] { return p.uploads.size() + p.uploading < p.max_uploads || p.failed; });
-            if (p.failed) std::rethrow_exception(p.failed);
+            p.done.wait(lk, [&p] { return p.uploads.size() + p.uploading < p.max_uploads || !p.failed.empty(); });
+            if (!p.failed.empty()) throw Error(p.failed);
             p.in_flight.insert(pack_id);
             p.uploads.push_back({pack_id, std::move(bytes), std::move(entries)});
         }
