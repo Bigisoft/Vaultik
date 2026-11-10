@@ -364,6 +364,11 @@ std::string format_time_local(std::uint64_t time);
 // Empty when unset.
 std::string get_env(const char* name);
 
+// The current account's own folders: on Windows its known folders, wherever they are (moved into
+// OneDrive, say); elsewhere $HOME and the XDG folders. Empty when there is no such folder.
+enum class UserFolder { Profile, Documents, Desktop, Pictures, Music, Videos, Downloads, SavedGames, RoamingAppData, LocalAppData };
+std::string user_folder(UserFolder folder);
+
 // FILETIME <-> Unix time conversion.
 constexpr std::uint64_t kUnixEpochTicks = 116444736000000000ull;
 constexpr std::uint64_t from_unix(std::int64_t seconds, std::int64_t nanoseconds) {

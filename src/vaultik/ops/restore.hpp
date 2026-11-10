@@ -20,6 +20,9 @@ struct RestoreOptions {
     std::string target;  // UTF-8 folder to restore into (created if missing)
     // Snapshot path to restore, '/' or '\' separated, e.g. "C/Users/me/Documents". Empty = everything.
     std::string subpath;
+    // With a folder as `subpath`: what is in it goes straight into `target` (Move to this PC puts
+    // an old Documents folder's content into this account's Documents folder), not the folder.
+    bool contents_only = false;
     bool overwrite = false;  // replace files that already exist in the target
     // Windows: apply each item's stored owner, group and access list. Off by default: restored
     // into another folder, another account's permissions could lock the user out of the files.

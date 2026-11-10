@@ -51,6 +51,7 @@
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/update_check.hpp"
+#include "vaultik/ops/move_here.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
@@ -159,6 +160,15 @@ Commands:
                                without what was lost (use --job <job> or -r)
       --quick                  Trust the packs' own headers; read no chunks
       --dry-run                Only show what would be done
+  move-here [<snapshot>]       Move to this PC: put an old computer's Documents,
+                               Desktop, pictures, browser profiles, email and game
+                               saves from the backup into this account's folders
+      --account <name>         The old account, when the backup holds several
+      --only <list>            Only these, comma-separated: documents, desktop,
+                               pictures, music, videos, downloads, browsers, email,
+                               games (or single items such as chrome)
+      --dry-run                Only show what goes where
+      --overwrite              Replace files that exist here already
   repair-data <percent>|off    Keep Reed-Solomon repair data next to the stored
                                data (1-50% of its size; jobs to drives use 5%),
                                so data damaged by bad sectors can be rebuilt by
@@ -271,7 +281,7 @@ const std::set<std::string> kValueOptions = {
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
-    "--user", "--from", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads"};
+    "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -2660,6 +2670,100 @@ int cmd_restore(const Args& a) {
     return kExitOk;
 }
 
+// "move-here [<snapshot>]": the folders of an old computer's account in the backup (Documents,
+// Desktop, browser profiles, email, game saves), each restored into the same kind of folder of
+// this account. Files that exist here already are left alone unless --overwrite.
+int cmd_move_here(const Args& a) {
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "move to this PC", lock_wait(a));
+    repo->reload_index();
+    const SnapshotRef ref = resolve_snapshot(*repo, a.positional.empty() ? std::string("latest") : a.positional[0]);
+    std::vector<MoveItem> plan = plan_move(*repo, ref.snapshot);
+    const std::vector<std::string> accounts = plan_accounts(plan);
+    if (plan.empty()) throw Error("this version holds none of an account's own folders (Documents, Desktop, ...)");
+    std::string account;
+    if (const auto chosen = a.value("--account")) {
+        account = *chosen;
+        if (std::find(accounts.begin(), accounts.end(), account) == accounts.end())
+            throw Error("this version holds no folders of an account called " + account);
+    } else if (accounts.size() == 1) {
+        account = accounts[0];
+    } else {
+        std::string names;
+        for (const std::string& n : accounts) names += (names.empty() ? "" : ", ") + n;
+        throw Error("this version holds the folders of several accounts (" + names + "); choose one with --account");
+    }
+    std::vector<std::string> only;
+    if (const auto o = a.value("--only")) {
+        std::size_t start = 0;
+        while (start <= o->size()) {
+            std::size_t end = o->find(',', start);
+            if (end == std::string::npos) end = o->size();
+            if (end > start) only.push_back(o->substr(start, end - start));
+            start = end + 1;
+        }
+    }
+    std::erase_if(plan, [&](const MoveItem& m) {
+        return m.account != account ||
+               (!only.empty() && std::find(only.begin(), only.end(), m.id) == only.end() &&
+                std::find(only.begin(), only.end(), m.group) == only.end());
+    });
+    if (plan.empty()) throw Error("nothing chosen is in this version");
+
+    if (a.has("--dry-run")) {
+        for (const MoveItem& m : plan) {
+            if (g_json) emit({{"event", "move_item"}, {"id", m.id}, {"group", m.group}, {"from", m.from}, {"to", m.to}});
+            else out("  " + m.id + ": " + m.from + " -> " + m.to + "\n");
+        }
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"dry_run", true}});
+        return kExitOk;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    RestoreResult total;
+    for (const MoveItem& m : plan) {
+        if (!g_json) out("Moving " + m.id + " to " + m.to + "\n");
+        RestoreOptions o;
+        o.target = m.to;
+        o.subpath = m.from;
+        o.contents_only = true;
+        o.overwrite = a.has("--overwrite");
+        // Another account's permissions would lock this one out of its own files.
+        o.permissions = false;
+        o.on_progress = [&](const RestoreProgress& p) {
+            if (g_json) {
+                emit({{"event", "progress"}, {"files", total.files + p.files}, {"bytes", total.bytes + p.bytes},
+                      {"current", p.current}});
+                return;
+            }
+            status(std::to_string(total.files + p.files) + " files, " + format_bytes(total.bytes + p.bytes) + "  " +
+                   p.current);
+        };
+        o.on_warning = [](const std::string& msg) { warning(msg); };
+        o.should_cancel = [] { return stop_requested(); };
+        const RestoreResult r = run_restore(*repo, ref.snapshot, o);
+        total.files += r.files;
+        total.dirs += r.dirs;
+        total.bytes += r.bytes;
+        total.skipped += r.skipped;
+        total.errors += r.errors;
+    }
+    if (g_json) {
+        emit({{"event", "done"}, {"status", total.errors > 0 ? "partial" : "success"}, {"files", total.files},
+              {"dirs", total.dirs}, {"bytes", total.bytes}, {"skipped", total.skipped}, {"errors", total.errors},
+              {"seconds", seconds_since(start)}});
+        return total.errors > 0 ? kExitPartial : kExitOk;
+    }
+    clear_status();
+    out("Moved " + std::to_string(total.files) + " files, " + format_bytes(total.bytes) + " in " +
+        format_duration(seconds_since(start)) + "\n");
+    if (total.skipped > 0) out("  left alone: " + std::to_string(total.skipped) + " (already here, or links)\n");
+    if (total.errors > 0) {
+        out("  " + std::to_string(total.errors) + " item(s) failed; see warnings above\n");
+        return kExitPartial;
+    }
+    return kExitOk;
+}
+
 // "repair-data <percent>|off": repair data for every pack from now on, and (unless off) for the
 // packs stored already, each after checking that it is intact.
 int cmd_repair_data(const Args& a) {
@@ -2815,6 +2919,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "prune") return cmd_prune(a);
     if (a.command == "repair") return cmd_repair(a);
     if (a.command == "repair-data") return cmd_repair_data(a);
+    if (a.command == "move-here") return cmd_move_here(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
     if (a.command == "pin") return cmd_pin(a, true);

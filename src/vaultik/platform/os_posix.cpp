@@ -625,6 +625,28 @@ std::string get_env(const char* name) {
     return v != nullptr ? std::string(v) : std::string();
 }
 
+std::string user_folder(UserFolder folder) {
+    const std::string home = get_env("HOME");
+    if (home.empty()) return {};
+    const auto xdg = [&](const char* var, const char* fallback) {
+        const std::string v = get_env(var);
+        return !v.empty() ? v : join(home, fallback);
+    };
+    switch (folder) {
+        case UserFolder::Profile: return home;
+        case UserFolder::Documents: return join(home, "Documents");
+        case UserFolder::Desktop: return join(home, "Desktop");
+        case UserFolder::Pictures: return join(home, "Pictures");
+        case UserFolder::Music: return join(home, "Music");
+        case UserFolder::Videos: return join(home, "Videos");
+        case UserFolder::Downloads: return join(home, "Downloads");
+        case UserFolder::SavedGames: return {};
+        case UserFolder::RoamingAppData: return xdg("XDG_CONFIG_HOME", ".config");
+        case UserFolder::LocalAppData: return xdg("XDG_DATA_HOME", ".local/share");
+    }
+    return {};
+}
+
 std::optional<FileId> File::id() const {
     return std::nullopt;
 }

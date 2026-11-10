@@ -78,6 +78,8 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/update_check.cpp
+    src/vaultik/jobs/profile_items.cpp
+    src/vaultik/ops/move_here.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
 )

@@ -10,7 +10,10 @@
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/copy.hpp"
+#include "vaultik/jobs/profile_items.hpp"
+#include "vaultik/model/tree.hpp"
 #include "vaultik/ops/diff.hpp"
+#include "vaultik/ops/move_here.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore_test.hpp"
@@ -405,6 +408,69 @@ TEST_CASE("a pack damaged by bad sectors is rebuilt from its repair data") {
         CHECK(v.parity_added == 1);
         CHECK(repo->backend().exists(Repository::parity_name(largest_id)));
     }
+}
+
+TEST_CASE("move to this PC finds an old account's folders") {
+    TempDir tmp;
+    const fs::path repo_dir = tmp.path / "repo";
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    // A backup made on another computer: C:\Users\anna with Documents (holding a file and
+    // Outlook Files), Chrome's profile and Public, and D:\Data.
+    const auto dir = [&](const std::string& name, std::vector<Node> children) {
+        Tree t;
+        t.nodes = std::move(children);
+        t.sort();
+        Node n;
+        n.name = name;
+        n.kind = NodeKind::Dir;
+        const Bytes b = serialize_tree(t);
+        repo->save_blob(BlobType::Tree, b, n.subtree);
+        return n;
+    };
+    Node letter;
+    letter.name = "letter.txt";
+    letter.kind = NodeKind::File;
+    const Bytes content = text("dear anna");
+    letter.size = content.size();
+    Id chunk{};
+    repo->save_blob(BlobType::Data, content, chunk);
+    letter.content = {chunk};
+    const Node c = dir("C", {dir("Users", {dir("anna", {dir("Documents", {letter, dir("Outlook Files", {})}),
+                                                       dir("AppData", {dir("Local", {dir("Google", {dir("Chrome", {
+                                                           dir("User Data", {})})})})})}),
+                                          dir("Public", {dir("Documents", {})})})});
+    const Node d = dir("D", {dir("Data", {})});
+    Tree root;
+    root.nodes = {c, d};
+    root.sort();
+    Snapshot s;
+    s.time = os::now();
+    s.hostname = "old-pc";
+    repo->save_blob(BlobType::Tree, serialize_tree(root), s.tree);
+    repo->flush();
+    repo->save_snapshot(s);
+
+    const std::vector<MoveItem> plan = plan_move(*repo, s);
+    CHECK(plan_accounts(plan) == std::vector<std::string>{"anna"});  // Public is nobody's own
+    std::vector<std::string> ids;
+    for (const MoveItem& m : plan) ids.push_back(m.id);
+    // Outlook Files lies inside Documents and comes along with it.
+    CHECK(ids == std::vector<std::string>{"documents", "chrome"});
+    REQUIRE(plan.size() == 2);
+    CHECK(plan[0].from == "C/Users/anna/Documents");
+    CHECK(plan[0].to == os::user_folder(os::UserFolder::Documents));
+    CHECK(plan[1].from == "C/Users/anna/AppData/Local/Google/Chrome/User Data");
+
+    // Its content goes into the folder chosen, not a folder of the same name inside it.
+    RestoreOptions ro;
+    ro.target = u8(tmp.path / "here");
+    ro.subpath = plan[0].from;
+    ro.contents_only = true;
+    const RestoreResult r = run_restore(*repo, s, ro);
+    CHECK(r.errors == 0);
+    CHECK(read_file(tmp.path / "here" / "letter.txt") == content);
+    CHECK(fs::is_directory(tmp.path / "here" / "Outlook Files"));
 }
 
 TEST_CASE("files that look encrypted by ransomware raise the alarm") {

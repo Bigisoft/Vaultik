@@ -453,8 +453,9 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
         }
     }
 
-    if (options_.subpath.empty()) {
-        restore_children(start.subtree, root);  // the snapshot root is virtual; restore what is under it
+    if (options_.subpath.empty() || (options_.contents_only && start.kind == NodeKind::Dir)) {
+        // The snapshot root is virtual, and with contents_only the folder's own place is `root`.
+        restore_children(start.subtree, root);
     } else {
         restore_node(start, root);
     }

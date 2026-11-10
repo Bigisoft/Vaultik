@@ -1072,4 +1072,27 @@ std::string get_env(const char* name) {
     return narrow(vaultik::get_env(widen(name).c_str()));
 }
 
+std::string user_folder(UserFolder folder) {
+    REFKNOWNFOLDERID id = [&]() -> REFKNOWNFOLDERID {
+        switch (folder) {
+            case UserFolder::Profile: return FOLDERID_Profile;
+            case UserFolder::Documents: return FOLDERID_Documents;
+            case UserFolder::Desktop: return FOLDERID_Desktop;
+            case UserFolder::Pictures: return FOLDERID_Pictures;
+            case UserFolder::Music: return FOLDERID_Music;
+            case UserFolder::Videos: return FOLDERID_Videos;
+            case UserFolder::Downloads: return FOLDERID_Downloads;
+            case UserFolder::SavedGames: return FOLDERID_SavedGames;
+            case UserFolder::RoamingAppData: return FOLDERID_RoamingAppData;
+            case UserFolder::LocalAppData: return FOLDERID_LocalAppData;
+        }
+        return FOLDERID_Profile;
+    }();
+    PWSTR p = nullptr;
+    std::string out;
+    if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p != nullptr) out = narrow(p);
+    CoTaskMemFree(p);
+    return out;
+}
+
 }  // namespace vaultik::os
