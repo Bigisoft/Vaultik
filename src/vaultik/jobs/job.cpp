@@ -235,8 +235,40 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     return std::nullopt;
 }
 
+namespace {
+
+// Control characters, or Unicode marks that change the direction of text (they can make a
+// name or a path read as something else wherever it is shown).
+bool has_hidden_chars(const std::string& s) {
+    for (const char c : s) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7F) return true;
+    }
+    static const char* const kMarks[] = {
+        "\xD8\x9C",  // U+061C
+        "\xE2\x80\x8E", "\xE2\x80\x8F",  // U+200E, U+200F
+        "\xE2\x80\xAA", "\xE2\x80\xAB", "\xE2\x80\xAC", "\xE2\x80\xAD", "\xE2\x80\xAE",  // U+202A to U+202E
+        "\xE2\x81\xA6", "\xE2\x81\xA7", "\xE2\x81\xA8", "\xE2\x81\xA9"};  // U+2066 to U+2069
+    for (const char* m : kMarks)
+        if (s.find(m) != std::string::npos) return true;
+    return false;
+}
+
+void check_text(const std::string& what, const std::string& s) {
+    if (has_hidden_chars(s)) throw Error(what + " contains control or text-direction characters");
+}
+
+}  // namespace
+
 void validate(const Job& job) {
     if (job.name.empty()) throw Error("the job needs a name");
+    check_text("the job's name", job.name);
+    for (const std::string& s : job.sources) check_text("a folder to back up", s);
+    for (const std::string& s : job.excludes) check_text("a pattern to skip", s);
+    check_text("the destination", job.repository);
+    check_text("the second copy's destination", job.second_copy.repository);
+    check_text("the command before the backup", job.before_command);
+    check_text("the command after the backup", job.after_command);
     if (!job.id.empty() && !std::all_of(job.id.begin(), job.id.end(), is_id_char))
         throw Error("invalid job id \"" + job.id + "\"");
     if (job.repository.empty()) throw Error("the job needs a backup destination (repository)");

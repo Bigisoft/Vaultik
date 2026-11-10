@@ -367,3 +367,16 @@ TEST_CASE("admin-only checks for jobs with administrator rights") {
     CHECK(combined_history(store, j.id).size() == 1);
 }
 #endif
+
+TEST_CASE("a job with control or text-direction characters is refused") {
+    Job j = sample();
+    CHECK_NOTHROW(validate(j));
+    j.name = "Docs" + std::string(1, '\n') + "To: C:\\Safe";
+    CHECK_THROWS(validate(j));
+    j = sample();
+    j.sources.push_back("C:\\Users\\\xE2\x80\xAE" "evil");  // U+202E right-to-left override
+    CHECK_THROWS(validate(j));
+    j = sample();
+    j.before_command = std::string("echo a") + char(13) + "echo b";
+    CHECK_THROWS(validate(j));
+}

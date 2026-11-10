@@ -21,34 +21,52 @@ namespace vaultik::jobs {
 #ifdef _WIN32
 namespace {
 
-// What a job with administrator rights reads, where it writes, and what it runs.
-bool same_effect(const Job& a, const Job& b) {
-    return a.sources == b.sources && a.excludes == b.excludes && a.repository == b.repository &&
-           a.second_copy.repository == b.second_copy.repository && a.vss == b.vss &&
-           a.before_command == b.before_command && a.after_command == b.after_command;
+// A field of the job for the question below: without control and text-direction characters
+// (which could fake its layout or wording) and at most 260 characters long.
+std::wstring shown(const std::string& utf8) {
+    std::wstring out;
+    for (const wchar_t c : widen(utf8)) {
+        const bool hidden = c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0x061C || c == 0x180E ||
+                            (c >= 0x200B && c <= 0x200F) || (c >= 0x2028 && c <= 0x202E) ||
+                            (c >= 0x2060 && c <= 0x206F) || c == 0xFEFF;
+        out += hidden ? L'�' : c;
+        if (out.size() >= 260) {
+            out += L"...";
+            break;
+        }
+    }
+    return out;
 }
 
 // A job with administrator rights reads any file (a shadow copy included), writes the backup where
 // the job says, and runs its commands, all as administrator. The job is copied from the user's
 // own job file, which any program running as the user could have changed (the backup password is
 // readable by the user too), and the approval prompt does not show what the job contains. So the
-// elevated step shows what the job does and asks, unless the admin copy already does exactly
-// this. A program without administrator rights cannot answer this window for the user.
-void confirm_job(const Job& job, const std::optional<Job>& approved) {
-    if (approved && same_effect(*approved, job)) return;
-    std::wstring text = L"The backup job \"" + widen(job.name) + L"\" will run with administrator rights:\n\n";
+// elevated step shows what the job does and asks, unless the admin copy is exactly the same job
+// with the same cloud keys. A program without administrator rights cannot answer this window.
+void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_secrets) {
+    if (approved && same_secrets && to_json(*approved) == to_json(job)) return;
+    std::wstring text = L"The backup job \"" + shown(job.name) + L"\" will run with administrator rights:\n\n";
     text += L"Back up:\n";
-    for (const std::string& s : job.sources) text += L"    " + widen(s) + L"\n";
+    for (std::size_t i = 0; i < job.sources.size() && i < 20; ++i) text += L"    " + shown(job.sources[i]) + L"\n";
+    if (job.sources.size() > 20) text += L"    ... and " + std::to_wstring(job.sources.size() - 20) + L" more\n";
     if (!job.excludes.empty()) {
         text += L"Skipping:  ";
         for (std::size_t i = 0; i < job.excludes.size() && i < 10; ++i)
-            text += (i ? L", " : L"") + widen(job.excludes[i]);
+            text += (i ? L", " : L"") + shown(job.excludes[i]);
         text += job.excludes.size() > 10 ? L", ...\n" : L"\n";
     }
-    text += L"To:  " + widen(job.repository) + L"\n";
-    if (!job.second_copy.repository.empty()) text += L"Second copy:  " + widen(job.second_copy.repository) + L"\n";
-    if (!job.before_command.empty()) text += L"Command before:  " + widen(job.before_command) + L"\n";
-    if (!job.after_command.empty()) text += L"Command after:  " + widen(job.after_command) + L"\n";
+    text += L"To:  " + shown(job.repository) + L"\n";
+    if (!job.cloud_key_id.empty()) text += L"    with the access key " + shown(job.cloud_key_id) + L"\n";
+    if (!job.second_copy.repository.empty()) {
+        text += L"Second copy:  " + shown(job.second_copy.repository) + L"\n";
+        if (!job.second_copy.cloud_key_id.empty())
+            text += L"    with the access key " + shown(job.second_copy.cloud_key_id) + L"\n";
+    }
+    if (!job.before_command.empty()) text += L"Command before:  " + shown(job.before_command) + L"\n";
+    if (!job.after_command.empty()) text += L"Command after:  " + shown(job.after_command) + L"\n";
+    if (approved && same_secrets) text += L"\n(Some other setting of the job changed.)\n";
+    if (!same_secrets) text += L"\n(Its cloud storage keys or sign-ins are new or changed.)\n";
     text += L"\nAnyone who knows the backup's password can read what it backs up. Allow this only if you set "
             L"the job up like this yourself. Allow?";
     const int answer = MessageBoxW(nullptr, text.c_str(), L"Vaultik: a job with administrator rights",
@@ -208,7 +226,18 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
     const std::string dir = prepare_admin_store(user_sid);
     const JobStore to(dir);
     try {
-        confirm_job(*job, to.find(id));
+        // The cloud keys decide where the data goes as much as the job does.
+        bool same_secrets = false;
+        try {
+            std::string old_cloud = to.cloud_secret(id);
+            std::string old_copy = to.copy_secret(id);
+            same_secrets = old_cloud == cloud && old_copy == copy;
+            secure_wipe(old_cloud.data(), old_cloud.size());
+            secure_wipe(old_copy.data(), old_copy.size());
+        } catch (const std::exception&) {
+            same_secrets = false;  // no readable approved copy: ask
+        }
+        confirm_job(*job, to.find(id), same_secrets);
         to.save(*job);
         if (pw.empty()) {
             os::remove_file(os::join(os::join(dir, "secrets"), id + ".key"));
