@@ -348,8 +348,11 @@ The Overview shows the drives a job uses (the backup drive, the second copy's an
 backed up from) with the health Windows reports for them, and flags a backup kept on the same
 physical drive as the files it backs up. A backup drive that reports a warning or a failing
 condition puts a banner on the Overview, and `run-job` records it in the history (`"drive"`),
-so the tray says so too. `vaultik drives` lists every drive; temperature, wear and error counts
-need administrator rights.
+so the tray says so too. An SSD's health is shown as a percentage: the part of its rated life
+left, from the wear the drive counts (an SSD at 10% or less counts as a problem). NVMe drives
+report it to anyone; a SATA SSD's needs administrator rights, and hard disks have no such
+counter. `vaultik drives` lists every drive; power-on hours and error counts need
+administrator rights.
 
 ### Health checks
 

@@ -1294,19 +1294,19 @@ void MainWindow::refresh_overview() {
             case os::DriveHealth::Status::Unhealthy: notes << tr("failing"); break;
             case os::DriveHealth::Status::Unknown: notes << tr("health unknown"); break;
         }
+        if (const auto p = h.health_percent()) notes << tr("health %1%").arg(*p);
         if (!h.condition.empty()) notes << qs(h.condition);
         if (h.read_errors_uncorrected.value_or(0) > 0)
             notes << tr("%1 unrecoverable read errors").arg(*h.read_errors_uncorrected);
         if (h.temperature) notes << tr("%1 °C").arg(*h.temperature);
-        if (h.wear) notes << tr("%1% worn").arg(*h.wear);
-        dr.problem = bad || !h.condition.empty() || h.read_errors_uncorrected.value_or(0) > 0;
+        dr.problem = bad || !h.condition.empty() || h.read_errors_uncorrected.value_or(0) > 0 || h.worn_out();
         // A backup on the same disk as what it backs up is lost with it.
         if (jd.role != DriveRole::Source && source_disks.contains(h.disk)) {
             notes << tr("the same drive as the backed-up files, so one drive failure loses both");
             dr.problem = true;
         }
         dr.status = notes.join(QStringLiteral(", "));
-        if (dr.problem && d.warning.isEmpty() && (bad || !h.condition.empty()) && jd.role != DriveRole::Source)
+        if (dr.problem && d.warning.isEmpty() && (bad || !h.condition.empty() || h.worn_out()) && jd.role != DriveRole::Source)
             d.warning = tr("The drive with the backup reports a problem (%1: %2). Copy the backup to another drive "
                            "soon, before it fails.").arg(dr.name, dr.status);
         d.drives.push_back(std::move(dr));

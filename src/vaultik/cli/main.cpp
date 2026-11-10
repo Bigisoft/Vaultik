@@ -1832,10 +1832,11 @@ int cmd_note(const Args& a) {
 std::string drive_problem(const os::DriveHealth& d) {
     const bool bad = d.status == os::DriveHealth::Status::Warning || d.status == os::DriveHealth::Status::Unhealthy;
     const bool uncorrected = d.read_errors_uncorrected.value_or(0) > 0;
-    if (!bad && d.condition.empty() && !uncorrected) return {};
+    if (!bad && d.condition.empty() && !uncorrected && !d.worn_out()) return {};
     std::string s = (d.model.empty() ? "disk " + std::to_string(d.disk) : d.model) + ": " + os::to_string(d.status);
     if (!d.condition.empty()) s += ", " + d.condition;
     if (uncorrected) s += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
+    if (d.worn_out()) s += ", " + std::to_string(*d.health_percent()) + "% of its rated life left";
     return s;
 }
 
@@ -1859,6 +1860,7 @@ int cmd_drives() {
                                 {"volumes", letters[d.disk]}};
             if (d.temperature) j["temperature"] = *d.temperature;
             if (d.wear) j["wear"] = *d.wear;
+            if (const auto p = d.health_percent()) j["health_percent"] = *p;
             if (d.power_on_hours) j["power_on_hours"] = *d.power_on_hours;
             if (d.read_errors_uncorrected) j["read_errors_uncorrected"] = *d.read_errors_uncorrected;
             list.push_back(j);
@@ -1870,20 +1872,24 @@ int cmd_drives() {
         out("Windows reported no drives (or this system cannot tell).\n");
         return kExitOk;
     }
-    bool details = false;
+    bool missing = false;
     for (const os::DriveHealth& d : drives) {
         std::string line = "Disk " + std::to_string(d.disk) + "  " + d.model + "  (" + d.bus +
                            (d.media.empty() ? "" : " " + d.media) + ", " + format_bytes(d.size) + ")";
         if (!letters[d.disk].empty()) line += "  " + letters[d.disk];
-        line += "\n  " + std::string(os::to_string(d.status)) + (d.condition.empty() ? "" : ", " + d.condition);
+        line += "\n  " + std::string(os::to_string(d.status));
+        if (const auto p = d.health_percent()) line += ", health " + std::to_string(*p) + "%";
+        if (!d.condition.empty()) line += ", " + d.condition;
         if (d.temperature) line += ", " + std::to_string(*d.temperature) + " C";
-        if (d.wear) line += ", " + std::to_string(*d.wear) + "% worn";
         if (d.power_on_hours) line += ", " + std::to_string(*d.power_on_hours) + " hours on";
         if (d.read_errors_uncorrected) line += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
-        details = details || d.temperature || d.wear || d.power_on_hours;
+        // Only SSDs count their wear; a hard disk has no percentage to show.
+        missing = missing || (d.media != "HDD" && !d.health_percent()) || !d.power_on_hours;
         out(line + "\n");
     }
-    if (!details) out("(Temperature, wear and error counts need administrator rights.)\n");
+    if (missing && !os::process_elevated())
+        out("(Health percentages of SATA SSDs, power-on hours and error counts need administrator rights;\n"
+            " hard disks have no health percentage.)\n");
     return kExitOk;
 }
 

@@ -3,9 +3,13 @@
 #include <windows.h>
 #include <winioctl.h>
 #include <wbemidl.h>
+#include <nvme.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstring>
 #include <map>
+#include <vector>
 
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/win.hpp"
@@ -136,6 +140,54 @@ std::string condition_of(const std::vector<std::uint16_t>& states) {
     return {};
 }
 
+// An NVMe drive's own health log (SMART / Health Information, log page 2). Unlike the ATA
+// S.M.A.R.T. data, Windows hands it to any user through IOCTL_STORAGE_QUERY_PROPERTY on a
+// handle opened without read or write access. Fills in what WMI left unknown, and turns the
+// drive's critical warnings into a warning when Windows still calls it healthy.
+void nvme_health(DriveHealth& d) {
+    const std::wstring device = L"\\\\.\\PhysicalDrive" + std::to_wstring(d.disk);
+    const HANDLE h = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    constexpr DWORD kLog = sizeof(NVME_HEALTH_INFO_LOG);
+    const DWORD size = FIELD_OFFSET(STORAGE_PROPERTY_QUERY, AdditionalParameters) + sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) + kLog;
+    std::vector<std::uint8_t> buffer(size);
+    auto* query = reinterpret_cast<STORAGE_PROPERTY_QUERY*>(buffer.data());
+    auto* request = reinterpret_cast<STORAGE_PROTOCOL_SPECIFIC_DATA*>(query->AdditionalParameters);
+    query->PropertyId = StorageDeviceProtocolSpecificProperty;
+    query->QueryType = PropertyStandardQuery;
+    request->ProtocolType = ProtocolTypeNvme;
+    request->DataType = NVMeDataTypeLogPage;
+    request->ProtocolDataRequestValue = NVME_LOG_PAGE_HEALTH_INFO;
+    request->ProtocolDataRequestSubValue = 0;
+    request->ProtocolDataOffset = sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
+    request->ProtocolDataLength = kLog;
+    DWORD got = 0;
+    const BOOL ok = DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, buffer.data(), size, buffer.data(), size, &got, nullptr);
+    CloseHandle(h);
+    if (!ok || got < sizeof(STORAGE_PROTOCOL_DATA_DESCRIPTOR)) return;
+    const auto* answer = reinterpret_cast<const STORAGE_PROTOCOL_DATA_DESCRIPTOR*>(buffer.data());
+    const STORAGE_PROTOCOL_SPECIFIC_DATA& data = answer->ProtocolSpecificData;
+    const std::size_t start = offsetof(STORAGE_PROTOCOL_DATA_DESCRIPTOR, ProtocolSpecificData) + data.ProtocolDataOffset;
+    if (data.ProtocolDataLength < kLog || start + kLog > got) return;
+    NVME_HEALTH_INFO_LOG log;
+    std::memcpy(&log, buffer.data() + start, kLog);
+
+    if (!d.wear) d.wear = log.PercentageUsed;
+    const int kelvin = log.Temperature[0] | (log.Temperature[1] << 8);
+    if (!d.temperature && kelvin > 273) d.temperature = kelvin - 273;
+    std::uint8_t critical = 0;
+    std::memcpy(&critical, &log.CriticalWarning, 1);
+    if (critical != 0 && d.status == DriveHealth::Status::Healthy) {
+        d.status = DriveHealth::Status::Warning;
+        if (d.condition.empty())
+            d.condition = (critical & 0x04) ? "Reliability degraded"
+                          : (critical & 0x08) ? "Read-only"
+                          : (critical & 0x01) ? "Spare space low"
+                          : (critical & 0x02) ? "Temperature out of range"
+                                              : "Critical warning";
+    }
+}
+
 std::vector<DriveHealth> query(const std::wstring& where) {
     std::vector<DriveHealth> out;
     try {
@@ -198,6 +250,8 @@ std::vector<DriveHealth> query(const std::wstring& where) {
                 if (const auto h = number(row, L"PowerOnHours"); h && *h > 0) d.power_on_hours = *h;
                 if (const auto e = number(row, L"ReadErrorsUncorrected")) d.read_errors_uncorrected = *e;
             });
+        for (DriveHealth& d : out)
+            if (d.bus == "NVMe" || d.media == "SSD") nvme_health(d);
     } catch (...) {
         // best effort
     }
