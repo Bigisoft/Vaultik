@@ -89,8 +89,13 @@ Sign-Files @($msi)
 
 # Checksums, for the release page: "certutil -hashfile <file> SHA256" shows a download's.
 $sums = Join-Path $dist 'SHA256SUMS.txt'
-Get-Item $zip, $msi | ForEach-Object { '{0}  {1}' -f (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower(), $_.Name } |
-    Set-Content -Encoding ascii $sums
+# (.NET directly: Get-FileHash is missing from some PowerShell setups)
+Get-Item $zip, $msi | ForEach-Object {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($_.FullName)
+    try { $hash = -join ($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) } finally { $stream.Dispose(); $sha.Dispose() }
+    '{0}  {1}' -f $hash, $_.Name
+} | Set-Content -Encoding ascii $sums
 
 Get-Item $zip, $msi | ForEach-Object { '{0}  {1:N1} MB' -f $_.Name, ($_.Length / 1MB) }
 if (-not $signtool) { 'Not signed: set VAULTIK_SIGN_THUMBPRINT or VAULTIK_SIGN_PFX to sign (see the top of this script).' }
