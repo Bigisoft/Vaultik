@@ -204,21 +204,39 @@ TEST_CASE("commands of administrator jobs: only safe ones, checked") {
     char windows[MAX_PATH] = {};
     GetSystemWindowsDirectoryA(windows, MAX_PATH);
     const std::string cmd = std::string(windows) + "\\System32\\cmd.exe";
-    CHECK_NOTHROW(check_admin_command(cmd + " /c echo hello", "the command"));
-    CHECK_NOTHROW(check_admin_command("\"" + cmd + "\" /c ver", "the command"));
+    CHECK_NOTHROW(check_admin_command(cmd + " /d /v:off /c echo hello", "the command"));
+    CHECK_NOTHROW(check_admin_command("\"" + cmd + "\" /d /v:off /c ver", "the command"));
     CHECK_THROWS(check_admin_command("%TOOLS%\\dump.cmd", "the command"));
     CHECK_THROWS(check_admin_command("C:^\\Users\\x.cmd", "the command"));
-    CHECK_THROWS(check_admin_command(cmd + " /c ..\\..\\x.cmd", "the command"));
+    CHECK_THROWS(check_admin_command(cmd + " /d /v:off /c ..\\..\\x.cmd", "the command"));
     CHECK_THROWS(check_admin_command("\\\\server\\share\\x.cmd", "the command"));
-    CHECK_THROWS(check_admin_command(cmd + " /c C:Users\\me\\x.cmd", "the command"));  // relative to the drive
-    CHECK_THROWS(check_admin_command(cmd + " /c \\Users\\me\\x.cmd", "the command"));  // relative to its root
-    CHECK_THROWS(check_admin_command(cmd + " /c /Users/me/x.cmd", "the command"));
-    CHECK_THROWS(check_admin_command(cmd + " /c /x.cmd", "the command"));      // a file at the drive's top
-    CHECK_THROWS(check_admin_command(cmd + " /c /Users", "the command"));      // a folder there
-    CHECK_NOTHROW(check_admin_command(cmd + " /c ver & echo done", "the command"));
+    CHECK_THROWS(check_admin_command(cmd + " /d /v:off /c C:Users\\me\\x.cmd", "the command"));  // relative to the drive
+    CHECK_THROWS(check_admin_command(cmd + " /d /v:off /c \\Users\\me\\x.cmd", "the command"));  // relative to its root
+    CHECK_THROWS(check_admin_command(cmd + " /d /v:off /c /Users/me/x.cmd", "the command"));
+    CHECK_THROWS(check_admin_command(cmd + " /d /v:off /c /x.cmd", "the command"));      // a file at the drive's top
+    CHECK_THROWS(check_admin_command(cmd + " /d /v:off /c /Users", "the command"));      // a folder there
+    CHECK_NOTHROW(check_admin_command(cmd + " /d /v:off /c ver & echo done", "the command"));
     TempDir tmp;  // in the user's temp folder: anyone running as the user can change it
-    CHECK_THROWS(check_admin_command(cmd + " /c " + u8(tmp.path / "dump.cmd"), "the command"));
+    CHECK_THROWS(check_admin_command(cmd + " /d /v:off /c " + u8(tmp.path / "dump.cmd"), "the command"));
     CHECK_THROWS(check_admin_command("\"" + u8(tmp.path / "not yet there.cmd") + "\"", "the command"));
+    // What a command starts with: a program or batch file only, nothing that starts others unseen.
+    CHECK_NOTHROW(check_admin_command("vssadmin list shadows", "the command"));
+    CHECK_NOTHROW(check_admin_command("net stop spooler & net start spooler", "the command"));
+    CHECK_NOTHROW(check_admin_command("ver > nul 2>&1", "the command"));
+    CHECK_NOTHROW(check_admin_command("powershell -NoProfile -Command Get-Date", "the command"));
+    CHECK_NOTHROW(check_admin_command("pwsh.exe -nop -c Get-Date", "the command"));
+    CHECK_THROWS(check_admin_command("powershell -Command Get-Date", "the command"));  // runs the user's profile
+    CHECK_THROWS(check_admin_command("ver & run.vbs", "the command"));  // opened by the user's file types
+    CHECK_THROWS(check_admin_command("ver | (task.js)", "the command"));
+    CHECK_THROWS(check_admin_command("call x.ps1", "the command"));
+    CHECK_THROWS(check_admin_command("start x.exe", "the command"));
+    CHECK_THROWS(check_admin_command("if 1==1 x.vbs", "the command"));
+    CHECK_THROWS(check_admin_command("for %i in (1) do x", "the command"));
+    CHECK_THROWS(check_admin_command("cmd /c ver", "the command"));  // the user's AutoRun command
+    CHECK_THROWS(check_admin_command("cmd /d /v:off /c x.vbs", "the command"));
+    CHECK_THROWS(check_admin_command("cmd /d /v:off /c \"ver & x.vbs\"", "the command"));
+    CHECK_THROWS(check_admin_command("> out.txt ver", "the command"));
+    CHECK_THROWS(check_admin_command("ver\nx.vbs", "the command"));
 }
 
 TEST_CASE("a command runs with a time limit, and programs it leaves running are not waited for") {

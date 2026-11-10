@@ -1,6 +1,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <system_error>
 
@@ -82,35 +83,81 @@ void check_admin_command(const std::string& command, const std::string& what) {
         throw Error(what + " of a job with administrator rights must not use \"..\"");
     if (command.find("\\\\") != std::string::npos || command.find("//") != std::string::npos)
         throw Error(what + " of a job with administrator rights must not use network paths");
-    // Split into words as cmd would see them (a quoted part is one word). Every word with a
-    // path separator must be a full path ("C:\x\y.cmd") on an admin-only chain, or a switch like
-    // "/c"; anything else (a path relative to a drive, "C:x", or to its root, "\x") could resolve
-    // to a folder the user can change and is refused. Bare names resolve in the admin-only working
-    // folder and the system folders of the fixed environment.
-    std::vector<std::string> words;
+    for (const char c : command)
+        if (static_cast<unsigned char>(c) < 0x20 && c != '\t')
+            throw Error(what + " of a job with administrator rights must be a single line");
+    // Split into words as cmd would see them (a quoted part is one word), noting where each
+    // command starts: at the beginning and after an unquoted &, |, ( or ).
+    struct Word {
+        std::string text;
+        bool starts_command = false;   // the first word of a command
+        bool redirect_target = false;  // the file after < or >
+    };
+    std::vector<Word> words;
     {
-        std::string word;
+        Word word;
         bool quoted = false;
+        bool next_starts = true;
+        bool next_redirect = false;
+        std::string quoted_part;
+        const auto push = [&] {
+            if (!word.text.empty()) {
+                word.starts_command = next_starts && !next_redirect;
+                word.redirect_target = next_redirect;
+                if (word.starts_command) next_starts = false;
+                next_redirect = false;
+                words.push_back(word);
+            }
+            word = Word{};
+        };
         for (const char d : command) {
             if (d == '"') {
+                // A quoted part with these would be read again by a cmd started inside the command.
+                if (quoted && quoted_part.find_first_of("&|<>()") != std::string::npos)
+                    throw Error(what + " of a job with administrator rights must not quote &, |, <, >, ( or )");
                 quoted = !quoted;
+                quoted_part.clear();
                 continue;
             }
-            const bool separator = !quoted && (d == ' ' || d == '\t' || d == '&' || d == '|' || d == '<' ||
-                                               d == '>' || d == '(' || d == ')' || d == ',' || d == ';' || d == '=');
-            if (separator) {
-                if (!word.empty()) words.push_back(word);
-                word.clear();
+            if (quoted) {
+                quoted_part += d;
+                word.text += d;
+                continue;
+            }
+            if (d == '&' || d == '|' || d == '(' || d == ')') {
+                push();
+                next_starts = true;
+                next_redirect = false;
+            } else if (d == '<' || d == '>') {
+                // "2>" names a handle, not a word.
+                if (!word.text.empty() &&
+                    std::all_of(word.text.begin(), word.text.end(), [](char c) { return c >= '0' && c <= '9'; }))
+                    word = Word{};
+                push();
+                if (next_starts)
+                    throw Error(what + " of a job with administrator rights must put a redirection after the program");
+                next_redirect = true;
+            } else if (d == ' ' || d == '\t' || d == ',' || d == ';' || d == '=') {
+                push();
             } else {
-                word += d;
+                word.text += d;
             }
         }
-        if (!word.empty()) words.push_back(word);
+        if (quoted) throw Error(what + " of a job with administrator rights has an unclosed quote");
+        push();
     }
     const auto refuse = [&](const std::string& word, const std::string& why) {
         throw Error(what + " of a job with administrator rights cannot use \"" + word + "\": " + why);
     };
-    for (const std::string& word : words) {
+    const auto lower = [](std::string t) {
+        for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return t;
+    };
+    // Every word with a path separator must be a full path ("C:\x\y.cmd") on an admin-only chain,
+    // or a switch like "/c"; anything else (a path relative to a drive, "C:x", or to its root,
+    // "\x") could resolve to a folder the user can change and is refused. Bare names resolve in the
+    // admin-only working folder and the system folders of the fixed environment.
+    const auto check_path = [&](const std::string& word) {
         const bool drive = word.size() >= 2 && ((word[0] | 0x20) >= 'a' && (word[0] | 0x20) <= 'z') && word[1] == ':';
         if (drive) {
             if (word.size() < 3 || (word[2] != '\\' && word[2] != '/'))
@@ -121,26 +168,88 @@ void check_admin_command(const std::string& command, const std::string& what) {
             std::string why;
             if (probe.empty() || !os::admin_only_chain(probe, &why))
                 refuse(word, "programs without administrator rights can change it" + (why.empty() ? "" : " (" + why + ")"));
-            continue;
+            return;
         }
         if (word.find('\\') != std::string::npos) refuse(word, "not a full path; write it as C:\\...");
         if (word.find('/') != std::string::npos) {
-            // Only a switch such as /c or /q (a slash and up to 4 letters or digits) that is not
-            // also the name of something at the top of the system drive.
-            bool sw = word[0] == '/' && word.size() >= 2 && word.size() <= 5;
+            // Only a switch such as /c, /q or /v:off (a slash and up to 5 letters, digits or a
+            // colon) that is not also the name of something at the top of the system drive.
+            bool sw = word[0] == '/' && word.size() >= 2 && word.size() <= 6;
             for (std::size_t k = 1; sw && k < word.size(); ++k)
-                sw = std::isalnum(static_cast<unsigned char>(word[k])) != 0;
+                sw = std::isalnum(static_cast<unsigned char>(word[k])) != 0 || word[k] == ':';
             if (sw) {
                 // cmd would read it as a path at the top of the drive, with any of the usual
                 // program extensions: refuse it when anything there answers to it.
                 char windows[MAX_PATH] = {};
                 const UINT n = GetSystemWindowsDirectoryA(windows, MAX_PATH);
                 if (n < 2 || n >= MAX_PATH) refuse(word, "the system drive cannot be told");
-                const std::string at_top = std::string(windows, 2) + "\\" + word.substr(1);
+                const std::string at_top = std::string(windows, 2) + "\\" + word.substr(1, word.find(':') - 1);
                 for (const char* ext : {"", ".com", ".exe", ".bat", ".cmd", ".vbs", ".js", ".wsf", ".msc", ".ps1"})
                     if (os::exists(at_top + ext)) sw = false;
             }
             if (!sw) refuse(word, "not a full path; write it as C:\\...");
+        }
+    };
+    // What a command starts with is run as a program: only a program or a batch file, never a
+    // file that the user's own file types would open (a .vbs, .js or .ps1), and nothing that
+    // would start another one out of sight of these checks.
+    const auto check_program = [&](const std::string& word) -> std::string {
+        const std::size_t cut = word.find_last_of("\\/:");
+        const std::string name = lower(cut == std::string::npos ? word : word.substr(cut + 1));
+        const std::size_t dot = name.find_last_of('.');
+        const std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
+        if (!ext.empty() && ext != ".exe" && ext != ".com" && ext != ".bat" && ext != ".cmd")
+            refuse(word, "only a program (.exe, .com) or a batch file (.bat, .cmd) can be run; run a script "
+                         "through its program, such as powershell -NoProfile -File C:\\...\\x.ps1");
+        const bool drive = word.size() >= 2 && word[1] == ':';
+        if (!drive && std::any_of(name.begin(), name.end(), [](char c) {
+                return !(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-');
+            }))
+            refuse(word, "not a program name; write a program's name or its full path");
+        const std::string base = ext.empty() ? name : name.substr(0, dot);
+        for (const char* banned : {"start", "if", "for", "mshta", "wscript", "cscript", "explorer", "rundll32"})
+            if (base == banned)
+                refuse(word, "it can start programs these checks do not see; put the steps in a .cmd file in a "
+                             "folder only administrators can change");
+        return base;
+    };
+    // "-NoProfile", or any shortening of it PowerShell accepts ("-nop" at least).
+    const auto no_profile = [&](const std::string& word) {
+        const std::string w = lower(word);
+        if (w.size() < 4 || (w[0] != '-' && w[0] != '/')) return false;
+        return std::string("noprofile").rfind(w.substr(1), 0) == 0;
+    };
+    for (std::size_t i = 0; i < words.size(); ++i) {
+        check_path(words[i].text);
+        if (!words[i].starts_command) continue;
+        std::string program = words[i].text;
+        if (!program.empty() && program[0] == '@') program.erase(0, 1);
+        if (lower(program) == "call") {  // "call x": x is the program
+            if (i + 1 >= words.size() || words[i + 1].redirect_target) refuse(program, "nothing to call");
+            words[i + 1].starts_command = true;
+            continue;
+        }
+        const std::string base = check_program(program);
+        if (base == "powershell" || base == "pwsh") {
+            // Its profile scripts are files the user can change.
+            if (i + 1 >= words.size() || !no_profile(words[i + 1].text))
+                refuse(words[i].text, "PowerShell must be started with -NoProfile first");
+        } else if (base == "cmd") {
+            // A cmd inside the command: without /d it runs the user's AutoRun command, without
+            // /v:off it may expand !names!; what follows its /c or /k is a command again.
+            bool autorun_off = false;
+            bool expansion_off = false;
+            std::size_t k = i + 1;
+            for (; k < words.size(); ++k) {
+                const std::string sw = lower(words[k].text);
+                if (sw.empty() || sw[0] != '/') refuse(words[i].text, "cmd must be given /d /v:off and then /c");
+                if (sw == "/d") autorun_off = true;
+                if (sw == "/v:off") expansion_off = true;
+                if (sw == "/c" || sw == "/k") break;
+            }
+            if (k >= words.size() || !autorun_off || !expansion_off)
+                refuse(words[i].text, "cmd must be given /d /v:off and then /c");
+            if (k + 1 < words.size() && !words[k + 1].redirect_target) words[k + 1].starts_command = true;
         }
     }
 }

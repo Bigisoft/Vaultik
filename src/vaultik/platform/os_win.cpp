@@ -18,6 +18,7 @@
 #include <dpapi.h>
 #include <netlistmgr.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <winioctl.h>
 
 namespace vaultik::os {
@@ -808,8 +809,11 @@ int run_shell(const std::string& command, std::string* output) {
 }
 
 int run_shell(const std::string& command, const ShellOptions& o) {
-    // "cmd /s /c "<command>"": cmd drops the outer quotes and runs the rest exactly as typed.
-    std::wstring cmdline = L"cmd.exe /d /s /c \"" + widen(command) + L"\"";
+    // "cmd /s /c "<command>"": cmd drops the outer quotes and runs the rest exactly as typed. /d:
+    // no AutoRun command from the registry. With the fixed environment also /e:on /v:off, so the
+    // user's own registry settings do not change how the command is read.
+    std::wstring cmdline = std::wstring(L"cmd.exe /d ") + (o.clean_environment ? L"/e:on /v:off " : L"") +
+                           L"/s /c \"" + widen(command) + L"\"";
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     HANDLE read_end = nullptr;
     HANDLE write_end = nullptr;
@@ -857,12 +861,36 @@ int run_shell(const std::string& command, const ShellOptions& o) {
             {L"windir", root},
             {L"SystemDrive", root.substr(0, 2)},
             {L"ComSpec", root + L"\\System32\\cmd.exe"},
-            {L"PATHEXT", L".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WSF;.MSC"},
+            {L"PATHEXT", L".COM;.EXE;.BAT;.CMD"},  // a bare name never opens a script by its file type
             {L"Path", root + L"\\System32;" + root + L";" + root + L"\\System32\\Wbem;" + root +
                           L"\\System32\\WindowsPowerShell\\v1.0;" + root + L"\\System32\\OpenSSH"},
             {L"TEMP", root + L"\\Temp"},
             {L"TMP", root + L"\\Temp"},
+            {L"OS", L"Windows_NT"},
         };
+        // The usual system values many tools expect, from the system rather than this process's
+        // environment (which the user's own settings make up).
+        const auto known = [&](REFKNOWNFOLDERID id, const wchar_t* name) {
+            PWSTR p = nullptr;
+            if (SUCCEEDED(SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, nullptr, &p)) && p != nullptr) vars[name] = p;
+            CoTaskMemFree(p);
+        };
+        known(FOLDERID_ProgramData, L"ProgramData");
+        known(FOLDERID_ProgramData, L"ALLUSERSPROFILE");
+        known(FOLDERID_ProgramFiles, L"ProgramFiles");
+        known(FOLDERID_ProgramFilesX86, L"ProgramFiles(x86)");
+        known(FOLDERID_ProgramFilesCommon, L"CommonProgramFiles");
+        known(FOLDERID_ProgramFilesCommonX86, L"CommonProgramFiles(x86)");
+        known(FOLDERID_Public, L"PUBLIC");
+        wchar_t computer[MAX_COMPUTERNAME_LENGTH + 1] = {};
+        DWORD computer_len = MAX_COMPUTERNAME_LENGTH + 1;
+        if (GetComputerNameW(computer, &computer_len)) vars[L"COMPUTERNAME"] = computer;
+        SYSTEM_INFO info{};
+        GetNativeSystemInfo(&info);
+        vars[L"NUMBER_OF_PROCESSORS"] = std::to_wstring(info.dwNumberOfProcessors);
+        vars[L"PROCESSOR_ARCHITECTURE"] = info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64 ? L"ARM64"
+                                          : info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL ? L"x86"
+                                                                                                         : L"AMD64";
         for (const auto& [name, value] : o.extra_environment) vars[widen(name)] = widen(value);
         for (const auto& [name, value] : vars) env += name + L"=" + value + L'\0';
         env += L'\0';
