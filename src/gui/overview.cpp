@@ -1,5 +1,7 @@
 #include "overview.h"
 
+#include <algorithm>
+
 #include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
@@ -8,6 +10,7 @@
 #include <QLabel>
 #include <QLocale>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QToolTip>
@@ -16,6 +19,38 @@
 #include "theme.h"
 
 namespace {
+
+// Green when the drive is fine, amber when it is wearing or has bad sectors, red near the end.
+QColor health_color(int percent) {
+    const Theme& t = theme();
+    return percent >= 70 ? t.success : percent >= 30 ? t.warning : t.danger;
+}
+
+// A small bar for a health percentage (-1: unknown, an empty track).
+class HealthBar : public QWidget {
+public:
+    HealthBar(int percent, QColor color) : percent_(percent), color_(color) { setFixedSize(64, 8); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QRectF r = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        const qreal radius = r.height() / 2;
+        p.setPen(Qt::NoPen);
+        p.setBrush(theme().border);
+        p.drawRoundedRect(r, radius, radius);
+        if (percent_ <= 0) return;
+        QRectF fill = r;
+        fill.setWidth(std::max(r.height(), r.width() * percent_ / 100.0));
+        p.setBrush(color_);
+        p.drawRoundedRect(fill, radius, radius);
+    }
+
+private:
+    int percent_;
+    QColor color_;
+};
 
 constexpr int kCell = 13;
 constexpr int kGap = 3;
@@ -305,7 +340,8 @@ void OverviewView::set_data(const OverviewData& d) {
     }
     calendar_->set_days(d.days);
 
-    // One row per drive: its role, the drive, and its health (in colour when it has a problem).
+    // One row per drive: its role, the drive, its health percentage and its state (in colour
+    // when it has a problem).
     auto* grid = static_cast<QGridLayout*>(drives_list_->layout());
     while (QLayoutItem* item = grid->takeAt(0)) {
         delete item->widget();
@@ -326,11 +362,32 @@ void OverviewView::set_data(const OverviewData& d) {
         status->setTextFormat(Qt::PlainText);
         status->setWordWrap(true);
         if (drive.problem) status->setStyleSheet(QStringLiteral("color: %1;").arg(t.danger.name()));
+        auto* health = new QWidget;
+        auto* hl = new QHBoxLayout(health);
+        hl->setContentsMargins(8, 0, 8, 0);
+        hl->setSpacing(6);
+        auto* percent = new QLabel;
+        percent->setMinimumWidth(QFontMetrics(percent->font()).horizontalAdvance(QStringLiteral("100%")) + 2);
+        percent->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        if (drive.health >= 0) {
+            const QColor color = health_color(drive.health);
+            percent->setText(tr("%1%").arg(drive.health));
+            percent->setStyleSheet(QStringLiteral("color: %1; font-weight: 600;").arg(color.name()));
+            hl->addWidget(new HealthBar(drive.health, color));
+            health->setToolTip(tr("Health %1%").arg(drive.health));
+        } else {
+            percent->setText(tr("n/a"));
+            percent->setProperty("role", "faint");
+            hl->addWidget(new HealthBar(-1, t.border));
+            health->setToolTip(drive.health_unknown);
+        }
+        hl->addWidget(percent);
         grid->addWidget(role, row, 0);
         grid->addWidget(icon_label, row, 1);
         grid->addWidget(name, row, 2);
-        grid->addWidget(status, row, 3);
+        grid->addWidget(health, row, 3);
+        grid->addWidget(status, row, 4);
         ++row;
     }
-    grid->setColumnStretch(3, 1);
+    grid->setColumnStretch(4, 1);
 }

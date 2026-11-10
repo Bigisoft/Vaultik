@@ -40,6 +40,8 @@ struct OverviewData {
         QString name;    // "WD My Passport 2627 (USB HDD, 4.55 TiB)"
         QString status;  // "healthy", or the problem
         bool problem = false;
+        int health = -1;         // the health percentage, -1 when unknown
+        QString health_unknown;  // why it is unknown (a tooltip)
     };
     std::vector<Drive> drives;
 

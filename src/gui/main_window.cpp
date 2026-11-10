@@ -1295,7 +1295,12 @@ void MainWindow::refresh_overview() {
             case os::DriveHealth::Status::Unhealthy: notes << tr("failing"); break;
             case os::DriveHealth::Status::Unknown: notes << tr("health unknown"); break;
         }
-        if (const auto p = h.health_percent()) notes << tr("health %1%").arg(*p);
+        dr.health = h.health_percent().value_or(-1);
+        if (dr.health < 0)
+            dr.health_unknown = os::process_elevated()
+                                    ? tr("This drive does not report what its health could be worked out from.")
+                                    : tr("Start Vaultik as administrator (Settings) to see the health of hard disks "
+                                         "and SATA SSDs.");
         if (!h.condition.empty()) notes << qs(h.condition);
         for (const std::string& issue : h.smart_issues)
             if (issue != h.condition) notes << qs(issue);
