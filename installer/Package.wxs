@@ -58,9 +58,10 @@
                      System="yes" Permanent="no" />
         <!-- Administrators and SYSTEM may change the folder, everyone else only run the programs,
              also outside Program Files (a folder on another drive would otherwise inherit that
-             any user may change it). Protected: the parent's permissions do not flow in. -->
+             any user may change it). Protected: the parent's permissions do not flow in. Owned by
+             Administrators, so a user who made the folder before cannot change its permissions. -->
         <CreateFolder>
-          <PermissionEx Sddl="D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
+          <PermissionEx Sddl="O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)" />
         </CreateFolder>
       </Component>
     </ComponentGroup>
