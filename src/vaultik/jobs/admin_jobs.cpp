@@ -21,11 +21,17 @@ namespace vaultik::jobs {
 #ifdef _WIN32
 namespace {
 
-// A field of the job for the question below, shown in full: control and text-direction
-// characters (which could fake its layout or wording) become U+FFFD, and a run of more than 3
-// spaces is shown as "[n spaces]" so it cannot push text out of view. A field too long to show in
-// full is refused rather than cut: what is approved must be exactly what is seen.
+// A field of the job for the question below, shown in full. Only letters, digits and punctuation
+// (of any script) and the plain space are shown as they are; every other character (controls,
+// text-direction marks, other kinds of spaces, invisible or combining characters) is shown as
+// U+FFFD, so nothing in a field can fake the layout or wording of the question or hide text. A run
+// of more than 3 spaces is shown as "[n spaces]". A field too long to show in full is refused
+// rather than cut: what is approved must be exactly what is seen.
 std::wstring shown(const std::string& utf8, const std::string& what) {
+    const std::wstring in = widen(utf8);
+    std::vector<WORD> types(in.size() + 1, 0);
+    if (!in.empty() && !GetStringTypeW(CT_CTYPE1, in.data(), static_cast<int>(in.size()), types.data()))
+        throw Error(what + " cannot be shown for approval");
     std::wstring out;
     std::size_t spaces = 0;
     const auto flush_spaces = [&] {
@@ -33,19 +39,20 @@ std::wstring shown(const std::string& utf8, const std::string& what) {
         else out.append(spaces, L' ');
         spaces = 0;
     };
-    for (const wchar_t c : widen(utf8)) {
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        const wchar_t c = in[i];
         if (c == L' ') {
             ++spaces;
             continue;
         }
         flush_spaces();
-        const bool hidden = c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0x061C || c == 0x180E ||
-                            (c >= 0x200B && c <= 0x200F) || (c >= 0x2028 && c <= 0x202E) ||
-                            (c >= 0x2060 && c <= 0x206F) || c == 0xFEFF;
-        out += hidden ? L'\uFFFD' : c;
+        const WORD t = types[i];
+        const bool visible = (t & (C1_ALPHA | C1_DIGIT | C1_PUNCT)) != 0 && (t & (C1_CNTRL | C1_SPACE | C1_BLANK)) == 0 &&
+                             !(c >= 0xD800 && c <= 0xDFFF);  // (halves of a surrogate pair: not shown)
+        out += visible ? c : L'�';
     }
     flush_spaces();
-    if (out.size() > 400) throw Error(what + " is too long to show in full for approval; shorten it");
+    if (out.size() > 300) throw Error(what + " is too long to show in full for approval; shorten it");
     return out;
 }
 
@@ -54,33 +61,39 @@ std::wstring shown(const std::string& utf8, const std::string& what) {
 // own job file, which any program running as the user could have changed (the backup password is
 // readable by the user too), and the approval prompt does not show what the job contains. So the
 // elevated step shows what the job does and asks, unless the admin copy is exactly the same job
-// with the same cloud keys. A program without administrator rights cannot answer this window.
+// with the same cloud keys. A program without administrator rights cannot answer this window. The
+// commands and destinations come first; a job whose description does not fit is refused.
 void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_secrets) {
     if (approved && same_secrets && to_json(*approved) == to_json(job)) return;
-    std::wstring text = L"The backup job \"" + shown(job.name, "the job's name") + L"\" will run with administrator rights:\n\n";
-    text += L"Back up:\n";
-    if (job.sources.size() > 20)
-        throw Error("the job backs up more than 20 folders and files, too many to show in full for approval");
-    for (const std::string& src : job.sources) text += L"    " + shown(src, "a folder to back up") + L"\n";
-    if (!job.excludes.empty()) {
-        text += L"Skipping:  ";
-        for (std::size_t i = 0; i < job.excludes.size() && i < 10; ++i)
-            text += (i ? L", " : L"") + shown(job.excludes[i], "a pattern to skip");
-        text += job.excludes.size() > 10 ? L", ...\n" : L"\n";
-    }
-    text += L"To:  " + shown(job.repository, "the destination") + L"\n";
+    if (job.sources.size() > 12 || job.excludes.size() > 12)
+        throw Error("the job has too many folders or patterns to show in full for approval (at most 12 of each)");
+    std::wstring text = L"The backup job \"" + shown(job.name, "the job's name") + L"\" will run with administrator rights.\n\n";
+    if (!job.before_command.empty())
+        text += L"Command run before each backup:\n    " + shown(job.before_command, "the command before the backup") + L"\n";
+    if (!job.after_command.empty())
+        text += L"Command run after each backup:\n    " + shown(job.after_command, "the command after the backup") + L"\n";
+    text += L"Saves the backup to:\n    " + shown(job.repository, "the destination") + L"\n";
     if (!job.cloud_key_id.empty()) text += L"    with the access key " + shown(job.cloud_key_id, "the access key") + L"\n";
     if (!job.second_copy.repository.empty()) {
-        text += L"Second copy:  " + shown(job.second_copy.repository, "the second copy's destination") + L"\n";
+        text += L"And a second copy to:\n    " + shown(job.second_copy.repository, "the second copy's destination") + L"\n";
         if (!job.second_copy.cloud_key_id.empty())
             text += L"    with the access key " + shown(job.second_copy.cloud_key_id, "the access key") + L"\n";
     }
-    if (!job.before_command.empty()) text += L"Command before:  " + shown(job.before_command, "the command before the backup") + L"\n";
-    if (!job.after_command.empty()) text += L"Command after:  " + shown(job.after_command, "the command after the backup") + L"\n";
+    text += L"Backs up:\n";
+    for (const std::string& src : job.sources) text += L"    " + shown(src, "a folder to back up") + L"\n";
+    if (!job.excludes.empty()) {
+        text += L"Skipping:\n";
+        for (const std::string& ex : job.excludes) text += L"    " + shown(ex, "a pattern to skip") + L"\n";
+    }
     if (approved && same_secrets) text += L"\n(Some other setting of the job changed.)\n";
     if (!same_secrets) text += L"\n(Its cloud storage keys or sign-ins are new or changed.)\n";
     text += L"\nAnyone who knows the backup's password can read what it backs up. Allow this only if you set "
             L"the job up like this yourself. Allow?";
+    // Everything must be on screen: a message box does not scroll.
+    const auto lines = static_cast<std::size_t>(std::count(text.begin(), text.end(), L'\n'));
+    if (text.size() > 4000 || lines > 45)
+        throw Error("the job's description is too long to show in full for approval; shorten its folders, "
+                    "patterns or commands");
     const int answer = MessageBoxW(nullptr, text.c_str(), L"Vaultik: a job with administrator rights",
                                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND);
     if (answer != IDYES)
