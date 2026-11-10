@@ -77,6 +77,7 @@ private:
     Repository& repo_;
     const RestoreOptions& options_;
     RestoreResult result_;
+    std::uint64_t kept_permissions_ = 0;  // existing folders whose stored permissions were not applied
     RestoreProgress progress_;
     std::chrono::steady_clock::time_point last_report_{};
 };
@@ -292,12 +293,19 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
             os::ErrorCode err = 0;
             os::File made = os::File::create_directory(path, err);
             if (!made.valid()) {
+                // Only a folder that is there already (or a system without the call) goes on
+                // without a handle; never make the folder some other way without its permissions.
+                if (!os::is_exists(err) && !os::is_not_supported(err)) {
+                    warn("cannot create folder " + path + ": " + os::error_message(err));
+                    return;
+                }
                 try {
                     ensure_dir(path);
                 } catch (const Error& e) {
                     warn(e.what());
                     return;
                 }
+                if (os::is_exists(err) && options_.permissions && node.security) ++kept_permissions_;
             }
             restore_children(node.subtree, path);
             os::set_metadata(path, info_of(node));  // after the children, so times and permissions stick
@@ -339,6 +347,10 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
         restore_node(start, root);
     }
     report();
+    if (kept_permissions_ > 0 && options_.on_warning)
+        options_.on_warning(std::to_string(kept_permissions_) +
+                            " folder(s) existed already and kept their own permissions (only folders the "
+                            "restore creates get the stored ones)");
     return result_;
 }
 

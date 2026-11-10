@@ -111,6 +111,10 @@ bool is_exists(ErrorCode code) {
     return code == EEXIST;
 }
 
+bool is_not_supported(ErrorCode code) {
+    return code == ENOTSUP;
+}
+
 void throw_error(const std::string& what, ErrorCode code) {
     throw OsError(what, code);
 }

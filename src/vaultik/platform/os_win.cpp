@@ -90,6 +90,10 @@ bool is_exists(ErrorCode code) {
     return code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS;
 }
 
+bool is_not_supported(ErrorCode code) {
+    return code == ERROR_NOT_SUPPORTED;
+}
+
 void throw_error(const std::string& what, ErrorCode code) {
     throw OsError(what, code);
 }
@@ -383,7 +387,8 @@ File File::create_directory(const std::string& path, ErrorCode& err) {
             return File(reinterpret_cast<std::intptr_t>(h));
         }
         err = to_error(status);
-        if (err != ERROR_ACCESS_DENIED) break;
+        // Refused for the owner right: try again without it. Anything else is the answer.
+        if (err != ERROR_ACCESS_DENIED && err != ERROR_PRIVILEGE_NOT_HELD && err != ERROR_INVALID_OWNER) break;
     }
     return File();
 }

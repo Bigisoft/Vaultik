@@ -39,6 +39,8 @@ ErrorCode last_error();
 std::string error_message(ErrorCode code);
 bool is_not_found(ErrorCode code);
 bool is_exists(ErrorCode code);
+// The call does not exist on this system (POSIX stubs of Windows-only calls).
+bool is_not_supported(ErrorCode code);
 
 // An Error that carries the OS error code, so a caller can skip one file and carry on.
 class OsError : public Error {
