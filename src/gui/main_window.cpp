@@ -1279,6 +1279,8 @@ void MainWindow::refresh_overview() {
         d.backup_when[0] = d.backup_when[0].toUpper();
         if (backup->status == jobs::RunStatus::Failed || backup->status == jobs::RunStatus::Cancelled)
             d.backup_detail = status_text(backup->status) + (backup->message.empty() ? QString() : ": " + qs(backup->message));
+        else if (backup->snapshot.empty())  // "only when something changed", and nothing had
+            d.backup_detail = tr("Nothing changed, so no new version was needed");
         else
             d.backup_detail = tr("%1, %2 new").arg(count_of(backup->files, tr("file"), tr("files")),
                                                    format_bytes(backup->new_bytes)) +

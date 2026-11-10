@@ -30,6 +30,9 @@ struct BackupOptions {
     // latest snapshot from this computer with the same paths is used.
     std::optional<Id> parent;
     bool use_parent = true;
+    // Save no new snapshot when nothing changed since the parent (the same tree: every file,
+    // folder and their metadata as before). The result then says so (unchanged).
+    bool skip_unchanged = false;
 
     // Where to read a path from (for example inside a shadow copy). Snapshot paths, excludes and
     // messages always use the real path. Unset: read the path itself.
@@ -60,8 +63,9 @@ struct ChangeAlarm {
 };
 
 struct BackupResult {
-    Id snapshot_id{};
+    Id snapshot_id{};  // zero when `unchanged`
     Snapshot snapshot;
+    bool unchanged = false;  // skip_unchanged and nothing changed: no snapshot was saved
     ChangeAlarm alarm;
     std::vector<std::string> missing_sources;  // backup paths that could not be read at all
 };

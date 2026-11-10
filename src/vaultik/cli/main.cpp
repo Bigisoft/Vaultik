@@ -87,6 +87,7 @@ Commands:
       --tag <tag>              Label the snapshot (repeatable)
       --no-parent              Re-read every file instead of reusing unchanged ones
       --parent <snapshot>      Compare against this snapshot instead of the latest
+      --skip-unchanged         Save no snapshot when nothing changed since it
       --threads <n>            Compress and encrypt on n worker threads (default: up
                                to 4; 0 at background priority or with --max-memory)
       --uploads <n>            Upload n packs in the background (default 2 for cloud
@@ -266,7 +267,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled"};
+                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -725,6 +726,9 @@ void raise_alarm(Repository& repo, const BackupResult& r, jobs::RunRecord& recor
     }
 }
 
+// The message of a run that found nothing changed (and so saved no version).
+constexpr const char* kUnchanged = "nothing changed since the last version, so no new one was saved";
+
 int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
                       RepoLock& lock, VssMode vss, bool pause_sql_server) {
     // Never back up the repository into itself.
@@ -781,13 +785,15 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
     const SnapshotStats& s = r.snapshot.stats;
     record.finished = os::now();
     record.status = s.errors > 0 ? jobs::RunStatus::Partial : jobs::RunStatus::Success;
-    record.snapshot = id_hex(r.snapshot_id);
+    record.snapshot = r.unchanged ? std::string() : id_hex(r.snapshot_id);
     record.files = s.files;
     record.bytes = s.bytes;
     record.new_bytes = s.new_bytes;
     record.stored_bytes = s.stored_bytes;
     record.errors = s.errors;
     record.message = s.errors > 0 ? std::to_string(s.errors) + " item(s) could not be read" : "";
+    if (r.unchanged)
+        record.message = std::string(kUnchanged) + (record.message.empty() ? "" : "; " + record.message);
     if (r.alarm.raised()) raise_alarm(repo, r, record);
     // A source that is gone (a detached disk, a locked volume, an unreachable share) or a sharp
     // drop in files makes a near-empty version; removing old versions by count or by day would
@@ -814,11 +820,15 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
               {"skipped", s.skipped},
               {"errors", s.errors},
               {"alert", record.alert},
+              {"unchanged", r.unchanged},
               {"seconds", seconds_since(start)}});
         return s.errors > 0 ? kExitPartial : kExitOk;
     }
     clear_status();
-    out("Snapshot " + short_id(r.snapshot_id) + " saved\n");
+    if (r.unchanged)
+        out("Nothing changed since snapshot " + short_id(*r.snapshot.parent) + "; no new snapshot was saved\n");
+    else
+        out("Snapshot " + short_id(r.snapshot_id) + " saved\n");
     out("  files:    " + std::to_string(s.files) + " in " + std::to_string(s.dirs) + " folders, " +
         format_bytes(s.bytes) + "\n");
     out("  new data: " + format_bytes(s.new_bytes) + ", stored " + format_bytes(s.stored_bytes) +
@@ -860,6 +870,7 @@ int cmd_backup(const Args& a) {
     o.excludes = a.all("--exclude");
     o.tags = a.all("--tag");
     o.use_parent = !a.has("--no-parent");
+    o.skip_unchanged = a.has("--skip-unchanged");
     if (auto p = a.value("--parent")) o.parent = resolve_snapshot(*repo, *p).id;
     jobs::RunRecord record;
     return backup_and_report(*repo, std::move(o), repo_path(a), record, lock, vss_arg(a, kDefaultVss),
@@ -1841,6 +1852,7 @@ int cmd_run_job(const Args& a) {
         o.excludes = job->excludes;
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
+        o.skip_unchanged = job->skip_unchanged;
         {
             // A scheduled run waits a while for a prune of the same repository to finish.
             RepoLock lock(*repo, RepoLock::Mode::Shared, "backup (job " + job->id + ")",

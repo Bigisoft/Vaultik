@@ -118,6 +118,9 @@ struct Job {
     std::string repository_relative;  // the folder below the volume's root
     // Windows: also back up as soon as the destination drive is connected (watched by the tray).
     bool backup_on_connect = false;
+    // Save a version only when something changed since the last one (a run that finds nothing
+    // changed is recorded as a success without a version).
+    bool skip_unchanged = false;
     // Command lines run by run-job before and after the backup (cmd.exe on Windows): e.g. a
     // database dump before, starting a stopped program again after. A failing "before" command
     // stops the run; "after" runs whatever happened, with VAULTIK_RESULT set to the result.

@@ -80,6 +80,7 @@ private:
     QCheckBox* check_monthly_ = nullptr;
     QCheckBox* check_restore_ = nullptr;
     QCheckBox* skip_battery_ = nullptr;
+    QCheckBox* skip_unchanged_ = nullptr;
     QCheckBox* wake_ = nullptr;
     QCheckBox* skip_metered_ = nullptr;
     QLineEdit* before_command_ = nullptr;

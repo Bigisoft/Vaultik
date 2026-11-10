@@ -392,6 +392,10 @@ QWidget* JobDialog::build_schedule() {
     wake_ = new QCheckBox(tr("Wake the computer from sleep to back up"));
     skip_metered_ = new QCheckBox(tr("Cloud storage: not over a metered connection (mobile data)"));
     skip_metered_->setToolTip(tr("A skipped run shows in the Activity tab; the next scheduled run tries again."));
+    skip_unchanged_ = new QCheckBox(tr("Only save a version when something changed"));
+    skip_unchanged_->setToolTip(tr("A run that finds every file as it was shows in the Activity tab as \"nothing "
+                                   "changed\" and still counts as a backup; no new version is added."));
+    form->addRow(tr("Versions:"), skip_unchanged_);
     form->addRow(tr("Scheduled runs:"), skip_battery_);
     form->addRow(QString(), wake_);
     form->addRow(QString(), skip_metered_);
@@ -724,6 +728,7 @@ void JobDialog::load(const jobs::Job& job) {
     minute_->setValue(job.schedule.minute);
     for (int d = 0; d < 7; ++d) days_[d]->setChecked((job.schedule.weekdays >> d) & 1u);
     skip_battery_->setChecked(job.schedule.skip_on_battery);
+    skip_unchanged_->setChecked(job.skip_unchanged);
     wake_->setChecked(job.schedule.wake_computer);
     skip_metered_->setChecked(job.schedule.skip_metered);
     update_schedule_fields();
@@ -825,6 +830,7 @@ jobs::Job JobDialog::collect() const {
     for (int d = 0; d < 7; ++d)
         if (days_[d]->isChecked()) j.schedule.weekdays |= static_cast<std::uint8_t>(1u << d);
     j.schedule.skip_on_battery = skip_battery_->isChecked();
+    j.skip_unchanged = skip_unchanged_->isChecked();
     j.schedule.wake_computer = wake_->isChecked();
     j.schedule.skip_metered = skip_metered_->isChecked();
 

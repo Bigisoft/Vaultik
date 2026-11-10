@@ -778,3 +778,28 @@ TEST_CASE("a failed background upload fails the backup and saves no version") {
     CHECK(repo->list_snapshot_ids().empty());
     CHECK_THROWS(repo->flush());  // still failed: nothing written later can count as stored
 }
+
+TEST_CASE("only when something changed: an unchanged backup saves no version") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "a.txt", text("one"));
+    write_file(src / "sub" / "b.txt", text("two"));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    options.skip_unchanged = true;
+    const BackupResult first = run_backup(*repo, options);  // no parent: always saved
+    CHECK_FALSE(first.unchanged);
+    const BackupResult second = run_backup(*repo, options);
+    CHECK(second.unchanged);
+    CHECK(repo->list_snapshot_ids().size() == 1);
+    append_file(src / "sub" / "b.txt", text(" more"));
+    const BackupResult third = run_backup(*repo, options);
+    CHECK_FALSE(third.unchanged);
+    CHECK(repo->list_snapshot_ids().size() == 2);
+    options.skip_unchanged = false;  // without the option every run saves one
+    CHECK_FALSE(run_backup(*repo, options).unchanged);
+    CHECK(repo->list_snapshot_ids().size() == 3);
+}

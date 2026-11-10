@@ -124,6 +124,22 @@ private:
     void scan_streams(const std::string& path, Node& node);
     bool store_stream(os::File& file, std::vector<Id>& content, std::uint64_t& total);
     std::map<Bytes, Id> security_ids_;
+    // Whether anything differs from the parent snapshot (for skip_unchanged): an item added, or
+    // one whose content or metadata changed. A folder's own times are left out: NTFS updates
+    // them lazily, so they drift without any change, and an added or removed entry counts anyway.
+    bool changed_ = false;
+    void note_change(const Node& n, const Node* old) {
+        if (old == nullptr) {
+            changed_ = true;
+            return;
+        }
+        const bool same = n.kind == old->kind && n.attributes == old->attributes && n.mode == old->mode &&
+                          n.uid == old->uid && n.gid == old->gid && n.size == old->size && n.content == old->content &&
+                          n.link_target == old->link_target && n.security == old->security &&
+                          n.streams == old->streams && n.link == old->link &&
+                          (n.kind == NodeKind::Dir || (n.mtime == old->mtime && n.ctime == old->ctime));
+        if (!same) changed_ = true;
+    }
     bool all_present(const std::vector<Id>& ids) const;
     Id save_virtual(const VirtualDir& dir);
     void warn(const std::string& message);
@@ -430,7 +446,10 @@ Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, c
         if (excluder_.excluded(name, child)) continue;
         Node node = node_from_info(info, name);
         const Node* pnode = parent != nullptr ? parent->find(node.name) : nullptr;
-        if (scan_entry(child, info, device, node, pnode)) tree.nodes.push_back(std::move(node));
+        if (scan_entry(child, info, device, node, pnode)) {
+            note_change(node, pnode);
+            tree.nodes.push_back(std::move(node));
+        }
     }
     if (!reader.ok()) warn("listing " + dir + " stopped early: " + os::error_message(reader.error()));
     tree.sort();
@@ -489,10 +508,12 @@ BackupResult BackupEngine::run() {
     snap.tags = options_.tags;
 
     std::optional<Tree> parent_root;
+    std::optional<Id> parent_tree;  // the parent's root tree, to see whether anything changed
     snap.parent = find_parent(snap.paths);
     if (snap.parent) {
         try {
             const Snapshot ps = repo_.load_snapshot(*snap.parent);
+            parent_tree = ps.tree;
             alarm_.parent_files = ps.stats.files;
             parent_root = load_tree(ps.tree);
         } catch (const Error& e) {
@@ -528,6 +549,7 @@ BackupResult BackupEngine::run() {
         std::optional<Node> pnode;
         if (parent_root) pnode = lookup(*parent_root, s.comps);
         if (!scan_entry(s.full, info, info.device, node, pnode ? &*pnode : nullptr)) continue;
+        note_change(node, pnode ? &*pnode : nullptr);
 
         VirtualDir* cur = &root;
         for (std::size_t i = 0; i + 1 < s.comps.size(); ++i) cur = &cur->dirs[s.comps[i]];
@@ -543,6 +565,13 @@ BackupResult BackupEngine::run() {
     report(true);
 
     BackupResult result;
+    if (options_.skip_unchanged && parent_tree && !changed_ && stats_.items_removed == 0 && missing_sources_.empty()) {
+        // Exactly what the last version holds: nothing to save.
+        result.unchanged = true;
+        result.snapshot = std::move(snap);
+        result.alarm = std::move(alarm_);
+        return result;
+    }
     result.snapshot_id = repo_.save_snapshot(snap);
     result.snapshot = std::move(snap);
     result.alarm = std::move(alarm_);

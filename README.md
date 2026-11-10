@@ -101,7 +101,11 @@ Start `vaultik-gui`, then **New backup job**:
   Scheduled runs can skip while the computer runs on battery, wake the computer from sleep at
   their time, and, for cloud storage, skip over a metered connection such as mobile data (the
   skipped run shows in the Activity tab; the next scheduled one tries again). "Back up now"
-  always runs.
+  always runs. "Only save a version when something changed" makes a run that finds every file
+  and folder as in the last version (content, times, attributes, permissions, streams; a folder's
+  own times aside, which Windows updates lazily) save no new version; it shows as "nothing
+  changed" and still counts as a backup for the overdue reminder (`vaultik backup
+  --skip-unchanged` on the command line).
   On Windows a job can also run with administrator rights, so scheduled runs use a shadow copy
   for open and locked files. Windows then asks for administrator approval each time the job (or
   its schedule) is saved or removed. Without the option, the task runs with normal rights and
