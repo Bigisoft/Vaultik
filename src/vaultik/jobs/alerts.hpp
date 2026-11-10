@@ -25,6 +25,7 @@ struct AlertSettings {
     std::string telegram_chat;  // the chat id the bot writes to
     std::string webhook_url;
     bool any() const { return !ntfy_url.empty() || !telegram_chat.empty() || !webhook_url.empty(); }
+    bool operator==(const AlertSettings&) const = default;
 };
 
 AlertSettings load_alerts(const std::string& dir = config_dir());

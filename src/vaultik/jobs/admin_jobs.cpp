@@ -5,6 +5,7 @@
 #include <system_error>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
@@ -68,8 +69,9 @@ std::wstring shown(const std::string& utf8, const std::string& what) {
 // elevated step shows what the job does and asks, unless the admin copy is exactly the same job
 // with the same cloud keys. A program without administrator rights cannot answer this window. The
 // commands and destinations come first; a job whose description does not fit is refused.
-void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_secrets) {
-    if (approved && same_secrets && to_json(*approved) == to_json(job)) return;
+void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_secrets, const AlertSettings& alerts,
+                 bool same_alerts) {
+    if (approved && same_secrets && same_alerts && to_json(*approved) == to_json(job)) return;
     if (job.sources.size() > 12 || job.excludes.size() > 12)
         throw Error("the job has too many folders or patterns to show in full for approval (at most 12 of each)");
     std::wstring text = L"The backup job \"" + shown(job.name, "the job's name") + L"\" will run with administrator rights.\n\n";
@@ -85,6 +87,14 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
         text += L"And a second copy to:\n    " + shown(job.second_copy.repository, "the second copy's destination") + L"\n";
         if (!job.second_copy.cloud_key_id.empty())
             text += L"    with the access key " + shown(job.second_copy.cloud_key_id, "the access key") + L"\n";
+    }
+    if (alerts.any()) {
+        text += L"Sends alerts to:\n";
+        if (!alerts.ntfy_url.empty()) text += L"    " + shown(alerts.ntfy_url, "the ntfy URL") + L"\n";
+        if (!alerts.ntfy_email.empty()) text += L"    " + shown(alerts.ntfy_email, "the alert email") + L"\n";
+        if (!alerts.telegram_chat.empty())
+            text += L"    Telegram chat " + shown(alerts.telegram_chat, "the Telegram chat") + L"\n";
+        if (!alerts.webhook_url.empty()) text += L"    " + shown(alerts.webhook_url, "the webhook URL") + L"\n";
     }
     text += L"Backs up:\n";
     for (const std::string& src : job.sources) text += L"    " + shown(src, "a folder to back up") + L"\n";
@@ -275,7 +285,28 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
         } catch (const std::exception&) {
             same_secrets = false;  // no readable approved copy: ask
         }
-        confirm_job(*job, to.find(id), same_secrets);
+        // The alerts of administrator runs: the user's alert settings, copied into the admin store
+        // with the job and approved with it (an elevated run never reads the user's own copy).
+        const AlertSettings alerts = load_alerts(from.dir());
+        std::string ntfy = alert_secret("ntfy", from.dir());
+        std::string telegram = alert_secret("telegram", from.dir());
+        std::string old_ntfy = alert_secret("ntfy", dir);
+        std::string old_telegram = alert_secret("telegram", dir);
+        const bool same_alerts = load_alerts(dir) == alerts && old_ntfy == ntfy && old_telegram == telegram;
+        secure_wipe(old_ntfy.data(), old_ntfy.size());
+        secure_wipe(old_telegram.data(), old_telegram.size());
+        try {
+            confirm_job(*job, to.find(id), same_secrets, alerts, same_alerts);
+            save_alerts(alerts, dir);
+            set_alert_secret("ntfy", ntfy, dir);
+            set_alert_secret("telegram", telegram, dir);
+        } catch (...) {
+            secure_wipe(ntfy.data(), ntfy.size());
+            secure_wipe(telegram.data(), telegram.size());
+            throw;
+        }
+        secure_wipe(ntfy.data(), ntfy.size());
+        secure_wipe(telegram.data(), telegram.size());
         to.save(*job);
         if (pw.empty()) {
             os::remove_file(os::join(os::join(dir, "secrets"), id + ".key"));

@@ -470,10 +470,13 @@ and optionally after every backup:
 - **Webhook**: a JSON POST (`source`, `event`, `level`, `job`, `title`, `message`, `computer`,
   `time`) to any https URL.
 
-Alerts name the computer and the job and say what happened, never file names or content (the
-ransomware warning names the suspicious files). Settings are in `alerts.json` in Vaultik's settings
-folder; the tokens are sealed like job passwords. URLs must use https (http only to this
-computer). **Save and send a test**, or `vaultik alert-test`, checks every channel.
+Alerts name the computer and the job and say what happened in fixed words, with counts; never a
+run's own message, file names, paths or content, which stay in Vaultik's history. Settings are in
+`alerts.json` in Vaultik's settings folder; the tokens are sealed like job passwords. URLs must
+use https (http only to this computer). **Save and send a test**, or `vaultik alert-test`, checks
+every channel. A job with administrator rights never reads your own alert settings: they are
+copied into the admin-only store with the job, shown in the question before it is approved, and
+updated the next time such a job is saved.
 
 ### Commands before and after a backup
 
