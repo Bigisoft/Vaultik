@@ -118,7 +118,15 @@ Start `vaultik-gui`, then **New backup job**:
   and saving it updates the copy; so does changing the password in Vaultik. The copy is taken from
   your own job file, which a program running as you could have changed, so when what the job backs
   up, where it saves it, or its commands differ from the copy already approved (or there is none
-  yet), the approved step shows them and asks before it copies them.
+  yet), the approved step shows them and asks before it copies them. Scheduled runs of such a
+  job use the Windows system account, not yours, so they also run when nobody is signed in and
+  your profile, registry and environment play no part; the job's secrets in the copy are sealed
+  with the computer's key so that account can open them. Each run first checks that the account
+  that approved the job is still an administrator of the computer (and not disabled), and does not
+  run otherwise. The system account cannot sign in to network shares, so a job whose destination
+  or folders are on one cannot use the option (back up over SFTP or WebDAV instead). The task
+  itself can be read by your account but changed only by administrators. A job saved with an
+  older version keeps running as your own account until it is saved again.
 - **Resources:** a priority preset and optional hard limits (see below).
 - **Old backups:** a preset: **Smart** (the default: one version per day for 7 days, per week
   for 4 weeks and per month for 12 months), the newest N versions, every version of the last N
@@ -514,7 +522,7 @@ command runs once the "before" one succeeded (or there is none), whatever the ba
 before the second copy and the checks; `VAULTIK_RESULT` holds the result (`success`, `partial`,
 `failed`, `cancelled`), and `VAULTIK_JOB` and `VAULTIK_JOB_NAME` the job. The start of their
 output goes to the log; a failing "after" command is a warning. They run with the job's rights:
-for a job with administrator rights, as administrator, from the approved copy of the job in the
+for a job with administrator rights, as the system account, from the approved copy of the job in the
 admin-only store, so a program running as you cannot change what they are. Since the job file it
 is copied from is yours, and any program running as you could have added a command to it, the
 elevated step that copies the job shows the exact commands and asks before it copies new or
