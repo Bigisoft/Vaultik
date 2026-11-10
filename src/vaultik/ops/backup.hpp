@@ -34,6 +34,14 @@ struct BackupOptions {
     // folder and their metadata as before). The result then says so (unchanged).
     bool skip_unchanged = false;
 
+    // The change journal (Windows, with administrator rights; see platform/usn_journal.hpp): when
+    // the parent snapshot is `journal_parent`, a folder for which `dir_unchanged(path)` is true had
+    // nothing in it added, removed, renamed or changed since that snapshot, so its listing (and its
+    // files, whose content is in the repository) is taken from the parent without reading the
+    // folder. Its subfolders are asked in turn. Unset: every folder is read.
+    std::optional<Id> journal_parent;
+    std::function<bool(const std::string& dir)> dir_unchanged;
+
     // Where to read a path from (for example inside a shadow copy). Snapshot paths, excludes and
     // messages always use the real path. Unset: read the path itself.
     std::function<std::string(const std::string&)> read_path;
@@ -68,6 +76,7 @@ struct BackupResult {
     bool unchanged = false;  // skip_unchanged and nothing changed: no snapshot was saved
     ChangeAlarm alarm;
     std::vector<std::string> missing_sources;  // backup paths that could not be read at all
+    std::uint64_t dirs_reused = 0;             // folders taken from the parent through the change journal
 };
 
 // What a backup of `paths` would read: files, folders and bytes, after the exclusions, walked as a

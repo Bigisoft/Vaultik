@@ -473,6 +473,53 @@ TEST_CASE("move to this PC finds an old account's folders") {
     CHECK(fs::is_directory(tmp.path / "here" / "Outlook Files"));
 }
 
+TEST_CASE("folders the change journal calls unchanged are taken from the parent") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "a" / "one.txt", text("one"));
+    write_file(src / "b" / "two.txt", text("two"));
+    write_file(src / "b" / "deeper" / "three.txt", text("three"));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    const BackupResult first = run_backup(*repo, options);
+    CHECK(first.dirs_reused == 0);
+    const auto restored = [&](const Id& snapshot, const std::string& name) {
+        const fs::path out = tmp.path / ("out-" + name);
+        RestoreOptions ro;
+        ro.target = u8(out);
+        run_restore(*repo, repo->load_snapshot(snapshot), ro);
+        return snapshot_of_dir(restored_location(out, src));
+    };
+
+    // Changed behind the journal's back: a journal that calls every folder unchanged keeps the
+    // parent's listing, which shows the folders were not read.
+    write_file(src / "b" / "two.txt", text("TWO, longer"));
+    options.journal_parent = first.snapshot_id;
+    options.dir_unchanged = [](const std::string&) { return true; };
+    const BackupResult second = run_backup(*repo, options);
+    CHECK(second.dirs_reused >= 3);
+    CHECK(second.snapshot.stats.files == 3);
+    CHECK(restored(second.snapshot_id, "2")["b/two.txt"] == text("two"));
+
+    // A folder the journal names is read again, with the folders below it asked in turn.
+    options.journal_parent = second.snapshot_id;
+    options.dir_unchanged = [](const std::string& dir) { return !(dir.ends_with("\\b") || dir.ends_with("/b")); };
+    const BackupResult third = run_backup(*repo, options);
+    CHECK(third.dirs_reused >= 1);
+    const auto files = restored(third.snapshot_id, "3");
+    CHECK(files.at("b/two.txt") == text("TWO, longer"));
+    CHECK(files.at("b/deeper/three.txt") == text("three"));
+    CHECK(files.at("a/one.txt") == text("one"));
+
+    // A journal read against another version than the parent answers nothing.
+    options.journal_parent = first.snapshot_id;
+    options.dir_unchanged = [](const std::string&) { return true; };
+    CHECK(run_backup(*repo, options).dirs_reused == 0);
+}
+
 TEST_CASE("files that look encrypted by ransomware raise the alarm") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";

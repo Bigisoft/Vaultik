@@ -51,6 +51,7 @@
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/update_check.hpp"
+#include "vaultik/ops/change_journal.hpp"
 #include "vaultik/ops/move_here.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
@@ -748,7 +749,7 @@ void raise_alarm(Repository& repo, const BackupResult& r, jobs::RunRecord& recor
 constexpr const char* kUnchanged = "nothing changed since the last version, so no new one was saved";
 
 int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
-                      RepoLock& lock, VssMode vss, bool pause_sql_server) {
+                      RepoLock& lock, VssMode vss, bool pause_sql_server, ChangeJournal* journal = nullptr) {
     // Never back up the repository into itself.
     if (!is_cloud_location(repo_location)) {
         const std::string repo_full = os::absolute_path(repo_location);
@@ -801,6 +802,14 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
         throw;
     }
     const SnapshotStats& s = r.snapshot.stats;
+    // Where the journal stands for the next run: only after a backup that read everything it
+    // tried to (a file skipped now must be tried again, not taken as unchanged).
+    if (journal != nullptr && s.errors == 0 && r.missing_sources.empty()) {
+        if (!r.unchanged) journal->save(r.snapshot_id);
+        else if (r.snapshot.parent) journal->save(*r.snapshot.parent);
+    }
+    if (r.dirs_reused > 0 && !g_json)
+        out("Change journal: " + std::to_string(r.dirs_reused) + " unchanged folder(s) were not read again\n");
     record.finished = os::now();
     record.status = s.errors > 0 ? jobs::RunStatus::Partial : jobs::RunStatus::Success;
     record.snapshot = r.unchanged ? std::string() : id_hex(r.snapshot_id);
@@ -1913,6 +1922,10 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
+        // With administrator rights: folders the change journal saw nothing happen in are not
+        // read again (see ops/change_journal.hpp).
+        ChangeJournal journal(store.dir(), job->id, job->sources, job->excludes);
+        journal.apply(o);
         // The job's repair data setting becomes the destination's (every writer then follows it).
         if (repo->parity_percent() != job->repair_data) {
             try {
@@ -1928,7 +1941,7 @@ int cmd_run_job(const Args& a) {
             repo->reload_index();  // a prune may have finished before the lock was granted
             code = backup_and_report(*repo, std::move(o), job->repository, record, lock,
                                      vss_arg(a, job->vss ? kDefaultVss : VssMode::Off),
-                                     !(job->vss_skip_sql || a.has("--vss-skip-sql")));
+                                     !(job->vss_skip_sql || a.has("--vss-skip-sql")), &journal);
         }
         refresh_drive_copy(*job);
         // The destination drive's own health, as the system reports it: a warning here is the

@@ -80,6 +80,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/profile_items.cpp
     src/vaultik/ops/move_here.cpp
+    src/vaultik/ops/change_journal.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
 )

@@ -548,6 +548,19 @@ every channel. A job with administrator rights never reads your own alert settin
 copied into the admin-only store with the job, shown in the question before it is approved, and
 updated the next time such a job is saved.
 
+### Faster backups with the change journal
+
+A backup normally lists every folder and compares every file's size and times with the last
+version, which takes minutes with hundreds of thousands of files even when little changed. Runs
+with administrator rights (a job's scheduled runs as the system account, or Vaultik started as
+administrator) read the NTFS change journal instead, which Windows keeps of every change on a
+volume: a folder in which nothing was added, removed, renamed or changed since the last backup,
+and which was not changed itself, is taken from that version without being read. Once a week, and
+whenever the journal cannot answer (it wrapped, it was recreated, the job's folders or exclusions
+changed, the last backup skipped files), every folder is read again. The journal's position is
+kept with the job's settings (`journal\<job>.json`). Without administrator rights, on FAT and
+exFAT drives and on Linux, every folder is read as before.
+
 ### Event Log
 
 Every run of a job (backup, second copy, health check, test restore) is also written to the

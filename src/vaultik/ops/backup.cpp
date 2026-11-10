@@ -115,6 +115,11 @@ private:
     std::optional<Node> lookup(const Tree& root, const std::vector<std::string>& comps);
     Tree scan_children(const std::string& dir, std::uint64_t device, const Tree* parent);
     Id scan_dir(const std::string& dir, std::uint64_t device, const Tree* parent);
+    // A folder the change journal says is unchanged: its parent listing, with each subfolder
+    // asked again. nullopt (nothing counted yet) when the parent's data is not all there.
+    std::optional<Id> reuse_dir(const std::string& dir, std::uint64_t device, const Tree& parent);
+    bool use_journal_ = false;
+    std::uint64_t dirs_reused_ = 0;
     bool scan_entry(const std::string& path, const os::FileInfo& info, std::uint64_t parent_device, Node& node,
                     const Node* pnode);
     bool scan_file(const std::string& path, Node& node, const Node* parent);
@@ -421,6 +426,13 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
             }
             std::optional<Tree> ptree;
             if (pnode != nullptr && pnode->kind == NodeKind::Dir) ptree = load_tree(pnode->subtree);
+            if (ptree && use_journal_ && options_.dir_unchanged(path)) {
+                if (const std::optional<Id> id = reuse_dir(path, info.device, *ptree)) {
+                    node.subtree = *id;
+                    ++stats_.dirs;
+                    return true;
+                }
+            }
             node.subtree = scan_dir(path, info.device, ptree ? &*ptree : nullptr);
             ++stats_.dirs;
             return true;
@@ -483,6 +495,66 @@ Id BackupEngine::scan_dir(const std::string& dir, std::uint64_t device, const Tr
     return id;
 }
 
+std::optional<Id> BackupEngine::reuse_dir(const std::string& dir, std::uint64_t device, const Tree& parent) {
+    // Everything the listing points at must still be stored (a prune may have removed data no
+    // version uses); otherwise the folder is read as usual.
+    for (const Node& n : parent.nodes) {
+        if (n.security && !repo_.has_blob(*n.security)) return std::nullopt;
+        if (n.kind == NodeKind::File && !all_present(n.content)) return std::nullopt;
+        for (const DataStream& s : n.streams)
+            if (!all_present(s.content)) return std::nullopt;
+    }
+    ++dirs_reused_;
+    Tree tree;
+    for (const Node& old : parent.nodes) {
+        check_cancel();
+        const std::string child = os::join(dir, old.name);
+        if (excluder_.excluded(old.name, child)) continue;
+        Node node = old;
+        switch (old.kind) {
+            case NodeKind::File:
+                ++stats_.files;
+                stats_.bytes += old.size;
+                break;
+            case NodeKind::Symlink:
+                ++stats_.files;
+                break;
+            case NodeKind::Reparse:
+                ++stats_.skipped;
+                break;
+            case NodeKind::Dir: {
+                // The folder's own entry is as before; what is in it is asked about in turn.
+                std::optional<Tree> sub = load_tree(old.subtree);
+                std::optional<Id> id;
+                if (sub && options_.dir_unchanged(child)) id = reuse_dir(child, device, *sub);
+                if (id) {
+                    node.subtree = *id;
+                    ++stats_.dirs;
+                    break;
+                }
+                // Read it: listed afresh, with its own metadata.
+                os::FileInfo info;
+                os::ErrorCode err = 0;
+                if (!os::stat(io(child), info, err)) {
+                    warn("cannot back up " + child + ": " + os::error_message(err));
+                    continue;
+                }
+                Node fresh = node_from_info(info, old.name);
+                if (!scan_entry(child, info, device, fresh, &old)) continue;
+                note_change(fresh, &old);
+                node = std::move(fresh);
+                break;
+            }
+        }
+        tree.nodes.push_back(std::move(node));
+        report();
+    }
+    tree.sort();
+    Id id;
+    repo_.save_blob(BlobType::Tree, serialize_tree(tree), id);
+    return id;
+}
+
 Id BackupEngine::save_virtual(const VirtualDir& dir) {
     Tree tree;
     for (const auto& [name, child] : dir.dirs) {
@@ -531,6 +603,10 @@ BackupResult BackupEngine::run() {
         }
     }
 
+    // The journal answers only for changes since the snapshot it was read against.
+    use_journal_ = options_.dir_unchanged && options_.journal_parent && snap.parent &&
+                   *snap.parent == *options_.journal_parent && parent_root.has_value();
+
     const WriteStats before = repo_.write_stats();
     VirtualDir root;
     for (const Source& s : sources) {
@@ -578,6 +654,7 @@ BackupResult BackupEngine::run() {
         stats_.items_removed == 0 && missing_sources_.empty()) {
         // Exactly what the last version holds: nothing to save.
         result.unchanged = true;
+        result.dirs_reused = dirs_reused_;
         result.snapshot = std::move(snap);
         result.alarm = std::move(alarm_);
         return result;
@@ -586,6 +663,7 @@ BackupResult BackupEngine::run() {
     result.snapshot = std::move(snap);
     result.alarm = std::move(alarm_);
     result.missing_sources = std::move(missing_sources_);
+    result.dirs_reused = dirs_reused_;
     return result;
 }
 
