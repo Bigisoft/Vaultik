@@ -21,20 +21,31 @@ namespace vaultik::jobs {
 #ifdef _WIN32
 namespace {
 
-// A field of the job for the question below: without control and text-direction characters
-// (which could fake its layout or wording) and at most 260 characters long.
-std::wstring shown(const std::string& utf8) {
+// A field of the job for the question below, shown in full: control and text-direction
+// characters (which could fake its layout or wording) become U+FFFD, and a run of more than 3
+// spaces is shown as "[n spaces]" so it cannot push text out of view. A field too long to show in
+// full is refused rather than cut: what is approved must be exactly what is seen.
+std::wstring shown(const std::string& utf8, const std::string& what) {
     std::wstring out;
+    std::size_t spaces = 0;
+    const auto flush_spaces = [&] {
+        if (spaces > 3) out += L"[" + std::to_wstring(spaces) + L" spaces]";
+        else out.append(spaces, L' ');
+        spaces = 0;
+    };
     for (const wchar_t c : widen(utf8)) {
+        if (c == L' ') {
+            ++spaces;
+            continue;
+        }
+        flush_spaces();
         const bool hidden = c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0x061C || c == 0x180E ||
                             (c >= 0x200B && c <= 0x200F) || (c >= 0x2028 && c <= 0x202E) ||
                             (c >= 0x2060 && c <= 0x206F) || c == 0xFEFF;
-        out += hidden ? L'�' : c;
-        if (out.size() >= 260) {
-            out += L"...";
-            break;
-        }
+        out += hidden ? L'\uFFFD' : c;
     }
+    flush_spaces();
+    if (out.size() > 400) throw Error(what + " is too long to show in full for approval; shorten it");
     return out;
 }
 
@@ -46,25 +57,26 @@ std::wstring shown(const std::string& utf8) {
 // with the same cloud keys. A program without administrator rights cannot answer this window.
 void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_secrets) {
     if (approved && same_secrets && to_json(*approved) == to_json(job)) return;
-    std::wstring text = L"The backup job \"" + shown(job.name) + L"\" will run with administrator rights:\n\n";
+    std::wstring text = L"The backup job \"" + shown(job.name, "the job's name") + L"\" will run with administrator rights:\n\n";
     text += L"Back up:\n";
-    for (std::size_t i = 0; i < job.sources.size() && i < 20; ++i) text += L"    " + shown(job.sources[i]) + L"\n";
-    if (job.sources.size() > 20) text += L"    ... and " + std::to_wstring(job.sources.size() - 20) + L" more\n";
+    if (job.sources.size() > 20)
+        throw Error("the job backs up more than 20 folders and files, too many to show in full for approval");
+    for (const std::string& src : job.sources) text += L"    " + shown(src, "a folder to back up") + L"\n";
     if (!job.excludes.empty()) {
         text += L"Skipping:  ";
         for (std::size_t i = 0; i < job.excludes.size() && i < 10; ++i)
-            text += (i ? L", " : L"") + shown(job.excludes[i]);
+            text += (i ? L", " : L"") + shown(job.excludes[i], "a pattern to skip");
         text += job.excludes.size() > 10 ? L", ...\n" : L"\n";
     }
-    text += L"To:  " + shown(job.repository) + L"\n";
-    if (!job.cloud_key_id.empty()) text += L"    with the access key " + shown(job.cloud_key_id) + L"\n";
+    text += L"To:  " + shown(job.repository, "the destination") + L"\n";
+    if (!job.cloud_key_id.empty()) text += L"    with the access key " + shown(job.cloud_key_id, "the access key") + L"\n";
     if (!job.second_copy.repository.empty()) {
-        text += L"Second copy:  " + shown(job.second_copy.repository) + L"\n";
+        text += L"Second copy:  " + shown(job.second_copy.repository, "the second copy's destination") + L"\n";
         if (!job.second_copy.cloud_key_id.empty())
-            text += L"    with the access key " + shown(job.second_copy.cloud_key_id) + L"\n";
+            text += L"    with the access key " + shown(job.second_copy.cloud_key_id, "the access key") + L"\n";
     }
-    if (!job.before_command.empty()) text += L"Command before:  " + shown(job.before_command) + L"\n";
-    if (!job.after_command.empty()) text += L"Command after:  " + shown(job.after_command) + L"\n";
+    if (!job.before_command.empty()) text += L"Command before:  " + shown(job.before_command, "the command before the backup") + L"\n";
+    if (!job.after_command.empty()) text += L"Command after:  " + shown(job.after_command, "the command after the backup") + L"\n";
     if (approved && same_secrets) text += L"\n(Some other setting of the job changed.)\n";
     if (!same_secrets) text += L"\n(Its cloud storage keys or sign-ins are new or changed.)\n";
     text += L"\nAnyone who knows the backup's password can read what it backs up. Allow this only if you set "
