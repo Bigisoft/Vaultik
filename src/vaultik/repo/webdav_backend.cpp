@@ -91,15 +91,27 @@ std::vector<std::string> elements(const std::string& xml, const std::string& loc
     return out;
 }
 
+// Only an address written out (never a name, which could say anything) in this computer's or a
+// private network's range: 127/8, 10/8, 172.16/12, 192.168/16, ::1, or "localhost".
 bool private_host(const std::string& host) {
-    if (host == "localhost" || host == "127.0.0.1" || host == "[::1]") return true;
-    // 10/8, 192.168/16, 172.16/12: a NAS on the own network.
-    if (host.rfind("10.", 0) == 0 || host.rfind("192.168.", 0) == 0) return true;
-    if (host.rfind("172.", 0) == 0) {
-        const int second = std::atoi(host.c_str() + 4);
-        return second >= 16 && second <= 31;
+    if (host == "localhost" || host == "[::1]") return true;
+    unsigned octet[4] = {};
+    std::size_t pos = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (i > 0) {
+            if (pos >= host.size() || host[pos] != '.') return false;
+            ++pos;
+        }
+        const std::size_t start = pos;
+        unsigned value = 0;
+        while (pos < host.size() && host[pos] >= '0' && host[pos] <= '9' && pos - start < 3)
+            value = value * 10 + static_cast<unsigned>(host[pos++] - '0');
+        if (pos == start || value > 255) return false;
+        octet[i] = value;
     }
-    return false;
+    if (pos != host.size()) return false;
+    return octet[0] == 127 || octet[0] == 10 || (octet[0] == 172 && octet[1] >= 16 && octet[1] <= 31) ||
+           (octet[0] == 192 && octet[1] == 168);
 }
 
 }  // namespace

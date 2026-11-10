@@ -165,4 +165,8 @@ TEST_CASE("WebDAV folder listings are read whatever the namespace prefix") {
     CHECK(paths[3] == "/dav/backups/pc/my file&x");
     CHECK_THROWS(WebDavBackend("webdav:http://cloud.example.com/x", {}));  // passwords only over https
     CHECK_NOTHROW(WebDavBackend("webdav:http://192.168.1.10/x", {}));      // or on the own network
+    CHECK_NOTHROW(WebDavBackend("webdav:http://172.20.0.5:8080/x", {}));
+    CHECK_THROWS(WebDavBackend("webdav:http://10.example.com/x", {}));     // a name, not an address
+    CHECK_THROWS(WebDavBackend("webdav:http://192.168.1.10.example.com/x", {}));
+    CHECK_THROWS(WebDavBackend("webdav:http://172.32.0.1/x", {}));
 }
