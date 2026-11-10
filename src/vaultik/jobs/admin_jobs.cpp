@@ -215,9 +215,11 @@ void check_admin_command(const std::string& command, const std::string& what) {
                                    "set", "setlocal", "path", "cd", "chdir", "pushd",
                                    // Reading their settings from the user's own profile.
                                    "ssh", "scp", "sftp", "git", "scalar", "plink", "pscp", "psftp", "tortoiseplink",
+                                   "tortoisegitplink", "putty", "puttytel", "pageant", "kitty", "klink", "winscp",
+                                   "curl", "wget",
                                    // Adds the user's own module folder whatever the environment says.
                                    "pwsh"})
-            if (base == banned || (base.starts_with("git-")))
+            if (base == banned || base.starts_with("git-") || (base.starts_with("powershell") && base != "powershell"))
                 refuse(word, "it can start programs these checks do not see; put the steps in a .cmd file in a "
                              "folder only administrators can change");
         return base;
@@ -250,13 +252,31 @@ void check_admin_command(const std::string& command, const std::string& what) {
             std::size_t k = i + 1;
             if (k >= words.size() || !no_profile(words[k].text))
                 refuse(words[i].text, "PowerShell must be started with -NoProfile first");
-            for (++k; k < words.size() && !is_file(words[k].text); ++k) {
+            // Only within this command: its switches, -File and the script all before the next &,
+            // |, ( or ) and not a redirection's file (else PowerShell, with no script of its own,
+            // would read commands from its input).
+            const auto own = [&](std::size_t at) {
+                return at < words.size() && !words[at].starts_command && !words[at].redirect_target;
+            };
+            if (!own(k)) refuse(words[i].text, "PowerShell must be started with -NoProfile first");
+            // PowerShell does not split its arguments at ; , or = as cmd does: refuse them, so the
+            // words judged here are the ones it gets.
+            if (command.find_first_of(";,=") != std::string::npos)
+                refuse(words[i].text, "a command with PowerShell must not use ; , or =");
+            // In order: switches, an execution policy only right after its switch, then -File.
+            const auto script_only = [&](const std::string& w) {
+                refuse(w, "PowerShell can only run a script: -NoProfile -File C:\\...\\x.ps1");
+            };
+            for (++k; own(k) && !is_file(words[k].text); ++k) {
                 const std::string l = lower(words[k].text);
-                if (l != "-noninteractive" && l != "-noni" && l != "-nologo" && l != "-executionpolicy" &&
-                    l != "-ep" && l != "bypass" && l != "remotesigned" && l != "allsigned")
-                    refuse(words[k].text, "PowerShell can only run a script: -NoProfile -File C:\\...\\x.ps1");
+                if (l == "-noninteractive" || l == "-noni" || l == "-nologo") continue;
+                if (l != "-executionpolicy" && l != "-ep") script_only(words[k].text);
+                ++k;
+                const std::string v = own(k) ? lower(words[k].text) : std::string();
+                if (v != "bypass" && v != "remotesigned" && v != "allsigned" && v != "restricted")
+                    script_only(words[i].text);
             }
-            if (k + 1 >= words.size() || words[k + 1].text.size() < 3 || words[k + 1].text[1] != ':')
+            if (!own(k) || !own(k + 1) || words[k + 1].text.size() < 3 || words[k + 1].text[1] != ':')
                 refuse(words[i].text, "PowerShell can only run a script: -NoProfile -File C:\\...\\x.ps1");
         } else if (base == "cmd") {
             // A cmd inside the command: without /d it runs the user's AutoRun command, without

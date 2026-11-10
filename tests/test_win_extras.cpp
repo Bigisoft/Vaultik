@@ -231,6 +231,16 @@ TEST_CASE("commands of administrator jobs: only safe ones, checked") {
     CHECK_THROWS(check_admin_command("pwsh.exe -nop -File " + script + "\\x.ps1", "the command"));
     CHECK_THROWS(check_admin_command("powershell -File " + script + "\\x.ps1", "the command"));  // the user's profile
     CHECK_THROWS(check_admin_command("plink nas", "the command"));
+    CHECK_THROWS(check_admin_command("putty -load nas", "the command"));
+    CHECK_THROWS(check_admin_command("curl -o x https://example.com", "the command"));  // reads the user's .curlrc
+    CHECK_THROWS(check_admin_command("powershell_ise", "the command"));
+    CHECK_THROWS(check_admin_command("powershell -NoProfile bypass -File " + script + "\\x.ps1", "the command"));
+    CHECK_THROWS(check_admin_command("powershell -NoProfile -ep;evil -File " + script + "\\x.ps1", "the command"));
+    // -File must be PowerShell's own, not a later command's: here it would read commands from the pipe.
+    CHECK_THROWS(check_admin_command("echo x | powershell -NoProfile & bypass -File " + script + "\\x.ps1",
+                                     "the command"));
+    CHECK_THROWS(check_admin_command("echo x | powershell -NoProfile & ver -File " + script + "\\x.ps1",
+                                     "the command"));
     CHECK_THROWS(check_admin_command("git-upload-pack x", "the command"));
     CHECK_THROWS(check_admin_command("ver & run.vbs", "the command"));  // opened by the user's file types
     CHECK_THROWS(check_admin_command("ver | (task.js)", "the command"));
