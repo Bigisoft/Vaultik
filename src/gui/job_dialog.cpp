@@ -384,6 +384,11 @@ QWidget* JobDialog::build_schedule() {
     form->addRow(tr("Check:"), row({check_weekly_, check_percent_, new QLabel(tr("of the stored data"))}));
     check_monthly_ = new QCheckBox(tr("Once a month, read back all of it"));
     form->addRow(QString(), check_monthly_);
+    check_restore_ = new QCheckBox(tr("Once a month, test a restore of a few files"));
+    check_restore_->setToolTip(tr("Restores up to 20 files (at most 500 MB) of the newest version into a temporary "
+                                  "folder, checks them, compares them with the unchanged files on this PC and "
+                                  "removes them again. Any time: Test a restore on the job's Overview."));
+    form->addRow(QString(), check_restore_);
     auto* check_note = new QLabel(tr("A check runs after a backup when it is due. It reads stored data back and "
                                      "compares it with what was saved, so a failing disk or damaged files are "
                                      "found while the originals still exist. Each week reads a different part. "
@@ -683,6 +688,7 @@ void JobDialog::load(const jobs::Job& job) {
     check_percent_->setValue(job.health.sample_percent);
     check_percent_->setEnabled(job.health.weekly);
     check_monthly_->setChecked(job.health.monthly);
+    check_restore_->setChecked(job.health.restore_test);
 
     schedule_kind_->setCurrentIndex(static_cast<int>(job.schedule.kind));
     time_->setTime(QTime(job.schedule.hour, job.schedule.minute));
@@ -806,6 +812,7 @@ jobs::Job JobDialog::collect() const {
     j.health.weekly = check_weekly_->isChecked();
     j.health.sample_percent = check_percent_->value();
     j.health.monthly = check_monthly_->isChecked();
+    j.health.restore_test = check_restore_->isChecked();
     return j;
 }
 

@@ -11,6 +11,7 @@
 #include "vaultik/ops/copy.hpp"
 #include "vaultik/ops/diff.hpp"
 #include "vaultik/ops/restore.hpp"
+#include "vaultik/ops/restore_test.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -536,4 +537,61 @@ TEST_CASE("overlapping backup paths are rejected") {
     BackupOptions options;
     options.paths = {u8(tmp.path / "a"), u8(tmp.path / "a" / "b")};
     CHECK_THROWS_AS(run_backup(*repo, options), Error);
+}
+
+TEST_CASE("a test restore brings files back and notices one that differs from the original") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    const fs::path work = tmp.path / "work";
+    for (int i = 0; i < 30; ++i)
+        write_file(src / ("dir" + std::to_string(i % 3)) / ("f" + std::to_string(i) + ".bin"),
+                   random_data(1000 + i * 37, 100 + i));
+    fs::create_directories(work);
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    const BackupResult backup = run_backup(*repo, options);
+
+    RestoreTestOptions o;
+    o.work_dir = u8(work);
+    o.max_files = 10;
+    o.seed = 7;
+    RestoreTestResult r = test_restore(*repo, backup.snapshot, o);
+    CHECK(r.candidates == 30);
+    CHECK(r.files == 10);
+    CHECK(r.compared == 10);
+    CHECK(r.problems.empty());
+    CHECK(fs::is_empty(work));  // the temporary folder is gone
+
+    // Change one file's bytes but keep its size and time, as silent damage would.
+    const fs::path victim = src / "dir1" / "f4.bin";
+    const auto when = fs::last_write_time(victim);
+    Bytes changed = read_file(victim);
+    changed[10] ^= 0xFF;
+    write_file(victim, changed);
+    fs::last_write_time(victim, when);
+    o.max_files = 100;
+    r = test_restore(*repo, backup.snapshot, o);
+    CHECK(r.files == 30);
+    REQUIRE(r.problems.size() == 1);
+    CHECK(r.problems[0].find("f4.bin") != std::string::npos);
+    CHECK(r.problems[0].find("differs") != std::string::npos);
+
+    // A size budget keeps the restore small.
+    o.max_bytes = 3000;
+    r = test_restore(*repo, backup.snapshot, o);
+    CHECK(r.bytes <= 3000);
+}
+
+TEST_CASE("snapshot paths map back to their place on this computer") {
+#ifdef _WIN32
+    CHECK(original_location("C/Users/me/a.txt") == "C:\\Users\\me\\a.txt");
+    CHECK(original_location("UNC/nas/share/x/y") == "\\\\nas\\share\\x\\y");
+    CHECK(original_location("UNC/nas").empty());
+#else
+    CHECK(original_location("home/me/a.txt") == "/home/me/a.txt");
+#endif
+    CHECK(original_location("").empty());
 }

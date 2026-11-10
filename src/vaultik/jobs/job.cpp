@@ -355,7 +355,8 @@ std::string to_json(const Job& job) {
         {"health",
          {{"weekly", job.health.weekly},
           {"sample_percent", job.health.sample_percent},
-          {"monthly", job.health.monthly}}},
+          {"monthly", job.health.monthly},
+          {"restore_test", job.health.restore_test}}},
     };
     return j.dump(2) + "\n";
 }
@@ -438,6 +439,7 @@ Job job_from_json(const std::string& text) {
             job.health.weekly = h.value("weekly", job.health.weekly);
             job.health.sample_percent = h.value("sample_percent", job.health.sample_percent);
             job.health.monthly = h.value("monthly", job.health.monthly);
+            job.health.restore_test = h.value("restore_test", job.health.restore_test);
         }
         validate(job);
         return job;
@@ -469,6 +471,7 @@ RunRecord record_from_json(const std::string& text) {
         r.kind = kind == "full_check" ? RunKind::FullCheck
                  : kind == "check"    ? RunKind::Check
                  : kind == "copy"     ? RunKind::Copy
+                 : kind == "restore_test" ? RunKind::RestoreTest
                                       : RunKind::Backup;
         r.on_connect = j.value("trigger", std::string()) == "connect";
         r.alert = j.value("alert", std::string());
@@ -502,6 +505,21 @@ const RunRecord* last_check(const std::vector<RunRecord>& history) {
     return nullptr;
 }
 
+const RunRecord* last_restore_test(const std::vector<RunRecord>& history) {
+    for (auto it = history.rbegin(); it != history.rend(); ++it)
+        if (it->kind == RunKind::RestoreTest) return &*it;
+    return nullptr;
+}
+
+bool restore_test_due(const HealthPolicy& policy, const std::vector<RunRecord>& history, std::uint64_t now) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;
+    if (!policy.restore_test) return false;
+    std::uint64_t last = 0;
+    for (const RunRecord& r : history)
+        if (r.kind == RunKind::RestoreTest && r.status != RunStatus::Cancelled) last = std::max(last, r.finished);
+    return last == 0 || last + 30 * kDay <= now;
+}
+
 const RunRecord* last_copy(const std::vector<RunRecord>& history) {
     for (auto it = history.rbegin(); it != history.rend(); ++it)
         if (it->kind == RunKind::Copy) return &*it;
@@ -514,6 +532,7 @@ const char* to_string(RunKind kind) {
         case RunKind::Check: return "check";
         case RunKind::FullCheck: return "full_check";
         case RunKind::Copy: return "copy";
+        case RunKind::RestoreTest: return "restore_test";
     }
     return "backup";
 }

@@ -259,7 +259,17 @@ OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
     check_ = new QPushButton(tr("Check now"));
     check_->setProperty("role", "flat");
     connect(check_, &QPushButton::clicked, this, &OverviewView::check_requested);
-    static_cast<QVBoxLayout*>(f->layout())->addWidget(check_, 0, Qt::AlignLeft);
+    test_ = new QPushButton(tr("Test a restore"));
+    test_->setProperty("role", "flat");
+    test_->setToolTip(tr("Restore a few files into a temporary folder, check them and compare them with the "
+                         "files on this PC, then remove them again."));
+    connect(test_, &QPushButton::clicked, this, &OverviewView::test_requested);
+    auto* checks = new QHBoxLayout;
+    checks->setContentsMargins(0, 0, 0, 0);
+    checks->addWidget(check_);
+    checks->addWidget(test_);
+    checks->addStretch(1);
+    static_cast<QVBoxLayout*>(f->layout())->addLayout(checks);
     grid->addWidget(f, 1, 1);
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
@@ -337,6 +347,10 @@ void OverviewView::set_data(const OverviewData& d) {
     } else {
         health_.value->setText(tr("Not checked yet"));
         health_.detail->setText(tr("A check runs after a backup once a week, or choose Check now."));
+    }
+    if (!d.test_text.isEmpty()) {
+        health_.detail->setText(health_.detail->text() + "\n" + d.test_text);
+        if (!d.test_ok) health_.value->setText(tr("Problems found"));
     }
     calendar_->set_days(d.days);
 

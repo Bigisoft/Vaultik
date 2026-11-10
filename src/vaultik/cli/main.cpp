@@ -29,6 +29,7 @@
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/restore.hpp"
+#include "vaultik/ops/restore_test.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/backends.hpp"
@@ -176,6 +177,11 @@ Commands:
   check-job <job>              Read the job's share of its stored data back and
                                check every version now (added to its history)
       --full                   Read all of the stored data
+  test-restore <job>           Restore a few files of the newest version into a
+                               temporary folder, check them (and compare them with
+                               the unchanged files on this PC), then remove them
+      --files <n>              How many files, at most (default 20)
+      --max-size <size>        Their total size, at most (default 500M)
   schedule <job>               Register the job's schedule with the system
                                scheduler (Task Scheduler or a systemd user timer)
   unschedule <job>             Remove it again (the job itself is kept)
@@ -240,7 +246,7 @@ const std::set<std::string> kValueOptions = {
     "--parent",   "--priority", "--cpu", "--io",       "--ram",        "--cpu-limit",
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
-    "--user", "--from", "--keep-within", "--read-share", "--to"};
+    "--user", "--from", "--keep-within", "--read-share", "--to", "--files", "--max-size"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -1166,6 +1172,85 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     return r.errors > 0 ? kExitAuth : kExitOk;
 }
 
+// A test restore of the job's newest version (see ops/restore_test.hpp), recorded in `record`.
+// The temporary folder is made in the job store's folder: the user's own, or with administrator
+// rights the admin-only store, so a privileged restore never writes where the user could plant a
+// link. Returns kExitOk, or kExitError when a file did not come back right.
+int restore_check(const Args& a, const jobs::JobStore& store, Repository& repo, const jobs::Job& job,
+                  jobs::RunRecord& record) {
+    record.kind = jobs::RunKind::RestoreTest;
+    record.started = os::now();
+    std::string work = store.dir();
+    if (os::process_elevated() && !a.has("--admin")) work = jobs::open_admin_store().dir();
+    RestoreTestResult r;
+    try {
+        RepoLock lock(repo, RepoLock::Mode::Shared, "test restore (job " + job.id + ")");
+        repo.reload_index();
+        // The newest version of this job.
+        const std::vector<SnapshotRef> all = load_all_snapshots(repo);
+        const SnapshotRef* newest = nullptr;  // the job's own (tagged), else the newest of any
+        const SnapshotRef* newest_tagged = nullptr;
+        for (const SnapshotRef& s : all) {  // oldest first
+            newest = &s;
+            const auto& tags = s.snapshot.tags;
+            if (std::find(tags.begin(), tags.end(), "job:" + job.id) != tags.end()) newest_tagged = &s;
+        }
+        if (newest_tagged != nullptr) newest = newest_tagged;
+        if (newest == nullptr) throw Error("the backup has no versions yet");
+        RestoreTestOptions o;
+        o.work_dir = work;
+        o.seed = record.started;
+        if (auto v = a.value("--files")) o.max_files = static_cast<std::size_t>(std::max(1, std::stoi(*v)));
+        if (auto v = a.value("--max-size")) o.max_bytes = parse_size(*v);
+        o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
+        o.on_progress = [](const std::string& msg) {
+            if (g_json) emit({{"event", "test_progress"}, {"current", msg}});
+            else status("Test restore: " + msg);
+        };
+        if (!g_json) out("Test restore: restoring a few files of the version of " +
+                         os::format_time_local(newest->snapshot.time) + "...\n");
+        r = test_restore(repo, newest->snapshot, o);
+        record.snapshot = id_hex(newest->id);
+    } catch (const Cancelled&) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Cancelled;
+        record.message = "cancelled";
+        throw;
+    } catch (const std::exception& e) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Failed;
+        record.message = std::string("the test restore could not run: ") + e.what();
+        throw;
+    }
+    record.finished = os::now();
+    record.files = r.files;
+    record.bytes = r.bytes;
+    record.errors = r.problems.size();
+    if (!r.problems.empty()) {
+        record.status = jobs::RunStatus::Failed;
+        record.message = std::to_string(r.problems.size()) + " file(s) did not come back right: ";
+        for (std::size_t i = 0; i < r.problems.size() && i < 3; ++i) record.message += (i ? "; " : "") + r.problems[i];
+        for (const std::string& p : r.problems) warning(p);
+    } else if (r.files == 0) {
+        record.status = jobs::RunStatus::Success;
+        record.message = "the newest version has no files to test";
+    } else {
+        record.status = jobs::RunStatus::Success;
+        record.message = "restored " + std::to_string(r.files) + " file(s), " + format_bytes(r.bytes) +
+                         ", all intact; " + std::to_string(r.compared) + " also compared with the file on this PC";
+    }
+    if (g_json) {
+        emit({{"event", "restore_test"}, {"status", jobs::to_string(record.status)}, {"files", r.files},
+              {"bytes", r.bytes}, {"compared", r.compared}, {"problems", r.problems}, {"message", record.message}});
+    } else {
+        clear_status();
+        out(std::string(r.problems.empty() ? "Test restore: " : "Test restore FAILED: ") + record.message + "\n");
+    }
+    return r.problems.empty() ? kExitOk : kExitError;
+}
+
 // The job's store: with --admin (the scheduled task of a job with administrator rights) only the
 // admin-only copy of the job is trusted, never the user's own settings.
 jobs::JobStore job_store(const Args& a) {
@@ -1529,6 +1614,43 @@ int cmd_check_job(const Args& a) {
     return code;
 }
 
+// "test-restore <job> [--files n] [--max-size size]": a test restore of the job's newest version
+// now, recorded in its history.
+int cmd_test_restore(const Args& a) {
+    if (a.positional.empty()) throw Error("usage: vaultik test-restore <job id or name> [--files <n>] [--max-size <size>]");
+    const jobs::JobStore store = job_store(a);
+    const auto job = store.find(a.positional[0]);
+    if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
+    apply_resource_policy(resource_policy(a, job->resources));
+    jobs::RunRecord record;
+    record.kind = jobs::RunKind::RestoreTest;
+    record.started = os::now();
+    int code = kExitError;
+    try {
+        const auto repo = open_job_repo(a, store, *job);
+        code = restore_check(a, store, *repo, *job, record);
+    } catch (const LockedError&) {
+        throw;  // nothing was tested; not a result for the history
+    } catch (const std::exception& e) {
+        if (record.finished == 0) {  // failed before the test started
+            record.finished = os::now();
+            record.status = jobs::RunStatus::Failed;
+            record.message = std::string("the test restore could not run: ") + e.what();
+        }
+        try {
+            store.append_history(job->id, record);
+        } catch (const Error&) {
+        }
+        if (record.status != jobs::RunStatus::Cancelled) throw;
+        if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", "test restore cancelled"}});
+        else err("test restore cancelled\n");
+        return kExitCancelled;
+    }
+    store.append_history(job->id, record);
+    if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
+    return code;
+}
+
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
     const jobs::JobStore store = job_store(a);
@@ -1624,22 +1746,42 @@ int cmd_run_job(const Args& a) {
     // it finds is its own entry in the history (and a notification from the tray).
     if (a.has("--no-check") || g_cancel.load()) return code;
     const auto due = jobs::due_check(job->health, jobs::combined_history(store, job->id, 500), os::now());
-    if (!due) return code;
-    jobs::RunRecord check;
+    if (due) {
+        jobs::RunRecord check;
+        try {
+            health_check(*repo, *job, *due, check);
+        } catch (const LockedError&) {
+            // Another run is using the repository: try again after the next backup.
+            if (!g_json) clear_status();
+            warning("the health check was skipped this time: another run is using the repository");
+            return code;
+        } catch (const std::exception&) {
+            // Cancelled or could not run: the record says which.
+        }
+        try {
+            store.append_history(job->id, check);
+        } catch (const Error& e) {
+            warning(std::string("could not record the health check: ") + e.what());
+        }
+    }
+
+    // And the monthly test restore, when it is on and due. Like the check, its own entry.
+    if (g_cancel.load() || !jobs::restore_test_due(job->health, jobs::combined_history(store, job->id, 500), os::now()))
+        return code;
+    jobs::RunRecord test;
     try {
-        health_check(*repo, *job, *due, check);
+        restore_check(a, store, *repo, *job, test);
     } catch (const LockedError&) {
-        // Another run is using the repository: try again after the next backup.
         if (!g_json) clear_status();
-        warning("the health check was skipped this time: another run is using the repository");
+        warning("the test restore was skipped this time: another run is using the repository");
         return code;
     } catch (const std::exception&) {
         // Cancelled or could not run: the record says which.
     }
     try {
-        store.append_history(job->id, check);
+        store.append_history(job->id, test);
     } catch (const Error& e) {
-        warning(std::string("could not record the health check: ") + e.what());
+        warning(std::string("could not record the test restore: ") + e.what());
     }
     return code;
 }
@@ -2321,6 +2463,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "drives") return cmd_drives(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
+    if (a.command == "test-restore") return cmd_test_restore(a);
     if (a.command == "copy") return cmd_copy(a);
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
     if (a.command == "mount") return cmd_mount(a);

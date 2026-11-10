@@ -33,6 +33,8 @@ struct OverviewData {
     bool check_ok = true;
     QString check_when;
     QString check_detail;
+    QString test_text;   // the last test restore, one line ("Test restore 3 days ago: ..."); empty: none
+    bool test_ok = true;
 
     // The drives involved, as Windows reports their health.
     struct Drive {
@@ -83,6 +85,7 @@ public:
 signals:
     void back_up_requested();
     void check_requested();
+    void test_requested();
     void versions_requested();
 
 private:
@@ -100,4 +103,5 @@ private:
     QWidget* drives_box_ = nullptr;
     QWidget* drives_list_ = nullptr;  // rebuilt on each set_data
     QPushButton* check_ = nullptr;
+    QPushButton* test_ = nullptr;
 };

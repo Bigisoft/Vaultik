@@ -16,6 +16,7 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLineEdit>
@@ -205,6 +206,20 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             log_->appendPlainText(check_result_);
             return;
         }
+        if (type == "restore_test") {
+            const bool bad = !ev.value("problems").toArray().isEmpty();
+            check_result_ = bad ? tr("The test restore found problems: %1").arg(ev.value("message").toString())
+                                : tr("Test restore: %1").arg(ev.value("message").toString());
+            log_->appendPlainText(check_result_);
+            return;
+        }
+        if (type == "test_progress") {
+            running_label_->setText(tr("Testing a restore..."));
+            bar_->setRange(0, 0);
+            progress_text_->setText(tr("Restoring a few files into a temporary folder and checking them"));
+            current_file_->setText(ev.value("current").toString());
+            return;
+        }
         if (type == "check_progress") {
             running_label_->setText(tr("Checking the backup..."));
             // "pack 3/120" while the stored data is read, then the versions' structure.
@@ -239,9 +254,20 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         const std::string id = running_job_;
         running_job_.clear();
         const bool check = check_run_;
+        const bool test = test_run_;
         check_run_ = false;
+        test_run_ = false;
         set_running(false);
         QString msg;
+        if (test) {
+            msg = result == "success"   ? tr("Test restore: %1").arg(ev.value("message").toString())
+                  : result == "cancelled" ? tr("Test restore cancelled.")
+                                          : tr("Test restore failed: %1").arg(ev.value("message").toString());
+            log_->appendPlainText(msg);
+            statusBar()->showMessage(msg, 15000);
+            reload_jobs(current_job() ? current_job()->id : id);
+            return;
+        }
         if (check) {
             msg = result == "success"   ? tr("Health check: no problems.")
                   : result == "cancelled" ? tr("Health check cancelled.")
@@ -882,6 +908,7 @@ QWidget* MainWindow::build_job_page() {
 
     overview_ = new OverviewView;
     connect(overview_, &OverviewView::check_requested, this, [this] { check_job(false); });
+    connect(overview_, &OverviewView::test_requested, this, &MainWindow::test_restore);
     tabs_->addTab(overview_, tr("Overview"));
 
     versions_ = new VersionsView;
@@ -1030,6 +1057,7 @@ void MainWindow::refresh_history() {
         item->setText(1, backup                                 ? tr("Backup")
                          : r.kind == jobs::RunKind::FullCheck ? tr("Full check")
                          : r.kind == jobs::RunKind::Copy      ? tr("Second copy")
+                         : r.kind == jobs::RunKind::RestoreTest ? tr("Test restore")
                                                               : tr("Health check"));
         item->setIcon(2, status_icon(r.status));
         if (backup) {
@@ -1280,6 +1308,11 @@ void MainWindow::refresh_overview() {
                            .arg(when_text(check->started));
         d.check_detail = qs(check->message);
     }
+    const jobs::RunRecord* test = jobs::last_restore_test(records);
+    if (test != nullptr && test->status != jobs::RunStatus::Cancelled) {
+        d.test_ok = !(test->status == jobs::RunStatus::Failed && test->errors > 0);
+        d.test_text = tr("Test restore %1: %2").arg(when_text(test->started), qs(test->message));
+    }
 
     // What needs attention, most serious first.
     const AppSettings settings = AppSettings::load();
@@ -1292,6 +1325,9 @@ void MainWindow::refresh_overview() {
     } else if (check && jobs::found_damage(*check)) {
         d.warning = tr("The last health check found damaged or missing data. Back up again soon, and check the "
                        "destination drive. %1").arg(qs(check->message));
+    } else if (test != nullptr && !d.test_ok) {
+        d.warning = tr("The last test restore found files that did not come back right: %1. Check the backup "
+                       "drive, and back up again soon.").arg(qs(test->message));
     } else if (backup && backup->status == jobs::RunStatus::Failed) {
         d.warning = tr("The last backup failed: %1").arg(qs(backup->message));
     } else if (const jobs::RunRecord* copy = jobs::last_copy(records); copy && copy->status == jobs::RunStatus::Failed) {
@@ -1611,6 +1647,21 @@ void MainWindow::check_job(bool full) {
     start_run(args, true);
 }
 
+void MainWindow::test_restore() {
+    const jobs::Job* job = current_job();
+    if (!job || runner_->running()) return;
+    if (is_cloud_location(job->repository)) {
+        const auto answer = QMessageBox::question(
+            this, tr("Test restore"),
+            tr("A test restore downloads a few files (up to 500 MB) from %1. Test it now?")
+                .arg(location_text(job->repository)));
+        if (answer != QMessageBox::Yes) return;
+    }
+    test_run_ = true;
+    start_run({"test-restore", qs(job->id)}, true);
+    if (running_job_.empty()) test_run_ = false;  // did not start (no password)
+}
+
 void MainWindow::start_run(const QStringList& args, bool check) {
     const jobs::Job* current = current_job();
     if (!current) return;
@@ -1621,9 +1672,13 @@ void MainWindow::start_run(const QStringList& args, bool check) {
     check_run_ = check;
     check_result_.clear();
     run_started_ = std::chrono::steady_clock::now();
-    log_->appendPlainText((check ? tr("--- %1: health check started") : tr("--- %1: backup started"))
+    log_->appendPlainText((test_run_ ? tr("--- %1: test restore started")
+                           : check   ? tr("--- %1: health check started")
+                                     : tr("--- %1: backup started"))
                               .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm")));
-    running_label_->setText(check ? tr("Checking the backup...") : tr("Backing up..."));
+    running_label_->setText(test_run_ ? tr("Testing a restore...")
+                            : check   ? tr("Checking the backup...")
+                                      : tr("Backing up..."));
     bar_->setRange(0, 0);
     progress_text_->setText(tr("Starting..."));
     current_file_->clear();

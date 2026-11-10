@@ -78,6 +78,7 @@ private:
     QCheckBox* check_weekly_ = nullptr;
     QSpinBox* check_percent_ = nullptr;
     QCheckBox* check_monthly_ = nullptr;
+    QCheckBox* check_restore_ = nullptr;
     bool check_monthly_touched_ = false;  // otherwise a new job follows its destination's default
 
     QComboBox* preset_ = nullptr;

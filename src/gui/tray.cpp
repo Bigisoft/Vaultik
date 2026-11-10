@@ -98,11 +98,16 @@ void Tray::check() {
         for (const jobs::RunRecord& r : records) {
             if (r.started <= seen) continue;
             const bool fresh = !first_check_ || &r == jobs::last_backup(records) || &r == jobs::last_check(records) ||
-                               &r == jobs::last_copy(records);
+                               &r == jobs::last_copy(records) || &r == jobs::last_restore_test(records);
             if (r.kind == jobs::RunKind::Copy) {
                 if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed)
                     icon_->showMessage(tr("Second copy of %1 failed").arg(name), qs(r.message).left(200),
                                        QSystemTrayIcon::Warning, 15000);
+            } else if (r.kind == jobs::RunKind::RestoreTest) {
+                // Files that did not come back right; a test that could not run is not news.
+                if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed && r.errors > 0)
+                    icon_->showMessage(tr("Test restore of %1 found problems").arg(name), qs(r.message).left(250),
+                                       QSystemTrayIcon::Critical, 15000);
             } else if (r.kind != jobs::RunKind::Backup) {
                 // A check that could not run is not news: the backup before it failed the same way.
                 if (fresh && settings.notify_failures && jobs::found_damage(r))

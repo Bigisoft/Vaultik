@@ -405,6 +405,22 @@ notification. `check-job <job> [--full]` runs one now; `verify --read-data --rea
 the same on any repository. New cloud jobs skip the monthly full check, since it downloads the
 whole backup.
 
+### Test restores
+
+A health check proves the stored data reads back; a test restore proves files come back. It
+picks up to 20 files at random from the newest version (at most 500 MB together), restores each
+one into a temporary folder, checks that it comes back whole (every chunk decrypted and matching
+its hash, the size as stored) and, when the file on this PC still has the same size and
+modification time, compares the two byte for byte. Then it removes the folder again. The result
+is its own history entry (`"kind": "restore_test"`), shown on the Overview, and a failed one gets
+a banner and a notification.
+
+Run one any time with **Test a restore** on the Overview or `vaultik test-restore <job>`
+(`--files <n>`, `--max-size <size>`). In the job's **Schedule** tab, "Once a month, test a
+restore of a few files" (off by default) runs one after a backup when the last is 30 days old.
+The temporary folder is made in Vaultik's settings folder, or for a run with administrator rights
+in the admin-only store, never in a folder a less privileged program could tamper with.
+
 ### Running side by side
 
 Backups, restores and checks of the same repository can run at the same time, also from several

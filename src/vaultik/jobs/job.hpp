@@ -37,6 +37,9 @@ struct HealthPolicy {
     bool weekly = true;
     int sample_percent = 10;  // 1..100: the share of stored data the weekly check reads
     bool monthly = true;
+    // A monthly test restore: a few files restored into a temporary folder and checked (see
+    // ops/restore_test.hpp). Off by default; "vaultik test-restore" runs one any time.
+    bool restore_test = false;
 };
 
 // Lower speed limits while people work: on the given days (bit 0 = Monday) from start_minute to
@@ -143,7 +146,7 @@ enum class RunStatus { Success, Partial, Failed, Cancelled };
 
 // What a run did: a backup, a health check that read a sample of the data or all of it, or the
 // second copy after a backup.
-enum class RunKind { Backup, Check, FullCheck, Copy };
+enum class RunKind { Backup, Check, FullCheck, Copy, RestoreTest };
 inline bool is_check(RunKind k) {
     return k == RunKind::Check || k == RunKind::FullCheck;
 }
@@ -193,6 +196,9 @@ RunRecord record_from_json(const std::string& text);
 const RunRecord* last_backup(const std::vector<RunRecord>& history);
 const RunRecord* last_check(const std::vector<RunRecord>& history);
 const RunRecord* last_copy(const std::vector<RunRecord>& history);
+const RunRecord* last_restore_test(const std::vector<RunRecord>& history);
+// Whether the monthly test restore is on and none finished (not cancelled) in the last 30 days.
+bool restore_test_due(const HealthPolicy& policy, const std::vector<RunRecord>& history, std::uint64_t now);
 // A health check that found damaged or missing data (not one that could not run).
 inline bool found_damage(const RunRecord& r) {
     return is_check(r.kind) && r.status == RunStatus::Failed && r.errors > 0;
