@@ -6,7 +6,7 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
 - **Small and idle-free.** The engine is one static ~1 MB executable: no service, no kernel driver.
   Scheduled backups are started by the system scheduler, run, and exit. Peak RAM stays around
   100 MB however much data there is (measured: 101 MB for a 9.7 GB folder with the worker threads,
-  9 MB for an unchanged re-run; uploads to cloud storage add 32 MiB per pack in flight, and the
+  9 MB for an unchanged re-run; packs written in the background add 32 MiB each, and the
   4 parallel file readers about 45 MB more). The frontend only uses memory while it is open.
 - **Deduplicated.** Files are split into content-defined chunks (FastCDC, ~1 MiB average). A chunk
   already stored, from any file in any earlier snapshot, is never stored again. Every snapshot looks
@@ -556,7 +556,9 @@ version, which takes minutes with hundreds of thousands of files even when littl
 with administrator rights (a job's scheduled runs as the system account, or Vaultik started as
 administrator) read the NTFS change journal instead, which Windows keeps of every change on a
 volume: a folder in which nothing was added, removed, renamed or changed since the last backup,
-and which was not changed itself, is taken from that version without being read. Once a week, and
+and which was not changed itself, is taken from that version without being read. A file with
+several names (hard links) changed through one of them also counts as a change in the folders of
+its other names. Once a week, and
 whenever the journal cannot answer (it wrapped, it was recreated, the job's folders or exclusions
 changed, the last backup skipped files), every folder is read again. The journal's position is
 kept with the job's settings (`journal\<job>.json`). Without administrator rights, on FAT and
@@ -669,10 +671,10 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
   one thread, and files are stored in folder order, so the result is the same with any number
   of readers. Several readers help most with many small and middle-sized files on a fast disk;
   one very large file is still read by a single thread, and a backup to a folder spends much of
-  its time writing packs. For cloud storage, 2 packs upload in the background while the next is
-  built (`--uploads`; each holds 32 MiB in memory). At background CPU priority or with
-  `--max-memory`, a backup stays on one thread, reads one file at a time and uploads one pack
-  at a time.
+  its time writing packs. So packs are written in the background while the next is built: 2 at
+  a time for cloud storage, 1 for a folder (`--uploads`; each holds 32 MiB in memory), which
+  about halves a first backup to a disk. At background CPU priority or with `--max-memory`, a
+  backup stays on one thread, reads one file at a time and writes one pack at a time.
 
 ## Roadmap
 

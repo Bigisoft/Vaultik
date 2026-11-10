@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <map>
+#include <unordered_set>
 
 #include <nlohmann/json.hpp>
 
@@ -38,6 +39,9 @@ struct ChangeJournal::State {
     std::optional<Id> parent;
     std::map<std::string, std::shared_ptr<os::UsnChanges>> changes;  // volume root -> records since
     std::vector<std::pair<std::string, std::string>> source_roots;  // folded source path -> volume root
+    // Folders (folded paths) holding another name of a changed file: a change through one hard
+    // link is recorded in that link's folder only.
+    std::shared_ptr<std::unordered_set<std::string>> link_dirs = std::make_shared<std::unordered_set<std::string>>();
 };
 
 ChangeJournal::ChangeJournal(std::string store_dir, std::string job_id, std::vector<std::string> sources,
@@ -84,6 +88,12 @@ ChangeJournal::ChangeJournal(std::string store_dir, std::string job_id, std::vec
             std::optional<os::UsnChanges> c =
                 os::usn_changes_since(v.root, v.journal_id, saved->value("usn", std::int64_t{0}), v.usn);
             if (!c) return;  // the journal no longer reaches back that far
+            // Each changed file's other names, if it has any. Many changes: read everything,
+            // which is about as quick then.
+            if (c->changed.size() > 50000) return;
+            for (const os::FileRef& ref : c->changed)
+                for (const std::string& name : os::other_names(v.root, ref))
+                    s_->link_dirs->insert(os::fold_case(os::parent_of(name)));
             changes[v.root] = std::make_shared<os::UsnChanges>(std::move(*c));
         }
         s_->changes = std::move(changes);
@@ -106,8 +116,10 @@ void ChangeJournal::apply(BackupOptions& options) const {
     // The folder's volume is its source's (links and mount points inside are not followed).
     auto roots = s_->source_roots;
     auto changes = s_->changes;
-    options.dir_unchanged = [roots, changes](const std::string& dir) {
+    auto link_dirs = s_->link_dirs;
+    options.dir_unchanged = [roots, changes, link_dirs](const std::string& dir) {
         const std::string folded = os::fold_case(dir);
+        if (link_dirs->contains(folded)) return false;
         for (const auto& [source, root] : roots) {
             if (!folded.starts_with(source)) continue;
             if (folded.size() > source.size() && folded[source.size()] != '\\' && folded[source.size()] != '/' &&

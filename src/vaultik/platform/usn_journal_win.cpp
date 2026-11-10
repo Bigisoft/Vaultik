@@ -186,4 +186,65 @@ FileRef file_ref(const std::string& path) {
     return ref64((static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow);
 }
 
+std::vector<std::string> other_names(const std::string& volume_path, const FileRef& ref) {
+    // Any handle on the volume serves as the hint for OpenFileById: its root folder.
+    wchar_t root[MAX_PATH + 1] = {};
+    if (!GetVolumePathNameW(widen(volume_path).c_str(), root, MAX_PATH)) throw_last_error("cannot find the volume of " + volume_path);
+    const UniqueHandle hint(CreateFileW(root, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!hint.valid()) throw_last_error("cannot open the volume of " + volume_path);
+    FILE_ID_DESCRIPTOR id{};
+    id.dwSize = sizeof id;
+    id.Type = ExtendedFileIdType;
+    std::memcpy(id.ExtendedFileId.Identifier, &ref.low, 8);
+    std::memcpy(id.ExtendedFileId.Identifier + 8, &ref.high, 8);
+    const UniqueHandle file(OpenFileById(hint.get(), &id, FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT));
+    if (!file.valid()) {
+        const DWORD err = GetLastError();
+        if (err == ERROR_INVALID_PARAMETER || err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND ||
+            err == ERROR_DELETE_PENDING)
+            return {};  // gone since: its folders have records of their own
+        throw_win32("cannot open a changed file by its id", err);
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(file.get(), &info)) throw_last_error("cannot read a changed file");
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || info.nNumberOfLinks <= 1) return {};
+    // Each name, as "\folder\file" on the volume, put after the volume's root ("C:\").
+    std::wstring prefix = root;
+    while (!prefix.empty() && prefix.back() == L'\\') prefix.pop_back();
+    std::wstring path(MAX_PATH, L'\0');
+    DWORD n = GetFinalPathNameByHandleW(file.get(), path.data(), static_cast<DWORD>(path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_NONE);
+    if (n >= path.size()) {
+        path.resize(n + 1);
+        n = GetFinalPathNameByHandleW(file.get(), path.data(), static_cast<DWORD>(path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_NONE);
+    }
+    if (n == 0 || n >= path.size()) throw_last_error("cannot name a changed file");
+    path.resize(n);
+    const std::wstring any = prefix + path;
+    std::vector<std::string> out;
+    std::wstring name(1024, L'\0');
+    DWORD len = static_cast<DWORD>(name.size());
+    HANDLE find = FindFirstFileNameW(any.c_str(), 0, &len, name.data());
+    if (find == INVALID_HANDLE_VALUE && GetLastError() == ERROR_MORE_DATA) {
+        name.resize(len + 1);
+        len = static_cast<DWORD>(name.size());
+        find = FindFirstFileNameW(any.c_str(), 0, &len, name.data());
+    }
+    if (find == INVALID_HANDLE_VALUE) throw_last_error("cannot list the names of a changed file");
+    for (int guard = 0; guard < 1100; ++guard) {  // NTFS allows 1024 names per file
+        out.push_back(narrow(prefix + std::wstring(name.c_str())));
+        len = static_cast<DWORD>(name.size());
+        if (!FindNextFileNameW(find, &len, name.data())) {
+            if (GetLastError() != ERROR_MORE_DATA) break;
+            name.resize(len + 1);
+            len = static_cast<DWORD>(name.size());
+            if (!FindNextFileNameW(find, &len, name.data())) break;
+        }
+    }
+    FindClose(find);
+    return out;
+}
+
 }  // namespace vaultik::os

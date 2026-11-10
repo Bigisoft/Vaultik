@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace vaultik::os {
 
@@ -60,5 +61,12 @@ std::optional<UsnChanges> usn_changes_since(const std::string& path, std::uint64
 // The FileRef of `path` (opened with no access rights needed beyond reading attributes,
 // FILE_FLAG_BACKUP_SEMANTICS so folders work, not following a final reparse point). Throws Error.
 FileRef file_ref(const std::string& path);
+
+// The full paths of every name of the file `ref` on the volume that holds `volume_path`, when it
+// has more than one (hard links); empty when it has one name, is a folder, or no longer exists. A
+// change through one name is recorded in that name's folder only, so the others' folders are
+// found here. Needs the backup privilege for files the account cannot read. Throws Error on other
+// failures.
+std::vector<std::string> other_names(const std::string& volume_path, const FileRef& ref);
 
 }  // namespace vaultik::os
