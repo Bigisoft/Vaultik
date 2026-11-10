@@ -121,9 +121,9 @@ void check_admin_command(const std::string& command, const std::string& what) {
             for (std::size_t k = 1; sw && k < word.size(); ++k)
                 sw = std::isalnum(static_cast<unsigned char>(word[k])) != 0;
             if (sw) {
-                char drive[MAX_PATH] = {};
-                GetSystemWindowsDirectoryA(drive, MAX_PATH);
-                sw = !os::exists(std::string(drive, 2) + "\\" + word.substr(1));
+                char windows[MAX_PATH] = {};
+                GetSystemWindowsDirectoryA(windows, MAX_PATH);
+                sw = !os::exists(std::string(windows, 2) + "\\" + word.substr(1));
             }
             if (!sw) refuse(word, "not a full path; write it as C:\\...");
         }
