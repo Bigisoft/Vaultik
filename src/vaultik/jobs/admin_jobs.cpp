@@ -79,6 +79,9 @@ void check_admin_command(const std::string& command, const std::string& what) {
     if (command.empty()) return;
     if (command.find_first_of("%^!") != std::string::npos)
         throw Error(what + " of a job with administrator rights must not use %variables%, !variables! or ^");
+    // A short name ("POWERS~1") reaches a program without its name being seen.
+    if (command.find('~') != std::string::npos)
+        throw Error(what + " of a job with administrator rights must not use short names with ~; write the full names");
     if (command.find("..") != std::string::npos)
         throw Error(what + " of a job with administrator rights must not use \"..\"");
     if (command.find("\\\\") != std::string::npos || command.find("//") != std::string::npos)
@@ -110,7 +113,11 @@ void check_admin_command(const std::string& command, const std::string& what) {
             }
             word = Word{};
         };
+        char prev = 0;
         for (const char d : command) {
+            const char before = prev;
+            prev = d;
+            if (d == '&' && (before == '>' || before == '<') && !quoted) continue;  // "2>&1": a handle
             if (d == '"') {
                 // A quoted part with these would be read again by a cmd started inside the command.
                 if (quoted && quoted_part.find_first_of("&|<>()") != std::string::npos)
@@ -216,12 +223,30 @@ void check_admin_command(const std::string& command, const std::string& what) {
                                    // Reading their settings from the user's own profile.
                                    "ssh", "scp", "sftp", "git", "scalar", "plink", "pscp", "psftp", "tortoiseplink",
                                    "tortoisegitplink", "putty", "puttytel", "pageant", "kitty", "klink", "winscp",
-                                   "curl", "wget",
-                                   // Adds the user's own module folder whatever the environment says.
-                                   "pwsh"})
-            if (base == banned || base.starts_with("git-") || (base.starts_with("powershell") && base != "powershell"))
-                refuse(word, "it can start programs these checks do not see; put the steps in a .cmd file in a "
-                             "folder only administrators can change");
+                                   "curl", "wget", "aws", "az", "gcloud", "gh", "hg", "svn", "npm", "npx", "node",
+                                   "python", "python3", "py", "pip", "rclone", "gpg", "java", "javaw", "perl", "ruby",
+                                   "php", "docker", "kubectl"})
+            if (base == banned || base.starts_with("git-") || base.starts_with("pwsh") ||
+                (base.starts_with("powershell") && base != "powershell"))
+                refuse(word, "it can start programs these checks do not see, or reads settings any program of "
+                             "yours can change; put the steps in a .cmd file in a folder only administrators can "
+                             "change");
+        // A bare name is found by cmd on the system's own path: only Windows' own tools for jobs
+        // like these. Anything else is given by its full path (in a folder only administrators
+        // can change, see check_path), so what runs is what was approved.
+        if (!drive) {
+            static const char* const kSystemTools[] = {
+                "cmd", "powershell", "echo", "ver", "rem", "exit", "type", "timeout", "net", "net1", "sc",
+                "vssadmin", "diskshadow", "wbadmin", "robocopy", "xcopy", "copy", "move", "del", "erase", "mkdir",
+                "md", "rmdir", "rd", "ren", "rename", "dir", "icacls", "takeown", "attrib", "wevtutil",
+                "eventcreate", "schtasks", "shutdown", "taskkill", "tasklist", "ping", "reg", "mountvol",
+                "fsutil", "manage-bde", "sync", "waitfor", "choice", "find", "findstr", "sort", "more"};
+            if (std::none_of(std::begin(kSystemTools), std::end(kSystemTools),
+                             [&](const char* t) { return base == t; }))
+                refuse(word, "only Windows' own tools (such as net, sc, robocopy or vssadmin) can be named "
+                             "alone; give any other program by its full path, in a folder only administrators "
+                             "can change");
+        }
         return base;
     };
     // "-NoProfile", or any shortening of it PowerShell accepts ("-nop" at least).

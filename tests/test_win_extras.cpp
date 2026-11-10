@@ -234,6 +234,10 @@ TEST_CASE("commands of administrator jobs: only safe ones, checked") {
     CHECK_THROWS(check_admin_command("putty -load nas", "the command"));
     CHECK_THROWS(check_admin_command("curl -o x https://example.com", "the command"));  // reads the user's .curlrc
     CHECK_THROWS(check_admin_command("powershell_ise", "the command"));
+    CHECK_THROWS(check_admin_command("POWERS~1 -Command x", "the command"));
+    CHECK_THROWS(check_admin_command("whoami", "the command"));  // not one of the listed tools by name alone
+    CHECK_THROWS(check_admin_command("python -c x", "the command"));
+    CHECK_NOTHROW(check_admin_command(std::string(windows) + "\\System32\\whoami.exe", "the command"));
     CHECK_THROWS(check_admin_command("powershell -NoProfile bypass -File " + script + "\\x.ps1", "the command"));
     CHECK_THROWS(check_admin_command("powershell -NoProfile -ep;evil -File " + script + "\\x.ps1", "the command"));
     // -File must be PowerShell's own, not a later command's: here it would read commands from the pipe.
