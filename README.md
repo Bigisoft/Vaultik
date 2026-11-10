@@ -451,7 +451,10 @@ before the second copy and the checks; `VAULTIK_RESULT` holds the result (`succe
 `failed`, `cancelled`), and `VAULTIK_JOB` and `VAULTIK_JOB_NAME` the job. The start of their
 output goes to the log; a failing "after" command is a warning. They run with the job's rights:
 for a job with administrator rights, as administrator, from the approved copy of the job in the
-admin-only store, so a program running as you cannot change what they are.
+admin-only store, so a program running as you cannot change what they are. Since the job file it
+is copied from is yours, and any program running as you could have added a command to it, the
+elevated step that copies the job shows the exact commands and asks before it copies new or
+changed ones; a program without administrator rights cannot answer that window for you.
 
 ### Running side by side
 

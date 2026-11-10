@@ -11,10 +11,38 @@
 #include "vaultik/util/error.hpp"
 #include "vaultik/util/hex.hpp"
 #ifdef _WIN32
+#include <windows.h>
+
 #include "vaultik/util/win.hpp"
 #endif
 
 namespace vaultik::jobs {
+
+#ifdef _WIN32
+namespace {
+
+// A job with administrator rights runs its "before" and "after" commands as administrator. The
+// user's own job file could have been changed by any program running as the user, and the
+// approval prompt does not show what the job contains, so the elevated step itself shows the
+// commands and asks, unless the admin copy already has exactly these. A program without
+// administrator rights cannot answer this window for the user.
+void confirm_commands(const Job& job, const std::optional<Job>& approved) {
+    if (job.before_command.empty() && job.after_command.empty()) return;
+    if (approved && approved->before_command == job.before_command && approved->after_command == job.after_command)
+        return;
+    std::wstring text = L"The backup job \"" + widen(job.name) +
+                        L"\" will run these commands with administrator rights at every backup:\n\n";
+    if (!job.before_command.empty()) text += L"Before:  " + widen(job.before_command) + L"\n";
+    if (!job.after_command.empty()) text += L"After:  " + widen(job.after_command) + L"\n";
+    text += L"\nAllow them only if you entered them yourself. Allow?";
+    const int answer = MessageBoxW(nullptr, text.c_str(), L"Vaultik: commands with administrator rights",
+                                   MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND);
+    if (answer != IDYES)
+        throw Error("the job's commands were not allowed to run with administrator rights; nothing was changed");
+}
+
+}  // namespace
+#endif
 
 namespace {
 
@@ -164,6 +192,7 @@ void install_admin_job(const JobStore& from, const std::string& id, const std::s
     const std::string dir = prepare_admin_store(user_sid);
     const JobStore to(dir);
     try {
+        confirm_commands(*job, to.find(id));
         to.save(*job);
         if (pw.empty()) {
             os::remove_file(os::join(os::join(dir, "secrets"), id + ".key"));
