@@ -210,6 +210,10 @@ TEST_CASE("commands of administrator jobs: only safe ones, checked") {
     CHECK_THROWS(check_admin_command("C:^\\Users\\x.cmd", "the command"));
     CHECK_THROWS(check_admin_command(cmd + " /c ..\\..\\x.cmd", "the command"));
     CHECK_THROWS(check_admin_command("\\\\server\\share\\x.cmd", "the command"));
+    CHECK_THROWS(check_admin_command(cmd + " /c C:Users\\me\\x.cmd", "the command"));  // relative to the drive
+    CHECK_THROWS(check_admin_command(cmd + " /c \\Users\\me\\x.cmd", "the command"));  // relative to its root
+    CHECK_THROWS(check_admin_command(cmd + " /c /Users/me/x.cmd", "the command"));
+    CHECK_NOTHROW(check_admin_command(cmd + " /c ver & echo done", "the command"));
     TempDir tmp;  // in the user's temp folder: anyone running as the user can change it
     CHECK_THROWS(check_admin_command(cmd + " /c " + u8(tmp.path / "dump.cmd"), "the command"));
     CHECK_THROWS(check_admin_command("\"" + u8(tmp.path / "not yet there.cmd") + "\"", "the command"));

@@ -72,31 +72,50 @@ void check_admin_command(const std::string& command, const std::string& what) {
         throw Error(what + " of a job with administrator rights must not use \"..\"");
     if (command.find("\\\\") != std::string::npos || command.find("//") != std::string::npos)
         throw Error(what + " of a job with administrator rights must not use network paths");
-    // Every absolute path in it: "C:\x\y.cmd" (quoted or not), up to a separator of cmd.
-    for (std::size_t i = 0; i + 2 < command.size(); ++i) {
-        const char c = command[i];
-        if (!(((c | 0x20) >= 'a' && (c | 0x20) <= 'z') && command[i + 1] == ':' &&
-              (command[i + 2] == '\\' || command[i + 2] == '/')))
-            continue;
-        if (i > 0 && std::isalnum(static_cast<unsigned char>(command[i - 1]))) continue;
-        const bool quoted = i > 0 && command[i - 1] == '"';
-        std::size_t end = i;
-        while (end < command.size()) {
-            const char d = command[end];
-            if (quoted ? d == '"' : (d == ' ' || d == '\t' || d == '"' || d == '&' || d == '|' || d == '<' ||
-                                      d == '>' || d == '(' || d == ')' || d == ',' || d == ';' || d == '='))
-                break;
-            ++end;
+    // Split into words as cmd would see them (a quoted part is one word). Every word with a
+    // path separator must be a full path ("C:\x\y.cmd") on an admin-only chain, or a switch like
+    // "/c"; anything else (a path relative to a drive, "C:x", or to its root, "\x") could resolve
+    // to a folder the user can change and is refused. Bare names resolve in the admin-only working
+    // folder and the system folders of the fixed environment.
+    std::vector<std::string> words;
+    {
+        std::string word;
+        bool quoted = false;
+        for (const char d : command) {
+            if (d == '"') {
+                quoted = !quoted;
+                continue;
+            }
+            const bool separator = !quoted && (d == ' ' || d == '\t' || d == '&' || d == '|' || d == '<' ||
+                                               d == '>' || d == '(' || d == ')' || d == ',' || d == ';' || d == '=');
+            if (separator) {
+                if (!word.empty()) words.push_back(word);
+                word.clear();
+            } else {
+                word += d;
+            }
         }
-        std::string path = command.substr(i, end - i);
-        // A file that does not exist yet could still be put there: judge its folder then.
-        std::string probe = path;
-        while (!probe.empty() && !os::exists(probe)) probe = os::parent_of(probe);
-        std::string why;
-        if (probe.empty() || !os::admin_only_chain(probe, &why))
-            throw Error(what + " of a job with administrator rights names " + path +
-                        ", which programs without administrator rights can change" + (why.empty() ? "" : " (" + why + ")"));
-        i = end;
+        if (!word.empty()) words.push_back(word);
+    }
+    const auto refuse = [&](const std::string& word, const std::string& why) {
+        throw Error(what + " of a job with administrator rights cannot use \"" + word + "\": " + why);
+    };
+    for (const std::string& word : words) {
+        const bool drive = word.size() >= 2 && ((word[0] | 0x20) >= 'a' && (word[0] | 0x20) <= 'z') && word[1] == ':';
+        if (drive) {
+            if (word.size() < 3 || (word[2] != '\\' && word[2] != '/'))
+                refuse(word, "a path relative to a drive; write the full path");
+            // A file that does not exist yet could still be put there: judge its folder then.
+            std::string probe = word;
+            while (!probe.empty() && !os::exists(probe)) probe = os::parent_of(probe);
+            std::string why;
+            if (probe.empty() || !os::admin_only_chain(probe, &why))
+                refuse(word, "programs without administrator rights can change it" + (why.empty() ? "" : " (" + why + ")"));
+            continue;
+        }
+        if (word.find('\\') != std::string::npos) refuse(word, "not a full path; write it as C:\\...");
+        if (word.find('/') != std::string::npos && (word[0] != '/' || word.find('/', 1) != std::string::npos))
+            refuse(word, "not a full path; write it as C:\\...");
     }
 }
 
