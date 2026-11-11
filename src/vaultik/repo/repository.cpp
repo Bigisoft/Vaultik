@@ -322,11 +322,13 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
     p->threads = threads;
     p->max_uploads = uploads;
     const int level = config_.zstd_level;
-    const Key32 key = enc_key_;
     for (unsigned i = 0; i < threads; ++i) {
-        p->workers.emplace_back([p, level, key] {
+        // Each worker its own cipher, made here: no copy of the key is left in a worker (or in
+        // the lambda copies std::thread makes), where nothing would wipe it.
+        std::shared_ptr<const AesGcm> cipher = std::make_shared<const AesGcm>(enc_key_);
+        p->workers.emplace_back([p, level, cipher] {
             ZstdCompressor compressor(level);
-            const AesGcm aead(key);
+            const AesGcm& aead = *cipher;
             std::unique_lock lk(p->mu);
             for (;;) {
                 p->work.wait(lk, [p] { return p->stop || !p->todo.empty(); });
