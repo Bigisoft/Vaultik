@@ -1092,6 +1092,16 @@ std::optional<FileId> file_id(const std::string& /*path*/) {
     return std::nullopt;
 }
 
+bool running_as_root() {
+    return ::geteuid() == 0;
+}
+
+bool others_can_change(const std::string& path) {
+    struct stat st{};
+    if (::lstat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return true;
+    return st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
+}
+
 File File::create_stream(const std::string& /*path*/, const std::string& /*name*/, const FileId& /*expected*/,
                          ErrorCode& err) {
     err = ENOTSUP;

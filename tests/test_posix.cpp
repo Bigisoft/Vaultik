@@ -157,6 +157,24 @@ TEST_CASE("POSIX: the home folder without HOME comes from the password database"
     CHECK_FALSE(home.empty());
 }
 
+TEST_CASE("POSIX: folders other accounts than root can change") {
+    PosixTemp tmp;
+    CHECK_FALSE(os::others_can_change("/"));  // root's, 0755
+    CHECK(os::others_can_change("/tmp"));      // 1777: anyone can add a link there
+    CHECK(os::others_can_change(os::join(tmp.path, "missing")));
+    const std::string dir = os::join(tmp.path, "d");
+    const std::string link = os::join(tmp.path, "l");
+    REQUIRE(::mkdir(dir.c_str(), 0700) == 0);
+    REQUIRE(::symlink("/", link.c_str()) == 0);
+    CHECK(os::others_can_change(link));  // a link, even to a safe folder
+    // A folder of the account running the test: safe only when that account is root itself.
+    CHECK(os::others_can_change(dir) == !os::running_as_root());
+    if (os::running_as_root()) {
+        ::chmod(dir.c_str(), 0770);
+        CHECK(os::others_can_change(dir));  // its group may write
+    }
+}
+
 TEST_CASE("POSIX: private folders are 0700") {
     PosixTemp tmp;
     const std::string dir = os::join(os::join(tmp.path, "a"), "secrets");

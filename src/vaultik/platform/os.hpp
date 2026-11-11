@@ -246,6 +246,17 @@ std::string final_path(const std::string& path);
 // The id of the item at `path` itself (a link is not followed); empty when it cannot be read.
 std::optional<FileId> file_id(const std::string& path);
 
+// POSIX: whether the process runs as root (effective user id 0). Always false on Windows (see
+// process_elevated in acl.hpp).
+bool running_as_root();
+// POSIX: whether an account other than root could rename, replace or add entries in the folder
+// at `path`, so a path through it could be redirected (swapped for a link to /etc) between a
+// check and a write: it is not a real folder (a link, or missing), it belongs to another account,
+// or its group or others may write to it (also with the sticky bit: they can still add a link).
+// A restore running as root goes only through folders where this is false. Always false on
+// Windows, where the restore holds folders open instead (File::hold_directory).
+bool others_can_change(const std::string& path);
+
 // The alternate data streams of a file or folder (not its own content).
 struct StreamEntry {
     std::string name;  // without the colons and the ":$DATA" type
