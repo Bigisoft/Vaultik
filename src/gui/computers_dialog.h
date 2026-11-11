@@ -35,6 +35,11 @@ private:
     void load();
     void fill(int index, const std::vector<vaultik::jobs::Computer>& computers, const QString& error);
     void show_details();
+    // The computer of the current row, or null; `source` gets its source's index.
+    const vaultik::jobs::Computer* current(int* source) const;
+    void update_buttons();
+    void ask_backup();
+    void forget();
 
     std::vector<ComputerSource> sources_;
     std::vector<std::vector<vaultik::jobs::Computer>> computers_;  // per source
@@ -43,5 +48,7 @@ private:
     QTreeWidget* tree_ = nullptr;
     QPlainTextEdit* details_ = nullptr;
     QPushButton* refresh_ = nullptr;
+    QPushButton* ask_ = nullptr;
+    QPushButton* forget_ = nullptr;
     QLabel* summary_ = nullptr;
 };

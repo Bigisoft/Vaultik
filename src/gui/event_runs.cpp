@@ -3,6 +3,9 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaObject>
 #include <QPointer>
 #include <QProcess>
@@ -22,6 +25,8 @@
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/cloud.hpp"
+
+#include <chrono>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -133,6 +138,43 @@ EventRuns::EventRuns(QWidget* window, QObject* parent) : QObject(parent), window
     poll_->setInterval(3000);
     connect(poll_, &QTimer::timeout, this, &EventRuns::poll);
     QCoreApplication::instance()->installNativeEventFilter(this);
+    // Requests from other computers: 15 minutes between looks at local and network backups, and
+    // every 4th look (an hour) at cloud storage too. The first look a minute after starting.
+    requests_ = new QTimer(this);
+    requests_->setInterval(std::chrono::minutes(15));
+    connect(requests_, &QTimer::timeout, this, &EventRuns::poll_requests);
+    requests_->start();
+    QTimer::singleShot(std::chrono::minutes(1), this, &EventRuns::poll_requests);
+}
+
+void EventRuns::poll_requests() {
+    if (request_poll_ != nullptr) return;  // the last look is still going
+    const bool cloud = request_ticks_++ % 4 == 0 && !os::metered_connection();
+    bool any = false;
+    for (const jobs::Job& job : jobs_)
+        if (!job.run_as_admin && (cloud || !is_cloud_location(job.repository))) any = true;
+    if (!any) return;
+    request_poll_ = new QProcess(this);
+    QStringList args = {QStringLiteral("computers"), QStringLiteral("--poll"), QStringLiteral("--json")};
+    if (cloud) args << QStringLiteral("--cloud");
+    QProcess* process = request_poll_;
+    connect(process, &QProcess::finished, this, [this, process] {
+        request_poll_ = nullptr;
+        process->deleteLater();
+        for (const QByteArray& line : process->readAllStandardOutput().split('\n')) {
+            const QJsonObject ev = QJsonDocument::fromJson(line).object();
+            if (ev.value(QStringLiteral("event")).toString() != QLatin1String("requests")) continue;
+            for (const QJsonValue& v : ev.value(QStringLiteral("jobs")).toArray()) {
+                const std::string id = v.toString().toStdString();
+                const auto job = std::find_if(jobs_.begin(), jobs_.end(), [&](const jobs::Job& j) { return j.id == id; });
+                if (job == jobs_.end() || running(id)) continue;
+                if (start(*job, QStringLiteral("--on-request"), false))
+                    emit notify(tr("Backing up %1").arg(qs(job->name)),
+                                tr("Another computer that shares this backup asked for a backup now."), false);
+            }
+        }
+    });
+    process->start(Runner::engine_path(), args);
 }
 
 EventRuns::~EventRuns() {
@@ -141,6 +183,7 @@ EventRuns::~EventRuns() {
 }
 
 void EventRuns::set_jobs(const std::vector<jobs::Job>& list) {
+    jobs_ = list;
     std::map<std::string, Watched> keep;
     for (const jobs::Job& job : list) {
         if (!job.continuous || job.run_as_admin) continue;

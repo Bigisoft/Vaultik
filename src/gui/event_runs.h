@@ -12,6 +12,7 @@
 
 #include "vaultik/jobs/job.hpp"
 
+class QProcess;
 class QTimer;
 class QWidget;
 class FolderWatch;
@@ -23,7 +24,12 @@ class FolderWatch;
 // - at sign-out or shutdown (Windows): jobs that back up then hold Windows up, with a reason it
 //   shows, until their runs end; then sign-out or shutdown goes on (the user can also go on
 //   without waiting). The runs themselves skip a job backed up shortly before (see
-//   jobs::event_backup_due).
+//   jobs::event_backup_due);
+// - when another computer sharing a backup asked for one (jobs::BackupRequest): every 15 minutes
+//   the repositories of the jobs on folders, drives and network shares are looked at, and every
+//   hour those in cloud storage too (each look there costs a few billed requests and, for the
+//   cloud drives, counts against their rate limits; not over a metered connection). A look opens
+//   the repository without its index and reads one small file.
 class EventRuns : public QObject, public QAbstractNativeEventFilter {
     Q_OBJECT
 
@@ -37,6 +43,9 @@ public:
 
     bool nativeEventFilter(const QByteArray& type, void* message, qintptr* result) override;
 
+    // Looks for requests from other computers now (also done on a timer).
+    void poll_requests();
+
 signals:
     // Something to tell the user (a notification).
     void notify(const QString& title, const QString& text, bool warning);
@@ -44,6 +53,11 @@ signals:
     void run_finished(const QString& job_id);
 
 private:
+    std::vector<vaultik::jobs::Job> jobs_;  // all saved jobs, for requests
+    QTimer* requests_ = nullptr;
+    int request_ticks_ = 0;
+    QProcess* request_poll_ = nullptr;
+
     struct Run {
         std::string job;
         std::uint32_t pid = 0;

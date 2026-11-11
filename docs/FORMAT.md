@@ -18,6 +18,7 @@ in file names.
   snapshots/<snapshot-id>   sealed snapshot manifests
   locks/<lock-id>           sealed lock files of the runs using the repository
   status/<computer-id>      optional: sealed status record of each computer backing up here
+  status/requests/<computer-id>  optional: sealed request to that computer to back up now
   parity/percent            optional: repair data is on, at this percentage ("5\n"), see below
   parity/<xx>/<pack-id>     optional: the repair data of a pack (see "Recovery data")
 ```
@@ -108,6 +109,7 @@ AAD values bind each object to its role and name:
 | snapshot      | `"VKSNAP01"` || snapshot id (32)          |
 | lock          | `"VKLOCK01"` || lock id (32)              |
 | status record | `"VKSTAT01"` || computer id (32)          |
+| backup request | `"VKREQ001"` || computer id (32)         |
 
 ## Blobs
 
@@ -314,11 +316,37 @@ fields they do not know and treat missing ones as empty or 0:
 ```
 
 A writer reads its own record, replaces the entry of the job that ran (keeping its other jobs'),
-and writes the whole file back in one put (atomic, like every file). Writing it is best effort: a
+and writes the whole file back in one put (atomic, like every file). Two runs of one computer
+ending together could each write back what they read, losing one entry, so a writer reads the
+record back afterwards and, when its entry is missing or different, merges and writes again (up
+to 5 times, after a random pause of 50 to 300 ms). Writing it is best effort: a
 run never fails because its record could not be written. Prune, repair and verify do not touch
 the folder; S3 Object Lock leaves status records unlocked (they are rewritten after every run),
 and a cloud rollback does not bring back old ones. A job is stale when it has not run for 3 days
 past its recorded next run.
+
+A computer that no longer backs up here can be removed (`vaultik computers --forget`): its status
+record and a request addressed to it are deleted; its snapshots stay. A computer never removes its
+own record.
+
+A computer can ask another to back up now: it writes `status/requests/<computer id of the asked
+computer>`, sealed like a status record but with AAD `"VKREQ001"` || that computer id, plaintext
+UTF-8 JSON:
+
+```
+{"format": 1, "from": "<asking computer's name>", "created": <FILETIME>,
+ "jobs": ["<job id>", ...], "state": "pending|running", "started": <FILETIME taken up, or 0>}
+```
+
+`jobs` are ids from the asked computer's status record. One request per computer: a new one
+replaces the old. The asked computer looks for its request when one of its jobs on the
+repository runs and when its frontend polls (every 15 minutes for folders and network shares,
+every hour for cloud storage); it runs those of the listed jobs it has that back up to this
+repository, sets `state` to `running`, removes each job from the list after it ran (whatever its
+result) and deletes the file when the list is empty. A request older than 7 days, or one naming
+none of its jobs here, is deleted unanswered. Requests ask only for saved jobs to run: nothing in
+them is a command, a path or a setting. S3 Object Lock and cloud rollback treat them like status
+records (unlocked, never brought back).
 
 ## Prune
 

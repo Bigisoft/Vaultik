@@ -54,6 +54,28 @@ void RepoHandle::open_async(QObject* context, std::string repository, std::strin
     thread->start();
 }
 
+void RepoHandle::action_async(QObject* context, std::string repository, std::string password, CloudCredentials cloud,
+                              std::function<void(Repository&)> work, ActionDone done) {
+    auto error = std::make_shared<QString>();
+    QThread* thread = QThread::create([error, repository, password, cloud, work = std::move(work)]() mutable {
+        try {
+            std::unique_ptr<Repository> repo = Repository::open(open_backend(repository, &cloud), password, false);
+            work(*repo);
+        } catch (const AuthError&) {
+            *error = QObject::tr("The password does not open this backup.");
+        } catch (const std::exception& e) {
+            *error = QString::fromUtf8(e.what());
+        }
+        secure_wipe(password.data(), password.size());
+    });
+    QPointer<QObject> guard(context);
+    QObject::connect(thread, &QThread::finished, context, [thread, error, guard, done = std::move(done)] {
+        thread->deleteLater();
+        if (guard) done(*error);
+    });
+    thread->start();
+}
+
 void RepoHandle::computers_async(QObject* context, std::string repository, std::string password,
                                  CloudCredentials cloud, ComputersDone done) {
     struct Result {

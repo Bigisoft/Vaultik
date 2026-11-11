@@ -1,13 +1,16 @@
 #include "vaultik/jobs/computers.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <ctime>
 #include <map>
 #include <set>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
+#include "vaultik/crypto/crypto.hpp"
 #include "vaultik/platform/os.hpp"
 
 namespace vaultik::jobs {
@@ -17,7 +20,9 @@ namespace {
 using json = nlohmann::json;
 
 constexpr char kStatusDir[] = "status";
+constexpr char kRequestDir[] = "status/requests";
 constexpr char kStatusAadPrefix[] = "VKSTAT01";
+constexpr char kRequestAadPrefix[] = "VKREQ001";
 constexpr char kHostIdPrefix[] = "VKHOST01";
 constexpr int kStatusFormat = 1;
 constexpr std::size_t kMaxStatusSize = 1u << 20;
@@ -26,6 +31,23 @@ Bytes status_aad(const Id& computer) {
     Bytes aad(kStatusAadPrefix, kStatusAadPrefix + std::strlen(kStatusAadPrefix));
     aad.insert(aad.end(), computer.begin(), computer.end());
     return aad;
+}
+
+Bytes request_aad(const Id& computer) {
+    Bytes aad(kRequestAadPrefix, kRequestAadPrefix + std::strlen(kRequestAadPrefix));
+    aad.insert(aad.end(), computer.begin(), computer.end());
+    return aad;
+}
+
+// "status/requests/<64 hex>" -> id.
+std::optional<Id> parse_request_name(const std::string& name) {
+    const std::string prefix = std::string(kRequestDir) + "/";
+    if (!name.starts_with(prefix) || name.size() != prefix.size() + 64) return std::nullopt;
+    try {
+        return id_from_hex(std::string_view(name).substr(prefix.size()));
+    } catch (const Error&) {
+        return std::nullopt;
+    }
 }
 
 // "status/<64 hex>" -> id, or nothing when the name does not have that shape.
@@ -283,21 +305,38 @@ JobStatus job_status(const Job& job, const std::vector<RunRecord>& history, std:
 
 void update_status(Repository& repo, const Id& computer, const std::string& host, const std::string& version,
                    const JobStatus& job, std::uint64_t now) {
-    HostStatus status;
-    try {
-        if (auto old = read_status(repo, computer)) status = std::move(*old);
-    } catch (const std::exception&) {
-        // unreadable (damaged, or changed by someone without the key): start a new record
+    const std::string written = job_json(job).dump();
+    constexpr int kAttempts = 5;
+    for (int attempt = 1;; ++attempt) {
+        HostStatus status;
+        try {
+            if (auto old = read_status(repo, computer)) status = std::move(*old);
+        } catch (const std::exception&) {
+            // unreadable (damaged, or changed by someone without the key): start a new record
+        }
+        status.host = host;
+        status.version = version;
+        status.updated = std::max(now, status.updated);
+        std::erase_if(status.jobs, [&job](const JobStatus& j) { return j.id == job.id; });
+        status.jobs.push_back(job);
+        std::sort(status.jobs.begin(), status.jobs.end(), [](const JobStatus& a, const JobStatus& b) {
+            return a.name != b.name ? a.name < b.name : a.id < b.id;
+        });
+        write_status(repo, computer, status);
+
+        // Read it back: another run of this computer may have written its own copy over ours.
+        bool kept = false;
+        try {
+            if (const auto back = read_status(repo, computer))
+                kept = std::any_of(back->jobs.begin(), back->jobs.end(),
+                                   [&](const JobStatus& j) { return j.id == job.id && job_json(j).dump() == written; });
+        } catch (const std::exception&) {
+        }
+        if (kept || attempt == kAttempts) return;
+        std::uint8_t rnd[1];
+        random_bytes(rnd);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50 + rnd[0]));  // the other writer goes first
     }
-    status.host = host;
-    status.version = version;
-    status.updated = now;
-    std::erase_if(status.jobs, [&job](const JobStatus& j) { return j.id == job.id; });
-    status.jobs.push_back(job);
-    std::sort(status.jobs.begin(), status.jobs.end(), [](const JobStatus& a, const JobStatus& b) {
-        return a.name != b.name ? a.name < b.name : a.id < b.id;
-    });
-    write_status(repo, computer, status);
 }
 
 std::string publish_status(Repository& repo, const Job& job, const std::vector<RunRecord>& history,
@@ -404,6 +443,9 @@ std::vector<Computer> merge_computers(const std::vector<StatusFile>& statuses, c
 
 std::vector<Computer> list_computers(Repository& repo, std::uint64_t now) {
     const std::vector<StatusFile> statuses = list_statuses(repo);
+    std::map<std::string, BackupRequest> requests;  // by the asked computer's status name
+    for (RequestFile& r : list_requests(repo))
+        if (r.request) requests.emplace(r.target, std::move(*r.request));
     std::vector<Snapshot> snapshots;
     for (const Id& id : repo.list_snapshot_ids()) {
         try {
@@ -412,8 +454,192 @@ std::vector<Computer> list_computers(Repository& repo, std::uint64_t now) {
             // unreadable snapshots are reported by verify
         }
     }
-    return merge_computers(statuses, snapshots, now, status_name(computer_id(repo, os::machine_id())),
-                           os::hostname());
+    std::vector<Computer> out = merge_computers(statuses, snapshots, now,
+                                                status_name(computer_id(repo, os::machine_id())), os::hostname());
+    for (Computer& c : out)
+        if (const auto it = requests.find(c.status_name); !c.status_name.empty() && it != requests.end())
+            c.request = it->second;
+    return out;
+}
+
+// ---- forget -------------------------------------------------------------------------------
+
+std::string resolve_computer(const std::vector<StatusFile>& statuses, std::string_view what) {
+    const std::string key = lower(what);
+    if (key.empty()) throw Error("name the computer to remove (its name or id)");
+    const std::string prefix = std::string(kStatusDir) + "/";
+    const bool hex = key.size() >= 8 && key.size() <= 64 &&
+                     std::all_of(key.begin(), key.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    std::vector<const StatusFile*> by_id, by_name;
+    for (const StatusFile& f : statuses) {
+        const std::string id = f.name.substr(std::min(prefix.size(), f.name.size()));
+        if (f.name == what || (hex && id.starts_with(key))) by_id.push_back(&f);
+        else if (f.status && lower(f.status->host) == key) by_name.push_back(&f);
+    }
+    const std::vector<const StatusFile*>& found = !by_id.empty() ? by_id : by_name;
+    if (found.empty()) throw Error("no computer called \"" + std::string(what) + "\" has a status note here");
+    if (found.size() > 1)
+        throw Error("several computers match \"" + std::string(what) +
+                    "\"; name one by its id (vaultik computers --json lists them)");
+    return found.front()->name;
+}
+
+std::string resolve_forget(const std::vector<StatusFile>& statuses, std::string_view what,
+                           std::string_view this_record) {
+    std::string name = resolve_computer(statuses, what);
+    if (name == this_record)
+        throw Error("this is this computer's own status note; its next run would write it again");
+    return name;
+}
+
+std::string forget_computer(Repository& repo, std::string_view what) {
+    const std::vector<StatusFile> statuses = list_statuses(repo);
+    const std::string name = resolve_forget(statuses, what, status_name(computer_id(repo, os::machine_id())));
+    std::string host = "?";
+    for (const StatusFile& f : statuses)
+        if (f.name == name && f.status) host = f.status->host;
+    const Id id = status_computer(name);
+    repo.backend().remove(name);
+    if (repo.backend().exists(request_name(id))) repo.backend().remove(request_name(id));
+    return host;
+}
+
+// ---- requests -----------------------------------------------------------------------------
+
+std::string to_json(const BackupRequest& r) {
+    const json j = {{"format", kStatusFormat}, {"from", r.from},   {"created", r.created},
+                    {"jobs", r.jobs},          {"state", r.state}, {"started", r.started}};
+    return j.dump();
+}
+
+BackupRequest request_from_json(const std::string& text) {
+    try {
+        const json j = json::parse(text);
+        if (!j.is_object() || get_or<int>(j, "format", 0) < 1) throw Error("malformed backup request");
+        BackupRequest r;
+        r.from = get_or<std::string>(j, "from", "");
+        r.created = get_or<std::uint64_t>(j, "created", 0);
+        r.jobs = get_or<std::vector<std::string>>(j, "jobs", {});
+        r.state = get_or<std::string>(j, "state", "pending");
+        r.started = get_or<std::uint64_t>(j, "started", 0);
+        return r;
+    } catch (const json::exception& e) {
+        throw Error(std::string("malformed backup request: ") + e.what());
+    }
+}
+
+std::string request_name(const Id& computer) {
+    return std::string(kRequestDir) + "/" + id_hex(computer);
+}
+
+Id status_computer(const std::string& name) {
+    const std::optional<Id> id = parse_status_name(name);
+    if (!id) throw Error("not a status note: " + name);
+    return *id;
+}
+
+void write_request(Repository& repo, const Id& computer, const BackupRequest& request) {
+    const std::string text = to_json(request);
+    repo.backend().put(request_name(computer),
+                       repo.seal_file(ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()),
+                                      request_aad(computer)));
+}
+
+std::optional<BackupRequest> read_request(Repository& repo, const Id& computer) {
+    const std::string name = request_name(computer);
+    if (!repo.backend().exists(name)) return std::nullopt;
+    const Bytes sealed = repo.backend().get(name);
+    if (sealed.size() > kMaxStatusSize) throw Error("backup request too large");
+    const Bytes plain = repo.open_file(sealed, request_aad(computer));
+    return request_from_json(std::string(plain.begin(), plain.end()));
+}
+
+void remove_request(Repository& repo, const Id& computer) {
+    const std::string name = request_name(computer);
+    if (repo.backend().exists(name)) repo.backend().remove(name);
+}
+
+void ask_backup(Repository& repo, const StatusFile& status, std::vector<std::string> jobs, const std::string& from,
+                std::uint64_t now) {
+    const Id target = status_computer(status.name);
+    if (status.name == status_name(computer_id(repo, os::machine_id())))
+        throw Error("this is this computer: start its backup here instead");
+    if (jobs.empty() && status.status)
+        for (const JobStatus& j : status.status->jobs) jobs.push_back(j.id);
+    if (jobs.empty()) throw Error("that computer has no jobs here to run");
+    BackupRequest r;
+    r.from = from;
+    r.created = now;
+    r.jobs = std::move(jobs);
+    write_request(repo, target, r);
+}
+
+std::vector<std::string> requested_jobs(const BackupRequest& r, const std::vector<std::string>& local,
+                                        std::uint64_t now) {
+    std::vector<std::string> out;
+    if (r.created > now + kRequestExpiry || (now > r.created && now - r.created > kRequestExpiry)) return out;
+    for (const std::string& id : r.jobs)
+        if (std::find(local.begin(), local.end(), id) != local.end() &&
+            std::find(out.begin(), out.end(), id) == out.end())
+            out.push_back(id);
+    return out;
+}
+
+std::optional<BackupRequest> after_run(BackupRequest r, const std::string& job_id) {
+    std::erase(r.jobs, job_id);
+    if (r.jobs.empty()) return std::nullopt;
+    return r;
+}
+
+std::vector<std::string> take_request(Repository& repo, const std::vector<std::string>& local,
+                                      std::uint64_t now) noexcept {
+    try {
+        const Id me = computer_id(repo, os::machine_id());
+        std::optional<BackupRequest> r = read_request(repo, me);
+        if (!r) return {};
+        std::vector<std::string> ids = requested_jobs(*r, local, now);
+        if (ids.empty()) {
+            // Expired, or for jobs this computer has not got here (any more): nobody will run it.
+            remove_request(repo, me);
+            return {};
+        }
+        if (r->state != "running") {
+            r->state = "running";
+            r->started = now;
+            write_request(repo, me, *r);
+        }
+        return ids;
+    } catch (...) {
+        return {};
+    }
+}
+
+void finish_request(Repository& repo, const std::string& job_id) noexcept {
+    try {
+        const Id me = computer_id(repo, os::machine_id());
+        const std::optional<BackupRequest> r = read_request(repo, me);
+        if (!r || std::find(r->jobs.begin(), r->jobs.end(), job_id) == r->jobs.end()) return;
+        if (const std::optional<BackupRequest> left = after_run(*r, job_id)) write_request(repo, me, *left);
+        else remove_request(repo, me);
+    } catch (...) {
+    }
+}
+
+std::vector<RequestFile> list_requests(Repository& repo) {
+    std::vector<RequestFile> out;
+    for (const std::string& name : repo.backend().list(kRequestDir)) {
+        const std::optional<Id> id = parse_request_name(name);
+        if (!id) continue;
+        RequestFile f;
+        f.target = status_name(*id);
+        try {
+            f.request = read_request(repo, *id);
+            if (!f.request) continue;  // removed while we looked
+        } catch (const std::exception&) {
+        }
+        out.push_back(std::move(f));
+    }
+    return out;
 }
 
 }  // namespace vaultik::jobs

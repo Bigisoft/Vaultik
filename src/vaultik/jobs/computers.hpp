@@ -78,13 +78,31 @@ std::optional<std::uint64_t> next_run(const Schedule& schedule, std::uint64_t no
 JobStatus job_status(const Job& job, const std::vector<RunRecord>& history, std::uint64_t now);
 
 // Puts `job` into the record of `computer` (read, the job's entry replaced, written back), with
-// the given host name and version. Entries of other jobs stay.
+// the given host name and version. Entries of other jobs stay. Two jobs of one computer ending
+// together would each write the record they read, and one entry would be lost: so the record is
+// read back after writing, and when the entry is not in it (another writer replaced the file
+// meanwhile) merged and written again, a few times with a random pause.
 void update_status(Repository& repo, const Id& computer, const std::string& host, const std::string& version,
                    const JobStatus& job, std::uint64_t now);
 // The same for this computer. Never throws: a status that cannot be written must not fail a run.
 // Returns why it failed, or empty.
 std::string publish_status(Repository& repo, const Job& job, const std::vector<RunRecord>& history,
                            const std::string& version) noexcept;
+
+// A request from one computer to another sharing the repository: run these jobs once, now. Kept
+// at status/requests/<computer id> (one per computer; a new request replaces an older one),
+// sealed with AAD "VKREQ001" || computer id. The asked computer looks for it when its jobs on
+// the repository run and when the frontend polls; it runs the jobs it has with these ids that
+// back up to this repository, removing each from the request when it ran, and the request when
+// none is left. A request older than kRequestExpiry is dropped.
+struct BackupRequest {
+    std::string from;                // the asking computer's name
+    std::uint64_t created = 0;       // when it asked
+    std::vector<std::string> jobs;   // ids of the asked computer's jobs still to run
+    std::string state = "pending";   // "pending", "running" (the asked computer took it up)
+    std::uint64_t started = 0;       // when it was taken up
+};
+constexpr std::uint64_t kRequestExpiry = 7ull * 24 * 3600 * 10000000;
 
 enum class Health { Ok, Unknown, Warning, Stale, Failed };  // from best to worst
 const char* to_string(Health health);
@@ -110,6 +128,7 @@ struct Computer {
     std::uint64_t latest_bytes = 0;  // the newest version's size
     std::uint64_t added_bytes = 0;   // bytes its versions added to the repository
     Health health = Health::Unknown;
+    std::optional<BackupRequest> request;  // a request to back up addressed to it
 };
 
 // Joins status records and snapshots by host name (case-insensitively): one entry per record,
@@ -119,5 +138,64 @@ std::vector<Computer> merge_computers(const std::vector<StatusFile>& statuses, c
                                       std::uint64_t now, std::string_view this_record, std::string_view this_host);
 // Reads everything from the repository (snapshots that cannot be read are left out).
 std::vector<Computer> list_computers(Repository& repo, std::uint64_t now);
+
+// ---- Removing a retired computer ----------------------------------------------------------
+
+// Which status record `what` names: a status name ("status/<hex>"), the computer id in hex (all
+// of it, or its first 8 or more digits), or a host name (ignoring case; it must name one record).
+// Throws Error when nothing or several records match.
+std::string resolve_computer(const std::vector<StatusFile>& statuses, std::string_view what);
+// The same for removing it: also throws when the record is `this_record` (this computer's own:
+// its next run would write it again, and its jobs still run).
+std::string resolve_forget(const std::vector<StatusFile>& statuses, std::string_view what,
+                           std::string_view this_record);
+// Removes that record and a request addressed to that computer (see below); the snapshots stay.
+// Returns the removed record's host name ("?" when it could not be read). Status records are not
+// under S3 Object Lock, so this works on locked cloud storage too.
+std::string forget_computer(Repository& repo, std::string_view what);
+
+// ---- Asking another computer to back up now ------------------------------------------------
+
+// The request (see BackupRequest above) and what to do with it.
+
+std::string to_json(const BackupRequest& request);
+BackupRequest request_from_json(const std::string& text);  // throws Error
+// "status/requests/<64 hex>".
+std::string request_name(const Id& computer);
+void write_request(Repository& repo, const Id& computer, const BackupRequest& request);
+// Empty when there is none. Throws AuthError when it was changed, Error when malformed.
+std::optional<BackupRequest> read_request(Repository& repo, const Id& computer);
+void remove_request(Repository& repo, const Id& computer);
+// The computer id in a status name ("status/<hex>"); throws Error for another name.
+Id status_computer(const std::string& status_name);
+
+// Asks the computer of `status` (a record from list_statuses) to run `jobs` (ids from its record;
+// all of its jobs when empty). Throws Error when it names no job, or when the record is this
+// computer's own (start a job here instead).
+void ask_backup(Repository& repo, const StatusFile& status, std::vector<std::string> jobs, const std::string& from,
+                std::uint64_t now);
+
+// What a request asks of this computer: the ids among `local` (this computer's jobs on this
+// repository) it lists, unless it expired. Empty when none.
+std::vector<std::string> requested_jobs(const BackupRequest& request, const std::vector<std::string>& local,
+                                        std::uint64_t now);
+// The request after `job_id` ran: without that job; empty when nothing is left.
+std::optional<BackupRequest> after_run(BackupRequest request, const std::string& job_id);
+
+// This computer, at a poll or the start of a run: the request addressed to it, if any; the job
+// ids among `local` it asks for (marking it taken up), or empty (an expired request, or one for
+// jobs this computer does not have here, is removed). Never throws: a request that cannot be read
+// is left alone.
+std::vector<std::string> take_request(Repository& repo, const std::vector<std::string>& local, std::uint64_t now) noexcept;
+// After `job_id` ran on this computer: removes it from the request addressed here (and the request
+// when it was the last). Never throws.
+void finish_request(Repository& repo, const std::string& job_id) noexcept;
+
+// A request in the view: whom it asks, its state.
+struct RequestFile {
+    std::string target;  // the asked computer's status name ("status/<hex>")
+    std::optional<BackupRequest> request;  // empty when it cannot be read
+};
+std::vector<RequestFile> list_requests(Repository& repo);
 
 }  // namespace vaultik::jobs

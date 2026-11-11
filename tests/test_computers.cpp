@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
 
 #include "vaultik/jobs/computers.hpp"
 #include "vaultik/ops/backup.hpp"
@@ -70,6 +71,35 @@ JobStatus sample_job(const std::string& id, std::uint64_t now) {
     j.next_run = now + kDay / 2;
     return j;
 }
+
+// A folder that, on the first write of a status note, lets "another run" of the same computer
+// write its own note over it right after (two jobs ending together).
+class RacingBackend : public Backend {
+public:
+    RacingBackend(std::unique_ptr<Backend> inner, std::function<void()> race)
+        : inner_(std::move(inner)), race_(std::move(race)) {}
+    std::string location() const override { return inner_->location(); }
+    bool exists(const std::string& name) override { return inner_->exists(name); }
+    void put(const std::string& name, ByteSpan data) override {
+        inner_->put(name, data);
+        if (name.starts_with("status/") && race_) {
+            auto race = std::move(race_);
+            race_ = nullptr;
+            race();
+        }
+    }
+    Bytes get(const std::string& name) override { return inner_->get(name); }
+    Bytes get_range(const std::string& name, std::uint64_t offset, std::size_t length) override {
+        return inner_->get_range(name, offset, length);
+    }
+    std::uint64_t size(const std::string& name) override { return inner_->size(name); }
+    std::vector<std::string> list(const std::string& dir) override { return inner_->list(dir); }
+    void remove(const std::string& name) override { inner_->remove(name); }
+
+private:
+    std::unique_ptr<Backend> inner_;
+    std::function<void()> race_;
+};
 
 Snapshot snap(const std::string& host, std::uint64_t time, std::uint64_t bytes, std::uint64_t stored) {
     Snapshot s;
@@ -183,6 +213,162 @@ TEST_CASE("updating a computer's record keeps its other jobs") {
     REQUIRE(fresh.has_value());
     REQUIRE(fresh->jobs.size() == 1);
     CHECK(fresh->jobs[0].id == "c");
+}
+
+TEST_CASE("two jobs of one computer ending together both stay in its record") {
+    TempDir tmp;
+    auto first = make_repo(tmp.path / "repo");
+    const std::uint64_t now = os::now();
+    const Id id = computer_id(*first, "machine-1");
+    update_status(*first, id, "pc", "0.7.0", sample_job("a", now), now);
+    // Job b's run read the record (with a) before job c's run wrote it, and writes after it:
+    // c's entry is lost from the file, and c's run must notice and write it again.
+    auto other = reopen(tmp.path / "repo");
+    HostStatus stale = *read_status(*other, id);
+    auto racing = Repository::open(std::make_unique<RacingBackend>(std::make_unique<LocalBackend>(u8(tmp.path / "repo")),
+                                                                   [&] {
+                                                                       stale.jobs.push_back(sample_job("b", now));
+                                                                       write_status(*other, id, stale);
+                                                                   }),
+                                   kPassword);
+    update_status(*racing, id, "pc", "0.7.0", sample_job("c", now), now);
+    const auto s = read_status(*first, id);
+    REQUIRE(s.has_value());
+    REQUIRE(s->jobs.size() == 3);
+    CHECK(s->jobs[0].id == "a");
+    CHECK(s->jobs[1].id == "b");
+    CHECK(s->jobs[2].id == "c");
+}
+
+TEST_CASE("removing a retired computer's status note") {
+    TempDir tmp;
+    auto repo = make_repo(tmp.path / "repo");
+    const std::uint64_t now = os::now();
+    const Id old_pc = computer_id(*repo, "machine-old");
+    const Id twin1 = computer_id(*repo, "machine-twin-1");
+    const Id twin2 = computer_id(*repo, "machine-twin-2");
+    const Id mine = computer_id(*repo, os::machine_id());
+    update_status(*repo, old_pc, "Old-Laptop", "0.7.0", sample_job("a", now), now);
+    update_status(*repo, twin1, "Twin", "0.7.0", sample_job("a", now), now);
+    update_status(*repo, twin2, "twin", "0.7.0", sample_job("a", now), now);
+    update_status(*repo, mine, os::hostname(), "0.7.0", sample_job("a", now), now);
+    const std::vector<StatusFile> files = list_statuses(*repo);
+    REQUIRE(files.size() == 4);
+    const std::string me = status_name(mine);
+
+    // By name (any case), by the whole id, by its start, by the file name.
+    CHECK(resolve_forget(files, "old-laptop", me) == status_name(old_pc));
+    CHECK(resolve_forget(files, id_hex(old_pc), me) == status_name(old_pc));
+    CHECK(resolve_forget(files, id_hex(old_pc).substr(0, 8), me) == status_name(old_pc));
+    CHECK(resolve_forget(files, status_name(old_pc), me) == status_name(old_pc));
+    // Not too short an id, not an unknown name, not two computers of one name, never this one.
+    CHECK_THROWS_AS(resolve_forget(files, id_hex(old_pc).substr(0, 4), me), Error);
+    CHECK_THROWS_AS(resolve_forget(files, "nobody", me), Error);
+    CHECK_THROWS_AS(resolve_forget(files, "", me), Error);
+    CHECK_THROWS_AS(resolve_forget(files, "TWIN", me), Error);
+    CHECK(resolve_forget(files, id_hex(twin2), me) == status_name(twin2));
+    CHECK_THROWS_AS(resolve_forget(files, me, me), Error);
+    CHECK_THROWS_AS(resolve_forget(files, os::hostname(), me), Error);
+    CHECK(resolve_computer(files, os::hostname()) == me);  // asking needs no such rule here
+
+    // Removing it takes a request addressed to it along; the others stay.
+    BackupRequest r;
+    r.from = "pc";
+    r.created = now;
+    r.jobs = {"a"};
+    write_request(*repo, old_pc, r);
+    CHECK(forget_computer(*repo, "Old-Laptop") == "Old-Laptop");
+    CHECK_FALSE(read_status(*repo, old_pc).has_value());
+    CHECK_FALSE(read_request(*repo, old_pc).has_value());
+    CHECK(list_statuses(*repo).size() == 3);
+    CHECK_THROWS_AS(forget_computer(*repo, os::hostname()), Error);
+    CHECK(read_status(*repo, mine).has_value());
+}
+
+TEST_CASE("asking another computer to back up") {
+    TempDir tmp;
+    auto repo = make_repo(tmp.path / "repo");
+    const std::uint64_t now = os::now();
+    const Id other = computer_id(*repo, "machine-other");
+    const Id mine = computer_id(*repo, os::machine_id());
+    update_status(*repo, other, "Desk", "0.7.0", sample_job("docs", now), now);
+    update_status(*repo, other, "Desk", "0.7.0", sample_job("photos", now), now);
+    update_status(*repo, mine, os::hostname(), "0.7.0", sample_job("x", now), now);
+    const std::vector<StatusFile> files = list_statuses(*repo);
+    const auto file_of = [&](const Id& id) {
+        for (const StatusFile& f : files)
+            if (f.name == status_name(id)) return f;
+        FAIL("no record");
+        return StatusFile{};
+    };
+
+    // All its jobs by default; never this computer itself.
+    ask_backup(*repo, file_of(other), {}, "Laptop", now);
+    auto r = read_request(*repo, other);
+    REQUIRE(r.has_value());
+    CHECK(r->from == "Laptop");
+    CHECK(r->created == now);
+    CHECK(r->state == "pending");
+    CHECK(r->jobs == std::vector<std::string>{"docs", "photos"});
+    CHECK_THROWS_AS(ask_backup(*repo, file_of(mine), {}, "Laptop", now), Error);
+    StatusFile empty = file_of(other);
+    empty.status->jobs.clear();
+    CHECK_THROWS_AS(ask_backup(*repo, empty, {}, "Laptop", now), Error);
+
+    // Sealed for that computer: moved to another one's name it does not open.
+    repo->backend().put(request_name(mine), repo->backend().get(request_name(other)));
+    CHECK_THROWS_AS(read_request(*repo, mine), AuthError);
+    repo->backend().remove(request_name(mine));
+    CHECK(BackupRequest{}.state == "pending");
+    CHECK(request_from_json(to_json(*r)).jobs == r->jobs);
+    CHECK_THROWS_AS(request_from_json("[]"), Error);
+
+    // What it asks of a computer: only its own jobs here, only while fresh.
+    CHECK(requested_jobs(*r, {"photos", "music"}, now) == std::vector<std::string>{"photos"});
+    CHECK(requested_jobs(*r, {"music"}, now).empty());
+    CHECK(requested_jobs(*r, {"docs", "photos"}, now + kRequestExpiry + 1).empty());
+    CHECK(requested_jobs(*r, {"docs"}, now + kRequestExpiry - 1) == std::vector<std::string>{"docs"});
+    const auto left = after_run(*r, "docs");
+    REQUIRE(left.has_value());
+    CHECK(left->jobs == std::vector<std::string>{"photos"});
+    CHECK_FALSE(after_run(*left, "photos").has_value());
+    CHECK(after_run(*left, "music")->jobs == left->jobs);
+
+    // The view shows it next to the computer it asks.
+    bool shown = false;
+    for (const Computer& c : list_computers(*repo, now))
+        if (c.status_name == status_name(other)) shown = c.request.has_value() && c.request->from == "Laptop";
+    CHECK(shown);
+    const std::vector<RequestFile> listed = list_requests(*repo);
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0].target == status_name(other));
+
+    // This computer takes up a request addressed to it, and answers it job by job.
+    BackupRequest to_me;
+    to_me.from = "Desk";
+    to_me.created = now;
+    to_me.jobs = {"x", "y"};
+    write_request(*repo, mine, to_me);
+    CHECK(take_request(*repo, {"x", "z"}, now + 5) == std::vector<std::string>{"x"});
+    auto taken = read_request(*repo, mine);
+    REQUIRE(taken.has_value());
+    CHECK(taken->state == "running");
+    CHECK(taken->started == now + 5);
+    finish_request(*repo, "z");  // not asked for: no change
+    CHECK(read_request(*repo, mine)->jobs.size() == 2);
+    finish_request(*repo, "x");
+    CHECK(read_request(*repo, mine)->jobs == std::vector<std::string>{"y"});
+    finish_request(*repo, "y");
+    CHECK_FALSE(read_request(*repo, mine).has_value());
+    // One for jobs this computer does not have here, or an expired one, is removed unanswered.
+    write_request(*repo, mine, to_me);
+    CHECK(take_request(*repo, {"q"}, now).empty());
+    CHECK_FALSE(read_request(*repo, mine).has_value());
+    write_request(*repo, mine, to_me);
+    CHECK(take_request(*repo, {"x"}, now + kRequestExpiry + 1).empty());
+    CHECK_FALSE(read_request(*repo, mine).has_value());
+    // Requests are not status notes.
+    CHECK(list_statuses(*repo).size() == 2);
 }
 
 TEST_CASE("job status from the history") {

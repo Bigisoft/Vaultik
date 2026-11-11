@@ -41,4 +41,11 @@ public:
     using ComputersDone = std::function<void(std::vector<vaultik::jobs::Computer>, QString error)>;
     static void computers_async(QObject* context, std::string repository, std::string password,
                                 vaultik::CloudCredentials cloud, ComputersDone done);
+
+    // Opens the repository the same way and runs `work` on it on the worker thread (small changes
+    // such as removing a computer's status note). `done` gets the error text, empty on success.
+    using ActionDone = std::function<void(QString error)>;
+    static void action_async(QObject* context, std::string repository, std::string password,
+                             vaultik::CloudCredentials cloud, std::function<void(vaultik::Repository&)> work,
+                             ActionDone done);
 };

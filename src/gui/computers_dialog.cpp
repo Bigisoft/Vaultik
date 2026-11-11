@@ -5,6 +5,7 @@
 #include <QHeaderView>
 #include <QLocale>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QTreeWidget>
@@ -100,6 +101,7 @@ ComputersDialog::ComputersDialog(std::vector<ComputerSource> sources, QWidget* p
     tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     for (int c = 1; c < 5; ++c) tree_->header()->setSectionResizeMode(c, QHeaderView::ResizeToContents);
     connect(tree_, &QTreeWidget::currentItemChanged, this, &ComputersDialog::show_details);
+    connect(tree_, &QTreeWidget::currentItemChanged, this, &ComputersDialog::update_buttons);
 
     details_ = new QPlainTextEdit;
     details_->setReadOnly(true);
@@ -113,6 +115,13 @@ ComputersDialog::ComputersDialog(std::vector<ComputerSource> sources, QWidget* p
     refresh_ = buttons->addButton(tr("Refresh"), QDialogButtonBox::ActionRole);
     refresh_->setIcon(icon(QStringLiteral("arrow_sync_20_regular")));
     connect(refresh_, &QPushButton::clicked, this, &ComputersDialog::load);
+    ask_ = buttons->addButton(tr("Ask to back up now"), QDialogButtonBox::ActionRole);
+    ask_->setToolTip(tr("That computer backs up when one of its jobs here runs, or when Vaultik there next looks "
+                        "(every 15 minutes, every hour for cloud storage)."));
+    connect(ask_, &QPushButton::clicked, this, &ComputersDialog::ask_backup);
+    forget_ = buttons->addButton(tr("Remove..."), QDialogButtonBox::ActionRole);
+    forget_->setToolTip(tr("Remove the status note of a computer that no longer backs up here"));
+    connect(forget_, &QPushButton::clicked, this, &ComputersDialog::forget);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     auto* layout = new QVBoxLayout(this);
@@ -125,6 +134,78 @@ ComputersDialog::ComputersDialog(std::vector<ComputerSource> sources, QWidget* p
     layout->addLayout(bottom);
 
     load();
+    update_buttons();
+}
+
+const jobs::Computer* ComputersDialog::current(int* source) const {
+    const QTreeWidgetItem* item = tree_->currentItem();
+    if (item == nullptr || !item->data(0, kComputerRole).isValid()) return nullptr;
+    const int s = item->data(0, kSourceRole).toInt();
+    const int c = item->data(0, kComputerRole).toInt();
+    if (s < 0 || static_cast<std::size_t>(s) >= computers_.size()) return nullptr;
+    const auto& list = computers_[static_cast<std::size_t>(s)];
+    if (c < 0 || static_cast<std::size_t>(c) >= list.size()) return nullptr;
+    if (source != nullptr) *source = s;
+    return &list[static_cast<std::size_t>(c)];
+}
+
+void ComputersDialog::update_buttons() {
+    const jobs::Computer* pc = current(nullptr);
+    // Only another computer with a status note: this one starts its backups itself, and one without
+    // a note has nothing to remove and no jobs to ask for.
+    const bool other = pc != nullptr && !pc->this_computer && !pc->status_name.empty();
+    ask_->setEnabled(other && pc->status && !pc->status->jobs.empty());
+    forget_->setEnabled(other);
+}
+
+void ComputersDialog::ask_backup() {
+    int s = 0;
+    const jobs::Computer* pc = current(&s);
+    if (pc == nullptr || !pc->status) return;
+    const ComputerSource& src = sources_[static_cast<std::size_t>(s)];
+    jobs::StatusFile file;
+    file.name = pc->status_name;
+    file.status = pc->status;
+    ask_->setEnabled(false);
+    const std::string from = os::hostname();
+    RepoHandle::action_async(
+        this, src.repository, src.password, src.cloud,
+        [file, from](Repository& repo) { jobs::ask_backup(repo, file, {}, from, os::now()); },
+        [this, host = qs(pc->host)](const QString& error) {
+            if (!error.isEmpty()) {
+                plain_warning(this, tr("Ask to back up now"), error);
+                update_buttons();
+                return;
+            }
+            summary_->setText(tr("Asked %1 to back up now.").arg(host));
+            load();
+        });
+}
+
+void ComputersDialog::forget() {
+    int s = 0;
+    const jobs::Computer* pc = current(&s);
+    if (pc == nullptr || pc->this_computer || pc->status_name.empty()) return;
+    const QString host = pc->host == "?" ? tr("this unknown computer") : qs(pc->host);
+    if (QMessageBox::question(this, tr("Remove computer"),
+                              tr("Remove the status note of %1 from this backup? Do this for a computer that no "
+                                 "longer backs up here. Its versions stay, and if it still backs up here, its next "
+                                 "run leaves a new note.").arg(host)) != QMessageBox::Yes)
+        return;
+    const ComputerSource& src = sources_[static_cast<std::size_t>(s)];
+    const std::string name = pc->status_name;
+    forget_->setEnabled(false);
+    RepoHandle::action_async(
+        this, src.repository, src.password, src.cloud,
+        [name](Repository& repo) { jobs::forget_computer(repo, name); },
+        [this](const QString& error) {
+            if (!error.isEmpty()) {
+                plain_warning(this, tr("Remove computer"), error);
+                update_buttons();
+                return;
+            }
+            load();
+        });
 }
 
 ComputersDialog::~ComputersDialog() {
@@ -188,7 +269,7 @@ void ComputersDialog::fill(int index, const std::vector<jobs::Computer>& compute
         auto* row = new QTreeWidgetItem(top);
         row->setText(0, name);
         row->setIcon(0, icon(QStringLiteral("window_20_regular")));
-        row->setText(1, health_text(pc.health));
+        row->setText(1, pc.request ? tr("%1, asked to back up").arg(health_text(pc.health)) : health_text(pc.health));
         row->setIcon(1, health_icon(pc.health));
         row->setText(2, when(last_backup_of(pc)));
         row->setText(3, locale.toString(static_cast<qulonglong>(pc.versions)));
@@ -229,6 +310,14 @@ void ComputersDialog::show_details() {
 
     QStringList lines;
     lines << tr("%1: %2").arg(item->text(0), health_text(pc.health));
+    if (pc.request) {
+        lines << (pc.request->state == "running"
+                      ? tr("Asked to back up by %1 on %2; it started on %3.")
+                            .arg(qs(pc.request->from), format_time(pc.request->created), format_time(pc.request->started))
+                      : tr("Asked to back up by %1 on %2; waiting for it to look (it looks when one of its jobs here "
+                           "runs, and every 15 minutes while Vaultik runs there, every hour for cloud storage).")
+                            .arg(qs(pc.request->from), format_time(pc.request->created)));
+    }
     if (pc.versions > 0) {
         lines << tr("Versions: %1, the newest from %2 (%3); together they added %4 to the backup.")
                      .arg(pc.versions)

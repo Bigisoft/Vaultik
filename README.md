@@ -422,7 +422,22 @@ vaultik computers -r \\nas\backups\vaultik --json
 
 Computers that backed up with an older Vaultik, or without a saved job, show with their versions
 only. Prune, repair and health checks leave the notes alone, and S3 Object Lock does not lock
-them (they are rewritten after each run).
+them (they are rewritten after each run). Two jobs of one computer that end at the same moment
+both keep their entry: each run reads the note back after writing it and writes it again when
+the other run's note replaced its own.
+
+**Remove...** (or `vaultik computers --forget <name or id>`) deletes the note of a computer that
+no longer backs up there, after asking; its versions stay. It refuses this computer's own note.
+
+**Ask to back up now** (or `vaultik computers --ask <name or id>`, `--ask-job <job id>` for one
+job) leaves an encrypted request for that computer in the repository. The other computer runs its
+jobs on that repository once (recorded with the trigger "request") when one of them runs anyway,
+or when Vaultik there looks for requests: every 15 minutes for folders, drives and network shares
+and every hour for cloud storage, where each look costs a few billed requests and counts against
+the cloud drives' rate limits (not over a metered connection). A look opens the repository
+without its index and reads one small file. The view shows a request as "asked to back up" until
+the last job ran; a request nobody took up within 7 days is dropped. Requests only name saved jobs
+of that computer: they cannot make it run anything else.
 
 ### External drives
 
@@ -899,7 +914,8 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    pausing a backup and a slower speed during working hours, a Bulgarian translation,
    Windows Hello before backups are opened, and the installed programs kept with each version
    to install again with winget on a new PC. Several PCs in one view (done): computers sharing
-   a repository see how each other's backups are doing.
+   a repository see how each other's backups are doing, can ask each other to back up now, and
+   retired computers can be removed from the view.
 8. Linux port, SteamOS on the Steam Deck first. The review before it is done; its Linux hazards
    are listed in docs/LINUX_PORT.md. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client

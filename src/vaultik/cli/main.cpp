@@ -120,6 +120,17 @@ Commands:
                                leaves a status record there), its versions and
                                whether it is ok, has warnings, failed or is
                                stale (more than 3 days past its schedule)
+      --forget <computer>      Remove a retired computer's status note (by its
+                               name or id; never this computer's own)
+      --ask <computer>         Ask that computer to back up now: it runs its
+                               jobs on this repository once, when one of them
+                               runs or Vaultik there next looks (every 15
+                               minutes, every hour for cloud storage)
+      --ask-job <job id>       Only this job of it (repeatable)
+      --poll                   Look for requests to this computer in the
+                               repositories of its saved jobs and list the
+                               jobs asked for (used by the frontend; --cloud
+                               includes cloud storage)
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
   mount <snapshot>             Windows: show a version as a read-only folder for File
                                Explorer until Enter is pressed (files are read
@@ -245,6 +256,8 @@ Commands:
                                (used by the tray)
       --on-change              Run only if it is not already backing up (used
                                by the tray for continuous backups)
+      --on-request             Run because another computer asked for it
+                               (vaultik computers --ask; started by the tray)
   copy <job>                   Copy the job's new versions to its second copy now
                                (run-job does this after each backup), creating it
                                there on first use with the job's password
@@ -332,11 +345,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -2114,6 +2127,7 @@ int cmd_run_job(const Args& a) {
     // Started by an event rather than a time: not again soon after a backup.
     std::string trigger = a.has("--on-event") ? "event" : a.has("--on-sign-out") ? "sign-out"
                           : a.has("--on-change")                                 ? "change"
+                          : a.has("--on-request")                                ? "request"
                                                                                  : std::string();
     if (trigger == "event" && job->schedule.on_update) {
         // The events task also starts on Windows Update installing something: tell whether that
@@ -2156,6 +2170,9 @@ int cmd_run_job(const Args& a) {
                 if (repo) publish_job_status(*repo, store, job);
             } catch (...) {
             }
+            // The job ran: a request from another computer to run it is answered, however it was
+            // started (see jobs::BackupRequest).
+            if (repo) jobs::finish_request(*repo, job.id);
         }
     } status_on_exit{repo, store, *job};
     // The "after" command runs once the "before" one did (or there is none), whatever happens.
@@ -2885,9 +2902,67 @@ int cmd_find(const Args& a) {
     return kExitOk;
 }
 
+// "computers --poll [--cloud]": the jobs other computers asked this one to run now, from the
+// requests in the repositories of the saved jobs (those with a stored password, without
+// administrator rights; their drives connected). Cloud storage only with --cloud: the frontend
+// asks for it less often, since every look costs a few requests there. Prints
+// {"event": "requests", "jobs": [ids]} (or one id per line); never fails on one repository.
+int poll_requests(const Args& a) {
+    const jobs::JobStore store = job_store(a);
+    std::map<std::string, std::vector<jobs::Job>> by_repo;
+    for (const jobs::Job& job : store.list()) {
+        if (job.run_as_admin || (is_cloud_location(job.repository) && !a.has("--cloud"))) continue;
+        if (!jobs::drive_connected(job)) continue;
+        by_repo[job.repository].push_back(job);
+    }
+    std::vector<std::string> asked;
+    std::vector<std::string> failed;
+    for (const auto& [location, list] : by_repo) {
+        std::string pw = store.password(list.front().id);
+        if (pw.empty()) continue;
+        try {
+            const CloudCredentials cloud = store.cloud_credentials(list.front());
+            auto repo = Repository::open(open_backend(location, &cloud), pw, false);
+            secure_wipe(pw.data(), pw.size());
+            std::vector<std::string> local;
+            for (const jobs::Job& j : list) local.push_back(j.id);
+            for (const std::string& id : jobs::take_request(*repo, local, os::now())) asked.push_back(id);
+        } catch (const std::exception& e) {
+            secure_wipe(pw.data(), pw.size());
+            failed.push_back(location + ": " + e.what());
+        }
+    }
+    if (g_json) {
+        emit({{"event", "requests"}, {"jobs", asked}, {"failed", failed}});
+    } else {
+        for (const std::string& id : asked) out(id + "\n");
+        for (const std::string& f : failed) err("could not look for requests in " + f + "\n");
+    }
+    return kExitOk;
+}
+
 // "computers": every computer backing up into the repository, from their status records and the
-// snapshots' host names.
+// snapshots' host names. --forget removes a retired computer's record, --ask asks one to back up.
 int cmd_computers(const Args& a) {
+    if (a.has("--poll")) return poll_requests(a);
+    if (const auto what = a.value("--forget")) {
+        auto repo = open_repo(a, false);
+        const std::string host = jobs::forget_computer(*repo, *what);
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"forgot", host}});
+        else out("Removed the status note of " + host + " (its versions stay).\n");
+        return kExitOk;
+    }
+    if (const auto what = a.value("--ask")) {
+        auto repo = open_repo(a, false);
+        const std::vector<jobs::StatusFile> statuses = jobs::list_statuses(*repo);
+        const std::string name = jobs::resolve_computer(statuses, *what);
+        const auto it = std::find_if(statuses.begin(), statuses.end(), [&](const jobs::StatusFile& f) { return f.name == name; });
+        jobs::ask_backup(*repo, *it, a.all("--ask-job"), os::hostname(), os::now());
+        const std::string host = it->status ? it->status->host : std::string("?");
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"asked", host}});
+        else out("Asked " + host + " to back up now. It does when one of its jobs here runs, or when Vaultik there next looks.\n");
+        return kExitOk;
+    }
     auto repo = open_repo(a);
     const std::uint64_t now = os::now();
     const std::vector<jobs::Computer> list = jobs::list_computers(*repo, now);
@@ -2903,6 +2978,9 @@ int cmd_computers(const Args& a) {
                                 {"latest_bytes", c.latest_bytes},
                                 {"added_bytes", c.added_bytes},
                                 {"record", c.status_name.empty() ? nlohmann::json() : nlohmann::json(c.status_name)}};
+            if (c.request)
+                j["request"] = {{"from", c.request->from}, {"created", c.request->created},
+                                {"jobs", c.request->jobs}, {"state", c.request->state}, {"started", c.request->started}};
             if (c.status) {
                 j["version"] = c.status->version;
                 j["updated"] = c.status->updated;
@@ -2936,6 +3014,10 @@ int cmd_computers(const Args& a) {
             line += c.status_name.empty() ? "  (no status record)" : "  (status record unreadable)";
         }
         out(line + "\n");
+        if (c.request)
+            out("    asked to back up by " + c.request->from + " " + os::format_time_local(c.request->created) +
+                (c.request->state == "running" ? ", taken up " + os::format_time_local(c.request->started) : ", waiting") +
+                "\n");
         if (!c.status) continue;
         for (const jobs::JobStatus& s : c.status->jobs) {
             std::string row = "    " + s.name + ": " + jobs::to_string(jobs::job_health(s, now));
