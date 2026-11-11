@@ -246,6 +246,17 @@ std::string final_path(const std::string& path);
 // The id of the item at `path` itself (a link is not followed); empty when it cannot be read.
 std::optional<FileId> file_id(const std::string& path);
 
+// POSIX: whether the process runs as root (effective user id 0). Always false on Windows (see
+// process_elevated in acl.hpp).
+bool running_as_root();
+// POSIX: whether an account other than root could rename, replace or add entries in the folder
+// at `path`, so a path through it could be redirected (swapped for a link to /etc) between a
+// check and a write: it is not a real folder (a link, or missing), it belongs to another account,
+// or its group or others may write to it (also with the sticky bit: they can still add a link).
+// A restore running as root goes only through folders where this is false. Always false on
+// Windows, where the restore holds folders open instead (File::hold_directory).
+bool others_can_change(const std::string& path);
+
 // The alternate data streams of a file or folder (not its own content).
 struct StreamEntry {
     std::string name;  // without the colons and the ":$DATA" type
@@ -308,10 +319,13 @@ void append_file(const std::string& path, ByteSpan data, std::uint32_t mode = 06
 // permissions already keep other accounts out). Throws OsError.
 void make_private_dirs(const std::string& path);
 
-// Encrypts a secret so only the current user can read it back (Windows DPAPI). On POSIX the
-// data is returned unchanged and protection comes from the file mode (0600) inside a 0700 folder
-// (make_private_dirs): anyone who can read the account's files (root, a backup of the home
-// folder, a program running as the user) can read it, as with an SSH key without a passphrase.
+// Encrypts a secret so only the current user can read it back (Windows DPAPI). On POSIX it is
+// sealed (AES-256-GCM) with a random key kept in this account's own settings folder
+// (secrets/local.key under VAULTIK_CONFIG_DIR, $XDG_CONFIG_HOME/vaultik or ~/.config/vaultik), so
+// a copy of the sealed files alone (a portable copy's settings on a backup drive) does not reveal
+// it; on the computer itself protection comes from the file modes (0600 in a 0700 folder,
+// make_private_dirs): anyone who can read the account's files (root, a program running as the
+// user) can still read it, as with an SSH key without a passphrase.
 // `machine`: sealed with the computer's key instead of the account's (Windows), so another account
 // (the system account of a job with administrator rights) can open it; the file's permissions are
 // then all that keeps others out.
@@ -331,8 +345,9 @@ struct CommandOptions {
     // run_command throws Error. Standard input is empty.
     std::chrono::seconds timeout = std::chrono::hours(4);
     std::function<bool()> cancelled;
-    // Windows: a fixed minimal environment plus these variables (see ShellOptions). Values passed
-    // this way never have to be quoted into a command line.
+    // A fixed minimal environment plus these variables (see ShellOptions); without
+    // `clean_environment` the variables go on top of this process's. Values passed this way never
+    // have to be quoted into a command line.
     bool clean_environment = false;
     std::vector<std::pair<std::string, std::string>> extra_environment;
 };
@@ -385,8 +400,9 @@ struct ShellOptions {
     // run_shell throws Error. Programs it starts and leaves running are not waited for.
     std::chrono::seconds timeout = std::chrono::hours(4);
     std::function<bool()> cancelled;
-    // Windows: a fixed minimal environment (the system folders on Path) instead of this
-    // process's, plus `extra_environment`; for commands run with administrator rights.
+    // A fixed minimal environment (Windows: the system folders on Path; POSIX: the system bin
+    // folders on PATH plus HOME, USER, LOGNAME, LANG and TZ) instead of this process's, plus
+    // `extra_environment`; for commands run with administrator rights.
     bool clean_environment = false;
     std::vector<std::pair<std::string, std::string>> extra_environment;
     std::string directory;  // the working folder (empty: this process's)

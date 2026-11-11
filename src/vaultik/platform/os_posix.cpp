@@ -25,7 +25,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
+#include "vaultik/crypto/crypto.hpp"
+#include "vaultik/util/hex.hpp"
 #include "vaultik/util/resources.hpp"
 
 namespace vaultik::os {
@@ -723,12 +726,109 @@ std::optional<DiskSpace> disk_space(const std::string& path) {
     return DiskSpace{static_cast<std::uint64_t>(st.f_bavail) * st.f_bsize, static_cast<std::uint64_t>(st.f_blocks) * st.f_bsize};
 }
 
+// ---- secrets: sealed with a key kept in this account's own settings ---------------------------
+
+namespace {
+
+constexpr std::string_view kSealedMagic = "VKS1";  // AES-256-GCM with the account's local key
+constexpr std::string_view kSealedAad = "vaultik local secret v1";
+
+// Where the key lives: the settings folder of this account on this computer (VAULTIK_CONFIG_DIR,
+// else $XDG_CONFIG_HOME/vaultik or ~/.config/vaultik), never the portable Settings-Linux folder
+// next to the programs, so a backup drive carrying a portable copy does not carry the key too.
+std::string secret_key_file() {
+    std::string base = get_env("VAULTIK_CONFIG_DIR");
+    if (!base.empty()) {
+        base = absolute_path(base);
+    } else {
+        const std::string config = user_folder(UserFolder::RoamingAppData);
+        if (config.empty()) throw Error("cannot keep a secret: the home folder is not known (HOME is not set)");
+        base = join(config, "vaultik");
+    }
+    return join(join(base, "secrets"), "local.key");
+}
+
+// The key; created (random) when `create` and there is none yet. Empty when there is none.
+std::optional<Key32> secret_key(bool create) {
+    const std::string path = secret_key_file();
+    const std::string dir = parent_of(path);
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        try {
+            if (is_directory(dir)) make_private_dirs(dir);  // tightens a folder left open
+            Bytes b = read_file(path, 64);
+            if (b.size() != 32) throw Error("the key for saved passwords is damaged: " + path);
+            Key32 key{};
+            std::memcpy(key.data(), b.data(), key.size());
+            secure_wipe(b.data(), b.size());
+            return key;
+        } catch (const OsError& e) {
+            if (!is_not_found(e.code())) throw;
+        }
+        if (!create) return std::nullopt;
+        // Written whole under a temporary name, then linked in: link() never replaces, so two
+        // processes making the key at once agree on one, and nobody reads a half-written key.
+        make_private_dirs(dir);
+        Key32 key{};
+        random_bytes(key);
+        std::uint8_t rnd[6];
+        random_bytes(rnd);
+        const std::string tmp = path + ".tmp-" + to_hex(rnd);
+        ErrorCode err = 0;
+        File f = File::create(tmp, false, err, 0600);
+        if (!f.valid()) throw_error("cannot create " + tmp, err);
+        try {
+            f.write_all(ByteSpan(key.data(), key.size()));
+            f.sync();
+        } catch (...) {
+            f.close();
+            ::unlink(tmp.c_str());
+            throw;
+        }
+        f.close();
+        const int linked = ::link(tmp.c_str(), path.c_str());
+        const int link_err = errno;
+        ::unlink(tmp.c_str());
+        if (linked == 0) {
+            sync_parent_dir(path);
+            return key;
+        }
+        secure_wipe(key.data(), key.size());
+        if (link_err != EEXIST) throw_error("cannot create " + path, static_cast<ErrorCode>(link_err));
+        // Another process made it first: read that one.
+    }
+    throw Error("cannot read the key for saved passwords: " + path);
+}
+
+}  // namespace
+
+// Sealed with a random key kept in this account's own settings folder (secret_key_file), so a
+// copy of the secrets alone (a portable copy's Settings-Linux folder on a backup drive) does not
+// give them away. On top of that the files are 0600 in a 0700 folder.
 Bytes protect_secret(ByteSpan plain, bool /*machine*/) {
-    return Bytes(plain.begin(), plain.end());  // protected by the 0600 file mode
+    std::optional<Key32> key = secret_key(true);
+    const AesGcm gcm(*key);
+    secure_wipe(key->data(), key->size());
+    const Bytes sealed = gcm.seal(plain, ByteSpan(reinterpret_cast<const std::uint8_t*>(kSealedAad.data()), kSealedAad.size()));
+    Bytes out(kSealedMagic.begin(), kSealedMagic.end());
+    out.insert(out.end(), sealed.begin(), sealed.end());
+    return out;
 }
 
 Bytes unprotect_secret(ByteSpan sealed) {
-    return Bytes(sealed.begin(), sealed.end());
+    if (sealed.size() < kSealedMagic.size() ||
+        std::memcmp(sealed.data(), kSealedMagic.data(), kSealedMagic.size()) != 0)
+        throw Error("a saved secret is not in a form this program can read; enter it again");
+    std::optional<Key32> key = secret_key(false);
+    if (!key)
+        throw Error("a saved secret was sealed on another computer or account (its key is not here); enter it again");
+    const AesGcm gcm(*key);
+    secure_wipe(key->data(), key->size());
+    try {
+        return gcm.open(sealed.subspan(kSealedMagic.size()),
+                        ByteSpan(reinterpret_cast<const std::uint8_t*>(kSealedAad.data()), kSealedAad.size()));
+    } catch (const AuthError&) {
+        throw Error("a saved secret was sealed on another computer or account (another key); enter it again");
+    }
 }
 
 // ---- process ------------------------------------------------------------------------------
@@ -829,8 +929,10 @@ int spawn_and_wait(const Spawn& s) {
             break;
         }
         if (done < 0 && errno != EINTR) {
-            status = 0;
-            break;
+            // Its exit code is lost (it was reaped elsewhere): never report that as success.
+            const int e = errno;
+            if (pipefd[0] >= 0) ::close(pipefd[0]);
+            throw_error("cannot wait for " + argv[0], static_cast<ErrorCode>(e));
         }
         if (s.cancelled != nullptr && *s.cancelled && (*s.cancelled)()) stop_reason = "cancelled";
         else if (std::chrono::steady_clock::now() > deadline) stop_reason = "did not finish in time";
@@ -900,11 +1002,16 @@ int run_shell(const std::string& command, const ShellOptions& options) {
 }
 
 int run_command(const std::vector<std::string>& argv, const CommandOptions& options) {
+    // The same environment rules as run_shell: a clean one when asked, extra variables on top.
+    std::vector<std::string> env;
+    const bool own_env = options.clean_environment || !options.extra_environment.empty();
+    if (own_env) env = shell_environment(options.clean_environment, options.extra_environment);
     Spawn s;
     s.argv = &argv;
     s.output = options.output;
     s.timeout = options.timeout;
     s.cancelled = &options.cancelled;
+    s.environment = own_env ? &env : nullptr;
     return spawn_and_wait(s);
 }
 
@@ -987,6 +1094,9 @@ std::uint32_t process_id() {
 
 bool process_alive(std::uint32_t pid) {
     if (pid == 0) return true;
+    // No process has an id that big (pid_max is at most 2^22), and as a negative pid_t kill()
+    // would test a whole process group instead.
+    if (pid > static_cast<std::uint32_t>(std::numeric_limits<pid_t>::max())) return false;
     return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
 }
 
@@ -1012,7 +1122,10 @@ std::string get_env(const char* name) {
 }
 
 std::string user_folder(UserFolder folder) {
-    const std::string home = get_env("HOME");
+    std::string home = get_env("HOME");
+    // Without HOME (some service managers and cron set none) the password database knows it.
+    if (home.empty())
+        if (const struct passwd* pw = ::getpwuid(::geteuid()); pw != nullptr && pw->pw_dir != nullptr) home = pw->pw_dir;
     if (home.empty()) return {};
     const auto xdg = [&](const char* var, const char* fallback) {
         const std::string v = get_env(var);
@@ -1076,6 +1189,16 @@ std::string final_path(const std::string& /*path*/) {
 
 std::optional<FileId> file_id(const std::string& /*path*/) {
     return std::nullopt;
+}
+
+bool running_as_root() {
+    return ::geteuid() == 0;
+}
+
+bool others_can_change(const std::string& path) {
+    struct stat st{};
+    if (::lstat(path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) return true;
+    return st.st_uid != 0 || (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
 }
 
 File File::create_stream(const std::string& /*path*/, const std::string& /*name*/, const FileId& /*expected*/,

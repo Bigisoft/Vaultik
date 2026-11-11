@@ -88,6 +88,15 @@ std::optional<FileId> file_id(const std::string& path) {
     return out;
 }
 
+// POSIX only: an elevated restore on Windows holds its folders open instead.
+bool running_as_root() {
+    return false;
+}
+
+bool others_can_change(const std::string& /*path*/) {
+    return false;
+}
+
 ErrorCode write_security(const std::string& path, ByteSpan descriptor, const FileId* expected) {
     if (descriptor.empty()) return 0;
     Bytes sd(descriptor.begin(), descriptor.end());  // the API wants a non-const pointer

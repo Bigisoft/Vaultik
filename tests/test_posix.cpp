@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <string>
@@ -124,6 +125,88 @@ TEST_CASE("POSIX: run_shell environment and working folder") {
     CHECK(os::run_shell("printf '%s|%s|' \"$VAULTIK_TEST_VALUE\" \"$(pwd)\"; env | grep -c '^VAULTIK_PASSWORD=' || true", o) == 0);
     CHECK(out.starts_with("a b|" + tmp.path + "|"));
     CHECK(out.find("|0") != std::string::npos);  // a clean environment carries no password
+}
+
+TEST_CASE("POSIX: run_command clean environment and extra variables") {
+    ::setenv("VAULTIK_TEST_LEAK", "secret", 1);
+    std::string out;
+    os::CommandOptions o;
+    o.output = &out;
+    o.clean_environment = true;
+    o.extra_environment = {{"VAULTIK_TEST_VALUE", "a b"}};
+    CHECK(os::run_command({"/bin/sh", "-c", "printf '%s|%s|' \"$VAULTIK_TEST_VALUE\" \"${VAULTIK_TEST_LEAK:-none}\""}, o) == 0);
+    CHECK(out == "a b|none|");
+
+    // Without a clean environment the extra variables go on top of this process's.
+    out.clear();
+    o.clean_environment = false;
+    CHECK(os::run_command({"/bin/sh", "-c", "printf '%s|%s|' \"$VAULTIK_TEST_VALUE\" \"${VAULTIK_TEST_LEAK:-none}\""}, o) == 0);
+    CHECK(out == "a b|secret|");
+    ::unsetenv("VAULTIK_TEST_LEAK");
+}
+
+TEST_CASE("POSIX: process ids past the pid_t range are not alive") {
+    CHECK(os::process_alive(os::process_id()));
+    CHECK_FALSE(os::process_alive(0xFFFFFFFFu));
+}
+
+TEST_CASE("POSIX: the home folder without HOME comes from the password database") {
+    const std::string saved = os::get_env("HOME");
+    ::unsetenv("HOME");
+    const std::string home = os::user_folder(os::UserFolder::Profile);
+    if (!saved.empty()) ::setenv("HOME", saved.c_str(), 1);
+    CHECK_FALSE(home.empty());
+}
+
+TEST_CASE("POSIX: folders other accounts than root can change") {
+    PosixTemp tmp;
+    CHECK_FALSE(os::others_can_change("/"));  // root's, 0755
+    CHECK(os::others_can_change("/tmp"));      // 1777: anyone can add a link there
+    CHECK(os::others_can_change(os::join(tmp.path, "missing")));
+    const std::string dir = os::join(tmp.path, "d");
+    const std::string link = os::join(tmp.path, "l");
+    REQUIRE(::mkdir(dir.c_str(), 0700) == 0);
+    REQUIRE(::symlink("/", link.c_str()) == 0);
+    CHECK(os::others_can_change(link));  // a link, even to a safe folder
+    // A folder of the account running the test: safe only when that account is root itself.
+    CHECK(os::others_can_change(dir) == !os::running_as_root());
+    if (os::running_as_root()) {
+        ::chmod(dir.c_str(), 0770);
+        CHECK(os::others_can_change(dir));  // its group may write
+    }
+}
+
+TEST_CASE("POSIX: secrets are sealed with a key kept in this account's settings") {
+    PosixTemp tmp;
+    const std::string saved = os::get_env("VAULTIK_CONFIG_DIR");
+    ::setenv("VAULTIK_CONFIG_DIR", tmp.path.c_str(), 1);
+    const std::string plain = "correct horse battery staple";
+    const ByteSpan in(reinterpret_cast<const std::uint8_t*>(plain.data()), plain.size());
+    const Bytes sealed = os::protect_secret(in);
+    // The plain text is not in what lands on the disk.
+    CHECK(std::search(sealed.begin(), sealed.end(), plain.begin(), plain.end()) == sealed.end());
+    const Bytes back = os::unprotect_secret(sealed);
+    CHECK(std::string(back.begin(), back.end()) == plain);
+
+    const std::string key = os::join(os::join(tmp.path, "secrets"), "local.key");
+    struct stat st{};
+    REQUIRE(::stat(key.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0600);
+    CHECK(st.st_size == 32);
+
+    Bytes tampered = sealed;
+    tampered.back() ^= 1;
+    CHECK_THROWS_AS(os::unprotect_secret(tampered), Error);
+    CHECK_THROWS_AS(os::unprotect_secret(in), Error);  // plain text is not taken as a sealed secret
+
+    // On another computer (no key there) it cannot be opened, and a new key does not open it.
+    REQUIRE(::unlink(key.c_str()) == 0);
+    CHECK_THROWS_AS(os::unprotect_secret(sealed), Error);
+    (void)os::protect_secret(in);
+    CHECK_THROWS_AS(os::unprotect_secret(sealed), Error);
+
+    if (saved.empty()) ::unsetenv("VAULTIK_CONFIG_DIR");
+    else ::setenv("VAULTIK_CONFIG_DIR", saved.c_str(), 1);
 }
 
 TEST_CASE("POSIX: private folders are 0700") {

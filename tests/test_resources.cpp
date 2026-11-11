@@ -4,6 +4,7 @@
 
 #include "vaultik/util/error.hpp"
 #include "vaultik/util/resources.hpp"
+#include "vaultik/util/resources_detail.hpp"
 
 using namespace vaultik;
 
@@ -75,4 +76,16 @@ TEST_CASE("read throttle holds the configured rate") {
     const auto start2 = std::chrono::steady_clock::now();
     for (int i = 0; i < 64; ++i) throttle_read(1u << 20);  // unlimited again
     CHECK(std::chrono::duration<double>(std::chrono::steady_clock::now() - start2).count() < 0.1);
+}
+
+TEST_CASE("CPU cap duty cycle counts every thread, also above one core") {
+    using detail::cpu_cap_delay;
+    CHECK(cpu_cap_delay(0.0, 1.0, 8.0) == 0.0);  // no cap
+    // One core's worth (25 % of four): 2 s of CPU in 1 s of wall time is 1 s ahead.
+    CHECK(cpu_cap_delay(1.0, 1.0, 2.0) == doctest::Approx(1.0));
+    // Two cores' worth: 3 s of CPU (three busy threads) in 1 s is half a second ahead.
+    CHECK(cpu_cap_delay(2.0, 1.0, 3.0) == doctest::Approx(0.5));
+    CHECK(cpu_cap_delay(2.0, 1.0, 2.0) == 0.0);    // exactly at the cap
+    CHECK(cpu_cap_delay(0.5, 2.0, 0.5) == 0.0);    // below it
+    CHECK(cpu_cap_delay(0.5, 1.0, 0.501) == 0.0);  // under 5 ms is not worth a sleep
 }

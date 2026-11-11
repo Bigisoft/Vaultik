@@ -79,6 +79,8 @@ Key32 pbkdf2_sha256(std::string_view password, ByteSpan salt, std::uint32_t iter
 
 Bytes pbkdf2_sha512(std::string_view password, ByteSpan salt, std::uint32_t iterations, std::size_t length) {
     if (iterations == 0) throw Error("PBKDF2 iteration count must be positive");
+    // OpenSSL takes an int: a larger count (from a server's reply) would wrap to a negative one.
+    if (iterations > static_cast<std::uint32_t>(std::numeric_limits<int>::max())) throw Error("too many iterations");
     Bytes out(length);
     check(PKCS5_PBKDF2_HMAC(password.data(), to_int(password.size()), salt.data(), to_int(salt.size()),
                             static_cast<int>(iterations), EVP_sha512(), to_int(out.size()), out.data()),

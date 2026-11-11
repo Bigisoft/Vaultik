@@ -56,31 +56,45 @@ double process_cpu_seconds() {
 }
 
 // Keeps CPU time at or below `share` of the wall-clock time by sleeping at the throttle points.
+// Process CPU time counts every thread, so a cap of 25 % on a 4-core machine (one core) still
+// holds back a backup whose compression and hashing threads use more than one core between them.
 class CpuCap {
 public:
     void set(unsigned percent) {
         std::lock_guard lock(mu_);
         const long cpus = ::sysconf(_SC_NPROCESSORS_ONLN);
+        cores_ = static_cast<double>(cpus > 0 ? cpus : 1);
         // The cap is a share of the whole machine, as on Windows.
-        share_ = percent == 0 ? 0.0 : static_cast<double>(percent) / 100.0 * static_cast<double>(cpus > 0 ? cpus : 1);
+        share_ = percent == 0 ? 0.0 : static_cast<double>(percent) / 100.0 * cores_;
         start_wall_ = std::chrono::steady_clock::now();
         start_cpu_ = process_cpu_seconds();
     }
 
     void tick() {
         std::unique_lock lock(mu_);
-        if (share_ <= 0.0 || share_ >= 1.0) return;  // a single thread cannot exceed one core
-        const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_wall_).count();
-        const double used = process_cpu_seconds() - start_cpu_;
-        const double excess = used / share_ - wall;  // seconds of wall time we are ahead
-        if (excess <= 0.005) return;
+        if (share_ <= 0.0 || share_ >= cores_) return;  // no cap, or the whole machine
+        const auto now = std::chrono::steady_clock::now();
+        const double wall = std::chrono::duration<double>(now - start_wall_).count();
+        const double cpu = process_cpu_seconds();
+        const double delay = detail::cpu_cap_delay(share_, wall, cpu - start_cpu_);
+        if (delay <= 0.0) {
+            // Within the cap. Start a new window now and then, so a long quiet spell (waiting on
+            // the network) does not save up credit for minutes of full speed later.
+            if (wall > 10.0) {
+                start_wall_ = now;
+                start_cpu_ = cpu;
+            }
+            return;
+        }
         lock.unlock();
-        std::this_thread::sleep_for(std::chrono::duration<double>(excess));
+        // In short steps, so a thread comes back to its cancel checks soon.
+        std::this_thread::sleep_for(std::chrono::duration<double>(delay < 0.5 ? delay : 0.5));
     }
 
 private:
     std::mutex mu_;
     double share_ = 0.0;
+    double cores_ = 1.0;
     std::chrono::steady_clock::time_point start_wall_{};
     double start_cpu_ = 0.0;
 };

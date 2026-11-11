@@ -98,6 +98,11 @@ private:
     RestoreResult result_;
     std::uint64_t kept_permissions_ = 0;  // existing folders whose stored permissions were not applied
     std::string root_;                    // the target's real path, for inside()
+    // POSIX, running as root: every folder the restore goes through must be one only root can
+    // change (os::others_can_change). Linux has no way to hold a folder in place as Windows does,
+    // and the writes go by path, so a user who can rename entries in a folder on the way could
+    // swap it for a link to /etc and have root write, chown and chmod there.
+    bool root_guard_ = false;
     RestoreProgress progress_;
     std::chrono::steady_clock::time_point last_report_{};
 };
@@ -382,6 +387,12 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
                     warn(e.what());
                     return;
                 }
+                if (root_guard_ && os::others_can_change(path)) {
+                    warn("skipped " + path +
+                         ": another account can change this folder, so a restore running as root does not go into it "
+                         "(restore into a new folder only root can change, then move the files)");
+                    return;
+                }
                 if (os::is_exists(err) && options_.permissions && node.security) ++kept_permissions_;
                 // Keep the existing folder from being swapped for a link while its content is
                 // restored (an elevated restore must not be led into another folder).
@@ -433,6 +444,18 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
 
     std::string root = os::absolute_path(options_.target);
     ensure_dir_chain(root);
+    root_guard_ = os::running_as_root();
+    if (root_guard_) {
+        // The target and every folder above it: a link put in place of any of them would move the
+        // whole restore. (Folders the restore makes are root's own and pass.)
+        for (std::string p = root; !p.empty(); p = os::parent_of(p))
+            if (os::others_can_change(p))
+                throw Error("cannot restore into " + root + " as root: " + p +
+                            " belongs to another account or others may write to it, so a link put in its place could "
+                            "send the restore anywhere (into /etc, say). Restore into a folder only root can change "
+                            "(for example a new folder under /root) and move the files from there, or run the restore "
+                            "as the account that owns " + p);
+    }
     // Work under the target's real path, with any link or junction on the way resolved now, and
     // hold every folder of it open from the top down, so none can be renamed, replaced by a link
     // or repointed during the restore. Every one of them must be a real folder.

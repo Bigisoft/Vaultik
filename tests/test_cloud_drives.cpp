@@ -7,9 +7,7 @@
 #include "vaultik/repo/mega_backend.hpp"
 #include "vaultik/repo/oauth.hpp"
 #include "vaultik/repo/webdav_backend.hpp"
-#ifdef _WIN32
 #include "vaultik/repo/sftp_backend.hpp"
-#endif
 #include "vaultik/util/base64.hpp"
 #include "vaultik/util/hex.hpp"
 
@@ -174,7 +172,6 @@ TEST_CASE("WebDAV folder listings are read whatever the namespace prefix") {
     CHECK_THROWS(WebDavBackend("webdav:http://172.32.0.1/x", {}));
 }
 
-#ifdef _WIN32
 TEST_CASE("SFTP locations: user, server, port and folder") {
     SftpLocation l = parse_sftp_location("sftp:me@nas.local/volume1/backups/pc/");
     CHECK(l.user == "me");
@@ -192,4 +189,3 @@ TEST_CASE("SFTP locations: user, server, port and folder") {
     CHECK_THROWS(parse_sftp_location("sftp:me@nas.local/a/../b"));
     CHECK(cloud_kind("sftp:me@nas/x") == CloudKind::Sftp);
 }
-#endif

@@ -6,7 +6,7 @@ it means) or **open**. Line numbers drift, so search for the named function.
 
 ## Verification
 
-- Windows: debug and release build, all 157 test cases pass (the Linux-only cases in
+- Windows: debug and release build, all 191 test cases pass (the Linux-only cases in
   `tests/test_posix.cpp` are compiled out there).
 - Linux: **not yet compiled or run.** The WSL Ubuntu distribution on the development PC stopped
   answering (every `wsl -d Ubuntu ...` hung, also `--exec /bin/echo`) for the whole session, so
@@ -21,6 +21,15 @@ it means) or **open**. Line numbers drift, so search for the named function.
 
   then the command line end to end against a temporary repository (init, backup, snapshots,
   restore, verify, forget/prune) with `VAULTIK_CONFIG_DIR` set to a scratch folder.
+
+  Written for Linux after the second review (November 2026) and not yet compiled or run there:
+  `run_command`'s environment and `waitpid` handling, `process_alive`, the home folder from the
+  password database, sealed secrets (`protect_secret`, `secrets/local.key`), the root restore
+  guard (`os::others_can_change`; its refusal as root was never exercised), the CPU cap's duty
+  cycle (only its arithmetic is tested, on Windows too), Manual jobs without timers and the
+  Description escaping, the GUI's socket under `$XDG_RUNTIME_DIR`, `poll` in the browser sign-in,
+  `fsync` of disk image files, the PBKDF2 bound, `sftp_location.cpp` and the CLI install rule. The
+  new cases in `tests/test_posix.cpp` cover the first five and run once Linux builds work.
 
 ## Metadata and restore
 
@@ -42,6 +51,18 @@ it means) or **open**. Line numbers drift, so search for the named function.
 - **Fixed** - history records, computer status records and monthly reports replace bytes that
   are not UTF-8 (Linux names need not be); saving a job with such a path gives a clear error
   instead of storing a changed path.
+- **Fixed (limited)** - restoring as root (`restore.cpp`, `root_guard_`): Linux cannot hold a
+  folder in place as Windows does (`File::hold_directory` and `final_path` are not supported
+  there) and the restore writes, chowns and chmods by path, so a user who can rename entries in a
+  folder on the way could swap it for a link to `/etc`. A restore running as root therefore goes
+  only through folders root alone can change (`os::others_can_change`: root's, not writable by
+  group or others, not a link): the target and every folder above it, or the restore stops with
+  a message; an existing folder inside the restore that fails the test is skipped with a warning.
+  Restoring as root straight into another account's folder (`/home/alice`) is refused: restore
+  into a new folder under `/root` and move the files, or restore as that account.
+- **Open** - a restore through directory descriptors (`openat`/`mkdirat` with `O_NOFOLLOW`, or
+  `openat2` with `RESOLVE_BENEATH`, and `fchownat`/`fchmodat`/`utimensat` relative to them), which
+  would let root restore into other accounts' folders safely.
 
 ## Processes and signals
 
@@ -49,7 +70,10 @@ it means) or **open**. Line numbers drift, so search for the named function.
   of a threaded process); a program that cannot start is an `OsError`, not exit code 127. Standard
   input is `/dev/null`; output goes to the caller or `/dev/null`, never into the `--json` stream;
   the timeout and `cancelled` stop the whole process group (TERM, then KILL after 2 s); the clean
-  environment, extra variables and working folder work.
+  environment (a fixed PATH plus HOME, USER, LOGNAME, LANG and TZ) and extra variables work for
+  both, the working folder for `run_shell`. A failed `waitpid` is an error, never exit code 0.
+- **Fixed** - `process_alive` answers false for an id past the `pid_t` range (it would have
+  tested a process group).
 - **Fixed** - `console_posix.cpp`: SIGINT, SIGTERM and SIGHUP set a flag that `stop_requested`
   reads, so Ctrl+C or `systemctl --user stop` ends a backup cleanly and releases its lock; a second
   signal ends the program at once. Echo comes back on every way out of the password prompt (also
@@ -58,14 +82,21 @@ it means) or **open**. Line numbers drift, so search for the named function.
 - **Fixed** - `resources_posix.cpp`: the memory cap is `RLIMIT_DATA` plus 128 MiB for thread
   stacks (not `RLIMIT_AS`, which counts reserved address space), malloc arenas are limited to 2
   while capped, and the cap is lifted when set back to 0.
+- **Fixed** - the CPU cap is a duty cycle: process CPU time (all threads) is kept at or below
+  the allowed share of the wall time by sleeping at the throttle points, for any share below the
+  whole machine (it used to do nothing from one core up); the window restarts after 10 quiet
+  seconds so waiting on the network does not save up credit.
 - **Decided** - nice values: a run applies its priority once, at start; working hours change only
   the read and write rates (`set_rate_limits`), never the priority, so "an unprivileged process
   cannot raise its priority again" never comes up. "High" stays normal without CAP_SYS_NICE.
 
 ## Scheduling
 
-- **Fixed** - unit Descriptions are one line with `%` escaped; `unit_quote` doubles `$` and `%`;
-  without HOME the home folder comes from the password database.
+- **Fixed** - unit Descriptions are one line with `%` escaped and no trailing backslash (it
+  would continue the line); `unit_quote` doubles `$` and `%`; without HOME the home folder comes
+  from the password database (`os::user_folder`).
+- **Fixed** - a Manual job gets no timer, also when it carries idle, lock or update triggers from
+  Windows (an empty `OnCalendar=` made systemd refuse the timer).
 - **Fixed** - ExecStart under an AppImage is `"$APPIMAGE" --cli run-job ...` (the program folder
   is a temporary mount); `packaging/linux/AppRun` hands `--cli` to the engine. In a Flatpak it is
   `flatpak run --command=vaultik io.github.bigisoft.Vaultik ...`, the units go to the real
@@ -105,12 +136,20 @@ it means) or **open**. Line numbers drift, so search for the named function.
   no redirects, no headers the caller did not ask for (signed requests), uploads read straight from
   memory, a reused connection cache per thread.
 - **Fixed** - `loopback.cpp`: the browser sign-in's local server on POSIX sockets (127.0.0.1 and
-  ::1); the browser opens with `xdg-open` in the background (web addresses only).
-- **Decided** - `protect_secret` stays a 0600 file, now in a 0700 `secrets` folder that is
-  tightened on every read and write (`os::make_private_dirs`). Limitation: whatever can read the
-  account's files (root, a program running as the user, a copy of the home folder) can read the
-  passwords, like an SSH key without a passphrase. libsecret needs a running, unlocked keyring,
-  which scheduled runs before sign-in and SteamOS' Game Mode do not have; possible as an option.
+  ::1), waited on with `poll` (`select` cannot take descriptors past 1023); the browser opens with
+  `xdg-open` in the background (web addresses only).
+- **Fixed** - `protect_secret` seals secrets (AES-256-GCM) with a random key in this account's own
+  settings folder (`secrets/local.key` under `VAULTIK_CONFIG_DIR`, `$XDG_CONFIG_HOME/vaultik` or
+  `~/.config/vaultik`, 0600 in a 0700 folder), and the sealed files are 0600 in a 0700 `secrets`
+  folder tightened on every read and write (`os::make_private_dirs`). A portable copy keeps its
+  settings on the backup drive, but the key stays on the computer, so the drive does not carry
+  the repository password in readable form; on another computer the password is asked for again.
+  Limitation: whatever can read the account's files (root, a program running as the user, a copy
+  of the whole home folder) can still read the passwords, like an SSH key without a passphrase.
+  libsecret needs a running, unlocked keyring, which scheduled runs before sign-in and SteamOS'
+  Game Mode do not have; possible as an option.
+- **Fixed** - `disk_posix.cpp`: a failed `fsync` of a disk image file is an error.
+- **Fixed** - `crypto_openssl.cpp`: PBKDF2-SHA512 refuses iteration counts above `INT_MAX`.
 - **Decided** - `vss.cpp`, `acl.cpp`, administrator jobs: Windows only. On Linux open files are
   read live; for other users' files run the engine as root from a system timer. The GUI hides "Run
   with administrator rights", "Start Vaultik as administrator" and Windows Hello.
@@ -126,9 +165,12 @@ it means) or **open**. Line numbers drift, so search for the named function.
 
 ## GUI
 
-- **Fixed** - one instance per user and settings folder through a user-only `QLocalServer`; a
-  second start hands `--history <path>` or "show" to the first. `history_argument` reads argv
-  (it ran before the application object existed).
+- **Fixed** - one instance per user and settings folder through a user-only `QLocalServer` whose
+  socket has an absolute path in `$XDG_RUNTIME_DIR` (when that is a 0700 folder of the account),
+  else in a 0700 `~/.cache/vaultik` (a bare name would put it in `/tmp`, where another account
+  could take the name first); without either there is no single-instance check. A second start
+  hands `--history <path>` or "show" to the first. `history_argument` reads argv (it ran before
+  the application object existed).
 - **Fixed** - "Start Vaultik when I sign in": an XDG autostart entry
   (`~/.config/autostart/vaultik.desktop`) that starts `$APPIMAGE` or the Flatpak when run from
   those.
@@ -143,6 +185,10 @@ it means) or **open**. Line numbers drift, so search for the named function.
 
 - **Fixed** - `.gitattributes` gives `*.sh` `eol=lf`; Linux links `Threads::Threads` and
   `CURL::libcurl`.
+- **Fixed** - `parse_sftp_location` is in `repo/sftp_location.cpp`, built everywhere (the cloud
+  dialog checks SFTP locations with it; the SFTP backend itself is Windows only so far).
+  `cli/main.cpp` includes `<cstdlib>` everywhere (`std::system` in `image_cmds.inc`). The engine is
+  installed without Qt too.
 - **Fixed** - CMake uses the distribution's packages without vcpkg (zstd and BLAKE3 also through
   pkg-config; otherwise BLAKE3 1.5.4 is downloaded at a fixed SHA-256). `build.sh` builds with
   them, `build.sh vcpkg` and the `linux-vcpkg-*` presets with vcpkg. `-DVAULTIK_BUILD_TESTS=OFF`
@@ -157,7 +203,9 @@ it means) or **open**. Line numbers drift, so search for the named function.
 - **Running from the backup drive on SteamOS** - after a backup to an external drive, a run from
   the AppImage copies it to `<drive>/Vaultik/Vaultik-x86_64.AppImage` with "How to restore on
   Linux.txt", next to the Windows programs. The `portable` file there keeps the Linux settings in
-  `Settings-Linux` (the Windows copy uses `Settings`). On the Deck: switch to Desktop Mode, open
+  `Settings-Linux` (the Windows copy uses `Settings`); the key that unlocks their saved passwords
+  stays in `~/.config/vaultik/secrets` on each computer (see `protect_secret` above), so on another
+  computer the password is asked for again. On the Deck: switch to Desktop Mode, open
   the drive in Dolphin and start the AppImage (a drive mounted `noexec` cannot run it: copy it to
   the home folder then). SteamOS updates reset the read-only system but not `/home`, where the
   AppImage, `~/.config/vaultik` and the systemd user timers live.

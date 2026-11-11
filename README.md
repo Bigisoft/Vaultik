@@ -194,8 +194,10 @@ else), connect the backup drive (or have the cloud storage keys at hand), pick t
 enter the password.
 
 The password is stored for scheduled runs, readable only by your user account: encrypted with
-DPAPI on Windows, in a file with mode 0600 inside a 0700 folder on Linux (anything that can read
-your account's files can read it there). Job files live in `%LOCALAPPDATA%\Vaultik`
+DPAPI on Windows; on Linux sealed with a key kept in your own settings folder
+(`~/.config/vaultik/secrets/local.key`) and stored with mode 0600 inside a 0700 folder (anything
+that can read your account's files can read it there, but a portable copy's settings on a backup
+drive do not carry the key, so the drive alone does not give the password away). Job files live in `%LOCALAPPDATA%\Vaultik`
 or `~/.config/vaultik` (override with `VAULTIK_CONFIG_DIR`).
 
 **Keep the password safe elsewhere too.** Without it the backups cannot be decrypted, and nobody
@@ -952,7 +954,10 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
   on a folder that was there already or on whatever a link put in their place points at. Audit
   settings (SACLs) are not kept. Backups with these extras need Vaultik 0.6 or later to restore.
   Linux: content, permissions, owner (restored when running as root), modification time and
-  symlinks are kept; extended attributes and ACLs are not. Kernel file systems (`/proc`, `/sys`,
+  symlinks are kept; extended attributes and ACLs are not. A restore running as root goes only
+  through folders that root alone can change (so another account cannot swap one for a link to
+  `/etc`): restore into a new folder under `/root` and move the files, or restore as the account
+  that owns the folder. Kernel file systems (`/proc`, `/sys`,
   `/dev`, tmpfs) are skipped.
 - Disk images: basic disks only (not dynamic disks or Storage Spaces); a BitLocker volume is
   stored as its unlocked content and comes back unencrypted (turn BitLocker on again after a

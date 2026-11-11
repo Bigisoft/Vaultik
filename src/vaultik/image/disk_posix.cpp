@@ -50,7 +50,10 @@ public:
         if (::ftruncate(fd_, static_cast<off_t>(size)) != 0)
             throw Error(std::string("growing the disk file: ") + std::strerror(errno));
     }
-    void flush() override { ::fsync(fd_); }
+    void flush() override {
+        // The image is only complete once it is on the disk: a failed flush is a failed write.
+        if (::fsync(fd_) != 0) throw Error(std::string("writing the disk file: ") + std::strerror(errno));
+    }
 
 private:
     int fd_;
