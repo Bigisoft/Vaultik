@@ -1,0 +1,73 @@
+# Builds Vaultik and runs its tests on Linux and Windows for every push and pull request, so a
+# change that breaks one platform is seen at once.
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.type }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        type: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the distribution's packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++ cmake ninja-build pkg-config libzstd-dev libssl-dev \
+            libcurl4-openssl-dev nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev
+      - name: Build and test
+        # As the runner's own (not root) account: as root, restores into /tmp are refused on
+        # purpose (another account could swap a folder there for a link).
+        run: BUILD_DIR="$RUNNER_TEMP/build-${{ matrix.type }}" ./build.sh ${{ matrix.type }} test
+
+  windows:
+    name: Windows (release)
+    runs-on: windows-2022
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      # Packages vcpkg built (Qt above all) are kept between runs, so only the first one builds them.
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get vcpkg at the manifest's baseline
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          git clone --quiet https://github.com/microsoft/vcpkg $env:VCPKG_ROOT
+          git -C $env:VCPKG_ROOT checkout --quiet $baseline
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          New-Item -ItemType Directory -Force "${{ github.workspace }}\vcpkg-cache" | Out-Null
+      - name: Restore vcpkg's built packages
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg-cache
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-windows-
+      - name: Build
+        shell: cmd
+        run: build.cmd release
+      # Saved right after the build, also when the tests then fail, so Qt is not built again.
+      - name: Save vcpkg's built packages
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}\vcpkg-cache
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
+      - name: Test
+        shell: cmd
+        run: ctest --preset release
