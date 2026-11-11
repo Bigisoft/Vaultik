@@ -753,6 +753,7 @@ void JobDialog::load(const jobs::Job& job) {
         cloud_.region = qs(job.cloud_region);
         cloud_.lock_days = job.cloud_lock_days;
         cloud_.lock_compliance = job.cloud_lock_compliance;
+        cloud_.storage_class = qs(job.cloud_storage_class);
         if (!job.id.empty()) {
             try {
                 std::string secret = store_.cloud_secret(job.id);
@@ -773,6 +774,7 @@ void JobDialog::load(const jobs::Job& job) {
         copy_cloud_.region = qs(sc.cloud_region);
         copy_cloud_.lock_days = sc.cloud_lock_days;
         copy_cloud_.lock_compliance = sc.cloud_lock_compliance;
+        copy_cloud_.storage_class = qs(sc.cloud_storage_class);
         if (!job.id.empty()) {
             try {
                 std::string secret = store_.copy_secret(job.id);
@@ -891,10 +893,12 @@ jobs::Job JobDialog::collect() const {
         j.cloud_region = u8(cloud_.region);
         j.cloud_lock_days = cloud_kind(j.repository) == CloudKind::S3 ? cloud_.lock_days : 0;
         j.cloud_lock_compliance = j.cloud_lock_days > 0 && cloud_.lock_compliance;
+        j.cloud_storage_class = cloud_kind(j.repository) == CloudKind::S3 ? u8(cloud_.storage_class) : std::string();
     } else {
         j.cloud_key_id.clear();
         j.cloud_region.clear();
         j.cloud_lock_days = 0;
+        j.cloud_storage_class.clear();
     }
     jobs::SecondCopy& sc = j.second_copy;
     sc = jobs::SecondCopy{};
@@ -904,6 +908,7 @@ jobs::Job JobDialog::collect() const {
         sc.cloud_region = u8(copy_cloud_.region);
         sc.cloud_lock_days = cloud_kind(sc.repository) == CloudKind::S3 ? copy_cloud_.lock_days : 0;
         sc.cloud_lock_compliance = sc.cloud_lock_days > 0 && copy_cloud_.lock_compliance;
+        sc.cloud_storage_class = cloud_kind(sc.repository) == CloudKind::S3 ? u8(copy_cloud_.storage_class) : std::string();
     } else if (!sc.repository.empty()) {
         sc.repository = os::absolute_path(sc.repository);
     }

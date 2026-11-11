@@ -97,6 +97,11 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     move_->setToolTip(tr("Set up this computer from an old one's backup: its Documents, Desktop, pictures, browser "
                          "profiles, email and game saves, each into the same folder of your account here"));
     connect(move_, &QPushButton::clicked, this, &RestoreDialog::move_here);
+    thaw_ = buttons->addButton(tr("Request thaw..."), QDialogButtonBox::ActionRole);
+    thaw_->setToolTip(tr("This backup keeps its data in archive storage: ask the cloud storage for a readable copy "
+                         "of what restoring the selected item (or the whole version) needs. Asking again shows how "
+                         "far the thaw is."));
+    connect(thaw_, &QPushButton::clicked, this, &RestoreDialog::request_thaw);
     restore_ = buttons->addButton(tr("Restore"), QDialogButtonBox::AcceptRole);
     restore_->setDefault(true);
     connect(restore_, &QPushButton::clicked, this, &RestoreDialog::start_restore);
@@ -142,6 +147,10 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
 
     runner_ = new Runner(this);
     connect(runner_, &Runner::progress, this, [this](const QJsonObject& ev) {
+        if (thaw_running_) {
+            status_->setText(tr("Asking for a thaw: part %1...").arg(ev.value("files").toInteger()));
+            return;
+        }
         status_->setText(tr("%1 files, %2   %3")
                              .arg(ev.value("files").toInteger())
                              .arg(format_bytes(static_cast<std::uint64_t>(ev.value("bytes").toInteger())))
@@ -152,8 +161,33 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
         bar_->hide();
         restore_->setEnabled(true);
         move_->setEnabled(true);
+        thaw_->setEnabled(true);
         snapshot_->setEnabled(true);
-        if (result == "success" || result == "partial") {
+        const bool thaw = thaw_running_;
+        thaw_running_ = false;
+        if (thaw && result == "success") {
+            QString text = tr("Thaw: %1 part(s) asked for now, %2 still being thawed, %3 readable already.")
+                               .arg(ev.value("requested").toInteger())
+                               .arg(ev.value("in_progress").toInteger())
+                               .arg(ev.value("available").toInteger());
+            text += " " + (ev.value("ready").toBool()
+                               ? tr("Everything this restore needs can be read now: restore it while the thawed copy lasts.")
+                               : tr("A thaw takes hours (up to 48 for Deep Archive). Request the thaw again later to "
+                                    "see how far it is, then restore."));
+            status_->setText(text);
+        } else if (thaw) {
+            status_->setText(result == "cancelled" ? tr("Thaw request cancelled.")
+                                                   : tr("The thaw request failed: %1").arg(ev.value("message").toString()));
+        } else if (ev.value("archived").toBool()) {
+            // The data is in archive storage: offer the thaw instead of a bare failure.
+            thaw_->show();
+            status_->setText(tr("This data is in archive storage and must be thawed before it can be restored."));
+            if (plain_question(this, windowTitle(),
+                               tr("The data of this version is in archive storage (Glacier or Deep Archive): it must "
+                                  "be thawed before it can be restored, which takes hours and is billed by the cloud "
+                                  "storage. Request a thaw of what this restore needs now?")))
+                request_thaw();
+        } else if (result == "success" || result == "partial") {
             QString text = tr("Restored %1 files (%2) in %3.")
                                .arg(ev.value("files").toInteger())
                                .arg(format_bytes(static_cast<std::uint64_t>(ev.value("bytes").toInteger())))
@@ -183,6 +217,8 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     set_role(restore_, "primary");
     restore_->setIcon(icon(QStringLiteral("arrow_counterclockwise_20_regular"), theme().accent_text));
     browse_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
+
+    show_archived_note();
 
     show_snapshot(selected >= 0 && selected < static_cast<int>(snapshots_.size()) ? selected : 0);
     if (selected > 0) {
@@ -370,11 +406,7 @@ void RestoreDialog::start_restore() {
         }
     }
 
-    QStringList args{"restore"};
-    if (job_.id.empty())
-        args << "--repo" << qs(job_.repository);
-    else
-        args << "--job" << qs(job_.id);
+    QStringList args = QStringList{"restore"} << repo_args();
     args << qs(id_hex(snap.id)) << "--target" << target;
     if (!path.isEmpty()) args << "--path" << path;
     if (overwrite_->isChecked()) args << "--overwrite";
@@ -383,8 +415,41 @@ void RestoreDialog::start_restore() {
     bar_->show();
     restore_->setEnabled(false);
     move_->setEnabled(false);
+    thaw_->setEnabled(false);
     snapshot_->setEnabled(false);
     status_->setText(tr("Starting..."));
+    runner_->start(args, password_, cloud_);
+}
+
+QStringList RestoreDialog::repo_args() const {
+    if (job_.id.empty()) return {QStringLiteral("--repo"), qs(job_.repository)};
+    return {QStringLiteral("--job"), qs(job_.id)};
+}
+
+void RestoreDialog::show_archived_note() {
+    const std::string cls = job_.id.empty() ? cloud_.storage_class : job_.cloud_storage_class;
+    const bool archived = storage_class_needs_thaw(cls);
+    thaw_->setVisible(archived);
+    if (archived)
+        status_->setText(tr("This backup keeps its data in archive storage (%1). Pick what to restore, choose Request "
+                            "thaw and wait until it is done (hours), then restore it.")
+                             .arg(qs(cls)));
+}
+
+void RestoreDialog::request_thaw() {
+    if (runner_->running() || snapshots_.empty()) return;
+    const SnapshotEntry& snap = snapshots_[static_cast<std::size_t>(snapshot_->currentIndex())];
+    const QString path = selected_path();
+    QStringList args = QStringList{"cloud-thaw"} << repo_args() << qs(id_hex(snap.id));
+    if (!path.isEmpty()) args << "--path" << path;
+    thaw_running_ = true;
+    bar_->show();
+    restore_->setEnabled(false);
+    move_->setEnabled(false);
+    thaw_->setEnabled(false);
+    snapshot_->setEnabled(false);
+    status_->setText(path.isEmpty() ? tr("Asking for a thaw of this version...")
+                                    : tr("Asking for a thaw of %1...").arg(path));
     runner_->start(args, password_, cloud_);
 }
 
@@ -452,17 +517,14 @@ void RestoreDialog::move_here() {
     for (int i = 0; i < list->count(); ++i)
         if (list->item(i)->checkState() == Qt::Checked) ids << list->item(i)->data(Qt::UserRole).toString();
     if (ids.isEmpty()) return;
-    QStringList args{"move-here"};
-    if (job_.id.empty())
-        args << "--repo" << qs(job_.repository);
-    else
-        args << "--job" << qs(job_.id);
+    QStringList args = QStringList{"move-here"} << repo_args();
     args << qs(id_hex(snap.id)) << "--account" << account->currentText() << "--only" << ids.join(',');
     if (replace->isChecked()) args << "--overwrite";
     warnings_ = 0;
     bar_->show();
     restore_->setEnabled(false);
     move_->setEnabled(false);
+    thaw_->setEnabled(false);
     snapshot_->setEnabled(false);
     status_->setText(tr("Starting..."));
     runner_->start(args, password_, cloud_);

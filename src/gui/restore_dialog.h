@@ -48,6 +48,13 @@ private:
     void show_versions_of_selected();
     // The old account's folders in this version, each into the same kind of folder here.
     void move_here();
+    // Archive storage (S3 GLACIER, DEEP_ARCHIVE): asks for a thaw of what restoring the selected
+    // item (or the whole version) needs, through the engine's cloud-thaw; asking again reports
+    // how far it is.
+    void request_thaw();
+    void show_archived_note();
+    // The engine command line for this job or repository: "--job <id>" or "--repo <location>".
+    QStringList repo_args() const;
 
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;
@@ -68,6 +75,8 @@ private:
     QLabel* status_ = nullptr;
     QPushButton* restore_ = nullptr;
     QPushButton* move_ = nullptr;
+    QPushButton* thaw_ = nullptr;
+    bool thaw_running_ = false;  // the engine runs cloud-thaw, not a restore
     Runner* runner_ = nullptr;
     int warnings_ = 0;
 };

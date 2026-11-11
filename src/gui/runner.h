@@ -23,7 +23,8 @@ public:
     bool running() const;
     // `password`, when given, reaches the engine as VAULTIK_PASSWORD (for a repository opened
     // without a saved job), and `cloud` keys as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and
-    // AWS_REGION. Inherited values of these are always dropped.
+    // AWS_REGION (and its storage class as VAULTIK_S3_STORAGE_CLASS). Inherited values of these are
+    // always dropped.
     void start(const QStringList& args, const QString& password = {}, const vaultik::CloudCredentials& cloud = {});
     // Asks the engine to stop cleanly; kills it if it has not exited after a grace period.
     void cancel();

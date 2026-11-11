@@ -134,6 +134,7 @@ CloudCredentials CloudTarget::credentials() const {
     CloudCredentials c{u8(key_id), u8(secret), u8(region)};
     c.lock_days = lock_days;
     c.lock_compliance = lock_compliance;
+    c.storage_class = u8(storage_class);
     return c;
 }
 
@@ -179,6 +180,21 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
                               "and deleting. Compliance mode cannot be lifted by anyone until the date passes, "
                               "so you also pay for the data until then."));
 
+    // The S3 names go in the item data; "" is the standard class.
+    storage_class_ = new QComboBox;
+    storage_class_->addItem(tr("Standard"), QString());
+    storage_class_->addItem(tr("Infrequent Access (STANDARD_IA)"), QStringLiteral("STANDARD_IA"));
+    storage_class_->addItem(tr("Glacier Instant Retrieval (GLACIER_IR)"), QStringLiteral("GLACIER_IR"));
+    storage_class_->addItem(tr("Glacier Flexible Retrieval (GLACIER): restore needs a thaw"), QStringLiteral("GLACIER"));
+    storage_class_->addItem(tr("Glacier Deep Archive (DEEP_ARCHIVE): restore needs a thaw"), QStringLiteral("DEEP_ARCHIVE"));
+    storage_hint_ = new QLabel(tr("For a long-term copy (usually the second copy): the backed-up data goes to a "
+                                  "cheaper class, while the list of versions and folders stays in Standard. Glacier "
+                                  "and Deep Archive must be thawed before a restore (hours, at a cost), health checks "
+                                  "cannot read them, and data deleted before 30, 90 or 180 days is billed for the "
+                                  "full period. Amazon S3 offers all of these; most other providers only Standard."));
+    storage_hint_->setWordWrap(true);
+    storage_hint_->setForegroundRole(QPalette::PlaceholderText);
+
     drive_folder_ = new QLineEdit;
     drive_folder_->setPlaceholderText(tr("e.g. Backups/my-pc"));
     app_id_ = new QLineEdit;
@@ -208,6 +224,8 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
     form_->addRow(tr("Region:"), region_);
     form_->addRow(tr("Lock uploads for:"), lock_days_);
     form_->addRow(tr("Lock mode:"), lock_mode_);
+    form_->addRow(tr("Storage class:"), storage_class_);
+    form_->addRow(storage_hint_);
     lock_mode_->setEnabled(false);
     connect(lock_days_, &QSpinBox::valueChanged, lock_mode_, [this](int days) { lock_mode_->setEnabled(days > 0); });
     form_->addRow(tr("Folder:"), drive_folder_);
@@ -246,6 +264,8 @@ CloudDialog::CloudDialog(const CloudTarget& initial, QWidget* parent) : QDialog(
         region_->setText(initial.region);
         lock_days_->setValue(initial.lock_days);
         lock_mode_->setCurrentIndex(initial.lock_compliance ? 1 : 0);
+        const int cls = storage_class_->findData(initial.storage_class);
+        storage_class_->setCurrentIndex(cls < 0 ? 0 : cls);
         try {
             const S3Location l = parse_s3_location(u8(initial.location));
             endpoint_->setText(qs(l.endpoint));
@@ -332,13 +352,18 @@ void CloudDialog::provider_changed(int index) {
     if (sftp != region_->text().startsWith(QStringLiteral("SHA256:"))) region_->clear();
     for (QWidget* w : {static_cast<QWidget*>(endpoint_), static_cast<QWidget*>(bucket_), static_cast<QWidget*>(folder_),
                        static_cast<QWidget*>(key_id_), static_cast<QWidget*>(secret_), static_cast<QWidget*>(region_),
-                       static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_)})
+                       static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_),
+                       static_cast<QWidget*>(storage_class_), static_cast<QWidget*>(storage_hint_)})
         form_->setRowVisible(w, !drive);
     // WebDAV: a folder's URL, a user name and a password.
     for (QWidget* w : {static_cast<QWidget*>(bucket_), static_cast<QWidget*>(folder_), static_cast<QWidget*>(region_),
-                       static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_)})
+                       static_cast<QWidget*>(lock_days_), static_cast<QWidget*>(lock_mode_),
+                       static_cast<QWidget*>(storage_class_), static_cast<QWidget*>(storage_hint_)})
         if (webdav) form_->setRowVisible(w, false);
-    if (webdav) lock_days_->setValue(0);
+    if (webdav) {
+        lock_days_->setValue(0);
+        storage_class_->setCurrentIndex(0);
+    }
     const auto label = [this](QWidget* field, const QString& text) {
         if (auto* l = qobject_cast<QLabel*>(form_->labelForField(field))) l->setText(text);
     };
@@ -571,6 +596,7 @@ CloudTarget CloudDialog::target() const {
     t.region = region_->text().trimmed();
     t.lock_days = lock_days_->value();
     t.lock_compliance = lock_mode_->currentIndex() == 1;
+    t.storage_class = storage_class_->currentData().toString();
     return t;
 }
 

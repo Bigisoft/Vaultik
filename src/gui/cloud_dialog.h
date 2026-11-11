@@ -19,6 +19,7 @@ struct CloudTarget {
     QString region;    // S3 only; empty: automatic
     int lock_days = 0;  // S3 only: Object Lock on uploads for this many days; 0 for none
     bool lock_compliance = false;
+    QString storage_class;  // S3 only: for packs of file data ("DEEP_ARCHIVE"); empty: standard
 
     vaultik::CloudCredentials credentials() const;
     void wipe();
@@ -62,6 +63,8 @@ private:
     QLineEdit* region_ = nullptr;
     QSpinBox* lock_days_ = nullptr;
     QComboBox* lock_mode_ = nullptr;
+    QComboBox* storage_class_ = nullptr;
+    QLabel* storage_hint_ = nullptr;
     // Drives
     QLineEdit* drive_folder_ = nullptr;
     QLineEdit* app_id_ = nullptr;
