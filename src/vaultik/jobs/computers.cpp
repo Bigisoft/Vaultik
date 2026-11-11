@@ -183,6 +183,13 @@ Bytes seal_status(Repository& repo, const Id& computer, const HostStatus& status
                           status_aad(computer));
 }
 
+// A status record or request is small: one that is not is not read (it is checked before it is
+// downloaded, so a huge file put there by the storage side costs nothing).
+Bytes get_small(Repository& repo, const std::string& name, const char* what) {
+    if (repo.backend().size(name) > kMaxStatusSize) throw Error(std::string(what) + " too large");
+    return repo.backend().get(name);
+}
+
 HostStatus open_status(Repository& repo, const Id& computer, ByteSpan sealed) {
     if (sealed.size() > kMaxStatusSize) throw Error("status record too large");
     const Bytes plain = repo.open_file(sealed, status_aad(computer));
@@ -198,7 +205,7 @@ void write_status(Repository& repo, const Id& computer, const HostStatus& status
 std::optional<HostStatus> read_status(Repository& repo, const Id& computer) {
     const std::string name = status_name(computer);
     if (!repo.backend().exists(name)) return std::nullopt;
-    return open_status(repo, computer, repo.backend().get(name));
+    return open_status(repo, computer, get_small(repo, name, "status record"));
 }
 
 std::vector<StatusFile> list_statuses(Repository& repo) {
@@ -209,7 +216,7 @@ std::vector<StatusFile> list_statuses(Repository& repo) {
         StatusFile f;
         f.name = name;
         try {
-            f.status = open_status(repo, *id, repo.backend().get(name));
+            f.status = open_status(repo, *id, get_small(repo, name, "status record"));
         } catch (const std::exception& e) {
             if (!repo.backend().exists(name)) continue;  // removed while we looked
             f.error = e.what();
@@ -553,7 +560,7 @@ void write_request(Repository& repo, const Id& computer, const BackupRequest& re
 std::optional<BackupRequest> read_request(Repository& repo, const Id& computer) {
     const std::string name = request_name(computer);
     if (!repo.backend().exists(name)) return std::nullopt;
-    const Bytes sealed = repo.backend().get(name);
+    const Bytes sealed = get_small(repo, name, "backup request");
     if (sealed.size() > kMaxStatusSize) throw Error("backup request too large");
     const Bytes plain = repo.open_file(sealed, request_aad(computer));
     return request_from_json(std::string(plain.begin(), plain.end()));
