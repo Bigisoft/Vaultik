@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(Vaultik VERSION 0.7.0 LANGUAGES C CXX)
+project(Vaultik VERSION 0.8.0 LANGUAGES C CXX)
 
 if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Vaultik supports Windows and Linux")

@@ -260,7 +260,7 @@ format change, so older Vaultik versions still read the snapshot (and show them 
 - `vaultik:copy-of=<64 hex>`: in a second copy, the id of the snapshot it was copied from.
 - `vaultik:apps=<64 hex>`: the id of a Data blob listing the programs installed when the snapshot
   was made (Vaultik 0.7 and later; see below).
-- `vaultik:image`: a disk image (added after Vaultik 0.7.0; see "Disk images"). Older versions see
+- `vaultik:image`: a disk image (added in Vaultik 0.8.0; see "Disk images"). Older versions see
   its partitions as folders of large files.
 
 The program list blob is stored like file content (so an unchanged list is one blob across
@@ -283,7 +283,7 @@ same id while holding a shared lock, and never recreates a snapshot that was rem
 
 ## Disk images
 
-An image snapshot (the reserved tag `vaultik:image`, added after Vaultik 0.7.0 without a
+An image snapshot (the reserved tag `vaultik:image`, added in Vaultik 0.8.0 without a
 format version change) holds whole disks.
 Its `paths` are `image:<disk id>` per disk, the disk id being `gpt-<disk GUID>` or
 `mbr-<signature, 8 hex digits>`. Its tree is an ordinary tree (version 2), so prune, verify,
@@ -368,7 +368,7 @@ itself, never answered from a listing the run made earlier (Google Drive, MEGA).
 
 Several computers can back up into one repository. After each run of a saved job (backup, health
 check, second copy, test restore) the computer writes its status record, so any of them can show
-how every computer's backups are doing (`vaultik computers`). Added after Vaultik 0.7.0 without a
+how every computer's backups are doing (`vaultik computers`). Added in Vaultik 0.8.0 without a
 format version change: older versions ignore the `status/` folder.
 
 The computer id is `BLAKE3-keyed(id_key, "VKHOST01" || repo_id (16) || machine id)`, where the
