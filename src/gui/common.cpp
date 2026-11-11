@@ -1,6 +1,9 @@
 #include "common.h"
 
 #include <QDateTime>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QScrollArea>
 #include <QEventLoop>
 #include <QLocale>
 #include <QMessageBox>
@@ -8,12 +11,35 @@
 #include <QStringList>
 #include <QThread>
 
+#include <algorithm>
 #include <atomic>
 #include <exception>
 
 #include "vaultik/jobs/forecast.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/platform/os.hpp"
+
+QWidget* scrolled(QWidget* page) {
+    auto* area = new QScrollArea;
+    area->setWidget(page);
+    area->setWidgetResizable(true);
+    area->setFrameShape(QFrame::NoFrame);
+    return area;
+}
+
+void fit_to_screen(QWidget* window, QSize wanted, const QWidget* anchor) {
+    window->setWindowFlag(Qt::WindowMaximizeButtonHint, true);
+    QScreen* screen = anchor != nullptr && anchor->screen() != nullptr ? anchor->screen() : QGuiApplication::primaryScreen();
+    if (screen == nullptr) {
+        window->resize(wanted);
+        return;
+    }
+    // Room for the title bar and frame, which the size does not include.
+    const QRect free = screen->availableGeometry();
+    const QSize size(std::min(wanted.width(), free.width() - 40), std::min(wanted.height(), free.height() - 60));
+    window->resize(size);
+    window->move(free.center() - QPoint(size.width() / 2, size.height() / 2));
+}
 
 void plain_warning(QWidget* parent, const QString& title, const QString& text) {
     QMessageBox box(QMessageBox::Warning, title, QString(), QMessageBox::Ok, parent);

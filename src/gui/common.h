@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QDateTime>
+#include <QSize>
 #include <QString>
 
 #include <cstdint>
@@ -25,6 +26,15 @@ class QWidget;
 // A warning box whose text is shown as plain text, never as markup: for messages that carry file
 // names or text from a server.
 void plain_warning(QWidget* parent, const QString& title, const QString& text);
+
+// A page inside a frameless scroll area: the page keeps its natural size, and a window holding it
+// can be made smaller than the page (which would otherwise set the window's minimum height and push
+// it under the taskbar on small screens).
+QWidget* scrolled(QWidget* page);
+
+// Gives a top-level window the wanted size, but never more than the free area of its screen (the
+// screen of `anchor` when given, without the taskbar), centred on that area, with a maximize button.
+void fit_to_screen(QWidget* window, QSize wanted, const QWidget* anchor = nullptr);
 // The same for a Yes/No question; true for Yes.
 bool plain_question(QWidget* parent, const QString& title, const QString& text);
 

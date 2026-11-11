@@ -13,6 +13,8 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 #include "alerts_dialog.h"
 #include "app_settings.h"
 #include "common.h"
@@ -54,7 +56,7 @@ QWidget* indented(QWidget* w) {
 
 SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     setWindowTitle(tr("Settings"));
-    resize(580, 0);
+    setSizeGripEnabled(true);
     const AppSettings s = AppSettings::load();
     const StartupSetting startup = startup_setting();
 
@@ -109,8 +111,10 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     connect(buttons, &QDialogButtonBox::accepted, this, &SettingsDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(20, 18, 20, 14);
+    // The settings scroll above the buttons, so the window fits on smaller screens.
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(20, 18, 20, 8);
     layout->setSpacing(6);
     layout->addWidget(heading(tr("Startup")));
     layout->addWidget(start_);
@@ -222,8 +226,15 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
                               "about you or your backups."),
                            26));
 
-    layout->addSpacing(10);
-    layout->addWidget(buttons);
+
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 20, 14);
+    outer->setSpacing(10);
+    outer->addWidget(scrolled(page));
+    outer->addWidget(buttons);
+    const QSize natural = page->sizeHint();
+    fit_to_screen(this, QSize(std::max(600, natural.width() + 24), natural.height() + buttons->sizeHint().height() + 30),
+                  parent);
 
     for (QCheckBox* c : {start_, tray_icon_, overdue_}) connect(c, &QCheckBox::toggled, this, &SettingsDialog::update_enabled);
     update_enabled();
