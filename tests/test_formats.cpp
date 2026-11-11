@@ -65,6 +65,18 @@ TEST_CASE("unsafe restore names") {
 #ifdef _WIN32
     CHECK_FALSE(is_safe_name("a\\b"));
     CHECK_FALSE(is_safe_name("C:"));
+    // Names from Linux snapshots that Windows programs cannot open or delete.
+    CHECK_FALSE(is_safe_name("notes."));
+    CHECK_FALSE(is_safe_name("notes "));
+    CHECK_FALSE(is_safe_name("CON"));
+    CHECK_FALSE(is_safe_name("nul.txt"));
+    CHECK_FALSE(is_safe_name("Com1"));
+    CHECK_FALSE(is_safe_name("LPT9.log"));
+    CHECK_FALSE(is_safe_name("aux .c"));
+    CHECK(is_safe_name("CONSOLE"));
+    CHECK(is_safe_name("COM10"));
+    CHECK(is_safe_name("nullable.txt"));
+    CHECK(is_safe_name(".gitignore"));
 #else
     CHECK(is_safe_name("a\\b"));  // legal file names on POSIX
     CHECK(is_safe_name("C:"));

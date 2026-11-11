@@ -199,6 +199,24 @@ bool is_safe_name(std::string_view name) {
             return false;
 #endif
     }
+#ifdef _WIN32
+    // Names that are fine on Linux but that Windows programs cannot open or delete: a trailing dot
+    // or space (the shell strips it), and the reserved device names, with or without an extension
+    // ("con", "NUL.txt", "COM1", also "COM¹" which Windows treats the same way).
+    if (name.back() == '.' || name.back() == ' ') return false;
+    std::string base(name.substr(0, name.find('.')));
+    while (!base.empty() && base.back() == ' ') base.pop_back();
+    for (char& c : base)
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    if (base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || base == "CONIN$" || base == "CONOUT$")
+        return false;
+    if (base.size() >= 4 && (base.starts_with("COM") || base.starts_with("LPT"))) {
+        const std::string_view digit = std::string_view(base).substr(3);
+        if ((digit.size() == 1 && digit[0] >= '0' && digit[0] <= '9') || digit == "\xC2\xB9" || digit == "\xC2\xB2" ||
+            digit == "\xC2\xB3")
+            return false;
+    }
+#endif
     return true;
 }
 

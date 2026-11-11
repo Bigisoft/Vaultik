@@ -143,6 +143,10 @@ TEST_CASE("name patterns") {
     CHECK_FALSE(name_matches("budget*.xlsx", "my budget.xlsx"));
     CHECK(name_matches("*.jp?g", "photo.jpeg"));
     CHECK(name_matches("?.txt", "a.txt"));
+    // Case is ignored on Linux too, also outside ASCII.
+    CHECK(name_matches("отчет", "Годишен ОТЧЕТ.docx"));
+    CHECK(name_matches("ÉTÉ*", "été 2026.jpg"));
+    CHECK(name_matches("łódź", "ŁÓDŹ.txt"));
     CHECK_FALSE(name_matches("?.txt", "ab.txt"));
 }
 
