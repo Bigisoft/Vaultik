@@ -128,6 +128,11 @@ struct Computer {
     std::uint64_t latest_bytes = 0;  // the newest version's size
     std::uint64_t added_bytes = 0;   // bytes its versions added to the repository
     Health health = Health::Unknown;
+    // Its status record is older than its newest version: every run writes the record after its
+    // version, so either the record could not be written, or the storage side put an older,
+    // genuine record back (records are sealed, but a copy of an old one still opens). What the
+    // record says may then be out of date; health is at least Warning.
+    bool record_behind = false;
     std::optional<BackupRequest> request;  // a request to back up addressed to it
 };
 

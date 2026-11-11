@@ -588,6 +588,16 @@ TEST_CASE("computers merge status records with the snapshots") {
     REQUIRE(mine.size() == 3);
     CHECK(mine[2].host == "old-pc");
     CHECK(mine[2].this_computer);
+
+    // A record older than the computer's newest version (put back by the storage side, or not
+    // written) is flagged, and the computer's health is at least Warning.
+    CHECK_FALSE(list[2].record_behind);
+    snaps.push_back(snap("OFFICE", now + 60 * 10000000ull, 300, 1));
+    const std::vector<Computer> behind = merge_computers(files, snaps, now, office.name, "OFFICE");
+    REQUIRE(behind.size() == 4);
+    CHECK(behind[2].record_behind);
+    CHECK(behind[2].health == Health::Warning);
+    CHECK_FALSE(behind[1].record_behind);
 }
 
 TEST_CASE("prune and verify leave status records alone") {

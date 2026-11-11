@@ -417,6 +417,11 @@ std::vector<Computer> merge_computers(const std::vector<StatusFile>& statuses, c
             for (const JobStatus& j : f.status->jobs) c.health = worst(c.health, job_health(j, now));
             with_record.insert(lower(c.host));
             if (const auto it = by_host.find(lower(c.host)); it != by_host.end()) add_versions(c, it->second);
+            // A version's time is when its run started; the record is written when it ends.
+            if (c.latest != 0 && c.latest > f.status->updated) {
+                c.record_behind = true;
+                c.health = worst(c.health, Health::Warning);
+            }
         } else {
             c.host = "?";
             c.health = Health::Unknown;

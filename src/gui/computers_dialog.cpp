@@ -334,6 +334,9 @@ void ComputersDialog::show_details() {
         return;
     }
     lines << tr("Vaultik %1, last note %2").arg(qs(pc.status->version), format_time(pc.status->updated));
+    if (pc.record_behind)
+        lines << tr("Its status note is older than its newest version: it could not be updated, or the storage "
+                    "put an older note back. What it says may be out of date.");
     for (const jobs::JobStatus& j : pc.status->jobs) {
         lines << QString();
         lines << tr("%1: %2").arg(qs(j.name), health_text(jobs::job_health(j, now)));

@@ -467,6 +467,7 @@
  "It stores less after compression and deduplication, and later backups only read what changed.": "След компресиране и дедупликация съхранява по-малко, а следващите архивирания четат само промененото.",
  "Its scheduled backups are not running. Is the destination connected?": "Планираните ѝ архивирания не се изпълняват. Свързано ли е местоназначението?",
  "Its status note cannot be read (damaged, or not written with this backup's key).": "Бележката му за състоянието не може да се прочете (повредена е или не е записана с ключа на този архив).",
+ "Its status note is older than its newest version: it could not be updated, or the storage put an older note back. What it says may be out of date.": "Бележката му за състоянието е по-стара от най-новата му версия: не е могла да се обнови или хранилището е върнало по-стара бележка. Написаното в нея може да е остаряло.",
  "Its versions appear here, with when it changed.": "Версиите му се показват тук, с това кога се е променил.",
  "January": "Януари",
  "Jobs without a schedule: after": "Задачи без график: след",

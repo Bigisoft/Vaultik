@@ -3323,7 +3323,8 @@ int cmd_computers(const Args& a) {
                                 {"latest", time_or_null(c.latest)},
                                 {"latest_bytes", c.latest_bytes},
                                 {"added_bytes", c.added_bytes},
-                                {"record", c.status_name.empty() ? nlohmann::json() : nlohmann::json(c.status_name)}};
+                                {"record", c.status_name.empty() ? nlohmann::json() : nlohmann::json(c.status_name)},
+                                {"record_behind", c.record_behind}};
             if (c.request)
                 j["request"] = {{"from", c.request->from}, {"created", c.request->created},
                                 {"jobs", c.request->jobs}, {"state", c.request->state}, {"started", c.request->started}};
@@ -3358,6 +3359,8 @@ int cmd_computers(const Args& a) {
                            rpad(std::to_string(c.versions), 9) + rpad(c.latest ? format_bytes(c.latest_bytes) : "-", 12);
         if (!c.status) {
             line += c.status_name.empty() ? "  (no status record)" : "  (status record unreadable)";
+        } else if (c.record_behind) {
+            line += "  (status record older than its newest version)";
         }
         out(line + "\n");
         if (c.request)
