@@ -386,8 +386,13 @@ private:
     bool reusable(const Node& node, const Node* parent) const;
     // A listed file that could be reused: on Windows the listing shows a hard-linked file's size
     // and times as of the last change through that name, so the file itself is asked when it
-    // had several names (or the job asks for every file). Leaves `info` as listed when that fails.
-    void refresh_info(const std::string& path, os::FileInfo& info, const Node* pnode) const;
+    // had several names, when `all` (the change journal says a file with another name in this
+    // folder changed) or when the job asks for every file. Leaves `info` as listed when that fails.
+    void refresh_info(const std::string& path, os::FileInfo& info, const Node* pnode, bool all) const;
+    // Whether every file listed in `dir` is to be asked (see BackupOptions::refresh_dir).
+    bool refresh_all_in(const std::string& dir) const {
+        return use_journal_ && options_.refresh_dir && options_.refresh_dir(dir);
+    }
     bool take_file(const std::string& path, Node& node, const Node* parent, ReaderPool::FileJob& job);
     bool file_read(const std::string& path, Node& node, const Node* parent, std::uint64_t total, bool random_start);
     // With several readers, folders are listed ahead of the engine (see look_ahead) and their
@@ -619,10 +624,10 @@ void BackupEngine::scan_streams(const std::string& path, Node& node) {
     }
 }
 
-void BackupEngine::refresh_info(const std::string& path, os::FileInfo& info, const Node* pnode) const {
+void BackupEngine::refresh_info(const std::string& path, os::FileInfo& info, const Node* pnode, bool all) const {
 #ifdef _WIN32
     if (info.type != os::EntryType::File || pnode == nullptr || pnode->kind != NodeKind::File) return;
-    if (pnode->names <= 1 && !options_.check_every_file) return;
+    if (pnode->names <= 1 && !all && !options_.check_every_file) return;
     os::FileInfo fresh;
     os::ErrorCode err = 0;
     if (os::stat(io(path), fresh, err) && fresh.type == os::EntryType::File) info = fresh;
@@ -631,6 +636,7 @@ void BackupEngine::refresh_info(const std::string& path, os::FileInfo& info, con
     (void)path;
     (void)info;
     (void)pnode;
+    (void)all;
 #endif
 }
 
@@ -828,12 +834,13 @@ Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, c
         }
         std::string name;
         os::FileInfo info;
+        const bool refresh_all = refresh_all_in(dir);
         while (reader.next(name, info)) {
             check_cancel();
             const std::string child = os::join(dir, name);
             if (excluder_.excluded(name, child)) continue;
             const Node* pnode = parent != nullptr ? parent->find(name) : nullptr;
-            refresh_info(child, info, pnode);
+            refresh_info(child, info, pnode, refresh_all);
             Node node = node_from_info(info, name);
             if (scan_entry(child, info, device, node, pnode)) {
                 note_change(node, pnode);
@@ -878,6 +885,7 @@ std::shared_ptr<PreparedDir> BackupEngine::prepare(const std::string& dir, std::
     }
     std::string name;
     os::FileInfo info;
+    const bool refresh_all = refresh_all_in(dir);
     while (reader.next(name, info)) {
         check_cancel();
         std::string child = os::join(dir, name);
@@ -885,7 +893,7 @@ std::shared_ptr<PreparedDir> BackupEngine::prepare(const std::string& dir, std::
         PreparedDir::Entry e;
         e.path = std::move(child);
         e.pnode = listed->parent != nullptr ? listed->parent->find(name) : nullptr;
-        refresh_info(e.path, info, e.pnode);
+        refresh_info(e.path, info, e.pnode, refresh_all);
         e.info = info;
         e.node = node_from_info(info, name);
         listed->entries.push_back(std::move(e));

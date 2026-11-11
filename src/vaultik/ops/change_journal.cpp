@@ -152,6 +152,14 @@ void ChangeJournal::apply(BackupOptions& options) const {
         }
         return false;
     };
+    options.refresh_dir = [link_dirs](const std::string& dir) {
+        if (link_dirs->empty()) return false;
+        try {
+            return link_dirs->contains(os::file_ref(dir));
+        } catch (const std::exception&) {
+            return true;  // unknown: ask every file, which is only slower
+        }
+    };
     options.dir_moved = [roots, changes](const std::string& dir) {
         const std::string folded = os::fold_case(dir);
         for (const auto& [source, root] : roots) {

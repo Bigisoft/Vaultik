@@ -804,10 +804,12 @@ exFAT drives and on Linux, every folder is read as before.
 Windows' folder listing shows a file with several names (hard links) with the size and times of
 its last change through that name, so a change through its other name would look like no change.
 Vaultik remembers which files have several names and asks those files themselves. A file that
-gets its second name only after a backup and is then changed through it is still missed by the
-listing: for folders where hard links come and go (package stores, build output), tick **Check
-every file** in the job's Schedule tab (`--check-every-file`), which asks every file and makes
-scanning unchanged files about three times slower.
+gets its second name only after a backup and is then changed through it is caught when the run
+uses the change journal (it names the folders of the changed file's other names, and every file
+in those folders is asked). Runs that read every folder (without administrator rights, and the
+weekly full read) still miss it: for folders where hard links come and go (package stores, build
+output), tick **Check every file** in the job's Schedule tab (`--check-every-file`), which asks
+every file and makes scanning unchanged files about three times slower.
 
 ### Disk images and the recovery drive
 
