@@ -357,6 +357,9 @@ void enable_restore_privileges();
 
 std::string hostname();
 std::string username();
+// A stable id of this computer that survives renaming it: Windows' MachineGuid (set when Windows
+// is installed), /etc/machine-id elsewhere. Falls back to the host name when there is none.
+std::string machine_id();
 
 // An entry in the system's log: the Windows Event Log (Application, source "Vaultik", which the
 // installer registers; without it Event Viewer still shows the text, after a note that the source

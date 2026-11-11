@@ -209,8 +209,9 @@ std::vector<std::pair<std::string, std::string>> put_headers(const std::string& 
                                                              const CloudCredentials& credentials, bool data_class,
                                                              std::int64_t now) {
     std::vector<std::pair<std::string, std::string>> headers;
-    // Everything but the lock files (which runs remove when they end) is locked, when asked.
-    if (credentials.lock_days > 0 && !name.starts_with("locks/"))
+    // Everything but the lock files (which runs remove when they end) and the computers' status
+    // records (rewritten after every run) is locked, when asked.
+    if (credentials.lock_days > 0 && !name.starts_with("locks/") && !name.starts_with("status/"))
         headers = lock_headers(body, now + static_cast<std::int64_t>(credentials.lock_days) * 86400,
                                credentials.lock_compliance);
     if (data_class && !credentials.storage_class.empty())
@@ -413,7 +414,7 @@ bool S3Backend::data_needs_thaw() const {
 }
 
 void S3Backend::put_object(const std::string& name, ByteSpan data, bool data_class) {
-    const bool lock = credentials_.lock_days > 0 && !name.starts_with("locks/");
+    const bool lock = credentials_.lock_days > 0 && !name.starts_with("locks/") && !name.starts_with("status/");
     const std::int64_t now =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     const Result r = request("PUT", key_of(name), {}, s3::put_headers(name, data, credentials_, data_class, now), data);
@@ -511,7 +512,8 @@ S3Backend::RollbackResult S3Backend::roll_back(std::int64_t time, bool dry_run,
         const std::string name = key.substr(std::min(root.size(), key.size()));
         const std::size_t first = i;
         i = end;
-        if (name.empty() || name.starts_with("locks/") || key.back() == '/') continue;  // never bring back old locks
+        // Never bring back old locks, nor old status records (they would show older runs as the newest).
+        if (name.empty() || name.starts_with("locks/") || name.starts_with("status/") || key.back() == '/') continue;
         ++result.files_checked;
 
         // The version that was current at `time`, and everything after it.

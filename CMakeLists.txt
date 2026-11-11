@@ -79,6 +79,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/report.cpp
+    src/vaultik/jobs/computers.cpp
     src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/profile_items.cpp
     src/vaultik/ops/move_here.cpp
@@ -203,6 +204,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/event_runs.cpp
             src/gui/overview.cpp
             src/gui/compare_dialog.cpp
+            src/gui/computers_dialog.cpp
             src/gui/hello.cpp
             src/gui/translator.cpp
             src/gui/main_window.cpp
@@ -260,6 +262,7 @@ add_executable(vaultik_tests
     tests/test_versions.cpp
     tests/test_recovery.cpp
     tests/test_apps.cpp
+    tests/test_computers.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # Assertions run on the main thread only. Without per-thread copies of doctest's state, threads that

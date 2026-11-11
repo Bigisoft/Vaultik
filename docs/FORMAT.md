@@ -17,6 +17,7 @@ in file names.
   index/<index-id>          sealed index files
   snapshots/<snapshot-id>   sealed snapshot manifests
   locks/<lock-id>           sealed lock files of the runs using the repository
+  status/<computer-id>      optional: sealed status record of each computer backing up here
   parity/percent            optional: repair data is on, at this percentage ("5\n"), see below
   parity/<xx>/<pack-id>     optional: the repair data of a pack (see "Recovery data")
 ```
@@ -106,6 +107,7 @@ AAD values bind each object to its role and name:
 | index file    | `"VKINDEX1"` || index id (32)             |
 | snapshot      | `"VKSNAP01"` || snapshot id (32)          |
 | lock          | `"VKLOCK01"` || lock id (32)              |
+| status record | `"VKSTAT01"` || computer id (32)          |
 
 ## Blobs
 
@@ -279,6 +281,44 @@ because they delete objects. A run writes its own lock first and then lists the 
 conflict it removes its lock again and waits or gives up. Holders rewrite their lock every 5
 minutes. A lock not refreshed for 30 minutes, or held by a process that no longer runs on the
 same computer, is stale: it is ignored and deleted by whoever finds it.
+
+## Status records
+
+Several computers can back up into one repository. After each run of a saved job (backup, health
+check, second copy, test restore) the computer writes its status record, so any of them can show
+how every computer's backups are doing (`vaultik computers`). Added after Vaultik 0.7.0 without a
+format version change: older versions ignore the `status/` folder.
+
+The computer id is `BLAKE3-keyed(id_key, "VKHOST01" || repo_id (16) || machine id)`, where the
+machine id is the UTF-8 text of Windows' `HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid`
+(`/etc/machine-id` on Linux; `host:<name>` when neither exists). It stays the same when the
+computer is renamed, and since it is keyed and includes the repository id, the records of one
+computer in two repositories cannot be linked. The file `status/<computer id as hex>` is sealed
+like every object (AAD `"VKSTAT01"` || computer id; compressed when that helps), so a record moved
+to another computer's name fails authentication. Its plaintext is UTF-8 JSON; readers ignore
+fields they do not know and treat missing ones as empty or 0:
+
+```
+{"format": 1, "host": "<computer name>", "version": "<Vaultik version>",
+ "updated": <FILETIME>, "jobs": [
+   {"id", "name", "schedule": "<in words>",
+    "last_run": <FILETIME the newest run of any kind ended>,
+    "last_kind": "backup|check|full_check|copy|restore_test",
+    "last_result": "success|partial|failed|cancelled", "last_message",
+    "files", "bytes", "new_bytes", "errors": <counts of that run>,
+    "last_backup": <FILETIME>, "last_backup_result",
+    "last_success": <FILETIME the newest backup that saved a version ended>,
+    "next_run": <FILETIME of the next scheduled run, 0 for a manual job>,
+    "damage": <true when the newest health check or test restore found damage>,
+    "warnings": ["<drive health, ransomware warning, ...>"]}]}
+```
+
+A writer reads its own record, replaces the entry of the job that ran (keeping its other jobs'),
+and writes the whole file back in one put (atomic, like every file). Writing it is best effort: a
+run never fails because its record could not be written. Prune, repair and verify do not touch
+the folder; S3 Object Lock leaves status records unlocked (they are rewritten after every run),
+and a cloud rollback does not bring back old ones. A job is stale when it has not run for 3 days
+past its recorded next run.
 
 ## Prune
 

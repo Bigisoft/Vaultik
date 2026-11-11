@@ -121,6 +121,14 @@ public:
     // while this object is busy, and AesGcm objects are not shared between threads.
     const AesGcm& lock_aead() const { return *lock_aead_; }
 
+    // Small sealed files beside the snapshot data (status/): the usual envelope (compressed when
+    // that helps) with the caller's AAD. open_file throws AuthError when the file was changed.
+    Bytes seal_file(ByteSpan plain, ByteSpan aad) { return seal_object(plain, aad, true); }
+    Bytes open_file(ByteSpan sealed, ByteSpan aad) { return open_object(sealed, aad); }
+    // BLAKE3 keyed with this repository's id key: an id only holders of the password can compute
+    // (and different in every repository). `data` must not start with a blob type byte (0 or 1).
+    Id keyed_hash(ByteSpan data) const { return id_hasher_.hash(data); }
+
     static std::string pack_name(const Id& pack_id);
     static std::string snapshot_name(const Id& id);
 

@@ -592,6 +592,19 @@ std::string hostname() {
     return buf;
 }
 
+std::string machine_id() {
+    for (const char* path : {"/etc/machine-id", "/var/lib/dbus/machine-id"}) {
+        try {
+            const Bytes b = read_file(path);
+            std::string id(b.begin(), b.end());
+            while (!id.empty() && (id.back() == '\n' || id.back() == '\r' || id.back() == ' ')) id.pop_back();
+            if (!id.empty()) return id;
+        } catch (const Error&) {
+        }
+    }
+    return "host:" + hostname();
+}
+
 std::string username() {
     if (const struct passwd* pw = ::getpwuid(::geteuid()); pw != nullptr && pw->pw_name != nullptr)
         return pw->pw_name;

@@ -1042,6 +1042,17 @@ std::string hostname() {
     return computer_name();
 }
 
+std::string machine_id() {
+    // The 64-bit view: a 32-bit process would otherwise read a redirected (missing) key.
+    wchar_t buf[128] = {};
+    DWORD size = sizeof buf;
+    if (::RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", L"MachineGuid",
+                       RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, buf, &size) == ERROR_SUCCESS &&
+        buf[0] != 0)
+        return narrow(buf);
+    return "host:" + computer_name();
+}
+
 void system_log(LogLevel level, std::uint32_t event_id, const std::string& text) {
     try {
         // An entry holds at most 31839 characters; cut on a character boundary.

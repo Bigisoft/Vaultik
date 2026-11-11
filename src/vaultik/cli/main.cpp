@@ -52,6 +52,7 @@
 #include "vaultik/platform/vss.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/computers.hpp"
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/report.hpp"
 #include "vaultik/jobs/update_check.hpp"
@@ -114,6 +115,11 @@ Commands:
       --apps                   Keep the list of installed programs with the
                                snapshot (saved jobs do this unless turned off)
   snapshots                    List snapshots
+  computers                    Every computer backing up into the repository:
+                               how its jobs last ran (each run of a saved job
+                               leaves a status record there), its versions and
+                               whether it is ok, has warnings, failed or is
+                               stale (more than 3 days past its schedule)
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
   mount <snapshot>             Windows: show a version as a read-only folder for File
                                Explorer until Enter is pressed (files are read
@@ -1439,6 +1445,19 @@ std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& s
     return repo;
 }
 
+// Leaves this computer's status record in the job's repository (see jobs/computers.hpp), so other
+// computers backing up there can see how this one is doing. Best effort: a record that cannot be
+// written is a warning, never a failed run.
+void publish_job_status(Repository& repo, const jobs::JobStore& store, const jobs::Job& job) {
+    std::vector<jobs::RunRecord> history;
+    try {
+        history = jobs::combined_history(store, job.id, 500);
+    } catch (const std::exception&) {
+    }
+    const std::string failed = jobs::publish_status(repo, job, history, kVersion);
+    if (!failed.empty()) warning("could not leave this computer's status in the backup: " + failed);
+}
+
 // Whether another run is backing up this job right now (it holds a live lock naming the job).
 bool backup_running(Repository& repo, const jobs::Job& job) {
     const std::string mine = "backup (job " + job.id + ")";
@@ -1812,6 +1831,7 @@ int cmd_copy(const Args& a) {
     jobs::RunRecord record;
     const int code = second_copy(a, store, *job, *repo, record);
     store.append_history(job->id, record);
+    publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
 }
@@ -1827,8 +1847,9 @@ int cmd_check_job(const Args& a) {
     record.kind = a.has("--full") ? jobs::RunKind::FullCheck : jobs::RunKind::Check;
     record.started = os::now();
     int code = kExitError;
+    std::unique_ptr<Repository> repo;
     try {
-        const auto repo = open_job_repo(a, store, *job);
+        repo = open_job_repo(a, store, *job);
         code = health_check(*repo, *job, record.kind, record);
     } catch (const LockedError&) {
         throw;  // nothing was checked; not a result for the history
@@ -1842,12 +1863,14 @@ int cmd_check_job(const Args& a) {
             store.append_history(job->id, record);
         } catch (const Error&) {
         }
+        if (repo) publish_job_status(*repo, store, *job);
         if (record.status != jobs::RunStatus::Cancelled) throw;
         if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", "health check cancelled"}});
         else err("health check cancelled\n");
         return kExitCancelled;
     }
     store.append_history(job->id, record);
+    publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
 }
@@ -1864,8 +1887,9 @@ int cmd_test_restore(const Args& a) {
     record.kind = jobs::RunKind::RestoreTest;
     record.started = os::now();
     int code = kExitError;
+    std::unique_ptr<Repository> repo;
     try {
-        const auto repo = open_job_repo(a, store, *job);
+        repo = open_job_repo(a, store, *job);
         code = restore_check(a, store, *repo, *job, record);
     } catch (const LockedError&) {
         throw;  // nothing was tested; not a result for the history
@@ -1879,12 +1903,14 @@ int cmd_test_restore(const Args& a) {
             store.append_history(job->id, record);
         } catch (const Error&) {
         }
+        if (repo) publish_job_status(*repo, store, *job);
         if (record.status != jobs::RunStatus::Cancelled) throw;
         if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", "test restore cancelled"}});
         else err("test restore cancelled\n");
         return kExitCancelled;
     }
     store.append_history(job->id, record);
+    publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
 }
@@ -2075,6 +2101,19 @@ int cmd_run_job(const Args& a) {
     record.started = os::now();
     int code = kExitError;
     std::unique_ptr<Repository> repo;
+    // Once the repository is open, this computer's status there is updated last, however the run
+    // ends (after the backup, the second copy, the health check and the test restore).
+    struct StatusOnExit {
+        std::unique_ptr<Repository>& repo;
+        const jobs::JobStore& store;
+        const jobs::Job& job;
+        ~StatusOnExit() {
+            try {
+                if (repo) publish_job_status(*repo, store, job);
+            } catch (...) {
+            }
+        }
+    } status_on_exit{repo, store, *job};
     // The "after" command runs once the "before" one did (or there is none), whatever happens.
     bool after_due = false;
     const auto run_after = [&](const std::string& result) {
@@ -2783,6 +2822,71 @@ int cmd_find(const Args& a) {
     return kExitOk;
 }
 
+// "computers": every computer backing up into the repository, from their status records and the
+// snapshots' host names.
+int cmd_computers(const Args& a) {
+    auto repo = open_repo(a);
+    const std::uint64_t now = os::now();
+    const std::vector<jobs::Computer> list = jobs::list_computers(*repo, now);
+    const auto time_or_null = [](std::uint64_t t) { return t == 0 ? nlohmann::json() : nlohmann::json(t); };
+    if (g_json) {
+        nlohmann::json computers = nlohmann::json::array();
+        for (const jobs::Computer& c : list) {
+            nlohmann::json j = {{"host", c.host},
+                                {"this_computer", c.this_computer},
+                                {"health", jobs::to_string(c.health)},
+                                {"versions", c.versions},
+                                {"latest", time_or_null(c.latest)},
+                                {"latest_bytes", c.latest_bytes},
+                                {"added_bytes", c.added_bytes},
+                                {"record", c.status_name.empty() ? nlohmann::json() : nlohmann::json(c.status_name)}};
+            if (c.status) {
+                j["version"] = c.status->version;
+                j["updated"] = c.status->updated;
+                nlohmann::json js = nlohmann::json::array();
+                for (const jobs::JobStatus& s : c.status->jobs) {
+                    nlohmann::json o = nlohmann::json::parse(jobs::to_json(s));
+                    o["health"] = jobs::to_string(jobs::job_health(s, now));
+                    js.push_back(o);
+                }
+                j["jobs"] = js;
+            } else if (!c.status_name.empty()) {
+                j["error"] = "the status record cannot be read";
+            }
+            computers.push_back(j);
+        }
+        emit({{"event", "computers"}, {"computers", computers}});
+        return kExitOk;
+    }
+    if (list.empty()) {
+        out("No computers have backed up here yet.\n");
+        return kExitOk;
+    }
+    out(pad("Computer", 20) + pad("State", 9) + pad("Newest version", 21) + rpad("Versions", 9) + rpad("Size", 12) +
+        "\n");
+    for (const jobs::Computer& c : list) {
+        std::string host = c.host + (c.this_computer ? " (this)" : "");
+        std::string line = pad(host, 20) + pad(jobs::to_string(c.health), 9) +
+                           pad(c.latest ? os::format_time_local(c.latest) : "-", 21) +
+                           rpad(std::to_string(c.versions), 9) + rpad(c.latest ? format_bytes(c.latest_bytes) : "-", 12);
+        if (!c.status) {
+            line += c.status_name.empty() ? "  (no status record)" : "  (status record unreadable)";
+        }
+        out(line + "\n");
+        if (!c.status) continue;
+        for (const jobs::JobStatus& s : c.status->jobs) {
+            std::string row = "    " + s.name + ": " + jobs::to_string(jobs::job_health(s, now));
+            if (s.last_run) row += ", last " + s.last_kind + " " + os::format_time_local(s.last_run) + " " + s.last_result;
+            if (s.last_success) row += ", last saved " + os::format_time_local(s.last_success);
+            row += s.next_run ? ", next " + os::format_time_local(s.next_run) : ", " + s.schedule;
+            out(row + "\n");
+            for (const std::string& w : s.warnings) out("      ! " + w + "\n");
+        }
+    }
+    out(std::to_string(list.size()) + " computer(s)\n");
+    return kExitOk;
+}
+
 int cmd_snapshots(const Args& a) {
     auto repo = open_repo(a);
     const auto all = load_all_snapshots(*repo);
@@ -3296,6 +3400,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "init") return cmd_init(a);
     if (a.command == "backup") return cmd_backup(a);
     if (a.command == "snapshots") return cmd_snapshots(a);
+    if (a.command == "computers") return cmd_computers(a);
     if (a.command == "ls") return cmd_ls(a);
     if (a.command == "restore") return cmd_restore(a);
     if (a.command == "verify") return cmd_verify(a);
