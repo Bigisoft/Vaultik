@@ -443,7 +443,19 @@ Besides a time, the Schedule tab's "Also back up" starts a job:
 - **When you sign out or shut down**: the tray icon asks Windows to wait, with the reason
   "Vaultik is backing up before Windows signs out", runs the job (`--on-sign-out`) and then lets
   Windows go on. Windows shows its "apps are preventing sign-out" screen meanwhile, where you can
-  go on without waiting. A shutdown forced by Windows itself (updates, low battery) is not held up.
+  go on without waiting. A shutdown Windows forces (low battery, the end of an update's
+  restart deadline) is not held up.
+- **When Windows starts installing updates**: the same `-events` task also starts on Windows
+  Update's "Installation Started" event (event 43 of `Microsoft-Windows-WindowsUpdateClient`,
+  which Windows writes to the System log, not to the WindowsUpdateClient/Operational one). The
+  run looks at what was installed in the last 15 minutes and skips Defender definitions and
+  Microsoft Store apps, which install several times a day; it is recorded with the trigger
+  "update". Windows does not wait for the backup: the installation goes on alongside it, so the
+  version may already hold some of the update's files, which is harmless for your own files. While
+  such a backup runs, Vaultik in the notification area holds up the restart that follows the
+  update, like a sign-out ("Vaultik is finishing a backup..."); a restart Windows forces (at the
+  end of the restart deadline) does not wait. For jobs with administrator rights the restart is
+  not held up.
 - These runs skip a job that was backed up within the last few hours ("but not again within",
   4 hours by default), so locking the computer ten times a day does not mean ten backups.
 - **Continuously**: the tray icon watches the job's folders and starts a backup a few minutes
@@ -861,8 +873,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
      runs when that drive connects (recognised by its volume ID, not its letter), then says it
      can be unplugged.
    - Back up when something happens (done): when the computer is idle or locked, at sign-out or
-     shutdown (holding Windows up until the backup is done), and continuously, a few minutes after
-     files change.
+     shutdown (holding Windows up until the backup is done), when Windows starts installing
+     updates (holding up the restart after them), and continuously, a few minutes after files
+     change.
    - Ransomware warning (done): when a backup sees many files that look encrypted or were renamed
      with an added extension, it warns, pins the version before it and skips cleanup, so the
      last clean version is never removed automatically.

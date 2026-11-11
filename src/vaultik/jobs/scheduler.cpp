@@ -146,7 +146,7 @@ std::string task_xml(const Job& job, const std::string& program_dir, const std::
 
 std::string events_definition(const Job& job, const std::string& program_dir) {
     const Schedule& s = job.schedule;
-    if (!s.on_idle && !s.on_lock) return {};
+    if (!s.on_idle && !s.on_lock && !s.on_update) return {};
     std::string triggers;
     std::string settings;
     if (s.on_idle) {
@@ -162,10 +162,131 @@ std::string events_definition(const Job& job, const std::string& program_dir) {
         triggers += "    <SessionStateChangeTrigger><StateChange>SessionLock</StateChange><UserId>" +
                     xml_escape(os::current_user_sid()) + "</UserId></SessionStateChangeTrigger>\n";
     }
+    if (s.on_update) {
+        // Windows Update starting to install an update (event 43 in the System log, which every
+        // user may read). The query is XML inside the task's XML, so it is escaped once more.
+        const std::string query = "<QueryList><Query Id=\"0\" Path=\"System\"><Select Path=\"System\">" +
+                                  xml_escape(kUpdateEventQuery) + "</Select></Query></QueryList>";
+        triggers += "    <EventTrigger><Enabled>true</Enabled><Subscription>" + xml_escape(query) +
+                    "</Subscription></EventTrigger>\n";
+    }
     return task_xml(job, program_dir, triggers, settings, " --scheduled --on-event", false);
 }
 
 #endif
+
+std::vector<std::string> update_titles(const std::string& xml) {
+    std::vector<std::string> out;
+    const std::string open = "<Data Name='updateTitle'>";
+    for (std::size_t at = xml.find(open); at != std::string::npos; at = xml.find(open, at)) {
+        at += open.size();
+        const std::size_t end = xml.find("</Data>", at);
+        if (end == std::string::npos) break;
+        std::string title = xml.substr(at, end - at);
+        // The few entities XML output uses.
+        for (const auto& [entity, c] : {std::pair<const char*, char>{"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'},
+                                        {"&apos;", '\''}, {"&amp;", '&'}}) {
+            for (std::size_t p = title.find(entity); p != std::string::npos; p = title.find(entity, p + 1))
+                title.replace(p, std::char_traits<char>::length(entity), 1, c);
+        }
+        out.push_back(std::move(title));
+        at = end;
+    }
+    return out;
+}
+
+bool routine_update(const std::string& title) {
+    if (title.find("KB2267602") != std::string::npos || title.starts_with("Security Intelligence Update"))
+        return true;
+    // A Microsoft Store package: a 12-character product id, a dash, the package name.
+    if (title.size() > 13 && title[12] == '-') {
+        bool id = true;
+        for (std::size_t i = 0; i < 12 && id; ++i)
+            id = (title[i] >= '0' && title[i] <= '9') || (title[i] >= 'A' && title[i] <= 'Z');
+        if (id && title.find(' ') == std::string::npos) return true;
+    }
+    return false;
+}
+
+std::vector<std::string> recent_update_installs(int minutes) {
+#ifdef _WIN32
+    const std::string query = std::string(kUpdateEventQuery).insert(std::string(kUpdateEventQuery).size() - 2,
+        " and TimeCreated[timediff(@SystemTime) <= " + std::to_string(static_cast<long long>(minutes) * 60000) + "]");
+    std::string output;
+    try {
+        if (os::run_command({"wevtutil.exe", "qe", "System", "/q:" + query, "/rd:true", "/c:20", "/f:xml"}, &output) != 0)
+            return {};
+    } catch (const Error&) {
+        return {};
+    }
+    return update_titles(output);
+#else
+    (void)minutes;
+    return {};
+#endif
+}
+
+std::string events_trigger(const Schedule& s, const std::vector<std::string>& recent) {
+    if (!s.on_update) return "event";
+    bool any = false, real = false;
+    for (const std::string& t : recent) {
+        any = true;
+        if (!routine_update(t)) real = true;
+    }
+    if (real) return "update";
+    if (s.on_idle || s.on_lock) return "event";  // idle or lock it was, or a routine update: run as for those
+    // Updates are the only trigger: a routine one is skipped; when the log said nothing, trust the trigger.
+    return any ? std::string() : std::string("update");
+}
+
+namespace {
+std::string update_marker(const std::string& dir, const std::string& job_id) {
+    return os::join(os::join(dir, "running"), "update-" + job_id);
+}
+}  // namespace
+
+void mark_update_run(const std::string& dir, const std::string& job_id) {
+    try {
+        os::make_dirs(os::join(dir, "running"));
+        os::write_file_atomic(update_marker(dir, job_id), bytes_of(std::to_string(os::process_id())));
+    } catch (const Error&) {
+        // best effort: without it the restart is only not held up
+    }
+}
+
+void clear_update_run(const std::string& dir, const std::string& job_id) {
+    try {
+        os::remove_file(update_marker(dir, job_id));
+    } catch (const Error&) {
+    }
+}
+
+std::vector<std::uint32_t> running_update_backups(const std::string& dir) {
+    std::vector<std::uint32_t> out;
+    const std::string folder = os::join(dir, "running");
+    try {
+        if (!os::exists(folder)) return out;
+        os::DirReader reader(folder);
+        std::string name;
+        os::FileInfo info;
+        std::vector<std::string> ended;
+        while (reader.next(name, info)) {
+            if (!name.starts_with("update-")) continue;
+            std::uint32_t pid = 0;
+            try {
+                const Bytes text = os::read_file(os::join(folder, name), 64);
+                pid = static_cast<std::uint32_t>(std::stoul(std::string(text.begin(), text.end())));
+            } catch (const std::exception&) {
+                continue;
+            }
+            if (pid != 0 && os::process_alive(pid)) out.push_back(pid);
+            else ended.push_back(name);
+        }
+        for (const std::string& n : ended) os::remove_file(os::join(folder, n));
+    } catch (const std::exception&) {
+    }
+    return out;
+}
 
 std::string schedule_definition(const Job& job, const std::string& program_dir) {
     const Schedule& s = job.schedule;

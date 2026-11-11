@@ -1391,6 +1391,7 @@ void MainWindow::refresh_overview() {
     if (job->schedule.on_idle) d.next_detail += "\n" + tr("Also when the computer is idle.");
     if (job->schedule.on_lock) d.next_detail += "\n" + tr("Also when you lock the computer.");
     if (job->schedule.on_sign_out) d.next_detail += "\n" + tr("Also when you sign out or shut down.");
+    if (job->schedule.on_update) d.next_detail += "\n" + tr("Also when Windows starts installing updates.");
     if (job->continuous)
         d.next_detail += "\n" + tr("Also %1 min after files change.").arg(job->continuous_minutes);
 

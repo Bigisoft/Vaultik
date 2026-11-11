@@ -76,6 +76,7 @@ private:
     QCheckBox* on_idle_ = nullptr;
     QCheckBox* on_lock_ = nullptr;
     QCheckBox* on_sign_out_ = nullptr;
+    QCheckBox* on_update_ = nullptr;
     QSpinBox* event_gap_ = nullptr;
     QCheckBox* continuous_ = nullptr;
     QSpinBox* continuous_minutes_ = nullptr;

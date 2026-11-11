@@ -482,10 +482,15 @@ QWidget* JobDialog::build_schedule() {
     on_lock_ = new QCheckBox(tr("When I lock the computer"));
     on_sign_out_ = new QCheckBox(tr("When I sign out or shut down"));
     on_sign_out_->setToolTip(tr("Windows waits for the backup and says why; you can also go on without waiting."));
+    on_update_ = new QCheckBox(tr("When Windows starts installing updates"));
+    on_update_->setToolTip(tr("Windows does not wait for the backup: it installs the update meanwhile. Vaultik in "
+                              "the notification area holds up the restart that follows until the backup is done. "
+                              "Defender definitions and Store apps do not start a backup."));
     event_gap_ = spin(1, 168, tr(" h"), QString());
     form->addRow(tr("Also back up:"), on_idle_);
     form->addRow(QString(), on_lock_);
     form->addRow(QString(), on_sign_out_);
+    form->addRow(QString(), on_update_);
     form->addRow(QString(), row({new QLabel(tr("but not again within")), event_gap_, new QLabel(tr("of the last backup"))}));
     continuous_ = new QCheckBox(tr("Continuously,"));
     continuous_minutes_ = spin(1, 1440, tr(" min"), QString());
@@ -495,10 +500,12 @@ QWidget* JobDialog::build_schedule() {
     events_note_->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(QString(), events_note_);
     const auto update_events = [this] {
-        event_gap_->setEnabled(on_idle_->isChecked() || on_lock_->isChecked() || on_sign_out_->isChecked());
+        event_gap_->setEnabled(on_idle_->isChecked() || on_lock_->isChecked() || on_sign_out_->isChecked() ||
+                               on_update_->isChecked());
         continuous_minutes_->setEnabled(continuous_->isChecked());
     };
-    for (QCheckBox* box : {on_idle_, on_lock_, on_sign_out_, continuous_}) connect(box, &QCheckBox::toggled, this, update_events);
+    for (QCheckBox* box : {on_idle_, on_lock_, on_sign_out_, on_update_, continuous_})
+        connect(box, &QCheckBox::toggled, this, update_events);
     update_events();
 
     // Health checks: after a scheduled or manual backup, when one is due.
@@ -840,6 +847,7 @@ void JobDialog::load(const jobs::Job& job) {
     on_idle_->setChecked(job.schedule.on_idle);
     on_lock_->setChecked(job.schedule.on_lock);
     on_sign_out_->setChecked(job.schedule.on_sign_out);
+    on_update_->setChecked(job.schedule.on_update);
     event_gap_->setValue(job.schedule.event_gap_hours);
     continuous_->setChecked(job.continuous);
     continuous_minutes_->setValue(job.continuous_minutes);
@@ -953,6 +961,7 @@ jobs::Job JobDialog::collect() const {
     j.schedule.on_idle = on_idle_->isChecked();
     j.schedule.on_lock = on_lock_->isChecked();
     j.schedule.on_sign_out = on_sign_out_->isChecked();
+    j.schedule.on_update = on_update_->isChecked();
     j.schedule.event_gap_hours = event_gap_->value();
     j.continuous = continuous_->isChecked();
     j.continuous_minutes = continuous_minutes_->value();

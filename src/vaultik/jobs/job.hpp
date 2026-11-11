@@ -37,10 +37,14 @@ struct Schedule {
     bool on_idle = false;
     bool on_lock = false;
     bool on_sign_out = false;
+    // Windows: also back up when Windows Update starts installing an update (an event trigger of the
+    // same second task; see scheduler.hpp). Windows does not wait for the backup: it runs alongside
+    // the installation, and the tray holds up the restart that follows while it is still running.
+    bool on_update = false;
     int event_gap_hours = 4;  // 1..168
 };
 
-// Whether the job has anything for the system scheduler to start (a time, or idle and lock).
+// Whether the job has anything for the system scheduler to start (a time, idle, lock or updates).
 bool has_system_schedule(const Schedule& s);
 
 // Health checks run after a scheduled backup when they are due: a weekly check reads a share of
@@ -202,8 +206,9 @@ SystemLogEntry system_log_entry(const RunRecord& record, const std::string& job_
 struct RunRecord {
     RunKind kind = RunKind::Backup;
     bool on_connect = false;  // started because the destination drive was connected
-    // What else started it: "event" (the computer idle or locked), "sign-out", "change" (files
-    // changed, for continuous backups); empty for a schedule, by hand or on_connect.
+    // What else started it: "event" (the computer idle or locked), "update" (Windows Update started
+    // installing), "sign-out", "change" (files changed, for continuous backups); empty for a
+    // schedule, by hand or on_connect.
     std::string trigger;
     std::uint64_t started = 0;   // FILETIME ticks
     std::uint64_t finished = 0;

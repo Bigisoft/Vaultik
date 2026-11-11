@@ -2112,11 +2112,27 @@ int cmd_run_job(const Args& a) {
     const bool on_connect = a.has("--on-connect");
     if (on_connect && !jobs::connect_backup_due(store, *job)) return kExitOk;
     // Started by an event rather than a time: not again soon after a backup.
-    const std::string trigger = a.has("--on-event") ? "event" : a.has("--on-sign-out") ? "sign-out"
-                                : a.has("--on-change")                                 ? "change"
-                                                                                       : std::string();
-    if ((trigger == "event" || trigger == "sign-out") && !jobs::event_backup_due(store, *job)) return kExitOk;
+    std::string trigger = a.has("--on-event") ? "event" : a.has("--on-sign-out") ? "sign-out"
+                          : a.has("--on-change")                                 ? "change"
+                                                                                 : std::string();
+    if (trigger == "event" && job->schedule.on_update) {
+        // The events task also starts on Windows Update installing something: tell whether that
+        // was it, and skip routine updates (Defender definitions, Store apps) nobody backs up for.
+        trigger = jobs::events_trigger(job->schedule, jobs::recent_update_installs(15));
+        if (trigger.empty()) return kExitOk;
+    }
+    if ((trigger == "event" || trigger == "update" || trigger == "sign-out") && !jobs::event_backup_due(store, *job))
+        return kExitOk;
     if (trigger == "change" && !jobs::drive_connected(*job)) return kExitOk;
+    // While a backup started by an update runs, the tray holds up the restart that follows it.
+    struct UpdateMark {
+        std::string dir, id;
+        bool on = false;
+        ~UpdateMark() {
+            if (on) jobs::clear_update_run(dir, id);
+        }
+    } update_mark{store.dir(), job->id, trigger == "update"};
+    if (update_mark.on) jobs::mark_update_run(store.dir(), job->id);
 
     const ResourcePolicy policy = resource_policy(a, job->resources);
     apply_resource_policy(policy);

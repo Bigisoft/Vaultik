@@ -588,6 +588,88 @@ TEST_CASE("backups started by events: settings, tasks and spacing") {
     CHECK(event_backup_due(store, e));
 }
 
+TEST_CASE("backups before Windows updates: trigger, task and the update's title") {
+    Job j = sample();
+    j.id = "docs";
+    j.schedule.kind = Schedule::Kind::Manual;
+    CHECK_FALSE(has_system_schedule(j.schedule));
+    j.schedule.on_update = true;
+    CHECK(has_system_schedule(j.schedule));
+    CHECK(describe(j.schedule) == "Before Windows updates");
+    CHECK(job_from_json(to_json(j)).schedule.on_update);
+    CHECK_FALSE(job_from_json(R"({"version":1,"id":"x","name":"x","repository":"E:/b","sources":["C:/a"]})").schedule.on_update);
+    // A job with administrator rights may have it: its task starts it, not the tray.
+    Job admin = j;
+    admin.run_as_admin = true;
+    CHECK_NOTHROW(validate(admin));
+    RunRecord r;
+    r.trigger = "update";
+    CHECK(record_from_json(to_json(r)).trigger == "update");
+
+#ifdef _WIN32
+    // An event trigger on event 43 of Windows Update in the System log, in the events task.
+    const std::string xml = events_definition(j, "C:\\x");
+    CHECK(xml.find("<EventTrigger><Enabled>true</Enabled><Subscription>&lt;QueryList&gt;&lt;Query Id=&quot;0&quot; "
+                   "Path=&quot;System&quot;&gt;&lt;Select Path=&quot;System&quot;&gt;*[System[Provider[@Name='"
+                   "Microsoft-Windows-WindowsUpdateClient'] and EventID=43]]&lt;/Select&gt;") != std::string::npos);
+    CHECK(xml.find("<Arguments>run-job docs --scheduled --on-event</Arguments>") != std::string::npos);
+    CHECK(xml.find("<IdleTrigger>") == std::string::npos);
+    j.schedule.on_update = false;
+    CHECK(events_definition(j, "C:\\x").empty());
+    j.schedule.on_update = true;
+#endif
+
+    // What wevtutil prints, two events (the second one escaped).
+    const std::string events =
+        "<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><EventID>43</EventID></System>"
+        "<EventData><Data Name='updateTitle'>9NRZT3Q9R3DL-Microsoft.WindowsAppRuntime.2</Data>"
+        "<Data Name='updateGuid'>{32079cbb}</Data></EventData></Event>"
+        "<Event><EventData><Data Name='updateTitle'>2026-11 Cumulative Update for Windows 11 &amp; more (KB5070000)"
+        "</Data></EventData></Event>";
+    const std::vector<std::string> titles = update_titles(events);
+    REQUIRE(titles.size() == 2);
+    CHECK(titles[0] == "9NRZT3Q9R3DL-Microsoft.WindowsAppRuntime.2");
+    CHECK(titles[1] == "2026-11 Cumulative Update for Windows 11 & more (KB5070000)");
+    CHECK(update_titles("").empty());
+    CHECK(update_titles("<Data Name='updateTitle'>cut off").empty());
+
+    CHECK(routine_update(titles[0]));
+    CHECK_FALSE(routine_update(titles[1]));
+    CHECK(routine_update("Security Intelligence Update for Microsoft Defender Antivirus - KB2267602 (Version 1.463.226.0) - Current Channel (Broad)"));
+    CHECK(routine_update("9NQ58D7GHB2X-DevX-Cipher.Detect-It-Easy"));
+    CHECK_FALSE(routine_update("Intel Corporation - Display - 32.0.101.6881"));
+    CHECK_FALSE(routine_update("2026-11 Security Update (KB5070001)"));
+
+    // Updates only: a real update runs, a routine one is skipped, an unknown one runs.
+    CHECK(events_trigger(j.schedule, {titles[1]}) == "update");
+    CHECK(events_trigger(j.schedule, {titles[0]}).empty());
+    CHECK(events_trigger(j.schedule, {}) == "update");
+    // With idle or lock too: a routine update or none means idle or lock started it.
+    j.schedule.on_lock = true;
+    CHECK(events_trigger(j.schedule, {titles[0], titles[1]}) == "update");
+    CHECK(events_trigger(j.schedule, {titles[0]}) == "event");
+    CHECK(events_trigger(j.schedule, {}) == "event");
+    j.schedule.on_update = false;
+    CHECK(events_trigger(j.schedule, {titles[1]}) == "event");
+
+    // The marker the tray holds the restart up for, while the run's process is alive.
+    TempStore tmp;
+    CHECK(running_update_backups(tmp.dir()).empty());
+    mark_update_run(tmp.dir(), "docs");
+    const std::vector<std::uint32_t> running = running_update_backups(tmp.dir());
+    REQUIRE(running.size() == 1);
+    CHECK(running[0] == os::process_id());
+    clear_update_run(tmp.dir(), "docs");
+    CHECK(running_update_backups(tmp.dir()).empty());
+    // One left by a process that ended is removed.
+    os::make_dirs(os::join(tmp.dir(), "running"));
+    const std::string dead = "4294967290";
+    os::write_file_atomic(os::join(os::join(tmp.dir(), "running"), "update-old"),
+                          ByteSpan(reinterpret_cast<const std::uint8_t*>(dead.data()), dead.size()));
+    CHECK(running_update_backups(tmp.dir()).empty());
+    CHECK_FALSE(os::exists(os::join(os::join(tmp.dir(), "running"), "update-old")));
+}
+
 TEST_CASE("continuous backups ignore changes the backup leaves out") {
     const std::vector<std::string> ex = {"*.tmp", "node_modules", "C:\\Users\\me\\AppData\\Local\\Temp"};
     CHECK(vaultik::path_excluded(ex, "C:\\Users\\me\\Documents\\a.tmp"));

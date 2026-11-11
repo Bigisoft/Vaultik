@@ -18,6 +18,7 @@
 #include "common.h"
 #include "runner.h"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/cloud.hpp"
@@ -215,6 +216,7 @@ void EventRuns::poll() {
         }
         const std::string job = it->job;
         it = runs_.erase(it);
+        if (job.empty()) continue;  // an update backup this program did not start
         emit run_finished(qs(job));
         const auto w = watched_.find(job);
         if (w != watched_.end() && w->second.changed_while_running) {
@@ -246,9 +248,20 @@ bool EventRuns::session_ending(std::intptr_t flags) {
         if (!jobs::event_backup_due(store, job)) continue;
         started = start(job, QStringLiteral("--on-sign-out"), true) || started;
     }
-    if (!started) return false;
+    // A backup started by Windows Update installing something (its task runs it, not this
+    // program) is still running: hold up the restart that follows the update until it is done.
+    bool update_backup = false;
+    for (const std::uint32_t pid : jobs::running_update_backups(store.dir())) {
+        if (std::any_of(runs_.begin(), runs_.end(), [pid](const Run& r) { return r.pid == pid; })) continue;
+        runs_.push_back({std::string(), pid, true});
+        update_backup = true;
+    }
+    if (update_backup && !poll_->isActive()) poll_->start();
+    if (!started && !update_backup) return false;
     blocking_ = true;
-    const QString reason = tr("Vaultik is backing up before Windows signs out. This takes a few minutes at most.");
+    const QString reason =
+        started ? tr("Vaultik is backing up before Windows signs out. This takes a few minutes at most.")
+                : tr("Vaultik is finishing a backup that started when Windows began installing updates.");
     ShutdownBlockReasonCreate(reinterpret_cast<HWND>(window_->winId()), reinterpret_cast<LPCWSTR>(reason.utf16()));
     return true;
 #else

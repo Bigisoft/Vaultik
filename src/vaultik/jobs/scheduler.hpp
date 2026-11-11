@@ -6,7 +6,9 @@
 //            windowless launcher vaultik-task.exe so no console window flashes up.
 //   Linux:   a systemd user timer vaultik-<id>.timer with Persistent=true (missed runs catch up).
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "vaultik/jobs/job.hpp"
 
@@ -38,9 +40,38 @@ void delete_task(const std::string& job_id);
 std::string schedule_definition(const Job& job, const std::string& program_dir);
 
 #ifdef _WIN32
-// The second task's XML, started when the computer is idle or the user locks it (empty when the
-// job has neither); exposed for tests.
+// The second task's XML, started when the computer is idle, the user locks it or Windows Update
+// starts installing an update (empty when the job has none of these); exposed for tests.
 std::string events_definition(const Job& job, const std::string& program_dir);
 #endif
+
+// Backing up before Windows updates. Windows Update writes event 43 ("Installation Started") of
+// Microsoft-Windows-WindowsUpdateClient to the System log when it starts installing an update
+// (the provider's manifest puts it there, not in the WindowsUpdateClient/Operational log), with
+// the update's title in EventData/updateTitle. The events task has an event trigger for it. The
+// same event comes for the daily Defender definitions and for Microsoft Store apps, which are not
+// worth a backup, so a run started by the events task first looks at what was installed.
+constexpr const char* kUpdateEventQuery =
+    "*[System[Provider[@Name='Microsoft-Windows-WindowsUpdateClient'] and EventID=43]]";
+// The updateTitle values in wevtutil's XML output (any number of <Event> elements).
+std::vector<std::string> update_titles(const std::string& events_xml);
+// Whether an update is routine (Defender security intelligence, a Store app's package, e.g.
+// "9NRZT3Q9R3DL-Microsoft.WindowsAppRuntime.2"), so not worth a backup.
+bool routine_update(const std::string& title);
+// The titles of the updates Windows started installing in the last `minutes` (newest first);
+// empty when none or when the log cannot be read. Windows only (empty elsewhere).
+std::vector<std::string> recent_update_installs(int minutes);
+// What started a run of the events task, from the job's triggers and the updates started lately:
+// "update" when a real update started (or updates are its only trigger and the log could not
+// tell), "event" when the idle or lock trigger must have started it, and "" when only a routine
+// update did (the run is skipped).
+std::string events_trigger(const Schedule& schedule, const std::vector<std::string>& recent_updates);
+
+// While a backup started by an update runs, it leaves <dir>/running/update-<job id> holding its
+// process id, so the tray can hold up the restart that follows the update until it is done.
+void mark_update_run(const std::string& dir, const std::string& job_id);
+void clear_update_run(const std::string& dir, const std::string& job_id);
+// The process ids of the update backups running now (files of processes that ended are removed).
+std::vector<std::uint32_t> running_update_backups(const std::string& dir);
 
 }  // namespace vaultik::jobs
