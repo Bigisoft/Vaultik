@@ -242,9 +242,12 @@ std::vector<FileRef> link_parents(const std::string& volume_path, const std::vec
                                              nullptr, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT));
         if (!file.valid()) {
             const DWORD err = GetLastError();
+            // Gone since: its folders have records of their own. A file being deleted (still open
+            // elsewhere) answers "access denied" (STATUS_DELETE_PENDING maps to it); with no access
+            // rights asked for and the backup privilege on, that is the only way to get it here.
             if (err == ERROR_INVALID_PARAMETER || err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND ||
-                err == ERROR_DELETE_PENDING || err == ERROR_CANT_ACCESS_FILE)
-                continue;  // gone since: its folders have records of their own
+                err == ERROR_DELETE_PENDING || err == ERROR_CANT_ACCESS_FILE || err == ERROR_ACCESS_DENIED)
+                continue;
             throw_win32("cannot open a changed file by its id", err);
         }
         LONG status = 0;
