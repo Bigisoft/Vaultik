@@ -136,9 +136,10 @@ Commands:
       --hyperv <machine>       Windows, as administrator: also back up this
                                Hyper-V virtual machine (repeatable), exported with
                                Export-VM into the folder Hyper-V/<machine>
-      --hyperv-staging <dir>   Where machines are exported to first (default:
-                               ProgramData\Vaultik\hyperv-export; needs room for
-                               the largest one; emptied afterwards)
+      --hyperv-staging <dir>   Where machines are exported to first, in a new
+                               folder "Vaultik Hyper-V export" made there
+                               (default: ProgramData\Vaultik\hyperv-export;
+                               needs room for the largest one; emptied afterwards)
   wsl list                     The WSL distributions of this account, whether they
                                run, and their disk files
   wsl import <snapshot> <distro>
@@ -1084,6 +1085,45 @@ struct VirtualMachines {
     }
 };
 
+// The Hyper-V export folder inside a folder the job names: that folder stays the user's (it is
+// never made administrator-only or moved aside, and may be a drive's root); the exports go into
+// this administrator-only folder made in it.
+std::string hyperv_export_root(const std::string& staging) {
+    return staging.empty() ? default_hyperv_staging() : os::join(staging, "Vaultik Hyper-V export");
+}
+
+// The folder of one run's exports: "run-<process id>-<random>", so a later run can tell that the
+// run which made it has ended.
+std::string hyperv_run_folder(const std::string& root) {
+    std::uint8_t rnd[6];
+    random_bytes(rnd);
+    return os::join(root, "run-" + std::to_string(os::process_id()) + "-" + to_hex(rnd));
+}
+
+// Removes what runs that ended without cleaning up left in the export folder (full copies of
+// virtual machines, which only fill the drive).
+void remove_leftover_exports(const std::string& root) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir(std::u8string(root.begin(), root.end()));
+    const auto now = fs::file_time_type::clock::now();
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::u8string n = it->path().filename().u8string();
+        const std::string name(n.begin(), n.end());
+        std::error_code tec;
+        const auto when = fs::last_write_time(it->path(), tec);
+        if (tec) continue;
+        const auto age = std::chrono::duration_cast<std::chrono::hours>(now - when);
+        if (!it->is_directory(tec) || it->is_symlink(tec) ||
+            !hyperv_run_left_over(name, age, os::process_id(), os::process_alive))
+            continue;
+        std::error_code rec;
+        fs::remove_all(it->path(), rec);
+        if (rec) warning("could not remove the exported virtual machines left in " + os::join(root, name) + ": " + rec.message());
+        else if (!g_json) err("Removed exported virtual machines left by an earlier run: " + os::join(root, name) + "\n");
+    }
+}
+
 ExtraSource failed_extra(std::vector<std::string> place, const std::string& why) {
     ExtraSource x;
     x.place = std::move(place);
@@ -1148,12 +1188,12 @@ std::unique_ptr<VirtualMachines> add_virtual_machines(BackupOptions& o, const st
             for (const std::string& m : machines) o.extras.push_back(failed_extra(hyperv_place(m), list.problem));
             return vm;
         }
-        const std::string root = staging.empty() ? default_hyperv_staging() : staging;
+        const std::string root = hyperv_export_root(staging);
+        if (!staging.empty()) os::make_dirs(staging);
         // Only administrators can read the exported disks (they hold all of the machine's data).
         os::make_admin_dir(root);
-        std::uint8_t rnd[6];
-        random_bytes(rnd);
-        vm->staging_run = os::join(root, "run-" + to_hex(rnd));
+        remove_leftover_exports(root);
+        vm->staging_run = hyperv_run_folder(root);
         o.excludes.push_back(root);  // a file backup of the drive does not read the exports twice
         o.excludes.push_back(os::join(root, "*"));
         std::size_t index = 0;

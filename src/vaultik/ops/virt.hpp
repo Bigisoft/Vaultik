@@ -148,6 +148,14 @@ std::string machine_of_path(std::string_view snapshot_path);
 // machine's data).
 std::string default_hyperv_staging();
 
+// Whether a run folder in the export folder was left by a run that ended without removing it
+// (killed, or the computer lost power): its process is gone, or it is older than a week (the
+// process id may have been reused). One from before the process id was in the name
+// ("run-<random>"), once it is a day old.
+// `own_pid` is this process, `alive` tells whether a process runs.
+bool hyperv_run_left_over(const std::string& name, std::chrono::hours age, std::uint32_t own_pid,
+                          const std::function<bool(std::uint32_t)>& alive);
+
 // Exports machine `name` (running or not) with Export-VM into `folder`, a new or empty folder,
 // and returns the folder holding the export (`folder`\<machine>). Throws Error.
 std::string hyperv_export(const std::string& name, const std::string& folder,

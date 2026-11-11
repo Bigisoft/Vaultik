@@ -403,3 +403,21 @@ TEST_CASE("a program's output and input as streams") {
     }
 }
 #endif
+
+TEST_CASE("Hyper-V exports left by a run that ended are recognized") {
+    using std::chrono::hours;
+    const auto alive = [](std::uint32_t pid) { return pid == 4242; };
+    // The run's process is gone, still runs, or is this one.
+    CHECK(hyperv_run_left_over("run-1234-0a1b2c3d4e5f", hours(0), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-4242-0a1b2c3d4e5f", hours(2), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-99-0a1b2c3d4e5f", hours(0), 99, alive));
+    // A process id taken over by another program: after a week anyway.
+    CHECK(hyperv_run_left_over("run-4242-0a1b2c3d4e5f", hours(24 * 7), 99, alive));
+    // Before the process id was in the name: after a day.
+    CHECK_FALSE(hyperv_run_left_over("run-0a1b2c3d4e5f", hours(23), 99, alive));
+    CHECK(hyperv_run_left_over("run-0a1b2c3d4e5f", hours(24), 99, alive));
+    // Anything else in the folder is never touched.
+    CHECK_FALSE(hyperv_run_left_over("Exports", hours(1000), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-x1-abc", hours(1000), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-99999999999-abc", hours(1), 99, alive));
+}

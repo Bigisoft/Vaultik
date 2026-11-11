@@ -672,9 +672,11 @@ are open while it runs, so a plain file backup gets a half-written copy or none 
   restored as a file.
 - **Hyper-V machines** (a job with administrator rights): each ticked machine is exported with
   `Export-VM` (a consistent copy, also of a running machine, through a checkpoint Hyper-V takes
-  and merges itself) into an export folder (`ProgramData\Vaultik\hyperv-export` unless set; only
-  administrators can read it, and it needs room for the largest machine), backed up from there as
-  the folder `Hyper-V\<name>` with its configuration and disks, and removed again. The machines'
+  and merges itself) into an export folder (`ProgramData\Vaultik\hyperv-export`, or a folder
+  `Vaultik Hyper-V export` made in the folder you set, which itself is left as it is; only
+  administrators can read the export folder, and it needs room for the largest machine), backed up
+  from there as the folder `Hyper-V\<name>` with its configuration and disks, and removed again.
+  Exports left behind by a run that was killed are removed by the next run. The machines'
   own disk files are left out of the file backup. **List machines** needs Vaultik started as
   administrator; a machine can also be added by name. To get one back, pick `Hyper-V\<name>` and
   choose **Import as new...**: its files are restored into `<folder>\Exported`, then imported

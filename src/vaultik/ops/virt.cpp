@@ -603,6 +603,25 @@ HyperVList hyperv_machines() {
     return list;
 }
 
+bool hyperv_run_left_over(const std::string& name, std::chrono::hours age, std::uint32_t own_pid,
+                          const std::function<bool(std::uint32_t)>& alive) {
+    if (!name.starts_with("run-")) return false;
+    const std::string rest = name.substr(4);
+    const std::size_t dash = rest.find('-');
+    if (dash == std::string::npos) return age >= std::chrono::hours(24);
+    std::uint32_t pid = 0;
+    const std::string digits = rest.substr(0, dash);
+    if (digits.empty() || digits.size() > 10 || !std::all_of(digits.begin(), digits.end(), [](unsigned char c) {
+            return c >= '0' && c <= '9';
+        }))
+        return false;
+    const unsigned long long n = std::stoull(digits);
+    if (n > 0xFFFFFFFFull) return false;
+    pid = static_cast<std::uint32_t>(n);
+    return age >= std::chrono::hours(24 * 7) || (pid != own_pid && !alive(pid));
+}
+
+
 std::string default_hyperv_staging() {
     return os::join(os::join(os::program_data_dir(), "Vaultik"), "hyperv-export");
 }
