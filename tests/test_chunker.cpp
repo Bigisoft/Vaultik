@@ -10,7 +10,7 @@ using namespace vaultik;
 
 namespace {
 
-Bytes random_data(std::size_t n, std::uint32_t seed) {
+Bytes seeded_bytes(std::size_t n, std::uint32_t seed) {
     std::mt19937 rng(seed);
     Bytes b(n);
     for (auto& x : b) x = static_cast<std::uint8_t>(rng());
@@ -40,7 +40,7 @@ std::vector<Bytes> chunk_all(const FastCdc& cdc, const Bytes& data, std::size_t 
 TEST_CASE("chunks reassemble to the input and respect size limits") {
     const ChunkerParams p{};
     FastCdc cdc(p);
-    const Bytes data = random_data(20u << 20, 1);
+    const Bytes data = seeded_bytes(20u << 20, 1);
     const auto chunks = chunk_all(cdc, data, 1u << 20);
 
     Bytes joined;
@@ -60,13 +60,13 @@ TEST_CASE("chunks reassemble to the input and respect size limits") {
 
 TEST_CASE("chunk boundaries do not depend on read size") {
     FastCdc cdc(ChunkerParams{});
-    const Bytes data = random_data(9u << 20, 2);
+    const Bytes data = seeded_bytes(9u << 20, 2);
     CHECK(chunk_all(cdc, data, 4096) == chunk_all(cdc, data, 3u << 20));
 }
 
 TEST_CASE("an insertion only changes nearby chunks") {
     FastCdc cdc(ChunkerParams{});
-    const Bytes a = random_data(16u << 20, 3);
+    const Bytes a = seeded_bytes(16u << 20, 3);
     Bytes b = a;
     b.insert(b.begin() + (5u << 20), 0x5A);
 
@@ -81,7 +81,7 @@ TEST_CASE("an insertion only changes nearby chunks") {
 TEST_CASE("small and empty inputs") {
     FastCdc cdc(ChunkerParams{});
     CHECK(chunk_all(cdc, {}, 4096).empty());
-    const Bytes small = random_data(1000, 4);
+    const Bytes small = seeded_bytes(1000, 4);
     const auto chunks = chunk_all(cdc, small, 4096);
     REQUIRE(chunks.size() == 1);
     CHECK(chunks[0] == small);

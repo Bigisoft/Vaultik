@@ -694,6 +694,8 @@ TEST_CASE("backups before Windows updates: trigger, task and the update's title"
 }
 
 TEST_CASE("continuous backups ignore changes the backup leaves out") {
+#ifdef _WIN32
+    // Windows paths: case does not matter.
     const std::vector<std::string> ex = {"*.tmp", "node_modules", "C:\\Users\\me\\AppData\\Local\\Temp"};
     CHECK(vaultik::path_excluded(ex, "C:\\Users\\me\\Documents\\a.tmp"));
     CHECK(vaultik::path_excluded(ex, "C:\\work\\node_modules\\left-pad\\index.js"));
@@ -701,4 +703,15 @@ TEST_CASE("continuous backups ignore changes the backup leaves out") {
     CHECK_FALSE(vaultik::path_excluded(ex, "C:\\Users\\me\\Documents\\report.docx"));
     CHECK_FALSE(vaultik::path_excluded(ex, "C:\\Users\\me\\AppData\\Local\\Temporary.txt"));
     CHECK_FALSE(vaultik::path_excluded({}, "C:\\a.tmp"));
+#else
+    // Linux paths: case matters.
+    const std::vector<std::string> ex = {"*.tmp", "node_modules", "/home/me/.cache"};
+    CHECK(vaultik::path_excluded(ex, "/home/me/Documents/a.tmp"));
+    CHECK(vaultik::path_excluded(ex, "/work/node_modules/left-pad/index.js"));
+    CHECK(vaultik::path_excluded(ex, "/home/me/.cache/x/y.txt"));
+    CHECK_FALSE(vaultik::path_excluded(ex, "/home/me/.Cache/x/y.txt"));
+    CHECK_FALSE(vaultik::path_excluded(ex, "/home/me/Documents/report.docx"));
+    CHECK_FALSE(vaultik::path_excluded(ex, "/home/me/.cached.txt"));
+    CHECK_FALSE(vaultik::path_excluded({}, "/a.tmp"));
+#endif
 }

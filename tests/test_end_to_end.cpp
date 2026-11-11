@@ -65,7 +65,7 @@ struct TempDir {
     }
 };
 
-Bytes random_data(std::size_t n, std::uint32_t seed) {
+Bytes seeded_bytes(std::size_t n, std::uint32_t seed) {
     std::mt19937 rng(seed);
     Bytes b(n);
     for (auto& x : b) x = static_cast<std::uint8_t>(rng());
@@ -131,7 +131,7 @@ TEST_CASE("backup, incremental backup, restore and verify") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    const Bytes big = random_data(6u << 20, 11);
+    const Bytes big = seeded_bytes(6u << 20, 11);
 
     write_file(src / "a.txt", text("hello"));
     write_file(src / "empty.bin", {});
@@ -156,7 +156,7 @@ TEST_CASE("backup, incremental backup, restore and verify") {
     CHECK_FALSE(first.snapshot.parent.has_value());
 
     // Change one file and add another.
-    append_file(src / "big.bin", random_data(1000, 12));
+    append_file(src / "big.bin", seeded_bytes(1000, 12));
     write_file(src / "new.txt", text("new file"));
 
     const BackupResult second = run_backup(*repo, options);
@@ -181,7 +181,11 @@ TEST_CASE("backup, incremental backup, restore and verify") {
     const fs::path restored = restored_location(out, src);
     CHECK(snapshot_of_dir(restored) == snapshot_of_dir(src));
     CHECK_FALSE(fs::exists(restored / "skip.tmp"));
-    CHECK(fs::last_write_time(restored / "a.txt") == fs::last_write_time(src / "a.txt"));
+    // Times are kept in 100 ns units: on Linux, which keeps nanoseconds, the restored time is the
+    // original rounded down to that.
+    const auto time_lost = fs::last_write_time(src / "a.txt") - fs::last_write_time(restored / "a.txt");
+    CHECK(time_lost >= std::chrono::nanoseconds(0));
+    CHECK(time_lost < std::chrono::nanoseconds(100));
 
     // The first snapshot still restores the old content.
     const fs::path out_old = tmp.path / "out_old";
@@ -271,7 +275,7 @@ TEST_CASE("damaged pack data is detected") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    write_file(src / "file.bin", random_data(3u << 20, 21));
+    write_file(src / "file.bin", seeded_bytes(3u << 20, 21));
     init_repo(repo_dir);
     {
         auto repo = open_repo(repo_dir);
@@ -332,7 +336,7 @@ TEST_CASE("a pack damaged by bad sectors is rebuilt from its repair data") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    write_file(src / "file.bin", random_data(3u << 20, 31));
+    write_file(src / "file.bin", seeded_bytes(3u << 20, 31));
     write_file(src / "small.txt", text("small"));
     init_repo(repo_dir);
     {
@@ -587,7 +591,7 @@ TEST_CASE("files that look encrypted by ransomware raise the alarm") {
         return Bytes(s.begin(), s.end());
     };
     for (int i = 0; i < 40; ++i) write_file(src / ("doc" + std::to_string(i) + ".txt"), text(i + 1));
-    for (int i = 0; i < 40; ++i) write_file(src / ("photo" + std::to_string(i) + ".jpg"), random_data(40000, 100 + i));
+    for (int i = 0; i < 40; ++i) write_file(src / ("photo" + std::to_string(i) + ".jpg"), seeded_bytes(40000, 100 + i));
     init_repo(repo_dir);
     auto repo = open_repo(repo_dir);
     BackupOptions options;
@@ -595,14 +599,14 @@ TEST_CASE("files that look encrypted by ransomware raise the alarm") {
     CHECK_FALSE(run_backup(*repo, options).alarm.raised());
 
     // Edited photos (new random content) and edited documents are ordinary changes.
-    for (int i = 0; i < 40; ++i) write_file(src / ("photo" + std::to_string(i) + ".jpg"), random_data(40000, 200 + i));
+    for (int i = 0; i < 40; ++i) write_file(src / ("photo" + std::to_string(i) + ".jpg"), seeded_bytes(40000, 200 + i));
     for (int i = 0; i < 10; ++i) write_file(src / ("doc" + std::to_string(i) + ".txt"), text(i + 50));
     BackupResult r = run_backup(*repo, options);
     CHECK(r.alarm.became_random == 0);
     CHECK_FALSE(r.alarm.raised());
 
     // Documents overwritten with random-looking data.
-    for (int i = 0; i < 25; ++i) write_file(src / ("doc" + std::to_string(i) + ".txt"), random_data(40000, 300 + i));
+    for (int i = 0; i < 25; ++i) write_file(src / ("doc" + std::to_string(i) + ".txt"), seeded_bytes(40000, 300 + i));
     r = run_backup(*repo, options);
     CHECK(r.alarm.became_random == 25);
     CHECK(r.alarm.parent_files == 80);
@@ -622,7 +626,7 @@ TEST_CASE("files that look encrypted by ransomware raise the alarm") {
     CHECK(r.alarm.renamed == 25);
     CHECK(r.alarm.raised());
 
-    CHECK(byte_entropy(random_data(65536, 1)) > 7.9);
+    CHECK(byte_entropy(seeded_bytes(65536, 1)) > 7.9);
     CHECK(byte_entropy(text(1)) < 5.0);
 }
 
@@ -646,7 +650,7 @@ TEST_CASE("a new repository is never created over existing backup data") {
     {
         auto repo = open_repo(tmp.path / "repo");
         BackupOptions options;
-        write_file(tmp.path / "src" / "a.txt", random_data(100, 1));
+        write_file(tmp.path / "src" / "a.txt", seeded_bytes(100, 1));
         options.paths = {u8(tmp.path / "src")};
         run_backup(*repo, options);
     }
@@ -660,8 +664,8 @@ TEST_CASE("a second copy of a backup") {
     const fs::path src = tmp.path / "src";
     const fs::path a_dir = tmp.path / "a";
     const fs::path b_dir = tmp.path / "b";
-    write_file(src / "one.bin", random_data(2u << 20, 31));
-    write_file(src / "sub" / "two.txt", random_data(1000, 32));
+    write_file(src / "one.bin", seeded_bytes(2u << 20, 31));
+    write_file(src / "sub" / "two.txt", seeded_bytes(1000, 32));
     init_repo(a_dir);
     init_repo(b_dir);  // its own key: everything is stored again under it
     auto a = open_repo(a_dir);
@@ -670,7 +674,7 @@ TEST_CASE("a second copy of a backup") {
     options.paths = {u8(src)};
     options.tags = {"job:docs"};
     run_backup(*a, options);
-    write_file(src / "sub" / "two.txt", random_data(1200, 33));
+    write_file(src / "sub" / "two.txt", seeded_bytes(1200, 33));
     const BackupResult second = run_backup(*a, options);
 
     CopyOptions co;
@@ -718,7 +722,7 @@ TEST_CASE("a second copy of a backup") {
     }
     CHECK(copy_pinned);
     CHECK(copy_snapshots(*a, *b, co).updated == 0);
-    write_file(src / "three.txt", random_data(500, 34));
+    write_file(src / "three.txt", seeded_bytes(500, 34));
     run_backup(*a, options);
     r = copy_snapshots(*a, *b, co);
     CHECK(r.copied == 1);
@@ -737,7 +741,7 @@ TEST_CASE("a second copy does not trust a folder listing a prune of the target l
     const fs::path src = tmp.path / "src";
     const fs::path a_dir = tmp.path / "a";
     const fs::path b_dir = tmp.path / "b";
-    const Bytes c = random_data(300000, 51);
+    const Bytes c = seeded_bytes(300000, 51);
     // V1 stores f.txt's data; V2 moves it to another folder (its listing new, the data not) and
     // adds keep.txt; V3 only keeps keep.txt, so V2's pack stays when V1 and V2 are gone.
     write_file(src / "one" / "f.txt", c);
@@ -751,7 +755,7 @@ TEST_CASE("a second copy does not trust a folder listing a prune of the target l
     const BackupResult v1 = run_backup(*a, options);
     fs::remove_all(src / "one");
     write_file(src / "two" / "f.txt", c);
-    write_file(src / "keep.txt", random_data(300000, 52));
+    write_file(src / "keep.txt", seeded_bytes(300000, 52));
     const BackupResult v2 = run_backup(*a, options);
     fs::remove_all(src / "two");
     run_backup(*a, options);
@@ -785,21 +789,21 @@ TEST_CASE("comparing two versions") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    write_file(src / "same.txt", random_data(100, 1));
-    write_file(src / "edit.txt", random_data(100, 2));
-    write_file(src / "gone.txt", random_data(100, 3));
-    write_file(src / "old dir" / "x.txt", random_data(100, 4));
-    write_file(src / "deep" / "inner" / "y.txt", random_data(100, 5));
+    write_file(src / "same.txt", seeded_bytes(100, 1));
+    write_file(src / "edit.txt", seeded_bytes(100, 2));
+    write_file(src / "gone.txt", seeded_bytes(100, 3));
+    write_file(src / "old dir" / "x.txt", seeded_bytes(100, 4));
+    write_file(src / "deep" / "inner" / "y.txt", seeded_bytes(100, 5));
     init_repo(repo_dir);
     auto repo = open_repo(repo_dir);
     BackupOptions options;
     options.paths = {u8(src)};
     const BackupResult first = run_backup(*repo, options);
 
-    write_file(src / "edit.txt", random_data(120, 6));
+    write_file(src / "edit.txt", seeded_bytes(120, 6));
     fs::remove(src / "gone.txt");
     fs::remove_all(src / "old dir");
-    write_file(src / "new.txt", random_data(100, 7));
+    write_file(src / "new.txt", seeded_bytes(100, 7));
     const BackupResult second = run_backup(*repo, options);
 
     const DiffResult d = diff_snapshots(*repo, first.snapshot, second.snapshot);
@@ -823,7 +827,7 @@ TEST_CASE("ready-made exclusions skip what they say") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    const Bytes one = random_data(100, 7);
+    const Bytes one = seeded_bytes(100, 7);
     write_file(src / "keep.txt", one);                                      // kept
     write_file(src / "report.tmp", one);                                    // temp
     write_file(src / "~$report.docx", one);                                 // temp (Office lock file)
@@ -868,7 +872,7 @@ TEST_CASE("a test restore brings files back and notices one that differs from th
     const fs::path work = tmp.path / "work";
     for (int i = 0; i < 30; ++i)
         write_file(src / ("dir" + std::to_string(i % 3)) / ("f" + std::to_string(i) + ".bin"),
-                   random_data(1000 + i * 37, 100 + i));
+                   seeded_bytes(1000 + i * 37, 100 + i));
     fs::create_directories(work);
     init_repo(repo_dir);
     auto repo = open_repo(repo_dir);
@@ -923,7 +927,7 @@ TEST_CASE("repair rebuilds a damaged index from the packs") {
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
     write_file(src / "a.txt", text("alpha"));
-    write_file(src / "b.bin", random_data(300000, 3));
+    write_file(src / "b.bin", seeded_bytes(300000, 3));
     init_repo(repo_dir);
     {
         auto repo = open_repo(repo_dir);
@@ -933,7 +937,7 @@ TEST_CASE("repair rebuilds a damaged index from the packs") {
     }
     // Garble every index file: a normal open now fails.
     for (const auto& e : fs::recursive_directory_iterator(repo_dir / "index"))
-        if (e.is_regular_file()) write_file(e.path(), random_data(200, 9));
+        if (e.is_regular_file()) write_file(e.path(), seeded_bytes(200, 9));
     CHECK_THROWS(open_repo(repo_dir));
 
     auto bare = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), kPassword, false);
@@ -960,7 +964,7 @@ TEST_CASE("repair saves a version again without a file whose data is damaged") {
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
     write_file(src / "small.txt", text("still here"));
-    write_file(src / "big.bin", random_data(400000, 4));
+    write_file(src / "big.bin", seeded_bytes(400000, 4));
     init_repo(repo_dir);
     {
         auto repo = open_repo(repo_dir);
@@ -1017,8 +1021,8 @@ TEST_CASE("a backup with worker threads and background uploads stores the same d
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    for (int i = 0; i < 12; ++i) write_file(src / ("f" + std::to_string(i) + ".bin"), random_data(900000 + i * 1000, 50 + i));
-    write_file(src / "dup.bin", random_data(900000, 50));  // the same as f0: stored once
+    for (int i = 0; i < 12; ++i) write_file(src / ("f" + std::to_string(i) + ".bin"), seeded_bytes(900000 + i * 1000, 50 + i));
+    write_file(src / "dup.bin", seeded_bytes(900000, 50));  // the same as f0: stored once
     write_file(src / "text.txt", text(std::string(200000, 'a')));
     init_repo(repo_dir);
     auto repo = open_repo(repo_dir);
@@ -1077,7 +1081,7 @@ TEST_CASE("a failed background upload fails the backup and saves no version") {
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
     // Incompressible data, enough for several 32 MiB packs.
-    for (int i = 0; i < 6; ++i) write_file(src / ("f" + std::to_string(i) + ".bin"), random_data(20u << 20, 70 + i));
+    for (int i = 0; i < 6; ++i) write_file(src / ("f" + std::to_string(i) + ".bin"), seeded_bytes(20u << 20, 70 + i));
     init_repo(repo_dir);
     auto repo = Repository::open(std::make_unique<FailingPacks>(repo_dir, 1), kPassword);
     repo->set_parallelism(2, 1);
@@ -1130,15 +1134,15 @@ void make_mixed_tree(const fs::path& src) {
                 case 4: size = rng() % 300000; break;
                 default: size = (i == 5 && d % 2 == 0) ? (3u << 20) + rng() % (2u << 20) : 1000; break;
             }
-            write_file(dir / ("f" + std::to_string(i) + ".bin"), random_data(size, rng()));
+            write_file(dir / ("f" + std::to_string(i) + ".bin"), seeded_bytes(size, rng()));
         }
         write_file(dir / "sub" / "deep" / "x.txt", text("folder " + std::to_string(d)));
     }
-    write_file(src / "multi.bin", random_data(9u << 20, 5));
-    write_file(src / "dir1" / "copy-of-multi.bin", random_data(9u << 20, 5));  // stored once
+    write_file(src / "multi.bin", seeded_bytes(9u << 20, 5));
+    write_file(src / "dir1" / "copy-of-multi.bin", seeded_bytes(9u << 20, 5));  // stored once
     write_file(src / "empty.bin", {});
     write_file(src / "gone.bin", text("read_path sends this one nowhere"));
-    write_file(src / "locked.bin", random_data(70000, 6));
+    write_file(src / "locked.bin", seeded_bytes(70000, 6));
 }
 
 }  // namespace
@@ -1212,8 +1216,8 @@ TEST_CASE("several readers make the same snapshot as one") {
     CHECK(again.snapshot.stats.bytes == a.bytes);
 
     // With a parent: a changed, an added and a removed file.
-    append_file(src / "dir2" / "f5.bin", random_data(5000, 9));
-    write_file(src / "dir3" / "new.bin", random_data(300000, 10));
+    append_file(src / "dir2" / "f5.bin", seeded_bytes(5000, 9));
+    write_file(src / "dir3" / "new.bin", seeded_bytes(300000, 10));
     fs::remove(src / "dir4" / "f3.bin");
     BackupOptions p1 = make_options(1);
     p1.use_parent = true;
@@ -1251,7 +1255,7 @@ TEST_CASE("a backup with several readers stops promptly when cancelled") {
     const fs::path src = tmp.path / "src";
     for (int i = 0; i < 12; ++i)
         write_file(src / ("d" + std::to_string(i % 3)) / ("big" + std::to_string(i) + ".bin"),
-                   random_data(3u << 20, static_cast<std::uint32_t>(100 + i)));
+                   seeded_bytes(3u << 20, static_cast<std::uint32_t>(100 + i)));
     init_repo(tmp.path / "repo");
     auto repo = open_repo(tmp.path / "repo");
     repo->set_parallelism(2, 0);

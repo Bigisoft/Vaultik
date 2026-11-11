@@ -46,7 +46,7 @@ struct TempDir {
     }
 };
 
-Bytes random_data(std::size_t n, std::uint32_t seed) {
+Bytes seeded_bytes(std::size_t n, std::uint32_t seed) {
     std::mt19937 rng(seed);
     Bytes b(n);
     for (auto& x : b) x = static_cast<std::uint8_t>(rng());
@@ -209,9 +209,9 @@ TEST_CASE("archive storage: file data goes cold, listings stay readable") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    const Bytes a = random_data(3u << 20, 11);
-    const Bytes b = random_data(3u << 20, 12);
-    const Bytes c = random_data(3u << 20, 13);
+    const Bytes a = seeded_bytes(3u << 20, 11);
+    const Bytes b = seeded_bytes(3u << 20, 12);
+    const Bytes c = seeded_bytes(3u << 20, 13);
     {
         LocalBackend backend(u8(repo_dir), true);
         InitOptions options;

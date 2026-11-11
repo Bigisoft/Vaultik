@@ -43,7 +43,7 @@ struct TempDir {
     }
 };
 
-Bytes random_data(std::size_t n, std::uint32_t seed) {
+Bytes seeded_bytes(std::size_t n, std::uint32_t seed) {
     std::mt19937 rng(seed);
     Bytes b(n);
     for (auto& x : b) x = static_cast<std::uint8_t>(rng());
@@ -202,9 +202,9 @@ TEST_CASE("forget and prune free the space of removed snapshots") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    const Bytes a = random_data(3u << 20, 1);
-    const Bytes b = random_data(3u << 20, 2);
-    const Bytes c = random_data(3u << 20, 3);
+    const Bytes a = seeded_bytes(3u << 20, 1);
+    const Bytes b = seeded_bytes(3u << 20, 2);
+    const Bytes c = seeded_bytes(3u << 20, 3);
 
     write_file(src / "a.bin", a);
     write_file(src / "b.bin", b);
@@ -265,7 +265,7 @@ TEST_CASE("prune keeps data whose index file was lost") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
     const fs::path repo_dir = tmp.path / "repo";
-    write_file(src / "a.bin", random_data(1u << 20, 4));
+    write_file(src / "a.bin", seeded_bytes(1u << 20, 4));
     auto repo = make_repo(repo_dir);
     BackupOptions bo;
     bo.paths = {u8(src)};
@@ -332,7 +332,7 @@ std::vector<std::string> make_packs(const fs::path& src, const fs::path& repo_di
     BackupOptions bo;
     bo.paths = {u8(src)};
     for (int i = 0; i < n; ++i) {
-        write_file(src / ("f" + std::to_string(i) + ".bin"), random_data(200u << 10, 40 + i));
+        write_file(src / ("f" + std::to_string(i) + ".bin"), seeded_bytes(200u << 10, 40 + i));
         run_backup(*repo, bo);
     }
     return repo->backend().list("data");

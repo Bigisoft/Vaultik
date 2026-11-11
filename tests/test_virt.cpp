@@ -41,7 +41,7 @@ struct TempDir {
     }
 };
 
-Bytes random_data(std::size_t n, std::uint32_t seed) {
+Bytes seeded_bytes(std::size_t n, std::uint32_t seed) {
     std::mt19937 rng(seed);
     Bytes b(n);
     for (auto& x : b) x = static_cast<std::uint8_t>(rng());
@@ -303,7 +303,7 @@ TEST_CASE("streams and folders are backed up at their own places") {
     }
     auto repo = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), "pw");
 
-    const Bytes tar = random_data(3u << 20, 5);
+    const Bytes tar = seeded_bytes(3u << 20, 5);
     const fs::path staged = tmp.path / "staging" / "Lab";
     fs::create_directories(staged / "Virtual Hard Disks");
     { std::ofstream(staged / "Virtual Hard Disks" / "lab.vhdx", std::ios::binary) << "disk"; }
@@ -314,7 +314,7 @@ TEST_CASE("streams and folders are backed up at their own places") {
     folder.place = hyperv_place("Lab");
     folder.folder = u8(staged);
     o.extras.push_back(folder);
-    o.extras.push_back(memory_source(wsl_place("Broken"), random_data(5000, 6), true));
+    o.extras.push_back(memory_source(wsl_place("Broken"), seeded_bytes(5000, 6), true));
     std::vector<std::string> warnings;
     o.on_warning = [&](const std::string& w) { warnings.push_back(w); };
     o.skip_unchanged = true;
