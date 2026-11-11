@@ -233,6 +233,15 @@ bool GoogleDriveBackend::exists(const std::string& name) {
     return lookup(name).has_value();
 }
 
+bool GoogleDriveBackend::exists_now(const std::string& name) {
+    {
+        // Forget what this process saw: another computer may have removed (trashed) it since.
+        std::lock_guard lock(mu_);
+        files_.erase(name);
+    }
+    return lookup(name).has_value();
+}
+
 std::uint64_t GoogleDriveBackend::size(const std::string& name) {
     const auto f = lookup(name);
     if (!f) throw Error(location_ + ": repository file " + name + " is missing");

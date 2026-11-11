@@ -199,7 +199,9 @@ void RepoLock::release() {
 
 RepoLock::State RepoLock::probe() {
     try {
-        return repo_.backend().exists(name_) ? State::Held : State::Gone;
+        // From the storage itself: a cached "still there" would keep a lock someone removed
+        // alive, and the refresh would write it back.
+        return repo_.backend().exists_now(name_) ? State::Held : State::Gone;
     } catch (const Error&) {
         return State::Unknown;
     }

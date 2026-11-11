@@ -703,6 +703,12 @@ bool MegaBackend::exists(const std::string& name) {
     return find_file(name).has_value();
 }
 
+bool MegaBackend::exists_now(const std::string& name) {
+    // The tree in memory first takes in what others changed since (a removal included).
+    catch_up();
+    return find_file(name).has_value();
+}
+
 std::uint64_t MegaBackend::size(const std::string& name) {
     const auto n = find_file(name);
     if (!n) throw Error(location_ + ": repository file " + name + " is missing");
