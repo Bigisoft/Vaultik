@@ -2,3 +2,5 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 *.sh text eol=lf
+# Kept byte for byte: vcpkg checks its hash (see .github/workflows/build.yml).
+tools/ci/*.json -text

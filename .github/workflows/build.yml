@@ -52,17 +52,15 @@ jobs:
           git -C $env:VCPKG_ROOT checkout --quiet $baseline
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
           New-Item -ItemType Directory -Force "${{ github.workspace }}\vcpkg-cache" | Out-Null
-      # pcre2 (for Qt) reads a gitlink from GitHub's API and checks its hash, which matches only the
-      # pretty-printed answer GitHub gives without a token; on the runners the request goes out
-      # with one and gets compact JSON. Fetched here without a token, checked, and left where vcpkg
-      # looks first, so it does not ask the API itself.
-      - name: Fetch pcre2's sljit gitlink for vcpkg
+      # pcre2 (for Qt) reads a gitlink from GitHub's API and checks its hash against one form of the
+      # answer, but GitHub answers in that form only sometimes (pretty-printed or compact JSON). The
+      # file vcpkg expects is kept in tools/ci and put where vcpkg looks first, so it never asks.
+      - name: Give vcpkg pcre2's sljit gitlink
         shell: pwsh
         run: |
-          $file = Join-Path $env:VCPKG_DOWNLOADS 'pcre2-pcre2-10.49-sljit-gitlink.json'
           New-Item -ItemType Directory -Force $env:VCPKG_DOWNLOADS | Out-Null
-          $url = 'https://api.github.com/repos/PCRE2Project/pcre2/contents/deps/sljit?ref=pcre2-10.49'
-          & curl.exe -sSfL --retry 5 -H 'User-Agent: vaultik-ci' -o $file $url
+          $file = Join-Path $env:VCPKG_DOWNLOADS 'pcre2-pcre2-10.49-sljit-gitlink.json'
+          Copy-Item 'tools/ci/pcre2-pcre2-10.49-sljit-gitlink.json' $file
           $expected = '719fa1d8d8e1e749ce6f7370db32818268f84b1376ed9367fd5290ab440d8bea7a6a25a68e55045a45da68b0ce7a55daa0d7acd2f1b11774319b50268c02441c'
           $actual = (Get-FileHash $file -Algorithm SHA512).Hash.ToLower()
           if ($actual -ne $expected) { Write-Error "unexpected sljit gitlink: $actual"; exit 1 }
