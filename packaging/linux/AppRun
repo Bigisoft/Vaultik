@@ -1,0 +1,19 @@
+#!/bin/sh
+# Entry point of the Vaultik AppImage.
+#   Vaultik-x86_64.AppImage [--tray] [--history <path>]   the window
+#   Vaultik-x86_64.AppImage --cli <command> ...           the engine (vaultik), e.g. --cli snapshots
+# Scheduled backups (systemd user timers) start "$APPIMAGE --cli run-job <id> --scheduled", because
+# the folder this script runs from is a temporary mount that is gone once the program ends.
+HERE="$(dirname "$(readlink -f "$0")")"
+export APPDIR="${APPDIR:-$HERE}"
+# Environment set up by linuxdeploy's plugins (Qt's platform theme and the like).
+if [ -d "$HERE/apprun-hooks" ]; then
+    for hook in "$HERE"/apprun-hooks/*.sh; do
+        [ -f "$hook" ] && . "$hook"
+    done
+fi
+if [ "${1:-}" = "--cli" ]; then
+    shift
+    exec "$HERE/usr/bin/vaultik" "$@"
+fi
+exec "$HERE/usr/bin/vaultik-gui" "$@"
