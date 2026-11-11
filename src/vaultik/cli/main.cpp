@@ -8,6 +8,7 @@
 #include <iostream>
 #include <thread>
 #include <cstdio>
+#include <cstdlib>  // std::system (image_cmds.inc) on every platform
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -69,7 +70,6 @@
 #ifdef _WIN32
 #include <windows.h>
 
-#include <cstdlib>
 #if defined(_MSC_VER) && defined(_DEBUG)
 #include <crtdbg.h>
 #endif
@@ -1441,8 +1441,9 @@ void refresh_drive_copy(const jobs::Job& job) {
         if (!os::exists(os::join(target, "portable")))
             write("portable",
                   "This file makes this copy of Vaultik portable: its settings are kept in the Settings folder "
-                  "(Settings-Linux for the Linux program) next to it, and nothing is written to the computer it "
-                  "runs on.\n");
+                  "(Settings-Linux for the Linux program) next to it. The Linux program keeps only the key that "
+                  "unlocks saved passwords on the computer it runs on (~/.config/vaultik/secrets), so this drive "
+                  "alone does not give them away.\n");
         const std::string where = loc.relative.empty() ? std::string("the top of this drive") : loc.relative;
         write(kNote,
               "Restoring files from this drive on Linux (also SteamOS on a Steam Deck)\n\n"
