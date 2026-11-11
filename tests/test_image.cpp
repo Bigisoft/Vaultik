@@ -104,6 +104,30 @@ struct MemTarget : DiskTarget {
     void finish() override { finished = true; }
 };
 
+// A disk target that notes, at every write into a partition, whether the disk showed a
+// partition table then (an MBR entry, or a GPT header in the primary or backup place).
+struct OrderTarget : MemTarget {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> parts;  // [begin, end) of the partitions
+    std::uint64_t original_size = 0;
+    int partition_writes = 0;
+    int with_tables = 0;
+    OrderTarget(std::uint64_t size, std::uint8_t fill) : MemTarget(size, fill) {}
+    bool shows_tables() const {
+        if (std::any_of(bytes.begin() + 446, bytes.begin() + 510, [](std::uint8_t b) { return b != 0; })) return true;
+        if (std::memcmp(bytes.data() + 512, "EFI PART", 8) == 0) return true;
+        return std::memcmp(bytes.data() + original_size - 512, "EFI PART", 8) == 0;
+    }
+    void write(std::uint64_t offset, ByteSpan data) override {
+        for (const auto& [b, e] : parts)
+            if (offset < e && offset + data.size() > b) {
+                ++partition_writes;
+                if (shows_tables()) ++with_tables;
+                break;
+            }
+        MemTarget::write(offset, data);
+    }
+};
+
 // A 64 MiB GPT disk: an EFI partition (read raw) and an "NTFS" partition read by its bitmap,
 // with a 20 MiB unused run (a hole) and scattered unused clusters full of old data.
 MemDisk make_gpt_disk() {
@@ -240,14 +264,43 @@ TEST_CASE("image: gaps between partitions are stored, up to 1 MiB each") {
     logical.length = 49 * kMiB;
     logical.mbr_type = 0x07;
     l.partitions = {a, ext, logical};
-    const std::vector<Region> g = gap_regions(l);
-    REQUIRE(g.size() == 3);
+    std::vector<Region> g = gap_regions(l);
+    REQUIRE(g.size() == 4);
     CHECK(g[0].offset == 0);
     CHECK(g[0].length == kMiB);  // capped
-    CHECK(g[1].offset == 12 * kMiB);  // the gap before the logical partition holds its EBR
+    CHECK(g[1].offset == 12 * kMiB);  // the start of the gap before the extended partition
     CHECK(g[1].length == kMiB);
-    CHECK(g[2].offset == 70 * kMiB);
+    CHECK(g[2].offset == 20 * kMiB);  // the EBR at the start of the extended partition, 8 MiB further
     CHECK(g[2].length == kMiB);
+    CHECK(g[3].offset == 70 * kMiB);
+    CHECK(g[3].length == kMiB);
+
+    // A second logical partition: its EBR sits where the link container starts, after free space
+    // (a deleted logical partition); a gap shorter than 1 MiB is stored once, without overlaps.
+    logical.length = 9 * kMiB;  // 21 to 30 MiB
+    Partition link;
+    link.offset = 40 * kMiB;
+    link.length = 30 * kMiB;
+    link.mbr_type = 0x05;
+    Partition logical2;
+    logical2.offset = 40 * kMiB + 512;  // right after its EBR
+    logical2.length = 30 * kMiB - 512;
+    logical2.mbr_type = 0x07;
+    l.partitions = {a, ext, logical, link, logical2};
+    g = gap_regions(l);
+    REQUIRE(g.size() == 6);
+    CHECK(g[2].offset == 20 * kMiB);
+    CHECK(g[3].offset == 30 * kMiB);  // the start of the free space
+    CHECK(g[3].length == kMiB);
+    CHECK(g[4].offset == 40 * kMiB);  // the second EBR
+    CHECK(g[4].length == 512);
+    CHECK(g[5].offset == 70 * kMiB);
+    for (std::size_t i = 1; i < g.size(); ++i) CHECK(g[i - 1].offset + g[i - 1].length <= g[i].offset);
+
+    // GPT disks have no containers: only the gap starts.
+    l.style = PartitionStyle::Gpt;
+    l.partitions = {a, logical};
+    CHECK(gap_regions(l).size() == 3);
 }
 
 TEST_CASE("image: GPT tables are valid and sized for the target") {
@@ -519,6 +572,133 @@ TEST_CASE("image: an MBR disk keeps its boot code; new ids change the signature"
     CHECK(std::memcmp(got.data(), d.bytes.data(), 440) == 0);
     CHECK(std::memcmp(got.data() + 440, d.bytes.data() + 440, 4) != 0);
     CHECK(std::memcmp(got.data() + 444, d.bytes.data() + 444, d.bytes.size() - 444) == 0);
+}
+
+TEST_CASE("image: the start of a hibernation file is overwritten on a disk with old data") {
+    TempDir tmp;
+    auto repo = make_repo(tmp.path / "repo");
+    MemDisk disk = make_gpt_disk();
+    disk.keep[1] = {{24 * kMiB, kMiB}};  // its first 1 MiB, at the start of the hole
+    ImageBackupOptions o;
+    o.disks = {&disk};
+    const ImageBackupResult r = run_image_backup(*repo, o);
+    const std::vector<DiskLayout> disks = image_disks(*repo, r.snapshot);
+    CHECK(disks[0].partitions[1].holes == Ranges{{25 * kMiB, 19 * kMiB}});
+    MemTarget target(64 * kMiB, 0xEE);
+    run_image_restore(*repo, r.snapshot, target, {});
+    const std::size_t at = static_cast<std::size_t>(disk.l.partitions[1].offset + 24 * kMiB);
+    CHECK(std::all_of(target.bytes.begin() + at, target.bytes.begin() + at + kMiB, [](std::uint8_t b) { return b == 0; }));
+    CHECK(target.bytes[at + kMiB] == 0xEE);  // the rest of the hole is left alone
+}
+
+TEST_CASE("image: a restore writes the partition tables only after every partition") {
+    TempDir tmp;
+    auto repo = make_repo(tmp.path / "repo");
+
+    SUBCASE("GPT") {
+        MemDisk disk = make_gpt_disk();
+        ImageBackupOptions o;
+        o.disks = {&disk};
+        const ImageBackupResult r = run_image_backup(*repo, o);
+        // Old data everywhere, and old tables of another layout at both ends.
+        OrderTarget target(64 * kMiB, 0xEE);
+        target.original_size = 64 * kMiB;
+        for (const Partition& p : disk.l.partitions) target.parts.emplace_back(p.offset, p.offset + p.length);
+        run_image_restore(*repo, r.snapshot, target, {});
+        CHECK(target.partition_writes > 0);
+        CHECK(target.with_tables == 0);
+        CHECK(target.shows_tables());  // in the end
+        CHECK(target.finished);
+        CHECK(std::memcmp(target.bytes.data(), disk.bytes.data(), 34 * 512) == 0);
+        CHECK(std::memcmp(target.bytes.data() + 64 * kMiB - 33 * 512, disk.bytes.data() + 64 * kMiB - 33 * 512, 33 * 512) == 0);
+    }
+    SUBCASE("MBR") {
+        MemDisk d;
+        d.l.style = PartitionStyle::Mbr;
+        d.l.size = 24 * kMiB;
+        d.l.signature = 0x12345678;
+        Partition p;
+        p.number = 1;
+        p.offset = kMiB;
+        p.length = 20 * kMiB;
+        p.mbr_type = 0x07;
+        p.active = true;
+        d.l.partitions = {p};
+        d.bytes.assign(static_cast<std::size_t>(d.l.size), 0);
+        fill_random(d.bytes.data(), 446, 5);  // boot code and signature
+        d.bytes[440] = 0x78;
+        d.bytes[441] = 0x56;
+        d.bytes[442] = 0x34;
+        d.bytes[443] = 0x12;
+        d.bytes[446] = 0x80;  // the entry
+        d.bytes[446 + 4] = 0x07;
+        d.bytes[446 + 8] = 0x00;
+        d.bytes[446 + 9] = 0x08;  // LBA 2048
+        d.bytes[510] = 0x55;
+        d.bytes[511] = 0xAA;
+        fill_random(d.bytes.data() + kMiB, 20 * kMiB, 6);
+        ImageBackupOptions o;
+        o.disks = {&d};
+        const ImageBackupResult r = run_image_backup(*repo, o);
+        OrderTarget target(24 * kMiB, 0xEE);
+        target.original_size = 24 * kMiB;
+        target.parts.emplace_back(p.offset, p.offset + p.length);
+        run_image_restore(*repo, r.snapshot, target, {});
+        CHECK(target.partition_writes > 0);
+        CHECK(target.with_tables == 0);
+        CHECK(std::memcmp(target.bytes.data(), d.bytes.data(), 21 * kMiB) == 0);  // the table is back, and the rest
+    }
+}
+
+TEST_CASE("image: a layout the partition tables cannot be made for is refused before any write") {
+    TempDir tmp;
+    auto repo = make_repo(tmp.path / "repo");
+    MemDisk d;
+    d.l.style = PartitionStyle::Gpt;
+    d.l.size = 8 * kMiB;
+    d.l.disk_guid = "11111111-2222-3333-4444-555555555555";
+    Partition p;
+    p.number = 1;
+    p.offset = 8 * 512;  // inside the space of the GPT entries: fits() lets it pass
+    p.length = 4 * kMiB;
+    p.type = std::string(kBasicDataType);
+    p.guid = "AAAAAAAA-0000-0000-0000-000000000001";
+    d.l.partitions = {p};
+    d.bytes.assign(static_cast<std::size_t>(d.l.size), 0);
+    fill_random(d.bytes.data() + p.offset, p.length, 3);
+    ImageBackupOptions o;
+    o.disks = {&d};
+    const ImageBackupResult r = run_image_backup(*repo, o);
+    MemTarget target(8 * kMiB, 0xEE);
+    REQUIRE(fits(d.l, target.size(), 512).empty());
+    CHECK_THROWS_AS(run_image_restore(*repo, r.snapshot, target, {}), Error);
+    CHECK(std::all_of(target.bytes.begin(), target.bytes.end(), [](std::uint8_t b) { return b == 0xEE; }));
+    CHECK_FALSE(target.finished);
+}
+
+TEST_CASE("image: the partition tables are cleared from stored bytes") {
+    DiskLayout l;
+    l.style = PartitionStyle::Gpt;
+    l.size = 10 * kMiB;
+    Bytes head(kMiB, 0xAB);
+    blank_tables(l, 0, head);
+    CHECK(head[445] == 0xAB);  // boot code
+    CHECK(std::all_of(head.begin() + 446, head.begin() + 510, [](std::uint8_t b) { return b == 0; }));
+    CHECK(head[510] == 0xAB);
+    CHECK(std::all_of(head.begin() + 512, head.begin() + 34 * 512, [](std::uint8_t b) { return b == 0; }));
+    CHECK(head[34 * 512] == 0xAB);
+    Bytes tail(kMiB, 0xAB);
+    blank_tables(l, 9 * kMiB, tail);
+    CHECK(tail[kMiB - 33 * 512 - 1] == 0xAB);
+    CHECK(std::all_of(tail.end() - 33 * 512, tail.end(), [](std::uint8_t b) { return b == 0; }));
+    Bytes middle(kMiB, 0xAB);
+    blank_tables(l, 4 * kMiB, middle);
+    CHECK(std::all_of(middle.begin(), middle.end(), [](std::uint8_t b) { return b == 0xAB; }));
+    l.style = PartitionStyle::Mbr;
+    Bytes mbr(kMiB, 0xAB);
+    blank_tables(l, 0, mbr);
+    CHECK(mbr[512] == 0xAB);  // only the four entries
+    CHECK(mbr[446] == 0);
 }
 
 TEST_CASE("image: a file version is not an image") {

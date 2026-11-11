@@ -275,21 +275,41 @@ DiskLayout layout_from_json(std::string_view text) {
 }
 
 std::vector<Region> gap_regions(const DiskLayout& layout, std::uint64_t cap) {
+    const bool mbr = layout.style == PartitionStyle::Mbr;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> used;
     for (const Partition& p : layout.partitions)
-        if (!(layout.style == PartitionStyle::Mbr && is_container(p.mbr_type)) && p.length > 0)
-            used.emplace_back(p.offset, p.offset + p.length);
+        if (!(mbr && is_container(p.mbr_type)) && p.length > 0) used.emplace_back(p.offset, p.offset + p.length);
     std::sort(used.begin(), used.end());
-    std::vector<Region> out;
+    // The gaps, as [from, to).
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> gaps;
     std::uint64_t pos = 0;
-    auto gap = [&](std::uint64_t from, std::uint64_t to) {
-        if (to > from) out.push_back({from, std::min(to - from, cap)});
-    };
     for (const auto& [b, e] : used) {
-        gap(pos, b);
+        if (b > pos) gaps.emplace_back(pos, b);
         pos = std::max(pos, e);
     }
-    gap(pos, layout.size);
+    if (layout.size > pos) gaps.emplace_back(pos, layout.size);
+
+    // What to keep of each gap: its start, and on MBR disks also the start of every container
+    // (extended partition or link to the next logical one) in it, where an EBR sits. An EBR is
+    // usually 1 MiB before its logical partition, which need not be the start of the gap (free
+    // space before an extended partition, or a deleted logical partition).
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> want;
+    for (const auto& [from, to] : gaps) {
+        want.emplace_back(from, std::min(to, from + cap));
+        if (!mbr) continue;
+        for (const Partition& p : layout.partitions)
+            if (is_container(p.mbr_type) && p.offset > from && p.offset < to)
+                want.emplace_back(p.offset, std::min(to, p.offset + cap));
+    }
+    std::sort(want.begin(), want.end());
+    std::vector<Region> out;
+    std::uint64_t end = 0;
+    for (auto [b, e] : want) {
+        b = std::max(b, end);  // no byte stored twice
+        if (e <= b) continue;
+        out.push_back({b, e - b});
+        end = e;
+    }
     return out;
 }
 
@@ -394,6 +414,25 @@ std::vector<DiskWrite> partition_tables(const DiskLayout& layout, std::uint64_t 
     tail.insert(tail.end(), backup.begin(), backup.end());
     out.push_back({(sectors - 1 - array_sectors) * ss, std::move(tail)});
     return out;
+}
+
+void blank_tables(const DiskLayout& layout, std::uint64_t offset, Bytes& data) {
+    auto clear = [&](std::uint64_t from, std::uint64_t to) {
+        const std::uint64_t b = std::max(from, offset);
+        const std::uint64_t e = std::min(to, offset + data.size());
+        if (e > b)
+            std::fill(data.begin() + static_cast<std::ptrdiff_t>(b - offset), data.begin() + static_cast<std::ptrdiff_t>(e - offset),
+                      std::uint8_t{0});
+    };
+    // The four entries of the MBR (or the protective MBR's 0xEE entry); the boot code and the
+    // disk signature stay.
+    clear(446, 510);
+    if (layout.style != PartitionStyle::Gpt) return;
+    const std::uint64_t ss = layout.sector_size;
+    const std::uint64_t array_sectors = (std::uint64_t{layout.gpt_entries} * 128 + ss - 1) / ss;
+    const std::uint64_t sectors = layout.size / ss;
+    clear(ss, (2 + array_sectors) * ss);  // the primary header and entries
+    if (sectors > 1 + array_sectors) clear((sectors - 1 - array_sectors) * ss, sectors * ss);  // the backup copy
 }
 
 void renew_ids(DiskLayout& layout) {

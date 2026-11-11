@@ -71,8 +71,9 @@ struct Partition {
 };
 
 // A range of the disk outside every partition that is stored as it is (at most 1 MiB at the
-// start of each gap: the MBR with its boot code, the GPT, the EBRs of logical partitions, a boot
-// loader between the MBR and the first partition).
+// start of each gap and, on MBR disks, at the start of each container: the MBR with its boot
+// code, the GPT, the EBRs of logical partitions, a boot loader between the MBR and the first
+// partition).
 struct Region {
     std::uint64_t offset = 0;
     std::uint64_t length = 0;
@@ -107,7 +108,9 @@ std::string disk_id(const DiskLayout& layout);
 // Extended (container) MBR partitions: their space is described by the logical partitions in it.
 bool is_container(std::uint8_t mbr_type);
 
-// The parts of the disk outside every partition, at most `cap` bytes from the start of each.
+// The parts of the disk outside every partition to store: at most `cap` bytes from the start of
+// each gap and, on MBR disks, from the start of each container in a gap (its EBR). Sorted, never
+// overlapping.
 std::vector<Region> gap_regions(const DiskLayout& layout, std::uint64_t cap = 1u << 20);
 
 // Bytes to write at an offset of the target disk.
@@ -121,6 +124,12 @@ struct DiskWrite {
 // size, so a larger disk is fine). MBR: nothing (the stored first region holds the table as it was).
 // Throws Error when a partition does not fit on the target.
 std::vector<DiskWrite> partition_tables(const DiskLayout& layout, std::uint64_t target_size);
+
+// Clears, in `data` (stored bytes of the original disk from `offset` on), the partition tables
+// of the layout's disk: the MBR's four entries and, for GPT, the primary and backup headers with
+// their entries. A restore writes the stored regions like this and the tables last, so a restore
+// that stops halfway leaves a disk without partitions rather than with half-written ones.
+void blank_tables(const DiskLayout& layout, std::uint64_t offset, Bytes& data);
 
 // What restoring onto a disk of `target_size` bytes with `sector_size`-byte sectors needs: an
 // empty string when it fits, otherwise why not.

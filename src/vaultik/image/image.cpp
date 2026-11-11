@@ -381,6 +381,9 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
     if (o.new_ids) renew_ids(layout);
     const std::string why = fits(layout, target.size(), target.sector_size());
     if (!why.empty()) throw Error(why);
+    // The partition tables are made now, so a layout they cannot be made for is refused before
+    // the first byte is written; they are written last.
+    std::vector<DiskWrite> tables = partition_tables(layout, target.size());
 
     const Tree root = parse_tree(repo.load_blob(BlobType::Tree, snapshot.tree));
     const Tree disk = parse_tree(
@@ -423,7 +426,8 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
         target.write((target.size() - n) / align * align, zeros);
     }
 
-    // Stored regions (MBR, boot loaders, EBRs).
+    // Stored regions (MBR, boot loaders, EBRs), without the partition tables in them: until the
+    // end the disk shows no partitions, so a restore that stops halfway leaves none half-written.
     for (std::size_t i = 0; i < layout.regions.size(); ++i) {
         const Region& r = layout.regions[i];
         const Node& n = child(disk, "r" + std::to_string(i), "a stored disk region");
@@ -437,7 +441,11 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
         if (r.offset == 0 && layout.style == PartitionStyle::Mbr && data.size() >= 512) {
             // The MBR's disk signature (changed by new_ids).
             for (int b = 0; b < 4; ++b) data[440 + b] = static_cast<std::uint8_t>(layout.signature >> (8 * b));
+            // An MBR disk's table is the stored first sector itself: written again at the end.
+            if (data.size() >= layout.sector_size)
+                tables.push_back({0, Bytes(data.begin(), data.begin() + layout.sector_size)});
         }
+        blank_tables(layout, r.offset, data);
         out.write(r.offset, data);
         progress.done += r.length;
     }
@@ -501,7 +509,7 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
     }
 
     // The partition tables last: until they are written, the restored disk shows no partitions.
-    for (const DiskWrite& w : partition_tables(layout, target.size())) out.write(w.offset, w.data);
+    for (const DiskWrite& w : tables) out.write(w.offset, w.data);
     out.flush();
     target.finish();
     report(true);

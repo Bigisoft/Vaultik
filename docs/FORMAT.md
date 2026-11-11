@@ -318,11 +318,17 @@ virtual disk, nor in a hole on a disk being overwritten.
 ```
 
 Regions are the first 1 MiB (at most) of every gap outside the partitions (MBR containers do
-not count as used): the MBR with its boot code, the GPT, EBRs of logical partitions, boot
-loaders. A restore writes, in this order: zeros over the first and last 1 MiB of a disk that is
-not empty, the regions (an MBR gets the layout's signature at offset 440), every partition, and
-for GPT a new protective MBR, primary and backup GPT computed for the target's size (same disk
-and partition GUIDs unless new ones are asked for). Readers reject a layout version other than
+not count as used): the MBR with its boot code, the GPT, boot loaders; on MBR disks also up to
+1 MiB from the start of every container inside a gap, where the EBRs of logical partitions sit.
+Regions never overlap and are sorted (images made before this have only the gap starts). A
+restore first makes the partition tables (refusing a layout they cannot be made for before
+writing anything), then writes, in this order: zeros over the first and last 1 MiB of a disk
+that is not empty, the regions with the partition tables they hold cleared (the MBR's four
+entries, and for GPT the original disk's primary and backup headers and entries; an MBR gets
+the layout's signature at offset 440), every partition, and last the partition tables: for GPT
+a new protective MBR, primary and backup GPT computed for the target's size (same disk and
+partition GUIDs unless new ones are asked for), for MBR the stored first sector as it was.
+Until then the disk shows no partitions. Readers reject a layout version other than
 1, sector sizes other than 512 and 4096, partitions or regions outside the disk, and regions
 over 16 MiB.
 
