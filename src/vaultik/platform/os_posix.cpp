@@ -4,8 +4,11 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pwd.h>
+#include <spawn.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <syslog.h>
@@ -19,6 +22,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -32,17 +36,27 @@ int as_fd(std::intptr_t h) {
     return static_cast<int>(h);
 }
 
+// FILETIME ticks count from 1601, so times before 1970 (negative Unix times) still fit. 0 means
+// "unset" in the repository format; a real time of exactly 1601-01-01 cannot occur on Linux.
+// Nanoseconds are kept to 100 ns, the format's resolution.
 std::uint64_t to_ticks(const struct timespec& ts) {
-    if (ts.tv_sec == 0 && ts.tv_nsec == 0) return 0;
-    return from_unix(static_cast<std::int64_t>(ts.tv_sec), static_cast<std::int64_t>(ts.tv_nsec));
+    const std::int64_t ticks = static_cast<std::int64_t>(ts.tv_sec) * 10000000ll + ts.tv_nsec / 100 +
+                               static_cast<std::int64_t>(kUnixEpochTicks);
+    return ticks > 0 ? static_cast<std::uint64_t>(ticks) : 1;
 }
 
 struct timespec from_ticks(std::uint64_t ticks) {
+    const std::int64_t since = static_cast<std::int64_t>(ticks) - static_cast<std::int64_t>(kUnixEpochTicks);
+    // Floor division, so 1969-12-31 23:59:59.5 becomes -1 s + 500 ms, not 0 s - 500 ms.
+    std::int64_t sec = since / 10000000ll;
+    std::int64_t rest = since % 10000000ll;
+    if (rest < 0) {
+        rest += 10000000ll;
+        --sec;
+    }
     struct timespec ts{};
-    if (ticks < kUnixEpochTicks) return ts;
-    const std::uint64_t since = ticks - kUnixEpochTicks;
-    ts.tv_sec = static_cast<time_t>(since / 10000000ull);
-    ts.tv_nsec = static_cast<long>((since % 10000000ull) * 100);
+    ts.tv_sec = static_cast<time_t>(sec);
+    ts.tv_nsec = static_cast<long>(rest * 100);
     return ts;
 }
 
@@ -414,17 +428,37 @@ ErrorCode remove_file(const std::string& path) {
 
 void make_writable(const std::string& /*path*/) {}
 
+void make_private_dirs(const std::string& path) {
+    make_dirs(path);
+    // Without following a link, and only a folder of this account (a shared folder is left as is).
+    const int fd = ::open(path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) throw_last_error("cannot open folder " + path);
+    struct stat st{};
+    if (::fstat(fd, &st) == 0 && st.st_uid == ::geteuid() && (st.st_mode & 077) != 0) (void)::fchmod(fd, 0700);
+    ::close(fd);
+}
+
 void set_metadata(const std::string& path, const FileInfo& info) {
     const bool link = info.type == EntryType::Symlink;
     // Ownership first: chown clears set-user-ID bits that chmod then restores.
     if (::geteuid() == 0 && (info.uid != 0 || info.gid != 0))
         (void)::lchown(path.c_str(), static_cast<uid_t>(info.uid), static_cast<gid_t>(info.gid));
-    if (!link && info.mode != 0) {
-        // Through a descriptor opened without following links, so a path swapped for a link
-        // cannot redirect the change. O_NONBLOCK: never hang on a pipe.
-        const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    // Mode 0 with Windows attributes comes from a snapshot made on Windows, which has no
+    // permissions to restore (the file keeps the umask default); with attributes 0 it is a real
+    // mode 0 from Linux.
+    if (!link && (info.mode != 0 || info.attributes == 0)) {
+        // Through an O_PATH descriptor opened without following links, so a path swapped for a
+        // link cannot redirect the change. O_PATH needs no read access (a file restored with mode
+        // 0200 could not be opened for reading) and never opens a pipe. fchmod does not take an
+        // O_PATH descriptor, but chmod on its /proc/self/fd entry does, and that entry names
+        // exactly the file opened.
+        const int fd = ::open(path.c_str(), O_PATH | O_CLOEXEC | O_NOFOLLOW);
         if (fd >= 0) {
-            (void)::fchmod(fd, static_cast<mode_t>(info.mode));
+            struct stat st{};
+            if (::fstat(fd, &st) == 0 && !S_ISLNK(st.st_mode)) {
+                const std::string proc = "/proc/self/fd/" + std::to_string(fd);
+                (void)::chmod(proc.c_str(), static_cast<mode_t>(info.mode));
+            }
             ::close(fd);
         }
     }
@@ -489,13 +523,198 @@ bool is_pseudo_filesystem(const std::string& path) {
 #endif
 }
 
-// Linux: comes with the port (by filesystem UUID under /dev/disk/by-uuid and the mount table).
-VolumeLocation volume_of(const std::string& /*path*/) {
+// ---- volumes: the mount table and file system UUIDs ----------------------------------------
+
+namespace {
+
+struct Mount {
+    unsigned major = 0;
+    unsigned minor = 0;
+    std::string root;   // the folder of the file system mounted here ("/" unless a bind mount)
+    std::string point;  // where it is mounted
+    std::string type;
+    std::string source;  // "/dev/sda1", or a name such as "tmpfs"
+};
+
+// Undoes the octal escapes of /proc/self/mountinfo ("\040" for a space).
+std::string unescape_mount(std::string_view s) {
+    std::string out;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 3 < s.size() && s[i + 1] >= '0' && s[i + 1] <= '3') {
+            out.push_back(static_cast<char>(((s[i + 1] - '0') << 6) | ((s[i + 2] - '0') << 3) | (s[i + 3] - '0')));
+            i += 3;
+        } else {
+            out.push_back(s[i]);
+        }
+    }
+    return out;
+}
+
+std::vector<Mount> read_mounts() {
+    std::vector<Mount> mounts;
+    Bytes data;
+    try {
+        data = read_file("/proc/self/mountinfo", 16u << 20);
+    } catch (const Error&) {
+        return mounts;
+    }
+    const std::string text(data.begin(), data.end());
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        std::size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        // "36 35 98:0 /mnt1 /mnt/parent rw,noatime master:1 - ext3 /dev/root rw,errors=continue"
+        std::vector<std::string_view> f;
+        const std::string_view line(text.data() + pos, end - pos);
+        std::size_t p = 0;
+        while (p < line.size()) {
+            std::size_t q = line.find(' ', p);
+            if (q == std::string_view::npos) q = line.size();
+            f.push_back(line.substr(p, q - p));
+            p = q + 1;
+        }
+        pos = end + 1;
+        std::size_t dash = 0;
+        for (std::size_t i = 6; i < f.size(); ++i)
+            if (f[i] == "-") {
+                dash = i;
+                break;
+            }
+        if (f.size() < 7 || dash == 0 || dash + 1 >= f.size()) continue;
+        Mount m;
+        const std::string dev(f[2]);
+        if (std::sscanf(dev.c_str(), "%u:%u", &m.major, &m.minor) != 2) continue;
+        m.root = unescape_mount(f[3]);
+        m.point = unescape_mount(f[4]);
+        m.type = std::string(f[dash + 1]);
+        if (dash + 2 < f.size()) m.source = unescape_mount(f[dash + 2]);
+        // Btrfs (and other file systems with subvolumes) show an anonymous device number here;
+        // the block device it lives on is the source.
+        if (m.major == 0 && m.source.starts_with("/dev/")) {
+            struct stat st{};
+            if (::stat(m.source.c_str(), &st) == 0 && S_ISBLK(st.st_mode)) {
+                m.major = ::major(st.st_rdev);
+                m.minor = ::minor(st.st_rdev);
+            }
+        }
+        mounts.push_back(std::move(m));
+    }
+    return mounts;
+}
+
+bool under(const std::string& path, const std::string& folder) {
+    if (folder == "/") return true;
+    return path == folder || (path.size() > folder.size() && path.starts_with(folder) && path[folder.size()] == '/');
+}
+
+// The mount `path` is on: the latest (top-most) mount whose point holds it.
+const Mount* mount_of(const std::vector<Mount>& mounts, const std::string& path) {
+    const Mount* best = nullptr;
+    for (const Mount& m : mounts)
+        if (under(path, m.point) && (best == nullptr || m.point.size() >= best->point.size())) best = &m;
+    return best;
+}
+
+bool network_type(const std::string& type) {
+    return type == "nfs" || type == "nfs4" || type == "cifs" || type == "smb3" || type == "smbfs" ||
+           type == "ncpfs" || type == "afs" || type == "9p" || type.starts_with("fuse.sshfs") ||
+           type == "fuse.rclone" || type == "davfs" || type == "fuse.davfs2" || type == "ceph" || type == "glusterfs";
+}
+
+constexpr const char* kByUuid = "/dev/disk/by-uuid";
+
+// The file system UUID of a block device, from the udev links in /dev/disk/by-uuid.
+std::string uuid_of(unsigned major, unsigned minor) {
+    DirReader dir(kByUuid);
+    std::string name;
+    FileInfo info;
+    while (dir.next(name, info)) {
+        struct stat st{};
+        if (::stat(join(kByUuid, name).c_str(), &st) == 0 && S_ISBLK(st.st_mode) && ::major(st.st_rdev) == major &&
+            ::minor(st.st_rdev) == minor)
+            return name;
+    }
     return {};
 }
 
-std::string volume_root(const std::string& /*volume*/) {
-    return {};
+// The sysfs folder of the whole disk a block device is on ("/sys/devices/.../block/sda").
+std::string disk_of(unsigned major, unsigned minor) {
+    char buf[4096];
+    const std::string link = "/sys/dev/block/" + std::to_string(major) + ":" + std::to_string(minor);
+    if (::realpath(link.c_str(), buf) == nullptr) return {};
+    std::string dev = buf;
+    if (exists(join(dev, "partition"))) dev = parent_of(dev);
+    return dev;
+}
+
+std::string read_small(const std::string& path) {
+    try {
+        const Bytes b = read_file(path, 4096);
+        std::string s(b.begin(), b.end());
+        while (!s.empty() && (s.back() == '\n' || s.back() == ' ')) s.pop_back();
+        return s;
+    } catch (const Error&) {
+        return {};
+    }
+}
+
+constexpr std::string_view kUuidPrefix = "uuid:";
+
+}  // namespace
+
+// Linux: the volume is named by its file system UUID ("uuid:1234-ABCD"), which stays the same
+// wherever the drive is mounted (/run/media/<user>/<label> on SteamOS and most desktops).
+VolumeLocation volume_of(const std::string& path) {
+    VolumeLocation loc;
+    const std::string full = absolute_path(path);
+    const std::vector<Mount> mounts = read_mounts();
+    const Mount* m = mount_of(mounts, full);
+    if (m == nullptr || network_type(m->type) || m->major == 0) return loc;  // network, or no device (tmpfs, overlay)
+    const std::string uuid = uuid_of(m->major, m->minor);
+    if (uuid.empty()) return loc;
+    loc.volume = std::string(kUuidPrefix) + uuid;
+    loc.root = m->point;
+    // Below the file system's own root, so a bind mount of a subfolder gives the same answer.
+    std::string rel = full.size() > m->point.size() ? full.substr(m->point.size() + (m->point == "/" ? 0 : 1)) : "";
+    if (!rel.empty() && rel.front() == '/') rel.erase(0, 1);
+    if (m->root != "/") {
+        // A bind mount: the root of the volume itself is wherever it is mounted whole.
+        std::string inner = m->root.substr(1);
+        rel = rel.empty() ? inner : join(inner, rel);
+        const std::string whole = volume_root(loc.volume);
+        loc.root = whole;
+        if (whole.empty()) {
+            loc.volume.clear();  // only this bind mount is there: cannot tell where the drive is
+            return loc;
+        }
+    }
+    loc.relative = rel;
+    const std::string disk = disk_of(m->major, m->minor);
+    const Mount* sys = mount_of(mounts, "/");
+    loc.system = sys != nullptr && ((sys->major == m->major && sys->minor == m->minor) ||
+                                    (!disk.empty() && disk == disk_of(sys->major, sys->minor)));
+    // External: on a USB or FireWire bus, a memory card (the Steam Deck's microSD slot), or a disk
+    // that calls itself removable.
+    loc.external = !loc.system && !disk.empty() &&
+                   (disk.find("/usb") != std::string::npos || disk.find("/firewire") != std::string::npos ||
+                    disk.find("/mmc_host/") != std::string::npos || read_small(join(disk, "removable")) == "1");
+    return loc;
+}
+
+std::string volume_root(const std::string& volume) {
+    if (!volume.starts_with(kUuidPrefix)) return {};
+    const std::string uuid = volume.substr(kUuidPrefix.size());
+    if (uuid.empty() || uuid.find('/') != std::string::npos) return {};
+    struct stat st{};
+    if (::stat(join(kByUuid, uuid).c_str(), &st) != 0 || !S_ISBLK(st.st_mode)) return {};
+    const unsigned major = ::major(st.st_rdev);
+    const unsigned minor = ::minor(st.st_rdev);
+    // The shortest mount point of the whole file system ("/run/media/deck/USB"), not a bind mount.
+    std::string best;
+    for (const Mount& m : read_mounts())
+        if (m.major == major && m.minor == minor && m.root == "/" && (best.empty() || m.point.size() < best.size()))
+            best = m.point;
+    return best;
 }
 
 Bytes protect_secret(ByteSpan plain, bool /*machine*/) {
@@ -516,16 +735,171 @@ void set_env(const std::string& name, const std::string& value) {
     ::setenv(name.c_str(), value.c_str(), 1);
 }
 
+namespace {
+
+struct Spawn {
+    const std::vector<std::string>* argv = nullptr;
+    std::string* output = nullptr;
+    std::size_t max_output = 1u << 20;
+    std::chrono::seconds timeout = std::chrono::hours(4);
+    const std::function<bool()>* cancelled = nullptr;
+    const std::vector<std::string>* environment = nullptr;  // null: this process's
+    std::string directory;
+};
+
+// Starts a program with posix_spawn, which (unlike fork) is safe in a process with other threads
+// (the lock refresh and the stdin reader) and reports a program that cannot be started as an
+// error instead of exit code 127. Standard input is empty; standard output and error go to
+// `output` or nowhere, never to this process's own (which may carry the --json event stream).
+// The program runs in its own process group, so a timeout or cancel stops what it started too.
+int spawn_and_wait(const Spawn& s) {
+    const std::vector<std::string>& argv = *s.argv;
+    if (argv.empty()) throw Error("run_command: no program");
+    std::vector<char*> args;
+    for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    args.push_back(nullptr);
+    std::vector<char*> env;
+    if (s.environment != nullptr) {
+        for (const std::string& e : *s.environment) env.push_back(const_cast<char*>(e.c_str()));
+        env.push_back(nullptr);
+    }
+
+    int pipefd[2] = {-1, -1};
+    if (s.output != nullptr && ::pipe2(pipefd, O_CLOEXEC) != 0) throw_last_error("cannot create a pipe");
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (s.output != nullptr) {
+        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
+    } else {
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+        posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO);
+    }
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 29))
+    if (!s.directory.empty()) posix_spawn_file_actions_addchdir_np(&actions, s.directory.c_str());
+#endif
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setpgroup(&attr, 0);
+    // The child starts with default signal handling, whatever this process installed.
+    sigset_t all;
+    sigfillset(&all);
+    posix_spawnattr_setsigdefault(&attr, &all);
+    sigset_t none;
+    sigemptyset(&none);
+    posix_spawnattr_setsigmask(&attr, &none);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+
+    pid_t pid = -1;
+    const int rc = ::posix_spawnp(&pid, args[0], &actions, &attr, args.data(), s.environment != nullptr ? env.data() : environ);
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+    if (pipefd[1] >= 0) ::close(pipefd[1]);
+    if (rc != 0) {
+        if (pipefd[0] >= 0) ::close(pipefd[0]);
+        throw_error("cannot start " + argv[0], static_cast<ErrorCode>(rc));
+    }
+    if (pipefd[0] >= 0) ::fcntl(pipefd[0], F_SETFL, ::fcntl(pipefd[0], F_GETFL) | O_NONBLOCK);
+
+    const auto deadline = std::chrono::steady_clock::now() + s.timeout;
+    const auto drain = [&] {
+        if (pipefd[0] < 0) return false;
+        char buf[4096];
+        for (;;) {
+            const ssize_t n = ::read(pipefd[0], buf, sizeof buf);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) return n == 0;  // true at end of output
+            const std::size_t room = s.max_output > s.output->size() ? s.max_output - s.output->size() : 0;
+            s.output->append(buf, std::min(room, static_cast<std::size_t>(n)));
+        }
+    };
+    int status = 0;
+    std::string stop_reason;
+    for (;;) {
+        const pid_t done = ::waitpid(pid, &status, WNOHANG);
+        if (done == pid) {
+            drain();  // what is left in the pipe; programs it left running may keep it open
+            break;
+        }
+        if (done < 0 && errno != EINTR) {
+            status = 0;
+            break;
+        }
+        if (s.cancelled != nullptr && *s.cancelled && (*s.cancelled)()) stop_reason = "cancelled";
+        else if (std::chrono::steady_clock::now() > deadline) stop_reason = "did not finish in time";
+        if (!stop_reason.empty()) {
+            ::kill(-pid, SIGTERM);
+            for (int i = 0; i < 20 && ::waitpid(pid, &status, WNOHANG) == 0; ++i) ::usleep(100000);
+            ::kill(-pid, SIGKILL);
+            while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+            }
+            break;
+        }
+        if (pipefd[0] >= 0) {
+            struct pollfd p{pipefd[0], POLLIN, 0};
+            if (::poll(&p, 1, 250) > 0 && drain()) {
+                ::close(pipefd[0]);
+                pipefd[0] = -1;
+            }
+        } else {
+            ::usleep(100000);
+        }
+    }
+    if (pipefd[0] >= 0) ::close(pipefd[0]);
+    if (!stop_reason.empty()) throw Error(argv[0] + " " + stop_reason);
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+}
+
+// The environment for a shell command: this process's, or with `clean` only a fixed PATH and
+// the account's basics, plus `extra`.
+std::vector<std::string> shell_environment(bool clean, const std::vector<std::pair<std::string, std::string>>& extra) {
+    std::vector<std::string> env;
+    if (clean) {
+        env.emplace_back("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        for (const char* name : {"HOME", "USER", "LOGNAME", "LANG", "TZ"})
+            if (const char* v = std::getenv(name); v != nullptr) env.push_back(std::string(name) + "=" + v);
+    } else {
+        for (char** e = environ; *e != nullptr; ++e) env.emplace_back(*e);
+    }
+    for (const auto& [name, value] : extra) {
+        const std::string prefix = name + "=";
+        std::erase_if(env, [&](const std::string& e) { return e.starts_with(prefix); });
+        env.push_back(prefix + value);
+    }
+    return env;
+}
+
+}  // namespace
+
 int run_shell(const std::string& command, std::string* output) {
-    return run_command({"/bin/sh", "-c", command}, output);
+    ShellOptions options;
+    options.output = output;
+    return run_shell(command, options);
 }
 
 int run_shell(const std::string& command, const ShellOptions& options) {
-    return run_command({"/bin/sh", "-c", command}, options.output);  // (no timeout yet on POSIX)
+    const std::vector<std::string> argv = {"/bin/sh", "-c", command};
+    const std::vector<std::string> env = shell_environment(options.clean_environment, options.extra_environment);
+    Spawn s;
+    s.argv = &argv;
+    s.output = options.output;
+    s.max_output = 64u << 10;
+    s.timeout = options.timeout;
+    s.cancelled = &options.cancelled;
+    s.environment = &env;
+    s.directory = options.directory;
+    return spawn_and_wait(s);
 }
 
 int run_command(const std::vector<std::string>& argv, const CommandOptions& options) {
-    return run_command(argv, options.output);  // (no timeout yet on POSIX)
+    Spawn s;
+    s.argv = &argv;
+    s.output = options.output;
+    s.timeout = options.timeout;
+    s.cancelled = &options.cancelled;
+    return spawn_and_wait(s);
 }
 
 int run_command_elevated(const std::vector<std::string>&) {
@@ -533,39 +907,9 @@ int run_command_elevated(const std::vector<std::string>&) {
 }
 
 int run_command(const std::vector<std::string>& argv, std::string* output) {
-    if (argv.empty()) throw Error("run_command: no program");
-    int pipefd[2] = {-1, -1};
-    if (output != nullptr && ::pipe2(pipefd, O_CLOEXEC) != 0) throw_last_error("cannot create pipe");
-
-    const pid_t pid = ::fork();
-    if (pid < 0) throw_last_error("cannot start " + argv[0]);
-    if (pid == 0) {
-        if (output != nullptr) {
-            ::dup2(pipefd[1], STDOUT_FILENO);
-            ::dup2(pipefd[1], STDERR_FILENO);
-        }
-        std::vector<char*> args;
-        for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
-        args.push_back(nullptr);
-        ::execvp(args[0], args.data());
-        ::_exit(127);
-    }
-    if (output != nullptr) {
-        ::close(pipefd[1]);
-        char buf[4096];
-        for (;;) {
-            const ssize_t n = ::read(pipefd[0], buf, sizeof buf);
-            if (n < 0 && errno == EINTR) continue;
-            if (n <= 0) break;
-            output->append(buf, static_cast<std::size_t>(n));
-        }
-        ::close(pipefd[0]);
-    }
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
-    }
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    return 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+    CommandOptions options;
+    options.output = output;
+    return run_command(argv, options);
 }
 
 std::string executable_path() {

@@ -38,6 +38,10 @@ void init_console() {
     SetConsoleOutputCP(CP_UTF8);
 }
 
+bool interrupted() {
+    return false;
+}
+
 void out(std::string_view text) {
     clear_status();
     write_handle(STD_OUTPUT_HANDLE, text);

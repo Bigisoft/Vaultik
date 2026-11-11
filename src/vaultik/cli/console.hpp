@@ -8,6 +8,11 @@ namespace vaultik::cli {
 
 void init_console();
 
+// POSIX: true once SIGINT, SIGTERM or SIGHUP arrived (Ctrl+C, "systemctl --user stop", a closed
+// terminal). The run then stops cleanly at the next check, releasing its repository lock; a
+// second signal ends the program at once. Windows: always false.
+bool interrupted();
+
 void out(std::string_view text);  // stdout, UTF-8
 void err(std::string_view text);  // stderr, UTF-8
 
