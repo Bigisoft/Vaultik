@@ -425,8 +425,20 @@ int cmd_image_mount(const Args& a) {
     const image::DiskLayout& layout = layouts[index];
 
     // A temporary virtual disk with new ids (so it can sit next to the original disk).
-    std::string folder = a.value("--target") ? os::absolute_path(*a.value("--target")) : os::join(jobs::config_dir(), "images");
-    os::make_dirs(folder);
+    // By default in <ProgramData>\Vaultik\images, which only administrators can change: this runs
+    // elevated, deletes and creates the file and then attaches it, so in a folder the user's
+    // programs can change the file could be swapped before it is attached, or the folder be a
+    // link to somewhere else.
+    std::string folder;
+    if (auto t = a.value("--target")) {
+        folder = os::absolute_path(*t);
+        os::make_dirs(folder);
+    } else {
+        const std::string vaultik = os::join(os::program_data_dir(), "Vaultik");
+        os::make_admin_dir(vaultik);
+        folder = os::join(vaultik, "images");
+        os::make_admin_dir(folder);
+    }
     const std::string path = os::join(folder, "vaultik-" + short_id(ref.id) + "-" + std::to_string(index + 1) + ".vhdx");
     os::remove_file(path);  // left over from an earlier run that ended abnormally
     struct RemoveFile {

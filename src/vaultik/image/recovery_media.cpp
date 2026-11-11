@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 #include "vaultik/platform/os.hpp"
 
@@ -125,11 +126,16 @@ void run(const std::vector<std::string>& argv, const std::string& what) {
     }
 }
 
-std::string temp_folder() {
-    wchar_t buf[MAX_PATH + 1];
-    const DWORD n = GetTempPathW(MAX_PATH, buf);
-    if (n == 0 || n > MAX_PATH) throw_last_error("finding the temporary folder");
-    return narrow(std::wstring_view(buf, n));
+// The folder the drive is built in: <ProgramData>\Vaultik\winpe, which only administrators can
+// change. The build runs elevated and hands files from there to DISM and a script to diskpart; in
+// the user's temporary folder a program running as the user could swap them (a diskpart script
+// that cleans another disk, or files of the recovery drive).
+std::string work_root() {
+    const std::string vaultik = os::join(os::program_data_dir(), "Vaultik");
+    os::make_admin_dir(vaultik);
+    const std::string root = os::join(vaultik, "winpe");
+    os::make_admin_dir(root);
+    return root;
 }
 
 }  // namespace
@@ -174,8 +180,8 @@ void make_recovery_media(const RecoveryMediaOptions& o) {
     };
 
     namespace fs = std::filesystem;
-    const fs::path work = fs::path(widen(temp_folder())) / (L"vaultik-winpe-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
-                                                            std::to_wstring(GetTickCount64()));
+    const fs::path work = fs::path(widen(work_root())) / (std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                                         std::to_wstring(GetTickCount64()));
     const fs::path media = work / L"media";
     const fs::path mount = work / L"mount";
     bool mounted = false;
