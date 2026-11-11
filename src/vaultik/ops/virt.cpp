@@ -183,14 +183,25 @@ std::string powershell_path() {
     return narrow(std::wstring(sys, n) + L"\\WindowsPowerShell\\v1.0\\powershell.exe");
 }
 
+// The line a failed script's message is written on (see run_powershell).
+constexpr std::string_view kScriptError = "VAULTIK-SCRIPT-ERROR: ";
+
 // Runs a PowerShell script with a fixed environment; values go in as environment variables (read
-// as $env:NAME), never into the script text. Returns its output; throws Error with its first
-// line of errors when it fails.
+// as $env:NAME), never into the script text. Returns its output; throws Error with the script's
+// error message when it fails.
 std::string run_powershell(const std::string& script, const std::vector<std::pair<std::string, std::string>>& env,
                            std::chrono::seconds timeout, const std::function<bool()>& cancelled = {}) {
     // -EncodedCommand takes the script as base64 of UTF-16LE: nothing in it is parsed by a shell.
-    const std::wstring wide = widen("$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n" +
-                                    script);
+    // With its error output redirected, PowerShell writes errors as serialized objects ("#< CLIXML"),
+    // not text: the script's message is caught and written as one plain line instead.
+    const std::wstring wide = widen("$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n"
+                                    "try {\n" +
+                                    script +
+                                    "\n} catch {\n"
+                                    "    [Console]::Out.WriteLine('" + std::string(kScriptError) +
+                                    "' + ($_.Exception.Message -replace '\\s+', ' '))\n"
+                                    "    exit 1\n"
+                                    "}\n");
     const std::string encoded =
         base64_encode(ByteSpan(reinterpret_cast<const std::uint8_t*>(wide.data()), wide.size() * sizeof(wchar_t)));
     std::string output;
@@ -203,8 +214,10 @@ std::string run_powershell(const std::string& script, const std::vector<std::pai
     const int code = os::run_command(
         {powershell_path(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded}, o);
     if (code != 0) {
-        // PowerShell prints its error record; its first line says what went wrong.
-        std::string why = first_line(output);
+        std::string why;
+        const std::size_t at = output.find(kScriptError);
+        if (at != std::string::npos) why = first_line(output.substr(at + kScriptError.size()));
+        else if (output.rfind("#< CLIXML", 0) != 0) why = first_line(output);
         if (why.empty()) why = "exit code " + std::to_string(code);
         throw Error(why);
     }
