@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <filesystem>
 
 #include <nlohmann/json.hpp>
@@ -668,6 +669,16 @@ TEST_CASE("backups before Windows updates: trigger, task and the update's title"
                           ByteSpan(reinterpret_cast<const std::uint8_t*>(dead.data()), dead.size()));
     CHECK(running_update_backups(tmp.dir()).empty());
     CHECK_FALSE(os::exists(os::join(os::join(tmp.dir(), "running"), "update-old")));
+#ifdef _WIN32
+    // One written before the process with its id started (left from before a restart, the id
+    // reused) holds nothing up either.
+    mark_update_run(tmp.dir(), "docs");
+    const std::string marker = os::join(os::join(tmp.dir(), "running"), "update-docs");
+    std::filesystem::last_write_time(std::filesystem::path(std::u8string(marker.begin(), marker.end())),
+                                     std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 365));
+    CHECK(running_update_backups(tmp.dir()).empty());
+    CHECK_FALSE(os::exists(marker));
+#endif
 }
 
 TEST_CASE("continuous backups ignore changes the backup leaves out") {

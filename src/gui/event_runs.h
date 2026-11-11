@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QString>
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -84,5 +85,7 @@ private:
     std::vector<Run> runs_;
     QTimer* poll_ = nullptr;
     bool blocking_ = false;  // holding up the end of the session
+    std::chrono::steady_clock::time_point blocking_since_;
+    static constexpr std::chrono::minutes kMaxHold{30};
     QTimer* rewatch_ = nullptr;
 };

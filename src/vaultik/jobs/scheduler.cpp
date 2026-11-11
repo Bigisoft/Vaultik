@@ -9,6 +9,8 @@
 #include "vaultik/util/hex.hpp"
 
 #ifdef _WIN32
+#include <windows.h>
+
 #include "vaultik/util/win.hpp"
 #endif
 
@@ -290,6 +292,27 @@ namespace {
 std::string update_marker(const std::string& dir, const std::string& job_id) {
     return os::join(os::join(dir, "running"), "update-" + job_id);
 }
+
+// Whether the process `pid` that wrote a marker at `written` (FILETIME) still runs. After a
+// restart (or once it ended) another process may have its id: one started after the marker was
+// written is not the one that wrote it. POSIX: by the id alone.
+bool marker_process_alive(std::uint32_t pid, std::uint64_t written) {
+    if (pid == 0 || !os::process_alive(pid)) return false;
+#ifdef _WIN32
+    const HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (h == nullptr) return true;  // there, but not ours to look at
+    FILETIME created{}, exited{}, kernel{}, user{};
+    const bool known = GetProcessTimes(h, &created, &exited, &kernel, &user) != FALSE;
+    CloseHandle(h);
+    if (known) {
+        const std::uint64_t start = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
+        if (written != 0 && start > written) return false;
+    }
+#else
+    (void)written;
+#endif
+    return true;
+}
 }  // namespace
 
 void mark_update_run(const std::string& dir, const std::string& job_id) {
@@ -326,7 +349,7 @@ std::vector<std::uint32_t> running_update_backups(const std::string& dir) {
             } catch (const std::exception&) {
                 continue;
             }
-            if (pid != 0 && os::process_alive(pid)) out.push_back(pid);
+            if (marker_process_alive(pid, info.mtime)) out.push_back(pid);
             else ended.push_back(name);
         }
         for (const std::string& n : ended) os::remove_file(os::join(folder, n));

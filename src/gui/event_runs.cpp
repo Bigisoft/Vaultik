@@ -384,7 +384,10 @@ void EventRuns::poll() {
         }
     }
 #ifdef Q_OS_WIN
-    if (blocking_ && std::none_of(runs_.begin(), runs_.end(), [](const Run& r) { return r.sign_out; })) {
+    // Never hold Windows up for longer than kMaxHold: a run that hangs must not keep the computer
+    // from restarting (Windows goes on; the run is ended with the session).
+    const bool too_long = blocking_ && std::chrono::steady_clock::now() - blocking_since_ > kMaxHold;
+    if (blocking_ && (too_long || std::none_of(runs_.begin(), runs_.end(), [](const Run& r) { return r.sign_out; }))) {
         blocking_ = false;
         ShutdownBlockReasonDestroy(reinterpret_cast<HWND>(window_->winId()));
         // Still signing out or shutting down (the user did not cancel it): this program closes, so
@@ -418,6 +421,7 @@ bool EventRuns::session_ending(std::intptr_t flags) {
     if (update_backup && !poll_->isActive()) poll_->start();
     if (!started && !update_backup) return false;
     blocking_ = true;
+    blocking_since_ = std::chrono::steady_clock::now();
     const QString reason =
         started ? tr("Vaultik is backing up before Windows signs out. This takes a few minutes at most.")
                 : tr("Vaultik is finishing a backup that started when Windows began installing updates.");
