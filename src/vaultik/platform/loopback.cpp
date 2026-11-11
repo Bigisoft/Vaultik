@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <vector>
 
 #include "vaultik/util/error.hpp"
 
@@ -20,7 +21,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <sys/select.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -185,18 +186,28 @@ std::map<std::string, std::string> LoopbackServer::wait(std::chrono::seconds tim
     for (;;) {
         if (cancelled && cancelled()) throw Error("sign-in cancelled");
         if (std::chrono::steady_clock::now() > deadline) throw Error("the browser sign-in was not finished in time");
+        // The listening sockets with a connection waiting.
+        std::vector<std::uintptr_t> ready;
+#ifdef _WIN32
         fd_set set;
         FD_ZERO(&set);
-        int highest = 0;  // ignored on Windows
         for (std::uintptr_t s : sockets_)
-            if (s != static_cast<std::uintptr_t>(kNone)) {
-                FD_SET(static_cast<Socket>(s), &set);
-                highest = std::max(highest, static_cast<int>(s));
-            }
+            if (s != static_cast<std::uintptr_t>(kNone)) FD_SET(static_cast<Socket>(s), &set);
         timeval tv{0, 250000};
-        if (select(highest + 1, &set, nullptr, nullptr, &tv) <= 0) continue;
-        for (std::uintptr_t ls : sockets_) {
-            if (ls == static_cast<std::uintptr_t>(kNone) || !FD_ISSET(static_cast<Socket>(ls), &set)) continue;
+        if (select(0, &set, nullptr, nullptr, &tv) <= 0) continue;
+        for (std::uintptr_t s : sockets_)
+            if (s != static_cast<std::uintptr_t>(kNone) && FD_ISSET(static_cast<Socket>(s), &set)) ready.push_back(s);
+#else
+        // poll, not select: an fd_set holds descriptors up to 1023 only, and a process with many
+        // files open (a backup) can get higher ones.
+        std::vector<pollfd> fds;
+        for (std::uintptr_t s : sockets_)
+            if (s != static_cast<std::uintptr_t>(kNone)) fds.push_back(pollfd{static_cast<int>(s), POLLIN, 0});
+        if (::poll(fds.data(), static_cast<nfds_t>(fds.size()), 250) <= 0) continue;
+        for (const pollfd& p : fds)
+            if ((p.revents & POLLIN) != 0) ready.push_back(static_cast<std::uintptr_t>(p.fd));
+#endif
+        for (std::uintptr_t ls : ready) {
             Socket c = accept(static_cast<Socket>(ls), nullptr, nullptr);
             if (c == kNone) continue;
 #ifdef _WIN32
