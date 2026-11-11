@@ -92,6 +92,8 @@ constexpr int kExitPartial = 3;  // finished, but some files could not be read o
 constexpr int kExitCancelled = 4;
 constexpr int kExitLocked = 5;  // another run holds a conflicting repository lock
 
+// In pieces (the ")" R"(" joins below): Visual Studio 2022 refuses a single string literal over
+// 16 KB (error C2026); adjacent literals are joined into one string.
 constexpr char kUsage[] = R"(Vaultik - deduplicating, compressed, encrypted backups
 
 Usage: vaultik <command> -r <repository> [options]
@@ -260,7 +262,7 @@ Commands:
                                data (1-50% of its size; jobs to drives use 5%),
                                so data damaged by bad sectors can be rebuilt by
                                repair; adds it to the data stored already
-  unlock                       Remove locks left by runs that ended abnormally
+)" R"(  unlock                       Remove locks left by runs that ended abnormally
   key passwd                   Set a new password (asks for the current one, or
                                use --recovery-key); saved jobs using this
                                repository get the new password too
