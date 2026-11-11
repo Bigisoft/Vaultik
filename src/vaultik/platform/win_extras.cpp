@@ -61,6 +61,17 @@ Bytes read_security(const std::string& path) {
     return sd;
 }
 
+std::string long_name(const std::string& path) {
+    const std::wstring wide = widen(path);
+    const DWORD needed = GetLongPathNameW(wide.c_str(), nullptr, 0);
+    if (needed == 0) return path;
+    std::wstring out(needed, L'\0');
+    const DWORD got = GetLongPathNameW(wide.c_str(), out.data(), needed);
+    if (got == 0 || got >= needed) return path;
+    out.resize(got);
+    return narrow(out);
+}
+
 std::string final_path(const std::string& path) {
     UniqueHandle h(CreateFileW(native_path(path).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));

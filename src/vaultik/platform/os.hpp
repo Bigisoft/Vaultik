@@ -243,6 +243,10 @@ ErrorCode write_security(const std::string& path, ByteSpan descriptor, const Fil
 // The path of a folder with every link and junction on the way resolved ("C:\Users\me\Docs"
 // for a junction that points there); empty when it cannot be told (and on POSIX).
 std::string final_path(const std::string& path);
+// `path` with its short (8.3) names written out in full ("C:\Users\RUNNER~1" becomes
+// "C:\Users\runneradmin"); links and junctions are not followed. The path itself when it cannot
+// be told, and always on POSIX.
+std::string long_name(const std::string& path);
 // The id of the item at `path` itself (a link is not followed); empty when it cannot be read.
 std::optional<FileId> file_id(const std::string& path);
 

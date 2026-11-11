@@ -291,6 +291,23 @@ TEST_CASE("a command runs with a time limit, and programs it leaves running are 
     CHECK(env.find("[success]") != std::string::npos);
 }
 
+TEST_CASE("short (8.3) names are written out in full") {
+    TempDir tmp;
+    const fs::path folder = tmp.path / "a folder with a long name";
+    fs::create_directories(folder);
+    wchar_t buf[MAX_PATH];
+    const DWORD n = GetShortPathNameW(folder.c_str(), buf, MAX_PATH);
+    REQUIRE(n > 0);
+    REQUIRE(n < MAX_PATH);
+    const std::string short_form = u8(fs::path(std::wstring(buf, n)));
+    // The drive may keep no short names; then the path is its own short form.
+    const std::string full = os::long_name(short_form);
+    CHECK(fs::path(std::u8string(full.begin(), full.end())) == folder);
+    CHECK(os::long_name(u8(folder)) == u8(folder));
+    // A path that does not exist comes back as it is.
+    CHECK(os::long_name(u8(tmp.path / "NOSUCH~1")) == u8(tmp.path / "NOSUCH~1"));
+}
+
 TEST_CASE("a file changed through its other name (a hard link) is read again") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";

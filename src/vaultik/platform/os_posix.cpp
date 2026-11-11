@@ -1188,6 +1188,10 @@ std::string final_path(const std::string& /*path*/) {
     return {};
 }
 
+std::string long_name(const std::string& path) {
+    return path;
+}
+
 std::optional<FileId> file_id(const std::string& /*path*/) {
     return std::nullopt;
 }

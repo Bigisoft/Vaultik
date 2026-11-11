@@ -475,7 +475,9 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
                        return std::tolower(static_cast<unsigned char>(p)) == std::tolower(static_cast<unsigned char>(q));
                    });
         };
-        if (!same(resolved, root) && os::process_elevated())
+        // A short (8.3) name in the path ("C:\Users\RUNNER~1\...") also differs from the resolved
+        // path without any link: written out in full it must match.
+        if (!same(resolved, root) && !same(resolved, os::long_name(root)) && os::process_elevated())
             throw Error("cannot restore into " + root + " with administrator rights: it leads to " + resolved +
                         " through a link or junction; choose " + resolved + " itself");
         root = resolved;
