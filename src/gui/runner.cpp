@@ -8,7 +8,18 @@
 Runner::Runner(QObject* parent) : QObject(parent) {}
 
 Runner::~Runner() {
-    if (running()) {
+    if (!running()) return;
+    // The owner is being destroyed (its members may already be gone): nothing from the process
+    // may reach it any more, so its signals are cut first. Then the engine is asked to stop
+    // cleanly (it releases the backup's lock and leaves no half-written files), and killed only
+    // when it does not.
+    process_->disconnect(this);
+    blockSignals(true);
+    if (process_->state() == QProcess::Running) {
+        process_->write("cancel\n");
+        process_->waitForBytesWritten(1000);
+    }
+    if (!process_->waitForFinished(10000)) {
         process_->kill();
         process_->waitForFinished(3000);
     }
