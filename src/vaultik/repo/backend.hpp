@@ -9,7 +9,8 @@
 namespace vaultik {
 
 // Storage for repository files. Names are relative, '/'-separated (for example "data/ab/ab12...").
-// Implementations: LocalBackend (local disk, USB drive, network share). S3 comes in phase 3.
+// Implementations: LocalBackend (local disk, USB drive, network share), S3Backend and the cloud
+// drives (backends.hpp).
 class Backend {
 public:
     virtual ~Backend() = default;
@@ -30,6 +31,16 @@ public:
     virtual std::vector<std::string> list(const std::string& dir) = 0;
 
     virtual void remove(const std::string& name) = 0;
+
+    // Archive storage (S3 storage classes): packs of file data and their repair data may be kept
+    // in a cheaper storage class than everything else. The class for them, empty when they are
+    // stored like everything else (every backend but S3).
+    virtual std::string data_class() const { return {}; }
+    // Whether files in that class must be restored for a while (thawed) before they can be read;
+    // reading one before throws ArchivedError.
+    virtual bool data_needs_thaw() const { return false; }
+    // Writes a pack of file data or its repair data, in data_class() when there is one.
+    virtual void put_data(const std::string& name, ByteSpan data) { put(name, data); }
 };
 
 }  // namespace vaultik

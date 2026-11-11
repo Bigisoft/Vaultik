@@ -55,6 +55,7 @@ void VerifyEngine::check_packs() {
     // Expected blobs per pack, from the index.
     std::vector<std::map<Id, BlobLocation>> expected(index.packs().size());
     index.for_each([&](const Id& id, const BlobLocation& loc) { expected[loc.pack].emplace(id, loc); });
+    const std::vector<bool> archived = repo_.archived_packs();
 
     for (std::size_t p = 0; p < index.packs().size(); ++p) {
         const Id& pack_id = index.packs()[p];
@@ -65,6 +66,12 @@ void VerifyEngine::check_packs() {
         try {
             if (!repo_.backend().exists(name)) {
                 error("missing pack " + name);
+                continue;
+            }
+            if (archived[p]) {
+                // Reading it needs a thaw; its listings and versions are checked below.
+                ++result_.packs_archived;
+                result_.blobs += expected[p].size();
                 continue;
             }
             std::vector<BlobEntry> entries;
@@ -122,6 +129,8 @@ void VerifyEngine::check_packs() {
             for (const auto& [id, loc] : expected[p]) {
                 if (!in_pack.contains(id)) error("indexed blob " + id_hex(id) + " is not in pack " + name);
             }
+        } catch (const ArchivedError&) {
+            ++result_.packs_archived;  // archived without the job saying so: not damage
         } catch (const Error& ex) {
             error("cannot check pack " + name + ": " + ex.what());
         }

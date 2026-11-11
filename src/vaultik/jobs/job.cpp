@@ -333,11 +333,19 @@ void validate(const Job& job) {
             throw Error("locking uploaded data needs S3-compatible storage with Object Lock");
         if (cloud_kind(sc.repository) == CloudKind::S3 && sc.cloud_key_id.empty())
             throw Error("the second copy's cloud storage needs an access key ID");
+        if (!sc.cloud_storage_class.empty() && cloud_kind(sc.repository) != CloudKind::S3)
+            throw Error("a storage class needs S3-compatible storage");
+        if (parse_storage_class(sc.cloud_storage_class) != sc.cloud_storage_class)
+            throw Error("unknown storage class " + sc.cloud_storage_class);
     }
     if (job.cloud_lock_days < 0 || job.cloud_lock_days > 3650)
         throw Error("the lock must be between 0 and 3650 days");
     if (job.cloud_lock_days > 0 && cloud_kind(job.repository) != CloudKind::S3)
         throw Error("locking uploaded data needs S3-compatible storage with Object Lock");
+    if (!job.cloud_storage_class.empty() && cloud_kind(job.repository) != CloudKind::S3)
+        throw Error("a storage class needs S3-compatible storage");
+    if (parse_storage_class(job.cloud_storage_class) != job.cloud_storage_class)
+        throw Error("unknown storage class " + job.cloud_storage_class);
     if (job.health.sample_percent < 1 || job.health.sample_percent > 100)
         throw Error("the weekly check must read between 1% and 100% of the data");
 }
@@ -353,6 +361,7 @@ std::string to_json(const Job& job) {
         {"cloud_region", job.cloud_region},
         {"cloud_lock_days", job.cloud_lock_days},
         {"cloud_lock_mode", job.cloud_lock_compliance ? "compliance" : "governance"},
+        {"cloud_storage_class", job.cloud_storage_class},
         {"sources", job.sources},
         {"excludes", job.excludes},
         {"tags", job.tags},
@@ -403,6 +412,7 @@ std::string to_json(const Job& job) {
           {"cloud_region", job.second_copy.cloud_region},
           {"cloud_lock_days", job.second_copy.cloud_lock_days},
           {"cloud_lock_mode", job.second_copy.cloud_lock_compliance ? "compliance" : "governance"},
+          {"cloud_storage_class", job.second_copy.cloud_storage_class},
           {"volume", job.second_copy.volume},
           {"path", job.second_copy.relative}}},
         {"work_hours",
@@ -433,6 +443,7 @@ Job job_from_json(const std::string& text) {
         job.cloud_region = j.value("cloud_region", std::string());
         job.cloud_lock_days = j.value("cloud_lock_days", 0);
         job.cloud_lock_compliance = j.value("cloud_lock_mode", std::string("governance")) == "compliance";
+        job.cloud_storage_class = j.value("cloud_storage_class", std::string());  // missing in older jobs
         job.sources = strings(j, "sources");
         job.excludes = strings(j, "excludes");
         job.tags = strings(j, "tags");
@@ -497,6 +508,7 @@ Job job_from_json(const std::string& text) {
             job.second_copy.cloud_region = c.value("cloud_region", std::string());
             job.second_copy.cloud_lock_days = c.value("cloud_lock_days", 0);
             job.second_copy.cloud_lock_compliance = c.value("cloud_lock_mode", std::string()) == "compliance";
+            job.second_copy.cloud_storage_class = c.value("cloud_storage_class", std::string());
             job.second_copy.volume = c.value("volume", std::string());
             job.second_copy.relative = c.value("path", std::string());
         }
@@ -849,6 +861,7 @@ CloudCredentials JobStore::copy_credentials(const Job& job) const {
     CloudCredentials c{sc.cloud_key_id, copy_secret(job.id), sc.cloud_region};
     c.lock_days = sc.cloud_lock_days;
     c.lock_compliance = sc.cloud_lock_compliance;
+    c.storage_class = sc.cloud_storage_class;
     c.on_secret_changed = [dir = dir_, id = job.id](const std::string& secret) {
         try {
             JobStore(dir).set_copy_secret(id, secret);
@@ -863,6 +876,7 @@ CloudCredentials JobStore::cloud_credentials(const Job& job) const {
     CloudCredentials c{job.cloud_key_id, cloud_secret(job.id), job.cloud_region};
     c.lock_days = job.cloud_lock_days;
     c.lock_compliance = job.cloud_lock_compliance;
+    c.storage_class = job.cloud_storage_class;
     // A renewed sign-in token is stored right away, so the next run starts from it.
     c.on_secret_changed = [dir = dir_, id = job.id](const std::string& secret) {
         try {

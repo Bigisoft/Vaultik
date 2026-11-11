@@ -135,6 +135,9 @@ public:
     static std::string parity_name(const Id& pack_id);
     // Writes the repair data of an intact pack (`bytes` hash to `pack_id`). Throws Error.
     void write_parity(const Id& pack_id, ByteSpan bytes, unsigned percent);
+    // Writes an intact pack back under its name (repair), in the data class when it holds file
+    // data only (see splits_trees).
+    void write_pack(const Id& pack_id, ByteSpan bytes);
     // Rebuilds a damaged pack (read as `pack`: wrong content, cut short or longer) from its repair
     // data. True when `pack` now hashes to `pack_id`; false (and `pack` unchanged) when the pack
     // has no repair data, it cannot be read, or too much is damaged.
@@ -146,11 +149,23 @@ public:
     // run, which rebuilds a pack in memory without writing it).
     void use_pack_bytes(const Id& pack_id, Bytes bytes);
 
+    // Archive storage (Backend::data_class): while the backend keeps file data in a class of its
+    // own, folder listings go to packs of their own in the standard class, so versions can be
+    // browsed and restores planned without a thaw; packs of file data (and their repair data)
+    // go to the archive class.
+    bool splits_trees() const { return split_trees_; }
+    // Per pack of index().packs(): whether it must be thawed before it can be read. With a
+    // backend whose data class needs a thaw, every pack without a folder listing; none otherwise.
+    std::vector<bool> archived_packs() const;
+
 private:
     Repository(std::unique_ptr<Backend> backend, RepoConfig config, const MasterKey& key);
 
     void load_indexes();
+    // Writes out both packs being built (`finish_pack(writer)`: one of them).
     void finish_pack();
+    void finish_pack(PackWriter& writer);
+    PackWriter& writer_for(BlobType type) { return split_trees_ && type == BlobType::Tree ? tree_pack_ : pack_; }
     struct Pipeline;
     // Moves blobs the workers have sealed into the pack, in order (`all`: waits for every one).
     void drain(bool all);
@@ -176,6 +191,8 @@ private:
 
     Index index_;
     PackWriter pack_;
+    PackWriter tree_pack_;  // folder listings, while split_trees_
+    bool split_trees_ = false;
     std::atomic<unsigned> parity_percent_{0};
     std::unordered_map<Id, Bytes, IdHash> pack_bytes_;  // use_pack_bytes
     std::unordered_set<Id, IdHash> pack_pending_;  // blobs in the pack being built

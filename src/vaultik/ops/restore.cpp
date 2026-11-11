@@ -213,6 +213,11 @@ void RestoreEngine::restore_file(const Node& node, const std::string& path) {
             report();
         }
         if (written != node.size) throw Error("restored size does not match the snapshot");
+    } catch (const ArchivedError&) {
+        // Every file after it would fail the same way: stop with the error that says what to do.
+        file.close();
+        os::remove_file(path);
+        throw;
     } catch (const Error& e) {
         file.close();
         os::remove_file(path);
@@ -252,6 +257,8 @@ void RestoreEngine::restore_streams(const Node& node, const std::string& path, c
                 written += data.size();
             }
             if (written != s.size) throw Error("restored size does not match the snapshot");
+        } catch (const ArchivedError&) {
+            throw;
         } catch (const Error& e) {
             warn("failed to restore the stream " + s.name + " of " + path + ": " + e.what());
         }
@@ -268,6 +275,8 @@ void RestoreEngine::restore_security(const Node& node, const std::string& path, 
         const Bytes sd = repo_.load_blob(BlobType::Data, *node.security);
         const os::ErrorCode err = os::write_security(path, sd, &*id);
         if (err != 0) warn("cannot restore the permissions of " + path + ": " + os::error_message(err));
+    } catch (const ArchivedError&) {
+        throw;
     } catch (const Error& e) {
         warn("cannot restore the permissions of " + path + ": " + e.what());
     }
@@ -320,6 +329,8 @@ void RestoreEngine::restore_children(const Id& tree_id, const std::string& dir) 
     Tree tree;
     try {
         tree = parse_tree(repo_.load_blob(BlobType::Tree, tree_id));
+    } catch (const ArchivedError&) {
+        throw;
     } catch (const Error& e) {
         warn("cannot read folder listing for " + dir + ": " + e.what());
         return;
@@ -357,6 +368,8 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
                 }
                 try {
                     ensure_dir(path);
+                } catch (const ArchivedError&) {
+                    throw;
                 } catch (const Error& e) {
                     warn(e.what());
                     return;
@@ -383,6 +396,8 @@ void RestoreEngine::restore_node(const Node& node, const std::string& parent_dir
                 try {
                     const os::ErrorCode e = made.set_security(repo_.load_blob(BlobType::Data, *node.security));
                     if (e != 0) warn("cannot restore the permissions of " + path + ": " + os::error_message(e));
+                } catch (const ArchivedError&) {
+                    throw;
                 } catch (const Error& e) {
                     warn("cannot restore the permissions of " + path + ": " + e.what());
                 }

@@ -32,6 +32,7 @@
 #include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/restore_test.hpp"
+#include "vaultik/ops/thaw.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/keys.hpp"
 #include "vaultik/repo/backends.hpp"
@@ -192,6 +193,17 @@ Commands:
                                versions (after files were deleted or overwritten)
       --to <time>              Local time, e.g. "2026-11-09 20:30"
       --dry-run                Only list what would be brought back
+  cloud-thaw [<snapshot>]      S3 archive storage (GLACIER, DEEP_ARCHIVE): ask for
+                               a readable copy of the data a restore of this
+                               version needs (default: latest), so it can be
+                               restored once the thaw is done (hours); run it
+                               again to see how far it is
+      --path <path>            Only what restoring this file or folder needs
+                               (repeatable)
+      --days <n>               Keep the readable copy this many days (default 7)
+      --tier <tier>            Standard (default), Bulk (cheaper, slower) or
+                               Expedited (GLACIER only, faster, dearer)
+      --status                 Only report, ask for nothing
   drives                       The health of this computer's drives, as Windows
                                reports it (details need administrator rights)
       --smart                  Also list each drive's S.M.A.R.T. attributes
@@ -293,11 +305,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads"};
+    "--read-threads", "--days", "--tier"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1258,6 +1270,9 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         record.message += "; " + std::to_string(r.packs_repairable) +
                           " damaged pack(s) can be rebuilt from their repair data: run a repair";
     if (r.parity_added > 0) record.message += "; repair data added to " + std::to_string(r.parity_added) + " pack(s)";
+    if (r.packs_archived > 0)
+        record.message += "; " + std::to_string(r.packs_archived) +
+                          " pack(s) in archive storage were only checked to be there (reading them needs a thaw)";
     if (g_json) {
         emit({{"event", "check"},
               {"kind", jobs::to_string(kind)},
@@ -1534,6 +1549,80 @@ int cmd_cloud_rollback(const Args& a) {
         if (!dry && r.restored > 0) out("Run \"vaultik verify\" next, then restore from the versions you need.\n");
     }
     return r.failed.empty() ? kExitOk : kExitPartial;
+}
+
+// "cloud-thaw [<snapshot>] [--path <p>]... [--days n] [--tier t] [--status]": asks S3 archive
+// storage for a readable copy of every pack a restore of that version (or of those paths) reads,
+// and reports how many were asked for now, are being thawed, and can be read already.
+int cmd_cloud_thaw(const Args& a) {
+    if (a.positional.size() > 1)
+        throw Error("usage: vaultik cloud-thaw -r s3:... [<snapshot>|latest] [--path <path>] [--days <n>] "
+                    "[--tier Standard|Bulk|Expedited] [--status]");
+    int days = 7;
+    if (const auto v = a.value("--days")) {
+        char* end = nullptr;
+        const long n = std::strtol(v->c_str(), &end, 10);
+        if (end == v->c_str() || *end != '\0' || n < 1 || n > 365) throw Error("--days takes a number from 1 to 365");
+        days = static_cast<int>(n);
+    }
+    const std::string tier = a.value("--tier").value_or("Standard");
+    (void)s3::restore_request(days, tier);  // checks both before anything is read
+    const bool status_only = a.has("--status");
+    auto repo = open_repo(a);
+    auto* s3 = dynamic_cast<S3Backend*>(&repo->backend());
+    if (s3 == nullptr) throw Error("cloud-thaw works on S3-compatible storage (archive storage classes)");
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "cloud-thaw", lock_wait(a));
+    repo->reload_index();
+    const SnapshotRef ref = resolve_snapshot(*repo, a.positional.empty() ? std::string("latest") : a.positional[0]);
+    status("Finding the data this restore needs...");
+    const std::vector<Id> packs = packs_for_restore(*repo, ref.snapshot, a.all("--path"));
+    std::uint64_t requested = 0, in_progress = 0, available = 0;
+    std::size_t done = 0;
+    for (const Id& pack : packs) {
+        if (stop_requested()) throw Cancelled();
+        const std::string name = Repository::pack_name(pack);
+        ++done;
+        if (g_json) emit({{"event", "progress"}, {"files", done}, {"bytes", 0}, {"current", name}});
+        else status("Thawing " + std::to_string(done) + " of " + std::to_string(packs.size()) + "...");
+        if (status_only) {
+            const S3Backend::ArchiveState st = s3->archive_state(name);
+            if (!st.archived || st.thawed) ++available;
+            else if (st.thawing) ++in_progress;
+            else ++requested;  // here: not asked for yet
+            continue;
+        }
+        switch (s3->thaw(name, days, tier)) {
+            case S3Backend::ThawOutcome::Requested: ++requested; break;
+            case S3Backend::ThawOutcome::InProgress: ++in_progress; break;
+            case S3Backend::ThawOutcome::Available: ++available; break;
+        }
+    }
+    clear_status();
+    const bool ready = requested == 0 && in_progress == 0;
+    if (g_json) {
+        emit({{"event", "done"},
+              {"status", "success"},
+              {"snapshot", id_hex(ref.id)},
+              {"packs", packs.size()},
+              {status_only ? "not_requested" : "requested", requested},
+              {"in_progress", in_progress},
+              {"available", available},
+              {"ready", ready}});
+        return kExitOk;
+    }
+    out("Version " + short_id(ref.id) + " needs " + std::to_string(packs.size()) + " pack(s): " +
+        std::to_string(requested) + (status_only ? " not asked for yet, " : " thaw(s) asked for now, ") +
+        std::to_string(in_progress) + " being thawed, " + std::to_string(available) + " readable already.\n");
+    if (ready) {
+        out("Everything this restore needs can be read now: restore it while the thawed copies last.\n");
+    } else if (status_only && in_progress == 0) {
+        out("Run \"vaultik cloud-thaw\" without --status to ask for a thaw.\n");
+    } else {
+        out("A thaw takes from minutes (Expedited) to 12 hours (Standard) or more (Bulk; up to 48 hours for "
+            "DEEP_ARCHIVE). Run \"vaultik cloud-thaw --status\" for the same version to see how far it is, then "
+            "restore.\n");
+    }
+    return kExitOk;
 }
 
 // While a job runs: switches to the working-hours speed limits when they start, and back when they
@@ -2879,6 +2968,9 @@ int cmd_verify(const Args& a) {
     const auto start = std::chrono::steady_clock::now();
     const VerifyResult r = run_verify(*repo, o);
     clear_status();
+    if (r.packs_archived > 0)
+        out(std::to_string(r.packs_archived) + " pack(s) are in archive storage: checked to be there, but not read "
+            "(that needs a thaw, see cloud-thaw); their folder listings and versions were checked.\n");
     out("Checked " + std::to_string(r.packs) + " packs, " + std::to_string(r.blobs) + " blobs, " +
         std::to_string(r.snapshots) + " snapshots, " + std::to_string(r.trees) + " folders" +
         (o.read_data ? ", read " + format_bytes(r.bytes_read) + " (" + std::to_string(r.packs_read) + " packs)"
@@ -2948,6 +3040,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "update-check") return cmd_update_check(a);
     if (a.command == "copy") return cmd_copy(a);
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);
+    if (a.command == "cloud-thaw") return cmd_cloud_thaw(a);
     if (a.command == "mount") return cmd_mount(a);
     if (a.command == "admin-job") return cmd_admin_job(a);
     if (a.command == "uninstall-cleanup") return cmd_uninstall_cleanup();
@@ -3008,6 +3101,11 @@ int run_main(const std::vector<std::string>& args) {
         return fail("failed", e.what(), kExitAuth);
     } catch (const vaultik::LockedError& e) {
         return fail("failed", e.what(), kExitLocked);
+    } catch (const vaultik::ArchivedError& e) {
+        // The frontend offers a thaw on "archived".
+        if (g_json) emit({{"event", "done"}, {"status", "failed"}, {"archived", true}, {"message", e.what()}});
+        err(std::string("error: ") + e.what() + "\n");
+        return kExitError;
     } catch (const vaultik::Error& e) {
         return fail("failed", e.what(), kExitError);
     } catch (const std::bad_alloc&) {

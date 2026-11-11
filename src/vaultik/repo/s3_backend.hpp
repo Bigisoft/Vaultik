@@ -9,6 +9,11 @@
 // Requests use path-style addresses and AWS Signature Version 4. Every repository file is one object
 // ("<folder>/data/ab/ab12..."); S3 replaces objects atomically, so no temporary names are needed.
 // The bucket must exist; Vaultik never creates or deletes buckets.
+//
+// Archive storage: with CloudCredentials::storage_class set, packs of file data and their repair
+// data are uploaded in that class (x-amz-storage-class); everything else (config, keys, index,
+// snapshots, folder listings, locks) stays in the standard class. Reading a file in GLACIER or
+// DEEP_ARCHIVE fails with ArchivedError until it is thawed (RestoreObject, see thaw).
 
 #include <cstdint>
 #include <functional>
@@ -54,6 +59,25 @@ public:
     std::uint64_t size(const std::string& name) override;
     std::vector<std::string> list(const std::string& dir) override;
     void remove(const std::string& name) override;
+    std::string data_class() const override { return credentials_.storage_class; }
+    bool data_needs_thaw() const override;
+    void put_data(const std::string& name, ByteSpan data) override;
+
+    // A repository file's storage class and thaw, from a HEAD request.
+    struct ArchiveState {
+        std::string storage_class;  // as the server reports it; empty: standard
+        bool archived = false;      // in a class that needs a thaw before reading
+        bool thawing = false;       // a thaw was asked for and is not finished
+        bool thawed = false;        // a readable copy is there (until `expiry`)
+        std::string expiry;         // "Fri, 21 Dec 2012 00:00:00 GMT"
+    };
+    ArchiveState archive_state(const std::string& name);
+
+    enum class ThawOutcome { Requested, InProgress, Available };
+    // Asks for a readable copy of an archived file for `days` days (RestoreObject) at `tier`
+    // ("Standard", "Bulk" or "Expedited"). Available: the file is not archived, or a copy is
+    // there already; InProgress: a thaw asked for earlier is still running.
+    ThawOutcome thaw(const std::string& name, int days, const std::string& tier);
 
     // Whether the bucket has Object Lock turned on (needed for CloudCredentials::lock_days).
     bool object_lock_enabled();
@@ -78,6 +102,7 @@ private:
     Result request(const std::string& method, const std::string& key, const std::string& query,
                    std::vector<std::pair<std::string, std::string>> extra_headers, ByteSpan body);
     std::string key_of(const std::string& name) const;
+    void put_object(const std::string& name, ByteSpan data, bool data_class);
 
     std::string location_;
     S3Location where_;
@@ -136,6 +161,26 @@ std::string iso_time(std::int64_t unix_seconds);
 // The headers that upload `body` with Object Lock (governance or compliance mode) until `until`
 // (seconds since 1970): the mode, the date, and the Content-MD5 that S3 requires with them.
 std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std::int64_t until, bool compliance);
+
+// The extra headers of a PUT of repository file `name` at `now` (seconds since 1970): the lock
+// headers when `credentials` ask for a lock (never for locks/), and x-amz-storage-class when
+// `data_class` (a pack of file data or its repair data) and a storage class is set.
+std::vector<std::pair<std::string, std::string>> put_headers(const std::string& name, ByteSpan body,
+                                                             const CloudCredentials& credentials, bool data_class,
+                                                             std::int64_t now);
+
+// The body of a RestoreObject request (POST ?restore). `tier`: Standard, Bulk or Expedited, any
+// case; throws Error for another, or for `days` outside 1-365.
+std::string restore_request(int days, const std::string& tier);
+
+// An x-amz-restore header: `ongoing-request="true"` while a thaw runs, then
+// `ongoing-request="false", expiry-date="Fri, 21 Dec 2012 00:00:00 GMT"`.
+struct RestoreHeader {
+    bool present = false;
+    bool ongoing = false;
+    std::string expiry;
+};
+RestoreHeader parse_restore_header(std::string_view value);
 
 }  // namespace s3
 

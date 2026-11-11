@@ -38,6 +38,9 @@ struct VerifyResult {
     std::uint64_t errors = 0;
     std::uint64_t packs_repairable = 0;  // damaged, but their repair data can rebuild them
     std::uint64_t parity_added = 0;      // packs that got repair data (add_parity)
+    // Packs in archive storage (Backend::data_needs_thaw): only checked to be there, neither their
+    // header nor their data can be read without a thaw.
+    std::uint64_t packs_archived = 0;
 };
 
 VerifyResult run_verify(Repository& repo, const VerifyOptions& options);

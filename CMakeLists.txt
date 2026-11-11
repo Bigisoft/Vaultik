@@ -57,6 +57,7 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/copy.cpp
     src/vaultik/ops/verify.cpp
     src/vaultik/ops/prune.cpp
+    src/vaultik/ops/thaw.cpp
     src/vaultik/ops/repair.cpp
     src/vaultik/platform/os_common.cpp
     src/vaultik/platform/vss.cpp
@@ -247,6 +248,7 @@ add_executable(vaultik_tests
     tests/test_prune.cpp
     tests/test_keys.cpp
     tests/test_s3.cpp
+    tests/test_archive.cpp
     tests/test_cloud_drives.cpp
     tests/test_versions.cpp
     tests/test_recovery.cpp

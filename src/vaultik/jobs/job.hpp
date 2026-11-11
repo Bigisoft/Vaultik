@@ -83,6 +83,7 @@ struct SecondCopy {
     std::string cloud_region;
     int cloud_lock_days = 0;
     bool cloud_lock_compliance = false;
+    std::string cloud_storage_class;  // S3 only, see Job::cloud_storage_class
     // A folder copy's drive, recorded like Job::repository_volume, so the copy is found under
     // another letter and never created on a different drive that took the letter meanwhile.
     std::string volume;
@@ -102,6 +103,9 @@ struct Job {
     // CloudCredentials::lock_days.
     int cloud_lock_days = 0;
     bool cloud_lock_compliance = false;  // compliance mode instead of governance (see there)
+    // S3 only: the storage class for packs of file data (CloudCredentials::storage_class); empty
+    // for the standard class.
+    std::string cloud_storage_class;
     std::vector<std::string> sources;
     std::vector<std::string> excludes;
     std::vector<std::string> tags;

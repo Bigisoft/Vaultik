@@ -205,6 +205,50 @@ std::vector<std::pair<std::string, std::string>> lock_headers(ByteSpan body, std
             {"x-amz-object-lock-retain-until-date", iso_time(until)}};
 }
 
+std::vector<std::pair<std::string, std::string>> put_headers(const std::string& name, ByteSpan body,
+                                                             const CloudCredentials& credentials, bool data_class,
+                                                             std::int64_t now) {
+    std::vector<std::pair<std::string, std::string>> headers;
+    // Everything but the lock files (which runs remove when they end) is locked, when asked.
+    if (credentials.lock_days > 0 && !name.starts_with("locks/"))
+        headers = lock_headers(body, now + static_cast<std::int64_t>(credentials.lock_days) * 86400,
+                               credentials.lock_compliance);
+    if (data_class && !credentials.storage_class.empty())
+        headers.emplace_back("x-amz-storage-class", credentials.storage_class);
+    return headers;
+}
+
+std::string restore_request(int days, const std::string& tier) {
+    if (days < 1 || days > 365) throw Error("a thaw lasts from 1 to 365 days");
+    std::string t = lower(tier);
+    if (t == "standard") t = "Standard";
+    else if (t == "bulk") t = "Bulk";
+    else if (t == "expedited") t = "Expedited";
+    else throw Error("unknown thaw tier " + tier + " (use Standard, Bulk or Expedited)");
+    return "<RestoreRequest xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Days>" + std::to_string(days) +
+           "</Days><GlacierJobParameters><Tier>" + t + "</Tier></GlacierJobParameters></RestoreRequest>";
+}
+
+RestoreHeader parse_restore_header(std::string_view value) {
+    RestoreHeader h;
+    const auto field = [value](std::string_view key, std::string& out) {
+        const std::string open = std::string(key) + "=\"";
+        const std::size_t a = value.find(open);
+        if (a == std::string_view::npos) return false;
+        const std::size_t start = a + open.size();
+        const std::size_t b = value.find('"', start);
+        if (b == std::string_view::npos) return false;
+        out = std::string(value.substr(start, b - start));
+        return true;
+    };
+    std::string ongoing;
+    if (!field("ongoing-request", ongoing)) return h;
+    h.present = true;
+    h.ongoing = ongoing == "true";
+    field("expiry-date", h.expiry);
+    return h;
+}
+
 ListPage parse_list(std::string_view xml) {
     ListPage page;
     std::size_t pos = 0;
@@ -338,6 +382,11 @@ namespace {
         hint = " - check the access key ID and secret, and that the key may use this bucket";
     else if (code == "NoSuchBucket") hint = " - create the bucket first";
     else if (code == "RequestTimeTooSkewed") hint = " - this computer's clock is wrong";
+    if (code == "InvalidObjectState") {
+        throw ArchivedError(location + ": " + what + " failed: the file is in archive storage and must be thawed "
+                            "before it can be read - run \"vaultik cloud-thaw\" for the version to restore, then "
+                            "try again once the thaw is done (this takes hours)");
+    }
     throw Error(location + ": " + what + " failed: " + std::to_string(resp.status) + (code.empty() ? "" : " " + code) +
                 (message.empty() ? "" : " (" + message + ")") + hint);
 }
@@ -352,17 +401,28 @@ bool S3Backend::exists(const std::string& name) {
 }
 
 void S3Backend::put(const std::string& name, ByteSpan data) {
-    // Everything but the lock files (which runs remove when they end) is locked, when asked.
+    put_object(name, data, false);
+}
+
+void S3Backend::put_data(const std::string& name, ByteSpan data) {
+    put_object(name, data, true);
+}
+
+bool S3Backend::data_needs_thaw() const {
+    return storage_class_needs_thaw(credentials_.storage_class);
+}
+
+void S3Backend::put_object(const std::string& name, ByteSpan data, bool data_class) {
     const bool lock = credentials_.lock_days > 0 && !name.starts_with("locks/");
-    std::vector<std::pair<std::string, std::string>> headers;
-    if (lock) {
-        const std::int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
-                                     std::chrono::system_clock::now().time_since_epoch())
-                                     .count();
-        headers = s3::lock_headers(data, now + static_cast<std::int64_t>(credentials_.lock_days) * 86400,
-                                   credentials_.lock_compliance);
+    const std::int64_t now =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    const Result r = request("PUT", key_of(name), {}, s3::put_headers(name, data, credentials_, data_class, now), data);
+    if (r.status == 400 && data_class && !credentials_.storage_class.empty()) {
+        const std::string_view text(reinterpret_cast<const char*>(r.response.body.data()), r.response.body.size());
+        if (s3::xml_value(text, "Code") == "InvalidStorageClass")
+            throw Error(location_ + ": the cloud storage does not offer the storage class " + credentials_.storage_class +
+                        " - choose another one (or Standard) for this job");
     }
-    const Result r = request("PUT", key_of(name), {}, std::move(headers), data);
     if (r.status == 400 && lock) {
         const std::string_view text(reinterpret_cast<const char*>(r.response.body.data()), r.response.body.size());
         throw Error(location_ + ": uploading " + name + " with a lock failed: " + s3::xml_value(text, "Message") +
@@ -371,6 +431,38 @@ void S3Backend::put(const std::string& name, ByteSpan data) {
     }
     if (r.status != 200) refuse(location_, "uploading " + name, r.response);
     throttle_write(data.size());
+}
+
+S3Backend::ArchiveState S3Backend::archive_state(const std::string& name) {
+    const Result r = request("HEAD", key_of(name), {}, {}, {});
+    if (r.status == 404) throw Error(location_ + ": repository file " + name + " is missing");
+    if (r.status != 200) refuse(location_, "checking " + name, r.response);
+    ArchiveState s;
+    s.storage_class = r.response.header("x-amz-storage-class");
+    s.archived = storage_class_needs_thaw(s.storage_class);
+    const s3::RestoreHeader h = s3::parse_restore_header(r.response.header("x-amz-restore"));
+    s.thawing = h.present && h.ongoing;
+    s.thawed = h.present && !h.ongoing;
+    s.expiry = h.expiry;
+    return s;
+}
+
+S3Backend::ThawOutcome S3Backend::thaw(const std::string& name, int days, const std::string& tier) {
+    const std::string body = s3::restore_request(days, tier);
+    const ArchiveState state = archive_state(name);
+    if (!state.archived || state.thawed) return ThawOutcome::Available;
+    if (state.thawing) return ThawOutcome::InProgress;
+    const ByteSpan span(reinterpret_cast<const std::uint8_t*>(body.data()), body.size());
+    const auto digest = md5(span);
+    const Result r = request("POST", key_of(name), "restore=",
+                             {{"content-md5", base64_encode(ByteSpan(digest.data(), digest.size()))}}, span);
+    if (r.status == 202) return ThawOutcome::Requested;
+    if (r.status == 200) return ThawOutcome::Available;  // a thawed copy was there already
+    const std::string_view text(reinterpret_cast<const char*>(r.response.body.data()), r.response.body.size());
+    const std::string code = s3::xml_value(text, "Code");
+    if (r.status == 409 || code == "RestoreAlreadyInProgress") return ThawOutcome::InProgress;
+    if (code == "InvalidObjectState") return ThawOutcome::Available;  // not in an archive class
+    refuse(location_, "thawing " + name, r.response);
 }
 
 bool S3Backend::object_lock_enabled() {

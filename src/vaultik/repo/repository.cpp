@@ -28,10 +28,13 @@ constexpr char kParityMarker[] = "parity/percent";
 
 // Best effort: a pack is complete without its repair data, so a failure here never fails the
 // write of the pack (a later health check adds what is missing).
-void put_parity(Backend& backend, const Id& pack_id, ByteSpan bytes, unsigned percent) {
+// `data`: a pack of file data only, whose repair data goes to the backend's data class too.
+void put_parity(Backend& backend, const Id& pack_id, ByteSpan bytes, unsigned percent, bool data) {
     if (percent == 0) return;
     try {
-        backend.put(Repository::parity_name(pack_id), repo::make_recovery(bytes, percent));
+        const Bytes parity = repo::make_recovery(bytes, percent);
+        if (data) backend.put_data(Repository::parity_name(pack_id), parity);
+        else backend.put(Repository::parity_name(pack_id), parity);
     } catch (const std::exception&) {
     }
 }
@@ -129,8 +132,38 @@ std::string Repository::parity_name(const Id& pack_id) {
     return "parity/" + hex.substr(0, 2) + "/" + hex;
 }
 
+namespace {
+
+// Whether a pack (its bytes) holds file data only; false when its header cannot be read.
+bool data_only(ByteSpan pack, const AesGcm& aead) {
+    try {
+        const std::vector<BlobEntry> entries = parse_pack_header(pack, aead);
+        return std::none_of(entries.begin(), entries.end(), [](const BlobEntry& e) { return e.type == BlobType::Tree; });
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+}  // namespace
+
 void Repository::write_parity(const Id& pack_id, ByteSpan bytes, unsigned percent) {
-    backend_->put(parity_name(pack_id), repo::make_recovery(bytes, percent));
+    const Bytes parity = repo::make_recovery(bytes, percent);
+    if (split_trees_ && data_only(bytes, *aead_)) backend_->put_data(parity_name(pack_id), parity);
+    else backend_->put(parity_name(pack_id), parity);
+}
+
+void Repository::write_pack(const Id& pack_id, ByteSpan bytes) {
+    if (split_trees_ && data_only(bytes, *aead_)) backend_->put_data(pack_name(pack_id), bytes);
+    else backend_->put(pack_name(pack_id), bytes);
+}
+
+std::vector<bool> Repository::archived_packs() const {
+    if (!backend_->data_needs_thaw()) return std::vector<bool>(index_.packs().size(), false);
+    std::vector<bool> out(index_.packs().size(), true);
+    index_.for_each([&out](const Id&, const BlobLocation& loc) {
+        if (loc.type == BlobType::Tree && loc.pack < out.size()) out[loc.pack] = false;
+    });
+    return out;
 }
 
 bool Repository::rebuild_pack(const Id& pack_id, Bytes& pack) {
@@ -193,6 +226,7 @@ Repository::Repository(std::unique_ptr<Backend> backend, RepoConfig config, cons
       lock_aead_(std::make_unique<AesGcm>(key.enc)),
       id_hasher_(key.id),
       compressor_(config_.zstd_level),
+      split_trees_(!backend_->data_class().empty()),
       enc_key_(key.enc) {}
 
 // Worker threads that seal blobs and upload packs; see set_parallelism.
@@ -210,6 +244,7 @@ struct Repository::Pipeline {
         Id pack_id{};
         Bytes bytes;
         std::vector<BlobEntry> entries;
+        bool data = false;  // file data only: to the backend's data class
     };
 
     std::mutex mu;
@@ -329,8 +364,9 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
                 lk.unlock();
                 std::string error;
                 try {
-                    backend->put(pack_name(u.pack_id), u.bytes);
-                    put_parity(*backend, u.pack_id, u.bytes, parity->load());
+                    if (u.data) backend->put_data(pack_name(u.pack_id), u.bytes);
+                    else backend->put(pack_name(u.pack_id), u.bytes);
+                    put_parity(*backend, u.pack_id, u.bytes, parity->load(), u.data);
                 } catch (const std::exception& e) {
                     error = std::string("cannot write a pack: ") + e.what();
                 } catch (...) {
@@ -379,8 +415,9 @@ void Repository::drain(bool all) {
             p.order.pop_front();
         }
         if (!job->error.empty()) throw Error(job->error);
-        pack_.add(job->type, job->id, job->sealed, job->raw_len);
-        if (pack_.size() >= kPackTargetSize) finish_pack();
+        PackWriter& writer = writer_for(job->type);
+        writer.add(job->type, job->id, job->sealed, job->raw_len);
+        if (writer.size() >= kPackTargetSize) finish_pack(writer);
     }
 }
 
@@ -483,8 +520,9 @@ bool Repository::save_blob_with_id(BlobType type, ByteSpan plain, const Id& id) 
         return true;
     }
     const Bytes sealed = seal_object(plain, blob_aad(type, id_out), true);
-    pack_.add(type, id_out, sealed, static_cast<std::uint32_t>(plain.size()));
-    if (pack_.size() >= kPackTargetSize) finish_pack();
+    PackWriter& writer = writer_for(type);
+    writer.add(type, id_out, sealed, static_cast<std::uint32_t>(plain.size()));
+    if (writer.size() >= kPackTargetSize) finish_pack(writer);
     return true;
 }
 
@@ -521,21 +559,28 @@ Bytes Repository::load_blob(BlobType type, const Id& id) {
 }
 
 void Repository::finish_pack() {
-    if (pack_.empty()) return;
+    finish_pack(pack_);
+    finish_pack(tree_pack_);
+}
+
+void Repository::finish_pack(PackWriter& writer) {
+    if (writer.empty()) return;
+    const bool data = split_trees_ && &writer == &pack_;  // file data only (see splits_trees)
     std::vector<BlobEntry> entries;
-    const Bytes bytes = pack_.finish(*aead_, entries);
+    const Bytes bytes = writer.finish(*aead_, entries);
     const Id pack_id = blake3(bytes);
     const bool background = pipe_ && pipe_->max_uploads > 0;
     if (!background) {
         // Written before its blobs count as stored; a failed write is final, like a failed
         // background one, since those blobs are in no pack now.
         try {
-            backend_->put(pack_name(pack_id), bytes);
+            if (data) backend_->put_data(pack_name(pack_id), bytes);
+            else backend_->put(pack_name(pack_id), bytes);
         } catch (const std::exception& e) {
             write_failed_ = std::string("cannot write a pack: ") + e.what();
             throw;
         }
-        put_parity(*backend_, pack_id, bytes, parity_percent_.load());
+        put_parity(*backend_, pack_id, bytes, parity_percent_.load(), data);
     }
     // Known at once (deduplication); listed in an index file once the pack is written.
     const std::uint32_t pos = index_.add_pack(pack_id);
@@ -550,7 +595,7 @@ void Repository::finish_pack() {
             p.done.wait(lk, [&p] { return p.uploads.size() + p.uploading < p.max_uploads || !p.failed.empty(); });
             if (!p.failed.empty()) throw Error(p.failed);
             p.in_flight.insert(pack_id);
-            p.uploads.push_back({pack_id, std::move(bytes), std::move(entries)});
+            p.uploads.push_back({pack_id, std::move(bytes), std::move(entries), data});
         }
         p.work.notify_all();
         collect_uploads(false);
@@ -606,9 +651,10 @@ IndexFileContent Repository::read_index_file(const std::string& name) {
 void Repository::copy_blob(BlobType type, const Id& id, ByteSpan sealed, std::uint32_t raw_len) {
     drain(true);  // keep the order of blobs already handed to the workers
     if (pack_pending_.contains(id)) return;
-    pack_.add(type, id, sealed, raw_len);
+    PackWriter& writer = writer_for(type);
+    writer.add(type, id, sealed, raw_len);
     pack_pending_.insert(id);
-    if (pack_.size() >= kPackTargetSize) finish_pack();
+    if (writer.size() >= kPackTargetSize) finish_pack(writer);
 }
 
 void Repository::flush() {

@@ -56,6 +56,10 @@ struct CloudCredentials {
     // settings); compliance mode stops everyone, the account owner too, until the date passes.
     int lock_days = 0;
     bool lock_compliance = false;
+    // S3 only: the storage class for packs of file data and their repair data (see
+    // parse_storage_class), e.g. "DEEP_ARCHIVE" for a cheap long-term copy; everything else
+    // stays in the standard class. Empty: the standard class.
+    std::string storage_class;
     // Called with the new secret when a service hands out a new sign-in token (OneDrive renews its
     // refresh token on every use), so the caller can store it. May be empty.
     std::function<void(const std::string& secret)> on_secret_changed;
@@ -70,9 +74,17 @@ struct CloudCredentials {
     bool empty() const { return key_id.empty() && secret.empty(); }
 
     // AWS_ACCESS_KEY_ID, AWS_REGION (or AWS_DEFAULT_REGION), and VAULTIK_CLOUD_SECRET or else
-    // AWS_SECRET_ACCESS_KEY.
+    // AWS_SECRET_ACCESS_KEY; VAULTIK_S3_LOCK_DAYS, VAULTIK_S3_LOCK_MODE and
+    // VAULTIK_S3_STORAGE_CLASS.
     static CloudCredentials from_environment();
 };
+
+// S3 storage classes for packs of file data: STANDARD_IA, ONEZONE_IA, GLACIER_IR (all readable at
+// once), GLACIER (Flexible Retrieval) and DEEP_ARCHIVE (both need a thaw before reading). Returns
+// the class as S3 names it, or empty for "STANDARD" and ""; any case. Throws Error for others.
+std::string parse_storage_class(std::string_view name);
+// Whether files in this storage class must be restored for a while before they can be read.
+bool storage_class_needs_thaw(std::string_view storage_class);
 
 namespace cloud {
 

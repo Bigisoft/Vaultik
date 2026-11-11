@@ -143,6 +143,14 @@ magic                     4 bytes "VKPK"
 The pack id is the unkeyed BLAKE3 hash of the whole pack file. Packs are closed at about 32 MiB.
 The header makes every pack self-describing, so the index can be rebuilt from packs alone.
 
+A pack may hold blobs of both types. While the storage keeps file data in an archive storage
+class (S3 `x-amz-storage-class`, the job's "Storage class"), data blobs and tree blobs go to
+separate packs: packs holding only data blobs, and their `parity/<xx>/<pack-id>` files, are
+uploaded in that class; packs holding tree blobs and every other file stay in the standard class,
+so the index, snapshots and folder listings can be read without a thaw. The format is the same
+either way, and a reader does not need to know which packs are archived (reading one that is
+not thawed fails until it is).
+
 ## Index files
 
 Sealed with AAD `"VKINDEX1" || index id`. Plaintext:

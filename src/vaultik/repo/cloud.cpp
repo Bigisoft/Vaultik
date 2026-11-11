@@ -109,7 +109,25 @@ CloudCredentials CloudCredentials::from_environment() {
     if (!mode.empty() && mode != "governance" && mode != "compliance")
         throw Error("VAULTIK_S3_LOCK_MODE must be governance or compliance");
     c.lock_compliance = mode == "compliance";
+    c.storage_class = parse_storage_class(os::get_env("VAULTIK_S3_STORAGE_CLASS"));
     return c;
+}
+
+std::string parse_storage_class(std::string_view name) {
+    std::string upper(name);
+    for (char& c : upper) {
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        if (c == '-') c = '_';
+    }
+    if (upper.empty() || upper == "STANDARD") return {};
+    for (const char* known : {"STANDARD_IA", "ONEZONE_IA", "GLACIER_IR", "GLACIER", "DEEP_ARCHIVE"})
+        if (upper == known) return upper;
+    throw Error("unknown storage class " + std::string(name) +
+                " (use STANDARD, STANDARD_IA, ONEZONE_IA, GLACIER_IR, GLACIER or DEEP_ARCHIVE)");
+}
+
+bool storage_class_needs_thaw(std::string_view storage_class) {
+    return storage_class == "GLACIER" || storage_class == "DEEP_ARCHIVE";
 }
 
 namespace cloud {

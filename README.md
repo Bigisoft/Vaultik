@@ -275,6 +275,8 @@ set AWS_ACCESS_KEY_ID=...
 set AWS_SECRET_ACCESS_KEY=...
 vaultik init   -r s3:https://<account id>.r2.cloudflarestorage.com/backups/my-pc
 vaultik backup -r s3:https://s3.eu-central-003.backblazeb2.com/my-bucket/vaultik C:\Users\me\Documents
+set VAULTIK_S3_STORAGE_CLASS=DEEP_ARCHIVE
+vaultik cloud-thaw -r s3:https://s3.eu-west-1.amazonaws.com/archive/my-pc latest --days 7
 ```
 
 The bucket must exist. The signing region is worked out from the endpoint (`auto` for R2,
@@ -441,6 +443,42 @@ the files that were deleted or overwritten since that time, and without `--dry-r
 back: later delete markers and versions are removed, or the old version is copied over a later
 one that is itself locked. Files added later stay; old lock files never come back. Then run
 `vaultik verify`.
+
+### Archive storage classes (S3)
+
+A long-term copy, usually the second copy, can keep its data in a cheaper storage class: in the
+cloud settings of S3-compatible storage, "Storage class" (on the command line:
+`VAULTIK_S3_STORAGE_CLASS`). Standard is the default; Amazon S3 also offers Infrequent Access
+(`STANDARD_IA`, `ONEZONE_IA`), Glacier Instant Retrieval (`GLACIER_IR`), Glacier Flexible
+Retrieval (`GLACIER`) and Glacier Deep Archive (`DEEP_ARCHIVE`). Most other providers
+(Cloudflare R2, Backblaze B2, Wasabi, IDrive e2, MinIO) offer only Standard, or Standard and
+Infrequent Access; a class they do not offer makes the first upload fail with a clear message.
+
+Only the packs of file data and their repair data (`data/`, `parity/`) go to that class.
+Everything small stays in Standard: the config, keys, recovery key, index, versions, locks and
+the folder listings, which then go to packs of their own. So listing versions, browsing them,
+opening the repository and backing up keep working as usual.
+
+Infrequent Access and Glacier Instant Retrieval are read at once (each read is billed).
+Glacier and Deep Archive must be restored for a while ("thawed") before a restore can read
+them: `vaultik cloud-thaw --job <job> [<version>|latest] [--path C/Users/me/Documents]` works
+out which packs restoring that version (or those files) needs and asks for a readable copy of
+each (`--days`, default 7; `--tier Standard|Bulk|Expedited`). It reports how many were asked
+for, are still being thawed and can be read already; run it again (or with `--status`, which
+asks for nothing) to see how far it is. A thaw takes minutes (Expedited, Glacier only) to 12
+hours (Standard), and up to 48 hours with Bulk or Deep Archive. A restore that reaches data
+that is not thawed stops with a message naming `cloud-thaw`; the restore window of the frontend
+offers to request the thaw instead.
+
+Health checks cannot read Glacier or Deep Archive data: they check that every pack is there and
+read the folder listings and versions, and say how many packs were only checked to be there.
+Cleanup (`prune`) only deletes packs nothing uses any more and never rewrites partly used ones,
+which would mean reading them. Repair needs every pack readable.
+
+These classes have minimum storage durations: data deleted earlier is billed as if it stayed
+(on Amazon S3: Infrequent Access 30 days, Glacier Instant Retrieval and Flexible Retrieval 90
+days, Deep Archive 180 days). Keep versions in such a copy for longer than
+that, so cleanup does not delete data that is still billed.
 
 ### Ransomware warning
 
@@ -723,6 +761,8 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
      last clean version is never removed automatically.
    - Locked cloud copies (done): S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded
      data undeletable for a set time, even with the keys, and `cloud-rollback` brings it back.
+   - Archive storage classes (done): a long-term cloud copy keeps its data in S3 Infrequent
+     Access, Glacier or Deep Archive, and `cloud-thaw` gets back what a restore needs.
 6. Portable version and installer (done for Windows): a portable folder that keeps its own
    settings, a copy of it kept on external backup drives with a how-to-restore note, and an MSI
    installer whose uninstall also removes the scheduled tasks. Still to come with the Linux port

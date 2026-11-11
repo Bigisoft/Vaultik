@@ -17,4 +17,11 @@ public:
     using Error::Error;
 };
 
+// A repository file is in archive storage (S3 Glacier Flexible Retrieval or Deep Archive) and
+// must be restored for a while ("vaultik cloud-thaw") before it can be read.
+class ArchivedError : public Error {
+public:
+    using Error::Error;
+};
+
 }  // namespace vaultik

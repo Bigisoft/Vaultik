@@ -151,7 +151,7 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
     // version refers to, and the checks below read it as it should be. A dry run keeps it in
     // memory instead.
     // A damaged or unreadable pack, whole again from its repair data (when it has some).
-    const auto rebuild = [&](const Id& id, const std::string& name, Bytes& pack, bool read_failed) {
+    const auto rebuild = [&](const Id& id, Bytes& pack, bool read_failed) {
         Bytes work = std::move(pack);
         if (read_failed) {
             try {
@@ -168,7 +168,7 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
         if (o.dry_run) {
             repo.use_pack_bytes(id, pack);
         } else {
-            backend.put(name, pack);
+            repo.write_pack(id, pack);
         }
         ++r.packs_rebuilt;
         warn("pack " + id_hex(id).substr(0, 8) + " was damaged and was rebuilt from its repair data");
@@ -197,7 +197,7 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
                     } catch (const std::exception&) {
                         failed = true;
                     }
-                    if (!rebuild(pack_id, name, pack, failed)) throw;
+                    if (!rebuild(pack_id, pack, failed)) throw;
                     entries = parse_pack_header(pack, repo.aead());
                 }
             } else {
@@ -208,7 +208,7 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
                     read_error = std::current_exception();
                 }
                 if (read_error || blake3(pack) != pack_id) {
-                    if (!rebuild(pack_id, name, pack, read_error != nullptr) && read_error)
+                    if (!rebuild(pack_id, pack, read_error != nullptr) && read_error)
                         std::rethrow_exception(read_error);
                 }
                 entries = parse_pack_header(pack, repo.aead());

@@ -376,6 +376,9 @@ PruneResult run_prune(Repository& repo, const PruneOptions& o) {
     }
 
     // 3. Keep, rewrite or delete each pack. A blob stored twice is kept in the first pack only.
+    // Packs in archive storage cannot be read without a thaw: they are deleted when nothing in
+    // them is used any more, never rewritten.
+    const bool archive = backend.data_needs_thaw();
     std::unordered_set<Id, IdHash> claimed;
     std::vector<Id> to_delete;
     std::vector<std::pair<Id, std::vector<BlobEntry>>> to_repack;
@@ -403,7 +406,9 @@ PruneResult run_prune(Repository& repo, const PruneOptions& o) {
         if (live.empty()) {
             to_delete.push_back(pack_id);
             r.bytes_deleted += size;
-        } else if (static_cast<double>(dead_bytes) > o.repack_unused * static_cast<double>(size)) {
+        } else if (static_cast<double>(dead_bytes) > o.repack_unused * static_cast<double>(size) &&
+                   !(archive && std::none_of(entries.begin(), entries.end(),
+                                             [](const BlobEntry& e) { return e.type == BlobType::Tree; }))) {
             to_repack.emplace_back(pack_id, std::move(live));
             r.bytes_deleted += size;
         } else {
