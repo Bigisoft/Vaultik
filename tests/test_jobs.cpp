@@ -396,6 +396,18 @@ TEST_CASE("a job with control or text-direction characters is refused") {
     CHECK_THROWS(validate(j));
 }
 
+TEST_CASE("a webhook alert with a name that is not valid UTF-8 is still sent") {
+    Alert a;
+    a.event = "failed";
+    a.job = "Docs";
+    a.title = "Backup of Docs failed";
+    a.message = "cannot read /home/a/caf\xE9.txt";  // Latin-1, not UTF-8
+    const std::string body = webhook_body(a, "pc", "2026-11-11 10:00:00");
+    const auto j = nlohmann::json::parse(body);
+    CHECK(j.at("job") == "Docs");
+    CHECK(j.at("message").get<std::string>().find("\xEF\xBF\xBD") != std::string::npos);
+}
+
 TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {
     TempStore tmp;
     AlertSettings s;
