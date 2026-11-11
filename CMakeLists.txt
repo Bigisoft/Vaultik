@@ -183,6 +183,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/repo_handle.cpp
             src/gui/job_dialog.cpp
             src/gui/restore_dialog.cpp
+            src/gui/apps_dialog.cpp
             src/gui/key_dialog.cpp
             src/gui/cloud_dialog.cpp
             src/gui/theme.cpp

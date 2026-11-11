@@ -95,6 +95,8 @@ void Runner::read_output() {
             emit warning(ev.value("message").toString());
         } else if (type == "done") {
             done_ = ev;
+        } else if (!type.isEmpty()) {
+            emit event(ev);
         }
     }
 }

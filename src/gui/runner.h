@@ -35,6 +35,8 @@ signals:
     // A "progress" event of a backup, or "check_progress" and the final "check" of a health check.
     void progress(const QJsonObject& event);
     void warning(const QString& message);
+    // Any other event before "done" (such as "app" of `vaultik apps`).
+    void event(const QJsonObject& event);
     // status: success, partial, failed or cancelled. `event` is the engine's "done" event.
     void finished(const QString& status, const QJsonObject& event);
 

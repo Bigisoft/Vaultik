@@ -452,6 +452,10 @@ QWidget* JobDialog::build_schedule() {
     skip_unchanged_->setToolTip(tr("A run that finds every file as it was shows in the Activity tab as \"nothing "
                                    "changed\" and still counts as a backup; no new version is added."));
     form->addRow(tr("Versions:"), skip_unchanged_);
+    record_apps_ = new QCheckBox(tr("Keep a list of the installed programs with each version"));
+    record_apps_->setToolTip(tr("On a new computer, \"Reinstall programs\" in the restore window then installs the "
+                                "missing ones with winget. The list is small and stored encrypted like the files."));
+    form->addRow(QString(), record_apps_);
     repair_data_ = new QComboBox;
     repair_data_->addItem(tr("Off"), 0);
     repair_data_->addItem(tr("5% of the backup's size (recommended for drives)"), 5);
@@ -822,6 +826,7 @@ void JobDialog::load(const jobs::Job& job) {
     for (int d = 0; d < 7; ++d) days_[d]->setChecked((job.schedule.weekdays >> d) & 1u);
     skip_battery_->setChecked(job.schedule.skip_on_battery);
     skip_unchanged_->setChecked(job.skip_unchanged);
+    record_apps_->setChecked(job.record_apps);
     {
         int at = repair_data_->findData(static_cast<int>(job.repair_data));
         if (at < 0) {
@@ -941,6 +946,7 @@ jobs::Job JobDialog::collect() const {
         if (days_[d]->isChecked()) j.schedule.weekdays |= static_cast<std::uint8_t>(1u << d);
     j.schedule.skip_on_battery = skip_battery_->isChecked();
     j.skip_unchanged = skip_unchanged_->isChecked();
+    j.record_apps = record_apps_->isChecked();
     j.repair_data = static_cast<unsigned>(repair_data_->currentData().toInt());
     j.schedule.wake_computer = wake_->isChecked();
     j.schedule.skip_metered = skip_metered_->isChecked();

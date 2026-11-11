@@ -23,6 +23,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
+#include "apps_dialog.h"
 #include "common.h"
 #include "find_page.h"
 #include "preview.h"
@@ -102,6 +103,8 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
                          "of what restoring the selected item (or the whole version) needs. Asking again shows how "
                          "far the thaw is."));
     connect(thaw_, &QPushButton::clicked, this, &RestoreDialog::request_thaw);
+    apps_ = buttons->addButton(tr("Reinstall programs..."), QDialogButtonBox::ActionRole);
+    connect(apps_, &QPushButton::clicked, this, &RestoreDialog::reinstall_programs);
     restore_ = buttons->addButton(tr("Restore"), QDialogButtonBox::AcceptRole);
     restore_->setDefault(true);
     connect(restore_, &QPushButton::clicked, this, &RestoreDialog::start_restore);
@@ -307,6 +310,12 @@ void RestoreDialog::show_versions_of_selected() {
 void RestoreDialog::show_snapshot(int index) {
     tree_->clear();
     if (index < 0 || index >= static_cast<int>(snapshots_.size())) return;
+    const bool has_apps = snapshots_[static_cast<std::size_t>(index)].snapshot.apps.has_value();
+    apps_->setEnabled(has_apps);
+    apps_->setToolTip(has_apps ? tr("Install the programs the computer had when this version was made, and that are "
+                                    "missing here, with winget")
+                               : tr("This version has no list of the installed programs (made by an older Vaultik, "
+                                    "or with the list turned off in the job)"));
     // The root is a virtual folder holding the drives (Windows) or top-level folders (Linux).
     auto* root = new QTreeWidgetItem;
     root->setData(0, KindRole, static_cast<int>(NodeKind::Dir));
@@ -528,6 +537,18 @@ void RestoreDialog::move_here() {
     snapshot_->setEnabled(false);
     status_->setText(tr("Starting..."));
     runner_->start(args, password_, cloud_);
+}
+
+void RestoreDialog::reinstall_programs() {
+    if (snapshots_.empty()) return;
+    const SnapshotEntry& snap = snapshots_[static_cast<std::size_t>(snapshot_->currentIndex())];
+    QStringList repo_args;
+    if (job_.id.empty())
+        repo_args << "--repo" << qs(job_.repository);
+    else
+        repo_args << "--job" << qs(job_.id);
+    AppsDialog dialog(repo_args, qs(id_hex(snap.id)), password_, cloud_, this);
+    dialog.exec();
 }
 
 RestoreDialog::~RestoreDialog() {

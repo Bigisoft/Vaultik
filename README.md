@@ -261,6 +261,8 @@ vaultik restore   --job documents latest --target D:\Restore
 vaultik key passwd   -r E:\Backups\vaultik
 vaultik key passwd   -r E:\Backups\vaultik --recovery-key
 vaultik key recovery -r E:\Backups\vaultik
+vaultik apps         --job documents latest --missing
+vaultik apps install --job documents Git.Git 7zip.7zip
 ```
 
 The repository can be any folder: an internal disk, a USB drive or a network share
@@ -561,6 +563,23 @@ documents,browsers` picks groups or single items; `--account` picks one when the
 several. Close the browsers and email programs first; saved browser passwords were sealed for the
 old account, so browsers ask you to sign in again.
 
+### Programs from the old PC
+
+Each version of a saved job also keeps the list of programs installed on the computer (name,
+version, publisher; turn it off in the job with "Keep a list of the installed programs"). It is
+read from the Windows uninstall list, leaving out system components, parts of other programs and
+updates, and matched to winget packages where winget is there for your account; an unchanged list
+is stored once. `vaultik backup` keeps it only with `--apps`.
+
+On a new computer, **Reinstall programs...** in the restore window shows the programs of that
+version that are not installed here. Those with a winget package can be ticked and installed one
+after the other; winget installs each silently as you, and Windows asks for administrator approval
+when an installer needs it (Vaultik never runs it with those rights itself). The others are listed
+with their publisher and version, to install by hand. From the command line, `vaultik apps
+[<version>] --job <job>` (or `-r <repository>`) lists them, `--missing` only those not on this PC,
+and `vaultik apps install <id>... [--snapshot <version>]` installs packages of that list (no
+other ids are taken).
+
 ### Repairing a damaged backup
 
 When a check or a restore found damage (a bad sector on the backup drive, a file changed by
@@ -750,6 +769,11 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
   symlinks are kept; extended attributes and ACLs are not. Kernel file systems (`/proc`, `/sys`,
   `/dev`, tmpfs) are skipped.
 - NTFS names that are not valid UTF-16 (unpaired surrogates, very rare) cannot be backed up.
+- The program list knows only what the Windows uninstall list and winget know. Jobs with
+  administrator rights run as the system account, which has no winget and its own per-user list:
+  their versions list the programs installed for everyone, by name only, so none of them can be
+  installed with winget from there. A program is "missing" when neither its winget package nor
+  its name (without version numbers) is found on this PC.
 - Restores and backups check for links planted in the folders they work on, but a parent folder
   swapped for a link during the run by someone who can write there is not detected. Run elevated
   restores into folders only you can write to.
@@ -803,8 +827,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
 7. More convenience and security (done): a second copy of each backup (3-2-1), a size and time
    estimate before the first backup, comparing two versions with a side-by-side text diff,
    "Earlier versions in Vaultik" in File Explorer's right-click menu, ready-made exclusions,
-   pausing a backup and a slower speed during working hours, a Bulgarian translation, and
-   Windows Hello before backups are opened.
+   pausing a backup and a slower speed during working hours, a Bulgarian translation,
+   Windows Hello before backups are opened, and the installed programs kept with each version
+   to install again with winget on a new PC.
 8. Linux port, SteamOS on the Steam Deck first. The review before it is done; its Linux hazards
    are listed in docs/LINUX_PORT.md. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client

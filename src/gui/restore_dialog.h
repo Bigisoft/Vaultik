@@ -55,6 +55,8 @@ private:
     void show_archived_note();
     // The engine command line for this job or repository: "--job <id>" or "--repo <location>".
     QStringList repo_args() const;
+    // The programs of this version that are missing here, to install again with winget.
+    void reinstall_programs();
 
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;
@@ -77,6 +79,7 @@ private:
     QPushButton* move_ = nullptr;
     QPushButton* thaw_ = nullptr;
     bool thaw_running_ = false;  // the engine runs cloud-thaw, not a restore
+    QPushButton* apps_ = nullptr;
     Runner* runner_ = nullptr;
     int warnings_ = 0;
 };
