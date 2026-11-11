@@ -62,11 +62,10 @@ std::optional<UsnChanges> usn_changes_since(const std::string& path, std::uint64
 // FILE_FLAG_BACKUP_SEMANTICS so folders work, not following a final reparse point). Throws Error.
 FileRef file_ref(const std::string& path);
 
-// The full paths of every name of the file `ref` on the volume that holds `volume_path`, when it
-// has more than one (hard links); empty when it has one name, is a folder, or no longer exists. A
-// change through one name is recorded in that name's folder only, so the others' folders are
-// found here. Needs the backup privilege for files the account cannot read. Throws Error on other
-// failures.
-std::vector<std::string> other_names(const std::string& volume_path, const FileRef& ref);
+// The folders holding a name of any of the files `refs` on the volume that holds `volume_path`
+// that have more than one name (hard links). A change through one name is recorded in that name's
+// folder only, so the others' folders are found here. Files that no longer exist, folders and
+// files with one name add nothing. Throws Error on other failures.
+std::vector<FileRef> link_parents(const std::string& volume_path, const std::vector<FileRef>& refs);
 
 }  // namespace vaultik::os

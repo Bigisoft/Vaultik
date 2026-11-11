@@ -39,9 +39,11 @@ struct ChangeJournal::State {
     std::optional<Id> parent;
     std::map<std::string, std::shared_ptr<os::UsnChanges>> changes;  // volume root -> records since
     std::vector<std::pair<std::string, std::string>> source_roots;  // folded source path -> volume root
-    // Folders (folded paths) holding another name of a changed file: a change through one hard
-    // link is recorded in that link's folder only.
-    std::shared_ptr<std::unordered_set<std::string>> link_dirs = std::make_shared<std::unordered_set<std::string>>();
+    // Folders holding another name of a changed file: a change through one hard link is recorded
+    // in that link's folder only.
+    std::shared_ptr<std::unordered_set<os::FileRef, os::FileRefHash>> link_dirs =
+        std::make_shared<std::unordered_set<os::FileRef, os::FileRefHash>>();
+    std::string why_not;  // why every folder is read, when it is
 };
 
 ChangeJournal::ChangeJournal(std::string store_dir, std::string job_id, std::vector<std::string> sources,
@@ -49,6 +51,9 @@ ChangeJournal::ChangeJournal(std::string store_dir, std::string job_id, std::vec
     : s_(std::make_unique<State>()) {
     try {
         if (!os::process_elevated()) return;
+        // Changed files are opened by id below, including ones the account cannot read.
+        os::enable_backup_privileges();
+        s_->why_not = "no change journal on a source's drive";
         for (std::string& p : sources) p = os::absolute_path(p);
         std::string text;
         for (const std::string& p : sources) text += os::fold_case(p) + '\n';
@@ -72,35 +77,42 @@ ChangeJournal::ChangeJournal(std::string store_dir, std::string job_id, std::vec
         }
 
         // The position after the last backup.
+        s_->why_not = "no earlier backup read every folder without errors";
         if (!os::exists(s_->file)) return;
         const Bytes b = os::read_file(s_->file, 1 << 20);
         const nlohmann::json j = nlohmann::json::parse(std::string(b.begin(), b.end()));
+        s_->why_not = "the job's folders or exclusions changed";
         if (j.value("key", std::string()) != s_->key) return;
         s_->full_scan = j.value("full_scan", std::uint64_t{0});
         const std::uint64_t now = os::now();
-        if (s_->full_scan > now || now - s_->full_scan > kWeek) return;  // read everything once a week
+        s_->why_not = "every folder is read once a week";
+        if (s_->full_scan > now || now - s_->full_scan > kWeek) return;
         std::map<std::string, std::shared_ptr<os::UsnChanges>> changes;
         for (const Volume& v : s_->now) {
             const nlohmann::json* saved = nullptr;
             for (const nlohmann::json& e : j.at("volumes"))
                 if (e.value("root", std::string()) == v.root) saved = &e;
+            s_->why_not = "the change journal of " + v.root + " was recreated";
             if (saved == nullptr || saved->value("journal", std::uint64_t{0}) != v.journal_id) return;
             std::optional<os::UsnChanges> c =
                 os::usn_changes_since(v.root, v.journal_id, saved->value("usn", std::int64_t{0}), v.usn);
-            if (!c) return;  // the journal no longer reaches back that far
+            s_->why_not = "the change journal of " + v.root + " no longer reaches back to the last backup";
+            if (!c) return;
             // Each changed file's other names, if it has any. Many changes: read everything,
             // which is about as quick then.
+            s_->why_not = "too many changes on " + v.root;
             if (c->changed.size() > 50000) return;
-            for (const os::FileRef& ref : c->changed)
-                for (const std::string& name : os::other_names(v.root, ref))
-                    s_->link_dirs->insert(os::fold_case(os::parent_of(name)));
+            const std::vector<os::FileRef> refs(c->changed.begin(), c->changed.end());
+            for (const os::FileRef& parent : os::link_parents(v.root, refs)) s_->link_dirs->insert(parent);
             changes[v.root] = std::make_shared<os::UsnChanges>(std::move(*c));
         }
         s_->changes = std::move(changes);
         s_->parent = id_from_hex(j.value("snapshot", std::string()));
-    } catch (const std::exception&) {
+        s_->why_not.clear();
+    } catch (const std::exception& e) {
         s_->parent.reset();
         s_->changes.clear();
+        s_->why_not = e.what();
     }
 }
 
@@ -108,6 +120,10 @@ ChangeJournal::~ChangeJournal() = default;
 
 bool ChangeJournal::usable() const {
     return s_->parent.has_value() && !s_->changes.empty();
+}
+
+std::string ChangeJournal::why_not() const {
+    return usable() ? std::string() : s_->why_not;
 }
 
 void ChangeJournal::apply(BackupOptions& options) const {
@@ -119,7 +135,6 @@ void ChangeJournal::apply(BackupOptions& options) const {
     auto link_dirs = s_->link_dirs;
     options.dir_unchanged = [roots, changes, link_dirs](const std::string& dir) {
         const std::string folded = os::fold_case(dir);
-        if (link_dirs->contains(folded)) return false;
         for (const auto& [source, root] : roots) {
             if (!folded.starts_with(source)) continue;
             if (folded.size() > source.size() && folded[source.size()] != '\\' && folded[source.size()] != '/' &&
@@ -129,7 +144,8 @@ void ChangeJournal::apply(BackupOptions& options) const {
             if (it == changes.end()) return false;
             try {
                 const os::FileRef ref = os::file_ref(dir);
-                return !it->second->parents.contains(ref) && !it->second->changed.contains(ref);
+                return !it->second->parents.contains(ref) && !it->second->changed.contains(ref) &&
+                       !link_dirs->contains(ref);
             } catch (const std::exception&) {
                 return false;
             }

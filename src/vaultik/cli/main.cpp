@@ -814,6 +814,8 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
     }
     if (r.dirs_reused > 0 && !g_json)
         out("Change journal: " + std::to_string(r.dirs_reused) + " unchanged folder(s) were not read again\n");
+    else if (journal != nullptr && !journal->why_not().empty() && !g_json)
+        out("Change journal: every folder was read (" + journal->why_not() + ")\n");
     record.finished = os::now();
     record.status = s.errors > 0 ? jobs::RunStatus::Partial : jobs::RunStatus::Success;
     record.snapshot = r.unchanged ? std::string() : id_hex(r.snapshot_id);

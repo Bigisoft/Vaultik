@@ -33,6 +33,9 @@ public:
     void apply(BackupOptions& options) const;
     // Whether apply lets the backup skip folders.
     bool usable() const;
+    // Why every folder is read, when it is; empty when the journal is used, or when the run has no
+    // administrator rights (then nothing is tried).
+    std::string why_not() const;
     // After a backup without errors that saved `snapshot` (or found nothing changed since it):
     // the position to read from next time. Never throws.
     void save(const Id& snapshot) noexcept;

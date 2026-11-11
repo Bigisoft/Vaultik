@@ -4,6 +4,8 @@
 #include <winioctl.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <string>
 #include <cstring>
 #include <vector>
 
@@ -186,64 +188,92 @@ FileRef file_ref(const std::string& path) {
     return ref64((static_cast<std::uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow);
 }
 
-std::vector<std::string> other_names(const std::string& volume_path, const FileRef& ref) {
+namespace {
+
+// FileHardLinkInformation (46) of NtQueryInformationFile: every name of a file, each as its
+// folder's 64-bit id and the name in it.
+struct LinkEntry {
+    ULONG next_entry_offset;
+    LONGLONG parent_file_id;
+    ULONG file_name_length;
+    WCHAR file_name[1];
+};
+struct LinksInfo {
+    ULONG bytes_needed;
+    ULONG entries_returned;
+    LinkEntry entry;
+};
+struct IoStatus {
+    union {
+        LONG status;
+        PVOID pointer;
+    };
+    ULONG_PTR information;
+};
+using QueryInformationFile = LONG(NTAPI*)(HANDLE, IoStatus*, PVOID, ULONG, int);
+constexpr int kFileHardLinkInformation = 46;
+constexpr LONG kBufferOverflow = static_cast<LONG>(0x80000005L);
+constexpr LONG kBufferTooSmall = static_cast<LONG>(0xC0000023L);
+
+}  // namespace
+
+std::vector<FileRef> link_parents(const std::string& volume_path, const std::vector<FileRef>& refs) {
+    std::vector<FileRef> out;
+    if (refs.empty()) return out;
+    static const auto query = reinterpret_cast<QueryInformationFile>(
+        reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile")));
+    if (query == nullptr) throw Error("cannot list the names of changed files on this system");
     // Any handle on the volume serves as the hint for OpenFileById: its root folder.
     wchar_t root[MAX_PATH + 1] = {};
     if (!GetVolumePathNameW(widen(volume_path).c_str(), root, MAX_PATH)) throw_last_error("cannot find the volume of " + volume_path);
     const UniqueHandle hint(CreateFileW(root, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
     if (!hint.valid()) throw_last_error("cannot open the volume of " + volume_path);
-    FILE_ID_DESCRIPTOR id{};
-    id.dwSize = sizeof id;
-    id.Type = ExtendedFileIdType;
-    std::memcpy(id.ExtendedFileId.Identifier, &ref.low, 8);
-    std::memcpy(id.ExtendedFileId.Identifier + 8, &ref.high, 8);
-    const UniqueHandle file(OpenFileById(hint.get(), &id, FILE_READ_ATTRIBUTES,
-                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT));
-    if (!file.valid()) {
-        const DWORD err = GetLastError();
-        if (err == ERROR_INVALID_PARAMETER || err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND ||
-            err == ERROR_DELETE_PENDING)
-            return {};  // gone since: its folders have records of their own
-        throw_win32("cannot open a changed file by its id", err);
-    }
-    BY_HANDLE_FILE_INFORMATION info{};
-    if (!GetFileInformationByHandle(file.get(), &info)) throw_last_error("cannot read a changed file");
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 || info.nNumberOfLinks <= 1) return {};
-    // Each name, as "\folder\file" on the volume, put after the volume's root ("C:\").
-    std::wstring prefix = root;
-    while (!prefix.empty() && prefix.back() == L'\\') prefix.pop_back();
-    std::wstring path(MAX_PATH, L'\0');
-    DWORD n = GetFinalPathNameByHandleW(file.get(), path.data(), static_cast<DWORD>(path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_NONE);
-    if (n >= path.size()) {
-        path.resize(n + 1);
-        n = GetFinalPathNameByHandleW(file.get(), path.data(), static_cast<DWORD>(path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_NONE);
-    }
-    if (n == 0 || n >= path.size()) throw_last_error("cannot name a changed file");
-    path.resize(n);
-    const std::wstring any = prefix + path;
-    std::vector<std::string> out;
-    std::wstring name(1024, L'\0');
-    DWORD len = static_cast<DWORD>(name.size());
-    HANDLE find = FindFirstFileNameW(any.c_str(), 0, &len, name.data());
-    if (find == INVALID_HANDLE_VALUE && GetLastError() == ERROR_MORE_DATA) {
-        name.resize(len + 1);
-        len = static_cast<DWORD>(name.size());
-        find = FindFirstFileNameW(any.c_str(), 0, &len, name.data());
-    }
-    if (find == INVALID_HANDLE_VALUE) throw_last_error("cannot list the names of a changed file");
-    for (int guard = 0; guard < 1100; ++guard) {  // NTFS allows 1024 names per file
-        out.push_back(narrow(prefix + std::wstring(name.c_str())));
-        len = static_cast<DWORD>(name.size());
-        if (!FindNextFileNameW(find, &len, name.data())) {
-            if (GetLastError() != ERROR_MORE_DATA) break;
-            name.resize(len + 1);
-            len = static_cast<DWORD>(name.size());
-            if (!FindNextFileNameW(find, &len, name.data())) break;
+    std::vector<std::uint8_t> buffer(4096);
+    for (const FileRef& ref : refs) {
+        FILE_ID_DESCRIPTOR id{};
+        id.dwSize = sizeof id;
+        id.Type = ExtendedFileIdType;
+        std::memcpy(id.ExtendedFileId.Identifier, &ref.low, 8);
+        std::memcpy(id.ExtendedFileId.Identifier + 8, &ref.high, 8);
+        // No access rights are needed to read a file's names, so files the account cannot read
+        // open too.
+        const UniqueHandle file(OpenFileById(hint.get(), &id, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                             nullptr, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT));
+        if (!file.valid()) {
+            const DWORD err = GetLastError();
+            if (err == ERROR_INVALID_PARAMETER || err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND ||
+                err == ERROR_DELETE_PENDING || err == ERROR_CANT_ACCESS_FILE)
+                continue;  // gone since: its folders have records of their own
+            throw_win32("cannot open a changed file by its id", err);
+        }
+        LONG status = 0;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            IoStatus io{};
+            status = query(file.get(), &io, buffer.data(), static_cast<ULONG>(buffer.size()), kFileHardLinkInformation);
+            if (status != kBufferOverflow && status != kBufferTooSmall) break;
+            const ULONG needed = reinterpret_cast<const LinksInfo*>(buffer.data())->bytes_needed;
+            buffer.resize(std::max<std::size_t>(buffer.size() * 2, needed + 64));
+        }
+        if (status < 0) {
+            // Folders and some special files have no list of names: one name, nothing to add.
+            if (status == static_cast<LONG>(0xC0000003L) /* invalid info class */ ||
+                status == static_cast<LONG>(0xC00000BBL) /* not supported */ ||
+                status == static_cast<LONG>(0xC0000010L) /* invalid device request */ ||
+                status == static_cast<LONG>(0xC00000BAL) /* is a directory */)
+                continue;
+            throw Error("cannot list the names of a changed file (status " + std::to_string(static_cast<unsigned long>(status)) + ")");
+        }
+        const auto* info = reinterpret_cast<const LinksInfo*>(buffer.data());
+        if (info->entries_returned <= 1) continue;
+        std::size_t offset = offsetof(LinksInfo, entry);
+        for (ULONG i = 0; i < info->entries_returned && offset + sizeof(LinkEntry) <= buffer.size(); ++i) {
+            const auto* e = reinterpret_cast<const LinkEntry*>(buffer.data() + offset);
+            out.push_back(ref64(static_cast<std::uint64_t>(e->parent_file_id)));
+            if (e->next_entry_offset == 0) break;
+            offset += e->next_entry_offset;
         }
     }
-    FindClose(find);
     return out;
 }
 

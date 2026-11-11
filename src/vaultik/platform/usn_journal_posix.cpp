@@ -18,7 +18,7 @@ FileRef file_ref(const std::string&) {
     throw Error("file ids are not implemented on this platform");
 }
 
-std::vector<std::string> other_names(const std::string&, const FileRef&) {
+std::vector<FileRef> link_parents(const std::string&, const std::vector<FileRef>&) {
     return {};
 }
 
