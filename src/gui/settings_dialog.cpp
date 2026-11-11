@@ -58,7 +58,11 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     const AppSettings s = AppSettings::load();
     const StartupSetting startup = startup_setting();
 
+#ifdef Q_OS_WIN
     start_ = new QCheckBox(tr("Start Vaultik when I sign in to Windows"));
+#else
+    start_ = new QCheckBox(tr("Start Vaultik when I sign in"));
+#endif
     start_->setChecked(startup.enabled);
     start_hidden_ = new QCheckBox(tr("Start hidden in the notification area"));
     start_hidden_->setChecked(startup.enabled ? startup.hidden : true);
@@ -115,11 +119,17 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     layout->addWidget(heading(tr("Startup")));
     layout->addWidget(start_);
     layout->addWidget(indented(start_hidden_));
+#ifdef Q_OS_WIN
     layout->addWidget(admin_);
     layout->addWidget(note(tr("Windows asks for approval once, then never again. Vaultik can then read all of a "
                               "drive's health details, but everything it starts, also every backup, runs with "
                               "administrator rights, and files can no longer be dragged into it from File Explorer."),
                            26));
+#else
+    // Administrator tasks are Windows only (Linux: run the engine as root from a system timer).
+    admin_->setParent(this);
+    admin_->hide();
+#endif
     layout->addSpacing(12);
     layout->addWidget(heading(tr("Notification area")));
     layout->addWidget(tray_icon_);
@@ -166,7 +176,11 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     });
     // Language: Windows' own, or one chosen here; used from the next start.
     language_ = new QComboBox;
+#ifdef Q_OS_WIN
     language_->addItem(tr("Same as Windows"), QStringLiteral("auto"));
+#else
+    language_->addItem(tr("Same as the system"), QStringLiteral("auto"));
+#endif
     language_->addItem(QStringLiteral("English"), QStringLiteral("en"));
     language_->addItem(QStringLiteral("Български"), QStringLiteral("bg"));
     language_->setCurrentIndex(std::max(0, language_->findData(chosen_language())));
@@ -181,12 +195,17 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
     layout->addWidget(language_row);
     layout->addWidget(note(tr("Used the next time Vaultik starts."), 0));
 
+#ifdef Q_OS_WIN
     layout->addSpacing(12);
     layout->addWidget(heading(tr("Security")));
     layout->addWidget(hello_);
     layout->addWidget(note(tr("Restoring, browsing, searching and comparing versions then need your face, fingerprint "
                               "or PIN, once until Vaultik is hidden again. Scheduled backups are not affected."),
                            26));
+#else
+    hello_->setParent(this);  // Windows Hello only
+    hello_->hide();
+#endif
     // Updates: only a question to GitHub; installing stays the user's step.
     updates_ = new QCheckBox(tr("Check for a new version once a day"));
     updates_->setChecked(s.check_updates);
