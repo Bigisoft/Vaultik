@@ -242,6 +242,8 @@ format change, so older Vaultik versions still read the snapshot (and show them 
 - `vaultik:copy-of=<64 hex>`: in a second copy, the id of the snapshot it was copied from.
 - `vaultik:apps=<64 hex>`: the id of a Data blob listing the programs installed when the snapshot
   was made (Vaultik 0.7 and later; see below).
+- `vaultik:image`: a disk image (added after Vaultik 0.7.0; see "Disk images"). Older versions see
+  its partitions as folders of large files.
 
 The program list blob is stored like file content (so an unchanged list is one blob across
 snapshots). Its plaintext is UTF-8 JSON, sorted by name:
@@ -260,6 +262,54 @@ not know the tag: their prune removes the blob, and the snapshot then reads as h
 
 Unknown reserved tags are ignored. Pinning or describing a snapshot rewrites its file under the
 same id while holding a shared lock, and never recreates a snapshot that was removed.
+
+## Disk images
+
+An image snapshot (the reserved tag `vaultik:image`, added after Vaultik 0.7.0 without a
+format version change) holds whole disks.
+Its `paths` are `image:<disk id>` per disk, the disk id being `gpt-<disk GUID>` or
+`mbr-<signature, 8 hex digits>`. Its tree is an ordinary tree (version 2), so prune, verify,
+copy and repair need nothing new:
+
+```
+disk0/                 one folder per disk, in the order backed up
+  layout.json          the disk layout (below), as file content
+  r0, r1, ...          the stored regions of the disk outside its partitions, as files
+  p0, p1, ...          per partition of the layout (by its index), unless it is an MBR container
+    g0000/             groups of 64 segments
+      s000000          the partition's bytes in segments of 1 GiB (the last one shorter)
+```
+
+All nodes have zero attributes, mode and times, so an unchanged segment or group gives the same
+tree blob as before. A segment's size is its length; its chunks, concatenated, are its bytes.
+Partitions read "used" (NTFS) store unused clusters as zeros: runs shorter than 16 MiB inside
+the data stream (chunked with it), longer runs ("holes") as chunks of `chunk_max` zero bytes and
+one shorter one. A restore recognises zero chunks by their id (the id of that many zero bytes,
+looked up through the blob's raw length in the index) and need not load or write them on a new
+virtual disk, nor in a hole on a disk being overwritten.
+
+`layout.json` (UTF-8 JSON; readers ignore unknown fields):
+
+```
+{"version": 1, "style": "gpt"|"mbr", "sector_size": 512|4096, "physical_sector_size",
+ "size": <bytes>, "disk_guid": "<GUID>" (gpt), "signature": <u32> (mbr), "gpt_entries": 128,
+ "number", "model", "serial", "system": <Windows ran from it>, "id": "<disk id>",
+ "partitions": [{"number", "offset", "length" (bytes, sector multiples),
+   "type", "guid", "name", "attributes" (gpt), "mbr_type", "active" (mbr),
+   "filesystem", "label", "mount", "serial", "cluster_size", "windows",
+   "method": "used"|"raw", "shadow_copy": <bool>, "used_bytes",
+   "holes": [[offset, length], ...] (from the partition start, "used" only)}],
+ "regions": [{"offset", "length"}]}
+```
+
+Regions are the first 1 MiB (at most) of every gap outside the partitions (MBR containers do
+not count as used): the MBR with its boot code, the GPT, EBRs of logical partitions, boot
+loaders. A restore writes, in this order: zeros over the first and last 1 MiB of a disk that is
+not empty, the regions (an MBR gets the layout's signature at offset 440), every partition, and
+for GPT a new protective MBR, primary and backup GPT computed for the target's size (same disk
+and partition GUIDs unless new ones are asked for). Readers reject a layout version other than
+1, sector sizes other than 512 and 4096, partitions or regions outside the disk, and regions
+over 16 MiB.
 
 ## Locks
 

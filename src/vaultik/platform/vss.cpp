@@ -113,7 +113,13 @@ std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& p
     for (const std::string& p : paths) {
         const std::wstring wp = widen(p);
         wchar_t mount[MAX_PATH + 1];
-        if (!GetVolumePathNameW(wp.c_str(), mount, MAX_PATH)) continue;
+        // A volume name ("\\?\Volume{GUID}\", disk images: volumes without a drive letter) is its
+        // own mount point.
+        if (upper(p).starts_with("\\\\?\\VOLUME{") && p.ends_with('\\') && wp.size() <= MAX_PATH) {
+            wcscpy_s(mount, wp.c_str());
+        } else if (!GetVolumePathNameW(wp.c_str(), mount, MAX_PATH)) {
+            continue;
+        }
         const std::string mount_u8 = upper(narrow(mount));
         if (std::any_of(volumes.begin(), volumes.end(), [&](const auto& v) { return v.first == mount_u8; })) continue;
         const UINT type = GetDriveTypeW(mount);

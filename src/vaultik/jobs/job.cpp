@@ -291,7 +291,16 @@ void validate(const Job& job) {
             if (job.cloud_key_id.empty())
                 throw Error(std::string("sign in to ") + cloud_kind_name(cloud_kind(job.repository)) + " first");
     }
-    if (job.sources.empty()) throw Error("the job needs at least one folder or file to back up");
+    for (const std::string& d : job.image_disks) check_text("a disk to back up", d);
+    if (!job.image_disks.empty()) {
+        if (!job.sources.empty()) throw Error("a job backs up either disks or folders, not both");
+        for (const std::string& d : job.image_disks)
+            if (d.empty()) throw Error("pick at least one disk to back up");
+        if (!job.run_as_admin)
+            throw Error("a disk image backup needs administrator rights: turn on \"Run with administrator rights\"");
+    } else if (job.sources.empty()) {
+        throw Error("the job needs at least one folder or file to back up");
+    }
     for (const std::string& s : job.sources)
         if (s.empty()) throw Error("empty source path");
     const Schedule& s = job.schedule;
@@ -363,6 +372,7 @@ std::string to_json(const Job& job) {
         {"cloud_lock_mode", job.cloud_lock_compliance ? "compliance" : "governance"},
         {"cloud_storage_class", job.cloud_storage_class},
         {"sources", job.sources},
+        {"image_disks", job.image_disks},
         {"excludes", job.excludes},
         {"tags", job.tags},
         {"vss", job.vss},
@@ -446,6 +456,7 @@ Job job_from_json(const std::string& text) {
         job.cloud_lock_compliance = j.value("cloud_lock_mode", std::string("governance")) == "compliance";
         job.cloud_storage_class = j.value("cloud_storage_class", std::string());  // missing in older jobs
         job.sources = strings(j, "sources");
+        job.image_disks = strings(j, "image_disks");
         job.excludes = strings(j, "excludes");
         job.tags = strings(j, "tags");
         job.vss = j.value("vss", true);
