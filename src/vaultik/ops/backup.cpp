@@ -370,7 +370,12 @@ private:
     // A folder the change journal says is unchanged: its parent listing, with each subfolder
     // asked again. nullopt (nothing counted yet) when the parent's data is not all there.
     std::optional<Id> reuse_dir(const std::string& dir, std::uint64_t device, const Tree& parent);
+    // Whether the change journal lets folder `dir` be taken from the parent version. Not inside
+    // a folder that was itself renamed, moved or created since then: the parent version's
+    // folder of the same name may be another folder, so the names of its subfolders say nothing.
+    bool journal_unchanged(const std::string& dir);
     bool use_journal_ = false;
+    std::vector<std::string> moved_dirs_;  // folders the journal has records of themselves
     std::uint64_t dirs_reused_ = 0;
     // `job`: a file the readers are reading (read_threads > 1), taken from them instead of
     // opened here.
@@ -782,7 +787,7 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
             } else {
                 if (pnode != nullptr && pnode->kind == NodeKind::Dir) ptree = load_tree(pnode->subtree);
                 pt = ptree ? &*ptree : nullptr;
-                if (pt != nullptr && use_journal_ && options_.dir_unchanged(path)) {
+                if (pt != nullptr && journal_unchanged(path)) {
                     if (const std::optional<Id> id = reuse_dir(path, info.device, *pt)) {
                         node.subtree = *id;
                         ++stats_.dirs;
@@ -932,7 +937,7 @@ void BackupEngine::look_ahead() {
             continue;
         }
         // What the engine does with this folder depends on more than its listing: stop here.
-        if (e.info.device != frame.dir->device || (use_journal_ && options_.dir_unchanged(e.path))) {
+        if (e.info.device != frame.dir->device || journal_unchanged(e.path)) {
             walk_.clear();
             return;
         }
@@ -985,6 +990,18 @@ Id BackupEngine::scan_dir(const std::string& dir, std::uint64_t device, const Tr
     return id;
 }
 
+bool BackupEngine::journal_unchanged(const std::string& dir) {
+    if (!use_journal_) return false;
+    for (const std::string& m : moved_dirs_)
+        if (dir.starts_with(m) && (dir.size() == m.size() || dir[m.size()] == '\\' || dir[m.size()] == '/'))
+            return false;
+    if (options_.dir_unchanged(dir)) return true;
+    // Asked only of the few folders the journal does not call unchanged. Folders are met before
+    // what is in them, so the folder is known here before any of its subfolders is asked about.
+    if (options_.dir_moved && options_.dir_moved(dir)) moved_dirs_.push_back(dir);
+    return false;
+}
+
 std::optional<Id> BackupEngine::reuse_dir(const std::string& dir, std::uint64_t device, const Tree& parent) {
     // Everything the listing points at must still be stored (a prune may have removed data no
     // version uses); otherwise the folder is read as usual.
@@ -1016,7 +1033,7 @@ std::optional<Id> BackupEngine::reuse_dir(const std::string& dir, std::uint64_t 
                 // The folder's own entry is as before; what is in it is asked about in turn.
                 std::optional<Tree> sub = load_tree(old.subtree);
                 std::optional<Id> id;
-                if (sub && options_.dir_unchanged(child)) id = reuse_dir(child, device, *sub);
+                if (sub && journal_unchanged(child)) id = reuse_dir(child, device, *sub);
                 if (id) {
                     node.subtree = *id;
                     ++stats_.dirs;

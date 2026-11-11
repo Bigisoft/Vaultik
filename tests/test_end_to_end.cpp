@@ -534,6 +534,45 @@ TEST_CASE("folders the change journal calls unchanged are taken from the parent"
     }
 }
 
+TEST_CASE("the change journal is not trusted inside a folder that was renamed") {
+    // Two folders swap names: the journal has records for the two folders and the folder they are
+    // in, none for what is inside them, so proj\code looks unchanged. It is another folder now.
+    for (const unsigned readers : {0u, 4u}) {
+        CAPTURE(readers);
+        TempDir tmp;
+        const fs::path src = tmp.path / "top";
+        const fs::path repo_dir = tmp.path / "repo";
+        write_file(src / "proj" / "code" / "x.txt", text("old project"));
+        write_file(src / "proj_new" / "code" / "x.txt", text("new project"));
+        init_repo(repo_dir);
+        auto repo = open_repo(repo_dir);
+        BackupOptions options;
+        options.paths = {u8(src)};
+        options.read_threads = readers;
+        const BackupResult first = run_backup(*repo, options);
+
+        fs::rename(src / "proj", src / "proj_old");
+        fs::rename(src / "proj_new", src / "proj");
+        const auto named = [](const std::string& dir, const std::string& name) {
+            return dir.ends_with("\\" + name) || dir.ends_with("/" + name);
+        };
+        // The journal: records for both folders (renamed) and for the folder they are in.
+        const auto moved = [named](const std::string& dir) { return named(dir, "proj") || named(dir, "proj_old"); };
+        options.journal_parent = first.snapshot_id;
+        options.dir_unchanged = [named, moved](const std::string& dir) { return !named(dir, "top") && !moved(dir); };
+        options.dir_moved = moved;
+        const BackupResult second = run_backup(*repo, options);
+
+        const fs::path out = tmp.path / "out";
+        RestoreOptions ro;
+        ro.target = u8(out);
+        run_restore(*repo, repo->load_snapshot(second.snapshot_id), ro);
+        const auto files = snapshot_of_dir(restored_location(out, src));
+        CHECK(files.at("proj/code/x.txt") == text("new project"));
+        CHECK(files.at("proj_old/code/x.txt") == text("old project"));
+    }
+}
+
 TEST_CASE("files that look encrypted by ransomware raise the alarm") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";

@@ -793,7 +793,9 @@ administrator) read the NTFS change journal instead, which Windows keeps of ever
 volume: a folder in which nothing was added, removed, renamed or changed since the last backup,
 and which was not changed itself, is taken from that version without being read. A file with
 several names (hard links) changed through one of them also counts as a change in the folders of
-its other names. Once a week, and
+its other names. Inside a folder that was itself renamed, moved or created since the last backup
+nothing is taken from it: two folders that swapped names leave no trace in the journal for what is
+in them. Once a week, and
 whenever the journal cannot answer (it wrapped, it was recreated, the job's folders or exclusions
 changed, the last backup skipped files), every folder is read again. The journal's position is
 kept with the job's settings (`journal\<job>.json`). Without administrator rights, on FAT and

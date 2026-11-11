@@ -152,6 +152,23 @@ void ChangeJournal::apply(BackupOptions& options) const {
         }
         return false;
     };
+    options.dir_moved = [roots, changes](const std::string& dir) {
+        const std::string folded = os::fold_case(dir);
+        for (const auto& [source, root] : roots) {
+            if (!folded.starts_with(source)) continue;
+            if (folded.size() > source.size() && folded[source.size()] != '\\' && folded[source.size()] != '/' &&
+                !source.ends_with('\\'))
+                continue;
+            const auto it = changes.find(root);
+            if (it == changes.end()) return true;
+            try {
+                return it->second->changed.contains(os::file_ref(dir));
+            } catch (const std::exception&) {
+                return true;  // unknown: trust nothing inside it
+            }
+        }
+        return true;
+    };
 }
 
 void ChangeJournal::save(const Id& snapshot) noexcept {
