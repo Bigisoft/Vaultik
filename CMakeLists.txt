@@ -122,6 +122,7 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/gdrive_backend.cpp
     src/vaultik/repo/mega_backend.cpp
     src/vaultik/repo/backends.cpp
+    src/vaultik/repo/sftp_location.cpp
     src/vaultik/jobs/job.cpp
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
@@ -231,6 +232,11 @@ if(WIN32)
     target_compile_options(vaultik-task PRIVATE /W4 /permissive- /utf-8)
     vaultik_version_resource(vaultik-task "Vaultik scheduled run launcher")
 endif()
+if(NOT WIN32)
+    # The engine on its own too: a server without Qt runs backups from the command line and
+    # systemd timers.
+    install(TARGETS vaultik RUNTIME DESTINATION bin)
+endif()
 
 # ---- frontend ---------------------------------------------------------------------------------
 
@@ -294,7 +300,7 @@ if(VAULTIK_BUILD_GUI)
             target_link_libraries(vaultik-gui PRIVATE windowscodecs uiautomationcore windowsapp)  # previews, accessibility, Windows Hello
         else()
             target_link_libraries(vaultik-gui PRIVATE Qt6::Network)
-            install(TARGETS vaultik vaultik-gui RUNTIME DESTINATION bin)
+            install(TARGETS vaultik-gui RUNTIME DESTINATION bin)
             install(FILES packaging/linux/io.github.bigisoft.Vaultik.desktop DESTINATION share/applications)
             install(FILES src/gui/app_icon.svg DESTINATION share/icons/hicolor/scalable/apps
                     RENAME io.github.bigisoft.Vaultik.svg)
