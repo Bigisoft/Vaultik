@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -554,6 +555,18 @@ std::string vm_file_name(std::string_view name) {
     }
     while (!out.empty() && (out.back() == '.' || out.back() == ' ')) out.back() = '_';  // Windows drops them
     if (out.empty() || out == "." || out == "..") out = "_";
+    if (out != name) {
+        // Changed: another machine may have exactly that name ("a:b" and "a_b"), so the changed
+        // one also gets a mark of its real name. The result needs no change, so this is stable.
+        std::uint32_t h = 2166136261u;  // FNV-1a
+        for (const char c : name) {
+            h ^= static_cast<unsigned char>(c);
+            h *= 16777619u;
+        }
+        char mark[16];
+        std::snprintf(mark, sizeof mark, "-%08x", static_cast<unsigned>(h));
+        out += mark;
+    }
     return out;
 }
 

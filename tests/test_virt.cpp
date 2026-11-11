@@ -188,9 +188,15 @@ TEST_CASE("Hyper-V machine names, version paths and Get-VM's list") {
     CHECK_FALSE(valid_vm_name(std::string(101, 'v')));
 
     CHECK(vm_file_name("Windows 11 dev") == "Windows 11 dev");
-    CHECK(vm_file_name("a/b:c") == "a_b_c");
-    CHECK(vm_file_name("dots.") == "dots_");
-    CHECK(hyperv_place("a/b") == std::vector<std::string>{"Hyper-V", "a_b"});
+    CHECK(vm_file_name("a/b:c").starts_with("a_b_c-"));
+    CHECK(vm_file_name("a/b:c").size() == 5 + 9);
+    CHECK(vm_file_name("dots.").starts_with("dots_-"));
+    // Two machines never share a folder, and a folder name maps to itself.
+    CHECK(vm_file_name("a:b") != vm_file_name("a_b"));
+    CHECK(vm_file_name("a_b") == "a_b");
+    CHECK(vm_file_name(vm_file_name("a:b")) == vm_file_name("a:b"));
+    CHECK(vm_file_name("x?") != vm_file_name("x*"));
+    CHECK(hyperv_place("a/b") == std::vector<std::string>{"Hyper-V", vm_file_name("a/b")});
     CHECK(hyperv_snapshot_path("Lab") == "Hyper-V/Lab");
     CHECK(machine_of_path("Hyper-V/Lab") == "Lab");
     CHECK(machine_of_path("/Hyper-V/Lab/") == "Lab");

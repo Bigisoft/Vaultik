@@ -138,11 +138,14 @@ std::vector<HyperVm> parse_hyperv_list(std::string_view json);
 // Names a backup or import accepts for a machine: not empty, at most 100 characters, no control
 // characters and none of * ? [ ] (Get-VM would take them as wildcards and match other machines).
 bool valid_vm_name(std::string_view name);
-// A machine's name as one file name (characters Windows does not allow in names become '_').
+// A machine's name as one file name: characters Windows does not allow in names become '_', and a
+// name changed that way gets "-<8 hex digits>" from the real name, so two machines never share a
+// folder ("a:b" and "a_b"). A name that needs no change stays as it is (so does the result).
 std::string vm_file_name(std::string_view name);
 std::vector<std::string> hyperv_place(const std::string& machine);
 std::string hyperv_snapshot_path(const std::string& machine);
-// The machine name a version path "Hyper-V/<name>" holds; empty for any other.
+// The folder name of a version path "Hyper-V/<folder>" (the machine's name, as vm_file_name made
+// it; the real name is inside the export), used to name an import; empty for any other path.
 std::string machine_of_path(std::string_view snapshot_path);
 
 // Where machines are exported before the backup reads them, by default:
