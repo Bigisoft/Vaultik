@@ -34,6 +34,7 @@ private:
     QWidget* build_schedule();
     QWidget* build_resources();
     QWidget* build_retention();
+    QWidget* build_machines();
     void load(const vaultik::jobs::Job& job);
     vaultik::jobs::Job collect() const;
     void apply_preset(int index);
@@ -62,6 +63,17 @@ private:
     QCheckBox* vss_ = nullptr;    // Windows only
     QCheckBox* skip_sql_ = nullptr;  // Windows only
     QCheckBox* admin_ = nullptr;  // Windows only
+
+    // Virtual machines (Windows): WSL distributions and Hyper-V machines, each a checkable item.
+    QListWidget* wsl_list_ = nullptr;
+    QComboBox* wsl_running_ = nullptr;
+    QListWidget* hyperv_list_ = nullptr;
+    QLabel* hyperv_note_ = nullptr;
+    QLineEdit* hyperv_staging_ = nullptr;
+    bool hyperv_listed_ = false;
+    // Asks Hyper-V for its machines (once, when the tab is first shown, or again on request).
+    void list_hyperv();
+    void add_machine_item(QListWidget* list, const QString& name, const QString& detail, bool checked);
 
     QComboBox* schedule_kind_ = nullptr;
     QTimeEdit* time_ = nullptr;

@@ -34,6 +34,7 @@
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/profile_items.hpp"
 #include "vaultik/jobs/scheduler.hpp"
+#include "vaultik/ops/virt.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/config.hpp"
 #include "vaultik/repo/backends.hpp"
@@ -89,6 +90,13 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
     tabs->addTab(build_schedule(), tr("Schedule"));
     tabs->addTab(build_resources(), tr("Resources"));
     tabs->addTab(build_retention(), tr("Old backups"));
+#ifdef _WIN32
+    const int machines_tab = tabs->addTab(build_machines(), tr("Virtual machines"));
+    // Asking Hyper-V takes a few seconds: only when the tab is opened.
+    connect(tabs, &QTabWidget::currentChanged, this, [this, machines_tab](int index) {
+        if (index == machines_tab && !hyperv_listed_) list_hyperv();
+    });
+#endif
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, this, &JobDialog::accept);
@@ -810,6 +818,31 @@ void JobDialog::load(const jobs::Job& job) {
     }
     if (admin_ != nullptr) admin_->setChecked(job.run_as_admin);
     update_on_connect();
+    if (wsl_list_ != nullptr) {
+        wsl_list_->clear();
+        const std::vector<WslDistro> installed = wsl_distros();
+        for (const WslDistro& d : installed) {
+            const bool chosen = std::any_of(job.wsl_distros.begin(), job.wsl_distros.end(), [&](const std::string& n) {
+                return os::fold_case(n) == os::fold_case(d.name);
+            });
+            add_machine_item(wsl_list_, qs(d.name), d.disk.empty() ? qs(d.folder) : qs(d.disk), chosen);
+        }
+        for (const std::string& n : job.wsl_distros) {
+            const bool there = std::any_of(installed.begin(), installed.end(), [&](const WslDistro& d) {
+                return os::fold_case(n) == os::fold_case(d.name);
+            });
+            if (!there) add_machine_item(wsl_list_, qs(n), tr("not installed"), true);
+        }
+        if (wsl_list_->count() == 0) {
+            auto* none = new QListWidgetItem(tr("No WSL distributions are installed for your account."), wsl_list_);
+            none->setFlags(Qt::NoItemFlags);
+        }
+        const int at = wsl_running_->findData(qs(job.wsl_when_running));
+        wsl_running_->setCurrentIndex(at < 0 ? 0 : at);
+        hyperv_list_->clear();
+        for (const std::string& n : job.hyperv_vms) add_machine_item(hyperv_list_, qs(n), QString(), true);
+        hyperv_staging_->setText(qs(job.hyperv_staging));
+    }
     if (on_connect_->isEnabled()) on_connect_->setChecked(job.backup_on_connect);
     check_weekly_->setChecked(job.health.weekly);
     check_percent_->setValue(job.health.sample_percent);
@@ -932,6 +965,22 @@ jobs::Job JobDialog::collect() const {
     j.before_command = u8(before_command_->text().trimmed());
     j.after_command = u8(after_command_->text().trimmed());
     if (admin_ != nullptr) j.run_as_admin = admin_->isChecked();
+    if (wsl_list_ != nullptr) {
+        j.wsl_distros.clear();
+        for (int i = 0; i < wsl_list_->count(); ++i) {
+            const QListWidgetItem* item = wsl_list_->item(i);
+            if ((item->flags() & Qt::ItemIsUserCheckable) && item->checkState() == Qt::Checked)
+                j.wsl_distros.push_back(u8(item->data(Qt::UserRole).toString()));
+        }
+        j.wsl_when_running = u8(wsl_running_->currentData().toString());
+        j.hyperv_vms.clear();
+        for (int i = 0; i < hyperv_list_->count(); ++i) {
+            const QListWidgetItem* item = hyperv_list_->item(i);
+            if ((item->flags() & Qt::ItemIsUserCheckable) && item->checkState() == Qt::Checked)
+                j.hyperv_vms.push_back(u8(item->data(Qt::UserRole).toString()));
+        }
+        j.hyperv_staging = u8(QDir::toNativeSeparators(hyperv_staging_->text().trimmed()));
+    }
 
     j.schedule.kind = static_cast<jobs::Schedule::Kind>(schedule_kind_->currentIndex());
     if (j.schedule.kind == jobs::Schedule::Kind::Hourly) {
@@ -1084,4 +1133,119 @@ void JobDialog::accept() {
     QApplication::restoreOverrideCursor();
     job_ = j;
     QDialog::accept();
+}
+
+void JobDialog::add_machine_item(QListWidget* list, const QString& name, const QString& detail, bool checked) {
+    // One item per name: a listed machine replaces the placeholder of a chosen one.
+    for (int i = 0; i < list->count(); ++i) {
+        QListWidgetItem* item = list->item(i);
+        if (item->data(Qt::UserRole).toString().compare(name, Qt::CaseInsensitive) == 0) {
+            if (!detail.isEmpty()) item->setText(detail.isEmpty() ? name : name + "   (" + detail + ")");
+            if (checked) item->setCheckState(Qt::Checked);
+            return;
+        }
+    }
+    auto* item = new QListWidgetItem(detail.isEmpty() ? name : name + "   (" + detail + ")", list);
+    item->setData(Qt::UserRole, name);
+    item->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+    item->setCheckState(checked ? Qt::Checked : Qt::Unchecked);
+}
+
+QWidget* JobDialog::build_machines() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+
+    auto* wsl_box = new QGroupBox(tr("WSL distributions"));
+    auto* wl = new QVBoxLayout(wsl_box);
+    wsl_list_ = new QListWidget;
+    wl->addWidget(wsl_list_, 1);
+    wsl_running_ = new QComboBox;
+    wsl_running_->addItem(tr("Leave it out this time (with a warning)"), QStringLiteral("skip"));
+    wsl_running_->addItem(tr("Export it while it runs (files being written may be caught half-way)"),
+                          QStringLiteral("export"));
+    wsl_running_->addItem(tr("Stop it first (wsl --terminate; programs running in it are closed)"),
+                          QStringLiteral("stop"));
+    auto* running_row = new QFormLayout;
+    running_row->addRow(tr("When a chosen one is running:"), wsl_running_);
+    wl->addLayout(running_row);
+    auto* wsl_note = new QLabel(tr("Each ticked distribution is exported with wsl --export straight into the backup, "
+                                   "as WSL\\<name>.tar, and its disk file (ext4.vhdx) is left out of the file backup. "
+                                   "Restore it with \"Import as new...\" in the restore window. WSL belongs to your "
+                                   "own account, so this is for jobs without administrator rights."));
+    wsl_note->setWordWrap(true);
+    wsl_note->setForegroundRole(QPalette::PlaceholderText);
+    wl->addWidget(wsl_note);
+    layout->addWidget(wsl_box, 1);
+
+    auto* hv_box = new QGroupBox(tr("Hyper-V virtual machines"));
+    auto* hl = new QVBoxLayout(hv_box);
+    hyperv_list_ = new QListWidget;
+    hl->addWidget(hyperv_list_, 1);
+    hyperv_note_ = new QLabel;
+    hyperv_note_->setWordWrap(true);
+    hyperv_note_->setTextFormat(Qt::PlainText);
+    hl->addWidget(hyperv_note_);
+    auto* refresh = new QPushButton(tr("List machines"));
+    connect(refresh, &QPushButton::clicked, this, &JobDialog::list_hyperv);
+    auto* by_name = new QPushButton(tr("Add by name..."));
+    connect(by_name, &QPushButton::clicked, this, [this] {
+        bool ok = false;
+        const QString name = QInputDialog::getText(this, tr("Virtual machine"), tr("The machine's name in Hyper-V:"),
+                                                   QLineEdit::Normal, QString(), &ok)
+                                 .trimmed();
+        if (!ok || name.isEmpty()) return;
+        if (!valid_vm_name(u8(name))) {
+            QMessageBox::warning(this, windowTitle(), tr("A machine name cannot contain * ? [ ] or `."));
+            return;
+        }
+        add_machine_item(hyperv_list_, name, QString(), true);
+    });
+    hl->addWidget(row({refresh, by_name}));
+    hyperv_staging_ = new QLineEdit;
+    hyperv_staging_->setPlaceholderText(qs(default_hyperv_staging()));
+    auto* staging_browse = new QPushButton(tr("Browse..."));
+    connect(staging_browse, &QPushButton::clicked, this, [this] {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Export folder"), hyperv_staging_->text());
+        if (!dir.isEmpty()) hyperv_staging_->setText(QDir::toNativeSeparators(dir));
+    });
+    auto* staging_row = new QWidget;
+    auto* sl = new QHBoxLayout(staging_row);
+    sl->setContentsMargins(0, 0, 0, 0);
+    sl->addWidget(new QLabel(tr("Export folder:")));
+    sl->addWidget(hyperv_staging_, 1);
+    sl->addWidget(staging_browse);
+    hl->addWidget(staging_row);
+    auto* hv_note = new QLabel(tr("Each ticked machine is exported with Export-VM (a consistent copy, also while it "
+                                  "runs) into the export folder, backed up from there as Hyper-V\\<name> and removed "
+                                  "again; the folder needs room for the largest machine. Restore it with \"Import as "
+                                  "new...\" in the restore window. Needs \"Run with administrator rights\" (Schedule "
+                                  "tab)."));
+    hv_note->setWordWrap(true);
+    hv_note->setForegroundRole(QPalette::PlaceholderText);
+    hl->addWidget(hv_note);
+    layout->addWidget(hv_box, 1);
+    return page;
+}
+
+void JobDialog::list_hyperv() {
+    hyperv_listed_ = true;
+    HyperVList list;
+    const QString error = run_busy(this, tr("Asking Hyper-V for its virtual machines..."),
+                                   [&](const std::function<bool()>&) { list = hyperv_machines(); });
+    if (!error.isEmpty()) {
+        hyperv_note_->setText(error);
+        return;
+    }
+    if (!list.available) {
+        hyperv_note_->setText(qs(list.problem) +
+                              (list.problem.find("administrator") != std::string::npos
+                                   ? tr(". Start Vaultik as administrator to list them, or add one by name.")
+                                   : QString(".")));
+        return;
+    }
+    for (const HyperVm& m : list.machines) add_machine_item(hyperv_list_, qs(m.name), qs(m.state), false);
+    hyperv_note_->setText(list.machines.empty() ? tr("There are no Hyper-V virtual machines on this computer.")
+                                                : tr("%1 on this computer.")
+                                                      .arg(count_of(list.machines.size(), tr("virtual machine"),
+                                                                    tr("virtual machines"))));
 }
