@@ -598,7 +598,9 @@ Each version of a saved job also keeps the list of programs installed on the com
 version, publisher; turn it off in the job with "Keep a list of the installed programs"). It is
 read from the Windows uninstall list, leaving out system components, parts of other programs and
 updates, and matched to winget packages where winget is there for your account; an unchanged list
-is stored once. `vaultik backup` keeps it only with `--apps`.
+is stored once. A backup within a day of the job's last one keeps that version's list instead of
+listing again (continuous and triggered backups run often, and winget takes a while). `vaultik
+backup` keeps it only with `--apps`.
 
 On a new computer, **Reinstall programs...** in the restore window shows the programs of that
 version that are not installed here. Those with a winget package can be ticked and installed one

@@ -310,6 +310,14 @@ TEST_CASE("a backup keeps the program list; prune, copy, verify and repair know 
     REQUIRE(loaded->size() == 2);
     CHECK((*loaded)[0].winget_id == "Git.Git");
 
+    // A run soon after keeps the last version's list without listing again.
+    options.app_list = nullptr;
+    options.reuse_app_list = true;
+    write_text(tmp.path / "src" / "c.txt", "gamma");
+    const BackupResult reused = run_backup(*repo, options);
+    CHECK(reused.snapshot.apps == first.snapshot.apps);
+    options.reuse_app_list = false;
+
     // A failing list is a warning, not a failed backup.
     std::vector<std::string> warnings;
     options.on_warning = [&](const std::string& w) { warnings.push_back(w); };

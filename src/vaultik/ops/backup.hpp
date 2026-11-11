@@ -63,6 +63,9 @@ struct BackupOptions {
     // The list of installed programs to keep with the version (see ops/apps.hpp: apps_to_json),
     // asked for once the files are stored; nothing keeps none. Errors are warnings.
     std::function<std::optional<std::string>()> app_list;
+    // Keep the parent version's list instead, when it has one (a run soon after the last one: the
+    // programs rarely change within hours, and winget takes a while). Used when app_list is unset.
+    bool reuse_app_list = false;
 };
 
 // Signs that files were encrypted by ransomware since the parent snapshot: changed files whose

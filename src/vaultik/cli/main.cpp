@@ -2158,7 +2158,17 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
-        if (job->record_apps) o.app_list = app_list_in_background();
+        if (job->record_apps) {
+            // Within a day of the last backup (continuous or triggered runs, hourly schedules) the
+            // last version's list is kept; winget lists the programs again after that.
+            const auto history = jobs::combined_history(store, job->id, 50);
+            const jobs::RunRecord* last = jobs::last_backup(history);
+            constexpr std::uint64_t kDay = 24ull * 3600 * 10'000'000;
+            if (last != nullptr && last->status != jobs::RunStatus::Failed && last->finished + kDay > os::now())
+                o.reuse_app_list = true;
+            else
+                o.app_list = app_list_in_background();
+        }
         // With administrator rights: folders the change journal saw nothing happen in are not
         // read again (see ops/change_journal.hpp).
         ChangeJournal journal(store.dir(), job->id, job->sources, job->excludes);

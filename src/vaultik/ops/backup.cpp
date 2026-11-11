@@ -1044,12 +1044,14 @@ BackupResult BackupEngine::run() {
 
     std::optional<Tree> parent_root;
     std::optional<Id> parent_tree;  // the parent's root tree, to see whether anything changed
+    std::optional<Id> parent_apps;  // the parent's list of installed programs
     bool parent_is_own = false;
     snap.parent = find_parent(snap.paths);
     if (snap.parent) {
         try {
             const Snapshot ps = repo_.load_snapshot(*snap.parent);
             parent_tree = ps.tree;
+            parent_apps = ps.apps;
             // Only a version of this same job may stand for an unchanged run (one that carries
             // every tag this run would get), so its own retention keeps it.
             parent_is_own = std::all_of(options_.tags.begin(), options_.tags.end(), [&](const std::string& t) {
@@ -1105,7 +1107,9 @@ BackupResult BackupEngine::run() {
     pool_.reset();  // every file is read: the readers and their buffers go
 
     snap.tree = save_virtual(root);
-    if (options_.app_list) {
+    if (!options_.app_list && options_.reuse_app_list && parent_apps) {
+        snap.apps = parent_apps;
+    } else if (options_.app_list) {
         try {
             if (const std::optional<std::string> list = options_.app_list()) {
                 Id id{};
