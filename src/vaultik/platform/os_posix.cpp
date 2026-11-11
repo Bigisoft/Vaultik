@@ -524,6 +524,10 @@ int run_shell(const std::string& command, const ShellOptions& options) {
     return run_command({"/bin/sh", "-c", command}, options.output);  // (no timeout yet on POSIX)
 }
 
+int run_command(const std::vector<std::string>& argv, const CommandOptions& options) {
+    return run_command(argv, options.output);  // (no timeout yet on POSIX)
+}
+
 int run_command_elevated(const std::vector<std::string>&) {
     throw Error("running as administrator is only supported on Windows");
 }

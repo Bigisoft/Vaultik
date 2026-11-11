@@ -101,6 +101,8 @@ public:
             label_ = "version " + std::to_string(n) + " of " + std::to_string(wanted.size());
             Snapshot copy = e.snapshot;
             copy.tree = copy_tree(e.snapshot.tree, std::string());
+            copy.apps.reset();
+            if (e.snapshot.apps && from_.has_blob(*e.snapshot.apps)) copy.apps = copy_blob(BlobType::Data, *e.snapshot.apps);
             copy.parent.reset();
             if (e.snapshot.parent) {
                 const auto parent = copies.find(*e.snapshot.parent);

@@ -237,6 +237,24 @@ format change, so older Vaultik versions still read the snapshot (and show them 
 - `vaultik:note=<text>`: the user's description of the snapshot.
 - `vaultik:changes=<new>,<changed>,<removed>`: files new and changed since the parent snapshot,
   and files or folders of the parent that are gone (Vaultik 0.4 and later).
+- `vaultik:copy-of=<64 hex>`: in a second copy, the id of the snapshot it was copied from.
+- `vaultik:apps=<64 hex>`: the id of a Data blob listing the programs installed when the snapshot
+  was made (Vaultik 0.7 and later; see below).
+
+The program list blob is stored like file content (so an unchanged list is one blob across
+snapshots). Its plaintext is UTF-8 JSON, sorted by name:
+
+```
+{"version":1,"apps":[{"name":"7-Zip 24.08 (x64)","version":"24.08","publisher":"Igor Pavlov",
+                      "id":"7zip.7zip","source":"winget"}, ...]}
+```
+
+`name` is required; `version`, `publisher`, `id` (a winget package id: 1 to 128 characters of
+`A-Z a-z 0-9 . _ - +`, starting with a letter or digit) and `source` (`winget` or `msstore`) are
+left out when unknown. Readers drop an `id` or `source` that does not match these rules. Prune
+counts the blob as in use, copy copies it with the snapshot, verify reports it when missing, and
+repair saves the snapshot again without the field when the blob is lost. Versions before 0.7 do
+not know the tag: their prune removes the blob, and the snapshot then reads as having no list.
 
 Unknown reserved tags are ignored. Pinning or describing a snapshot rewrites its file under the
 same id while holding a shared lock, and never recreates a snapshot that was removed.

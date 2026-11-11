@@ -1105,6 +1105,20 @@ BackupResult BackupEngine::run() {
     pool_.reset();  // every file is read: the readers and their buffers go
 
     snap.tree = save_virtual(root);
+    if (options_.app_list) {
+        try {
+            if (const std::optional<std::string> list = options_.app_list()) {
+                Id id{};
+                repo_.save_blob(BlobType::Data,
+                                ByteSpan(reinterpret_cast<const std::uint8_t*>(list->data()), list->size()), id);
+                snap.apps = id;
+            }
+        } catch (const Cancelled&) {
+            throw;
+        } catch (const std::exception& e) {
+            if (options_.on_warning) options_.on_warning(std::string("cannot list the installed programs: ") + e.what());
+        }
+    }
     repo_.flush();
     if (options_.before_save) options_.before_save();
     stats_.stored_bytes = repo_.write_stats().stored_bytes_added - before.stored_bytes_added;

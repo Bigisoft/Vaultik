@@ -849,12 +849,10 @@ int run_shell(const std::string& command, std::string* output) {
     return run_shell(command, o);
 }
 
-int run_shell(const std::string& command, const ShellOptions& o) {
-    // "cmd /s /c "<command>"": cmd drops the outer quotes and runs the rest exactly as typed. /d:
-    // no AutoRun command from the registry. With the fixed environment also /e:on /v:off, so the
-    // user's own registry settings do not change how the command is read.
-    std::wstring cmdline = std::wstring(L"cmd.exe /d ") + (o.clean_environment ? L"/e:on /v:off " : L"") +
-                           L"/s /c \"" + widen(command) + L"\"";
+// Runs `program` with `cmdline` without a window and with empty input, captures its output (the
+// first `output_limit` bytes), and stops it with everything it started after the timeout.
+static int run_process(const std::wstring& program, std::wstring cmdline, const ShellOptions& o,
+                       std::size_t output_limit) {
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     HANDLE read_end = nullptr;
     HANDLE write_end = nullptr;
@@ -940,7 +938,6 @@ int run_shell(const std::string& command, const ShellOptions& o) {
     }
     const std::wstring directory = o.directory.empty() ? std::wstring() : widen(o.directory);
 
-    const std::wstring program = program_path("cmd.exe");
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, TRUE,
                         CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED |
@@ -968,7 +965,7 @@ int run_shell(const std::string& command, const ShellOptions& o) {
         char buf[4096];
         DWORD n = 0;
         while (!stop_reading && ReadFile(r.get(), buf, sizeof buf, &n, nullptr) && n > 0)
-            if (captured.size() < (64u << 10)) captured.append(buf, n);  // the start is enough for a log
+            if (captured.size() < output_limit) captured.append(buf, n);  // the start is enough for a log
         reader_done = true;
     });
     const auto deadline = std::chrono::steady_clock::now() + o.timeout;
@@ -998,6 +995,26 @@ int run_shell(const std::string& command, const ShellOptions& o) {
     DWORD code = 0;
     GetExitCodeProcess(process.get(), &code);
     return static_cast<int>(code);
+}
+
+int run_shell(const std::string& command, const ShellOptions& o) {
+    // "cmd /s /c "<command>"": cmd drops the outer quotes and runs the rest exactly as typed. /d:
+    // no AutoRun command from the registry. With the fixed environment also /e:on /v:off, so the
+    // user's own registry settings do not change how the command is read.
+    std::wstring cmdline = std::wstring(L"cmd.exe /d ") + (o.clean_environment ? L"/e:on /v:off " : L"") +
+                           L"/s /c \"" + widen(command) + L"\"";
+    return run_process(program_path("cmd.exe"), std::move(cmdline), o, 64u << 10);
+}
+
+int run_command(const std::vector<std::string>& argv, const CommandOptions& options) {
+    if (argv.empty()) throw Error("run_command: no program");
+    std::wstring cmdline;
+    for (const std::string& a : argv) cmdline += (cmdline.empty() ? L"" : L" ") + quote_arg(widen(a));
+    ShellOptions o;
+    o.output = options.output;
+    o.timeout = options.timeout;
+    o.cancelled = options.cancelled;
+    return run_process(program_path(argv[0]), std::move(cmdline), o, 1u << 20);
 }
 
 std::string executable_path() {

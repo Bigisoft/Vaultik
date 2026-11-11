@@ -309,6 +309,14 @@ Bytes unprotect_secret(ByteSpan sealed);  // throws Error when it cannot be decr
 // returns its exit code. stdout and stderr are captured into `output` when given. Throws
 // OsError when it cannot be started.
 int run_command(const std::vector<std::string>& argv, std::string* output = nullptr);
+struct CommandOptions {
+    std::string* output = nullptr;  // stdout and stderr, the first 1 MiB
+    // Stopped (with everything it started) after this long, or when `cancelled` says so; then
+    // run_command throws Error. Standard input is empty.
+    std::chrono::seconds timeout = std::chrono::hours(4);
+    std::function<bool()> cancelled;
+};
+int run_command(const std::vector<std::string>& argv, const CommandOptions& options);
 
 // Windows: like run_command, but with administrator rights, so the user sees an approval (UAC)
 // prompt unless the process already has them. Output is not captured. Throws Error when the

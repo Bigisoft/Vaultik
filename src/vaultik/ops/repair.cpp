@@ -276,12 +276,15 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
                 plans.push_back(std::move(p));
                 continue;
             }
-            if (!root.changed) continue;
+            const bool apps_lost = p.snapshot.apps && !repo.has_blob(*p.snapshot.apps);
+            if (!root.changed && !apps_lost) continue;
             ++r.snapshots_repaired;
             r.files_lost += root.files_lost;
             r.folders_lost += root.folders_lost;
-            p.lost = std::to_string(root.files_lost) + " file(s) and " + std::to_string(root.folders_lost) +
-                     " folder(s) were lost";
+            if (root.changed)
+                p.lost = std::to_string(root.files_lost) + " file(s) and " + std::to_string(root.folders_lost) +
+                         " folder(s) were lost";
+            if (apps_lost) p.lost += std::string(p.lost.empty() ? "" : "; ") + "the program list was lost";
             warn("version " + short_hex(sid) + ": " + p.lost + "; saved again without them");
             plans.push_back(std::move(p));
         }
@@ -312,6 +315,7 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
         if (!root.ok) continue;  // (judged before; not removed now without a fresh judgement)
         Snapshot fixed = p.snapshot;
         fixed.tree = root.id;
+        if (fixed.apps && !repo.has_blob(*fixed.apps)) fixed.apps.reset();
         fixed.note = (p.snapshot.note.empty() ? std::string() : p.snapshot.note + " ") + "(repaired: " + p.lost + ")";
         repo.save_snapshot(fixed);  // flushes the new folder listings first
         backend.remove(Repository::snapshot_name(p.id));

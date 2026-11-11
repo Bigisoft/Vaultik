@@ -20,6 +20,24 @@ constexpr std::string_view kPinnedTag = "vaultik:pinned";
 constexpr std::string_view kNoteTag = "vaultik:note=";
 constexpr std::string_view kChangesTag = "vaultik:changes=";
 constexpr std::string_view kCopyOfTag = "vaultik:copy-of=";
+constexpr std::string_view kAppsTag = "vaultik:apps=";
+
+std::string id_tag(std::string_view prefix, const Id& id) {
+    return std::string(prefix) + to_hex(ByteSpan(id.data(), id.size()));
+}
+
+// An id written by id_tag; nothing for a damaged tag.
+std::optional<Id> tag_id(const std::string& tag, std::string_view prefix) {
+    try {
+        const Bytes raw = from_hex(tag.substr(prefix.size()));
+        if (raw.size() != sizeof(Id)) return std::nullopt;
+        Id id{};
+        std::copy(raw.begin(), raw.end(), id.begin());
+        return id;
+    } catch (const Error&) {
+        return std::nullopt;
+    }
+}
 
 // The user's tags plus the reserved ones that carry the newer fields.
 std::vector<std::string> all_tags(const Snapshot& s) {
@@ -28,7 +46,8 @@ std::vector<std::string> all_tags(const Snapshot& s) {
         if (!t.starts_with(kReservedTagPrefix)) tags.push_back(t);
     if (s.pinned) tags.emplace_back(kPinnedTag);
     if (!s.note.empty()) tags.push_back(std::string(kNoteTag) + s.note);
-    if (s.copy_of) tags.push_back(std::string(kCopyOfTag) + to_hex(ByteSpan(s.copy_of->data(), s.copy_of->size())));
+    if (s.copy_of) tags.push_back(id_tag(kCopyOfTag, *s.copy_of));
+    if (s.apps) tags.push_back(id_tag(kAppsTag, *s.apps));
     if (s.stats.changes_known) {
         tags.push_back(std::string(kChangesTag) + std::to_string(s.stats.files_new) + "," +
                        std::to_string(s.stats.files_changed) + "," + std::to_string(s.stats.items_removed));
@@ -42,16 +61,9 @@ void read_reserved(Snapshot& s, const std::string& tag) {
     } else if (tag.starts_with(kNoteTag)) {
         s.note = tag.substr(kNoteTag.size());
     } else if (tag.starts_with(kCopyOfTag)) {
-        try {
-            const Bytes raw = from_hex(tag.substr(kCopyOfTag.size()));
-            if (raw.size() == sizeof(Id)) {
-                Id id{};
-                std::copy(raw.begin(), raw.end(), id.begin());
-                s.copy_of = id;
-            }
-        } catch (const Error&) {
-            // a damaged tag: the snapshot is then simply not known as a copy
-        }
+        s.copy_of = tag_id(tag, kCopyOfTag);  // a damaged tag: the snapshot is then simply not known as a copy
+    } else if (tag.starts_with(kAppsTag)) {
+        s.apps = tag_id(tag, kAppsTag);
     } else if (tag.starts_with(kChangesTag)) {
         // "<new>,<changed>,<removed>"
         const char* p = tag.c_str() + kChangesTag.size();

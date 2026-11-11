@@ -358,6 +358,7 @@ PruneResult run_prune(Repository& repo, const PruneOptions& o) {
                         "; nothing was deleted (run vaultik verify)");
         }
         if (used.insert(s.tree).second) pending.push_back(s.tree);
+        if (s.apps) used.insert(*s.apps);
     }
     while (!pending.empty()) {
         const Id tree_id = pending.back();

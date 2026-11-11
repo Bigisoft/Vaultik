@@ -139,6 +139,9 @@ struct Job {
     // Save a version only when something changed since the last one (a run that finds nothing
     // changed is recorded as a success without a version).
     bool skip_unchanged = false;
+    // Keep the list of programs installed on this computer with each version (see ops/apps.hpp),
+    // so they can be installed again on a new one.
+    bool record_apps = true;
     // Repair data written with each pack, in percent of its size (0: none; see
     // Repository::set_parity_percent). A backup sets the destination's setting to this.
     unsigned repair_data = 5;

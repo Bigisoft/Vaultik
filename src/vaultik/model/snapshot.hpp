@@ -43,6 +43,8 @@ struct Snapshot {
     std::string note;     // the user's description, e.g. "before Windows update"
     // In a second copy: the id of the snapshot it was copied from (in the first repository).
     std::optional<Id> copy_of;
+    // A Data blob with the programs installed when the version was made (see ops/apps.hpp).
+    std::optional<Id> apps;
 };
 
 Bytes serialize_snapshot(const Snapshot& s);

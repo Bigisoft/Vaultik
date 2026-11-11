@@ -403,6 +403,7 @@ std::string to_json(const Job& job) {
         {"continuous", job.continuous},
         {"continuous_minutes", job.continuous_minutes},
         {"skip_unchanged", job.skip_unchanged},
+        {"record_apps", job.record_apps},
         {"repair_data", job.repair_data},
         {"before_command", job.before_command},
         {"after_command", job.after_command},
@@ -497,6 +498,7 @@ Job job_from_json(const std::string& text) {
         job.schedule.on_sign_out = job.schedule.on_sign_out && !job.run_as_admin;
         job.before_command = j.value("before_command", std::string());
         job.skip_unchanged = j.value("skip_unchanged", false);
+        job.record_apps = j.value("record_apps", true);
         // Jobs from before repair data: on for drives, where bad sectors are the risk; cloud
         // storage keeps its own copies.
         job.repair_data = std::min(50u, j.value("repair_data", is_cloud_location(job.repository) ? 0u : 5u));

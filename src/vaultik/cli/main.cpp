@@ -19,6 +19,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <future>
 
 #include <nlohmann/json.hpp>
 
@@ -27,6 +28,7 @@
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/model/tree.hpp"
+#include "vaultik/ops/apps.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/repair.hpp"
@@ -109,6 +111,8 @@ Commands:
       --vss-skip-sql           Do not pause SQL Server for the shadow copy; its
                                database files are then copied as they would be
                                after a power cut (SQL Server recovers them)
+      --apps                   Keep the list of installed programs with the
+                               snapshot (saved jobs do this unless turned off)
   snapshots                    List snapshots
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
   mount <snapshot>             Windows: show a version as a read-only folder for File
@@ -175,6 +179,15 @@ Commands:
                                games (or single items such as chrome)
       --dry-run                Only show what goes where
       --overwrite              Replace files that exist here already
+  apps [<snapshot>]            The programs that were installed when the snapshot
+                               was made (default: latest), with their winget
+                               package where one is known
+      --missing                Only those not installed on this PC
+  apps install <id>...         Install programs of that list again with winget,
+                               one after the other, as you (winget asks for
+                               administrator approval when an installer needs it)
+      --snapshot <snapshot>    The snapshot whose list the ids come from (default:
+                               latest)
   repair-data <percent>|off    Keep Reed-Solomon repair data next to the stored
                                data (1-50% of its size; jobs to drives use 5%),
                                so data damaged by bad sectors can be rebuilt by
@@ -313,11 +326,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -776,6 +789,25 @@ void raise_alarm(Repository& repo, const BackupResult& r, jobs::RunRecord& recor
     }
 }
 
+// The installed programs, listed on another thread while the backup runs (winget can take up to a
+// minute); the backup asks for the list once its files are stored. A run that ends early stops
+// the listing.
+std::function<std::optional<std::string>()> app_list_in_background() {
+    struct Task {
+        std::atomic<bool> stop{false};
+        std::future<AppScan> scan;
+        ~Task() {
+            stop = true;
+            if (scan.valid()) scan.wait();
+        }
+    };
+    auto task = std::make_shared<Task>();
+    std::atomic<bool>* stop = &task->stop;
+    task->scan = std::async(std::launch::async,
+                            [stop] { return scan_installed_apps(true, [stop] { return stop->load() || g_cancel.load(); }); });
+    return [task]() -> std::optional<std::string> { return apps_to_json(task->scan.get().apps); };
+}
+
 // The message of a run that found nothing changed (and so saved no version).
 constexpr const char* kUnchanged = "nothing changed since the last version, so no new one was saved";
 
@@ -948,6 +980,7 @@ int cmd_backup(const Args& a) {
     o.use_parent = !a.has("--no-parent");
     o.skip_unchanged = a.has("--skip-unchanged");
     if (auto p = a.value("--parent")) o.parent = resolve_snapshot(*repo, *p).id;
+    if (a.has("--apps")) o.app_list = app_list_in_background();
     jobs::RunRecord record;
     return backup_and_report(*repo, std::move(o), repo_path(a), record, lock, vss_arg(a, kDefaultVss),
                              !a.has("--vss-skip-sql"));
@@ -2086,6 +2119,7 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
+        if (job->record_apps) o.app_list = app_list_in_background();
         // With administrator rights: folders the change journal saw nothing happen in are not
         // read again (see ops/change_journal.hpp).
         ChangeJournal journal(store.dir(), job->id, job->sources, job->excludes);
@@ -2960,6 +2994,153 @@ int cmd_move_here(const Args& a) {
     return kExitOk;
 }
 
+nlohmann::json app_json(const InstalledApp& app) {
+    return {{"name", app.name},      {"version", app.version}, {"publisher", app.publisher},
+            {"id", app.winget_id},   {"source", app.source},   {"installable", !app.winget_id.empty()}};
+}
+
+// The program list a snapshot recorded.
+std::vector<InstalledApp> snapshot_apps(Repository& repo, const SnapshotRef& ref) {
+    std::optional<std::vector<InstalledApp>> apps = load_app_list(repo, ref.snapshot);
+    if (!apps)
+        throw Error("snapshot " + short_id(ref.id) +
+                    " has no list of programs (made by an older Vaultik, or with the list turned off)");
+    return std::move(*apps);
+}
+
+// The last line of winget's output that says something (it draws progress bars with \r).
+std::string last_message(const std::string& output) {
+    std::string last;
+    std::size_t at = 0;
+    while (at < output.size()) {
+        std::size_t end = output.find_first_of("\r\n", at);
+        if (end == std::string::npos) end = output.size();
+        const std::string line = output.substr(at, end - at);
+        if (std::any_of(line.begin(), line.end(), [](char c) { return std::isalpha(static_cast<unsigned char>(c)); }))
+            last = line;
+        at = end + 1;
+    }
+    while (!last.empty() && last.front() == ' ') last.erase(last.begin());
+    return last;
+}
+
+// "apps install <id>...": installs programs of a snapshot's list with winget, one by one, as the
+// user running this (never with administrator rights of Vaultik's own). Only package ids from the
+// list are taken.
+int cmd_apps_install(const Args& a) {
+    const std::vector<std::string> ids(a.positional.begin() + 1, a.positional.end());
+    if (ids.empty()) throw Error("usage: vaultik apps install <id>... (-r <repository> or --job <job>)");
+    for (const std::string& id : ids)
+        if (!valid_winget_id(id)) throw Error("not a winget package id: " + id);
+    std::vector<InstalledApp> listed;
+    {
+        auto repo = open_repo(a);
+        RepoLock lock(*repo, RepoLock::Mode::Shared, "apps", lock_wait(a));
+        repo->reload_index();
+        listed = snapshot_apps(*repo, resolve_snapshot(*repo, a.value("--snapshot").value_or("latest")));
+    }
+    std::vector<const InstalledApp*> chosen;
+    for (const std::string& id : ids) {
+        const auto it = std::find_if(listed.begin(), listed.end(), [&](const InstalledApp& app) {
+            const auto lower = [](std::string v) {
+                for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return v;
+            };
+            return !app.winget_id.empty() && lower(app.winget_id) == lower(id);
+        });
+        if (it == listed.end()) throw Error(id + " is not a winget package of that snapshot's program list");
+        chosen.push_back(&*it);
+    }
+    if (winget_program().empty())
+        throw Error("winget is not available for this account (install App Installer from the Microsoft Store)");
+
+    const auto start = std::chrono::steady_clock::now();
+    std::size_t ok = 0;
+    std::size_t failed = 0;
+    for (std::size_t i = 0; i < chosen.size(); ++i) {
+        const InstalledApp& app = *chosen[i];
+        if (stop_requested()) throw Cancelled();
+        if (g_json) emit({{"event", "app_install"}, {"id", app.winget_id}, {"name", app.name}, {"index", i},
+                          {"count", chosen.size()}});
+        else out("Installing " + app.name + " (" + app.winget_id + ")...\n");
+        std::string output;
+        int code = 0;
+        std::string message;
+        try {
+            // Not stopped halfway: a cancel takes effect before the next one.
+            code = winget_install(app.winget_id, app.source, &output);
+            message = last_message(output);
+        } catch (const std::exception& e) {
+            code = -1;
+            message = e.what();
+        }
+        const bool success = code == 0;
+        (success ? ok : failed) += 1;
+        if (g_json) {
+            emit({{"event", "app_installed"}, {"id", app.winget_id}, {"name", app.name}, {"ok", success},
+                  {"code", code}, {"message", message}});
+        } else {
+            char hex[16];
+            std::snprintf(hex, sizeof hex, "0x%08X", static_cast<unsigned>(code));
+            out(std::string("  ") + (success ? "installed" : "failed (winget exit code " + std::string(hex) + ")") +
+                (message.empty() ? "" : ": " + message) + "\n");
+        }
+    }
+    if (g_json) {
+        emit({{"event", "done"}, {"status", failed > 0 ? "partial" : "success"}, {"installed", ok},
+              {"failed", failed}, {"seconds", seconds_since(start)}});
+    } else {
+        out(std::to_string(ok) + " installed, " + std::to_string(failed) + " failed\n");
+    }
+    return failed > 0 ? kExitPartial : kExitOk;
+}
+
+// "apps [<snapshot>]": the programs a snapshot recorded (--missing: those not installed here).
+int cmd_apps(const Args& a) {
+    if (!a.positional.empty() && a.positional[0] == "install") return cmd_apps_install(a);
+    if (a.positional.size() > 1) throw Error("usage: vaultik apps [<snapshot>] [--missing] (-r <repository> or --job <job>)");
+    std::vector<InstalledApp> apps;
+    {
+        auto repo = open_repo(a);
+        RepoLock lock(*repo, RepoLock::Mode::Shared, "apps", lock_wait(a));
+        repo->reload_index();
+        apps = snapshot_apps(*repo, resolve_snapshot(*repo, a.positional.empty() ? std::string("latest") : a.positional[0]));
+    }
+    bool winget_here = false;
+    if (a.has("--missing")) {
+        if (!g_json) err("Looking at the programs on this PC...\n");
+        const AppScan here = scan_installed_apps(true, [] { return stop_requested(); });
+        if (stop_requested()) throw Cancelled();
+        winget_here = here.winget;
+        apps = missing_apps(apps, here.apps, here.winget);
+    }
+    std::stable_sort(apps.begin(), apps.end(), [](const InstalledApp& x, const InstalledApp& y) {
+        return !x.winget_id.empty() && y.winget_id.empty();  // the ones winget can install first
+    });
+    if (g_json) {
+        for (const InstalledApp& app : apps) {
+            nlohmann::json ev = app_json(app);
+            ev["event"] = "app";
+            emit(ev);
+        }
+        emit({{"event", "done"}, {"status", "success"}, {"count", apps.size()}, {"winget", winget_here}});
+        return kExitOk;
+    }
+    std::size_t installable = 0;
+    for (const InstalledApp& app : apps) {
+        std::string line = pad(app.name, 44) + " " + pad(app.version, 16) + " " + pad(app.publisher, 24);
+        if (!app.winget_id.empty()) {
+            line += " winget: " + app.winget_id;
+            ++installable;
+        }
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        out(line + "\n");
+    }
+    out(std::to_string(apps.size()) + " program(s)" + (a.has("--missing") ? " not on this PC" : "") + ", " +
+        std::to_string(installable) + " installable with winget (vaultik apps install <id>...)\n");
+    return kExitOk;
+}
+
 // "repair-data <percent>|off": repair data for every pack from now on, and (unless off) for the
 // packs stored already, each after checking that it is intact.
 int cmd_repair_data(const Args& a) {
@@ -3121,6 +3302,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "repair") return cmd_repair(a);
     if (a.command == "repair-data") return cmd_repair_data(a);
     if (a.command == "move-here") return cmd_move_here(a);
+    if (a.command == "apps") return cmd_apps(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
     if (a.command == "pin") return cmd_pin(a, true);

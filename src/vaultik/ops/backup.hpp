@@ -60,6 +60,9 @@ struct BackupOptions {
     // Called just before the snapshot is saved; may throw to discard it (for example when the
     // repository lock was lost and data the snapshot relies on may have been pruned).
     std::function<void()> before_save;
+    // The list of installed programs to keep with the version (see ops/apps.hpp: apps_to_json),
+    // asked for once the files are stored; nothing keeps none. Errors are warnings.
+    std::function<std::optional<std::string>()> app_list;
 };
 
 // Signs that files were encrypted by ransomware since the parent snapshot: changed files whose

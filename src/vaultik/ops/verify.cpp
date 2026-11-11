@@ -169,6 +169,11 @@ void VerifyEngine::check_snapshots() {
         try {
             const Snapshot s = repo_.load_snapshot(id);
             walk_tree(s.tree, "");
+            if (s.apps) {
+                const BlobLocation* loc = repo_.index().find(*s.apps);
+                if (loc == nullptr || loc->type != BlobType::Data)
+                    error("snapshot " + id_hex(id) + " references a missing program list " + id_hex(*s.apps));
+            }
         } catch (const Error& ex) {
             error("cannot read snapshot " + id_hex(id) + ": " + ex.what());
         }
