@@ -41,6 +41,7 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
       # Packages vcpkg built (Qt above all) are kept between runs, so only the first one builds them.
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+      VCPKG_DOWNLOADS: ${{ github.workspace }}\vcpkg-downloads
     steps:
       - uses: actions/checkout@v4
       - name: Get vcpkg at the manifest's baseline
@@ -51,23 +52,40 @@ jobs:
           git -C $env:VCPKG_ROOT checkout --quiet $baseline
           & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
           New-Item -ItemType Directory -Force "${{ github.workspace }}\vcpkg-cache" | Out-Null
+      # pcre2 (for Qt) reads a gitlink from GitHub's API and checks its hash, which matches only the
+      # pretty-printed answer GitHub gives without a token; on the runners the request goes out
+      # with one and gets compact JSON. Fetched here without a token, checked, and left where vcpkg
+      # looks first, so it does not ask the API itself.
+      - name: Fetch pcre2's sljit gitlink for vcpkg
+        shell: pwsh
+        run: |
+          $file = Join-Path $env:VCPKG_DOWNLOADS 'pcre2-pcre2-10.49-sljit-gitlink.json'
+          New-Item -ItemType Directory -Force $env:VCPKG_DOWNLOADS | Out-Null
+          $url = 'https://api.github.com/repos/PCRE2Project/pcre2/contents/deps/sljit?ref=pcre2-10.49'
+          & curl.exe -sSfL --retry 5 -H 'User-Agent: vaultik-ci' -o $file $url
+          $expected = '719fa1d8d8e1e749ce6f7370db32818268f84b1376ed9367fd5290ab440d8bea7a6a25a68e55045a45da68b0ce7a55daa0d7acd2f1b11774319b50268c02441c'
+          $actual = (Get-FileHash $file -Algorithm SHA512).Hash.ToLower()
+          if ($actual -ne $expected) { Write-Error "unexpected sljit gitlink: $actual"; exit 1 }
       - name: Restore vcpkg's built packages
         id: vcpkg-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}\vcpkg-cache
-          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
-          restore-keys: vcpkg-windows-
+          # Each run saves under its own key; the newest one for this manifest is restored.
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+          restore-keys: |
+            vcpkg-windows-${{ hashFiles('vcpkg.json') }}-
+            vcpkg-windows-
       - name: Build
         shell: cmd
         run: build.cmd release
       # Saved right after the build, also when the tests then fail, so Qt is not built again.
       - name: Save vcpkg's built packages
-        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}\vcpkg-cache
-          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
       - name: Test
         shell: cmd
         run: ctest --preset release

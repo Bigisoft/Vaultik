@@ -11,8 +11,11 @@ if not defined VSDIR (
     exit /b 1
 )
 if not defined VCPKG_ROOT set "VCPKG_ROOT=%VSDIR%\VC\vcpkg"
+rem The developer environment sets VCPKG_ROOT to Visual Studio's own vcpkg; keep the one chosen.
+set "VAULTIK_VCPKG_ROOT=%VCPKG_ROOT%"
 
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
+set "VCPKG_ROOT=%VAULTIK_VCPKG_ROOT%"
 
 set "PRESET=%~1"
 if not defined PRESET set "PRESET=debug"
