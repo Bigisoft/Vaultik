@@ -301,9 +301,12 @@ TEST_CASE("short (8.3) names are written out in full") {
     REQUIRE(n < MAX_PATH);
     const std::string short_form = u8(fs::path(std::wstring(buf, n)));
     // The drive may keep no short names; then the path is its own short form.
+    // The temporary folder may itself be written with short names (RUNNER~1 on GitHub's runners):
+    // compare with the real path, which Windows resolves with long names.
+    const fs::path real = fs::canonical(folder);
     const std::string full = os::long_name(short_form);
-    CHECK(fs::path(std::u8string(full.begin(), full.end())) == folder);
-    CHECK(os::long_name(u8(folder)) == u8(folder));
+    CHECK(fs::path(std::u8string(full.begin(), full.end())) == real);
+    CHECK(os::long_name(u8(folder)) == u8(real));
     // A path that does not exist comes back as it is.
     CHECK(os::long_name(u8(tmp.path / "NOSUCH~1")) == u8(tmp.path / "NOSUCH~1"));
 }
