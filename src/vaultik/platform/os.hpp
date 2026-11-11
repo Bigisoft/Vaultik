@@ -320,8 +320,9 @@ int run_command(const std::vector<std::string>& argv, const CommandOptions& opti
 
 // Windows: like run_command, but with administrator rights, so the user sees an approval (UAC)
 // prompt unless the process already has them. Output is not captured. Throws Error when the
-// approval is declined or the program cannot start; on POSIX it always throws.
-int run_command_elevated(const std::vector<std::string>& argv);
+// approval is declined or the program cannot start; on POSIX it always throws. With
+// `show_window` a console program gets a window of its own, so the user can follow it.
+int run_command_elevated(const std::vector<std::string>& argv, bool show_window = false);
 
 // Runs a command line as typed by the user, through the shell (Windows: cmd.exe /s /c; POSIX:
 // /bin/sh -c), without a window, and returns its exit code. Captures stdout and stderr into

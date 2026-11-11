@@ -34,6 +34,7 @@
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/profile_items.hpp"
 #include "vaultik/jobs/scheduler.hpp"
+#include "vaultik/image/disk.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/config.hpp"
 #include "vaultik/repo/backends.hpp"
@@ -235,9 +236,90 @@ void JobDialog::estimate_size() {
     estimate_->show();
 }
 
+QWidget* JobDialog::build_disks() {
+    auto* box = new QWidget;
+    auto* layout = new QVBoxLayout(box);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(new QLabel(tr("Disks to back up whole:")));
+    disks_ = new QListWidget;
+    layout->addWidget(disks_, 1);
+    auto* refresh = new QPushButton(tr("Look again"));
+    connect(refresh, &QPushButton::clicked, this, [this] {
+        std::vector<std::string> checked;
+        for (int i = 0; i < disks_->count(); ++i)
+            if (disks_->item(i)->checkState() == Qt::Checked) checked.push_back(u8(disks_->item(i)->data(Qt::UserRole).toString()));
+        fill_disks(checked);
+    });
+    layout->addWidget(row({refresh}));
+    auto* note = new QLabel(tr("A disk image holds every partition of the disk (Windows, its boot and recovery "
+                               "partitions, your data) and its layout, so the whole computer can be brought back "
+                               "onto a new disk with the recovery drive (More > Create recovery drive). Only the "
+                               "used space is read, and later images store only what changed. It needs "
+                               "administrator rights: scheduled runs have them; Back up now works when Vaultik "
+                               "runs as administrator. The destination must be on another disk."));
+    note->setWordWrap(true);
+    note->setForegroundRole(QPalette::PlaceholderText);
+    layout->addWidget(note);
+    return box;
+}
+
+void JobDialog::fill_disks(const std::vector<std::string>& checked) {
+    if (disks_ == nullptr) return;
+    disks_->clear();
+    std::vector<std::string> left = checked;
+    for (const image::DiskInfo& d : image::list_disks()) {
+        // The disk Windows runs from is kept by that role, so a replaced system disk is still found.
+        const std::string id = d.system ? std::string("system") : d.id;
+        if (id.empty()) continue;  // no partition table: nothing to image
+        QString text = qs(image::describe(d));
+        QStringList vols;
+        for (const image::DiskVolume& v : d.volumes)
+            if (!v.mount.empty()) vols << qs(v.mount.substr(0, 2) + (v.label.empty() ? "" : " " + v.label));
+        if (!vols.isEmpty()) text += "\n    " + vols.join(", ");
+        auto* item = new QListWidgetItem(text, disks_);
+        item->setData(Qt::UserRole, qs(id));
+        const bool on = std::find(checked.begin(), checked.end(), id) != checked.end() ||
+                        std::find(checked.begin(), checked.end(), d.id) != checked.end();
+        item->setCheckState(on ? Qt::Checked : Qt::Unchecked);
+        std::erase(left, id);
+        std::erase(left, d.id);
+    }
+    // Disks of the job that are not connected now stay in it.
+    for (const std::string& id : left) {
+        auto* item = new QListWidgetItem(tr("%1 (not connected)").arg(qs(id)), disks_);
+        item->setData(Qt::UserRole, qs(id));
+        item->setCheckState(Qt::Checked);
+    }
+}
+
+void JobDialog::update_kind() {
+    const bool image = kind_ != nullptr && kind_->currentIndex() == 1;
+    if (files_box_ != nullptr) files_box_->setVisible(!image);
+    if (disks_box_ != nullptr) disks_box_->setVisible(image);
+    if (admin_ != nullptr) {
+        if (image) admin_->setChecked(true);
+        admin_->setEnabled(!image);
+    }
+}
+
 QWidget* JobDialog::build_sources() {
     auto* page = new QWidget;
-    auto* layout = new QVBoxLayout(page);
+    auto* outer = new QVBoxLayout(page);
+#ifdef _WIN32
+    kind_ = new QComboBox;
+    kind_->addItems({tr("Folders and files"), tr("Whole disks (disk image)")});
+    outer->addWidget(row({new QLabel(tr("Back up:")), kind_}));
+#endif
+    files_box_ = new QWidget;
+    auto* layout = new QVBoxLayout(files_box_);
+    layout->setContentsMargins(0, 0, 0, 0);
+    outer->addWidget(files_box_, 1);
+#ifdef _WIN32
+    disks_box_ = build_disks();
+    disks_box_->hide();
+    outer->addWidget(disks_box_, 1);
+    connect(kind_, &QComboBox::currentIndexChanged, this, &JobDialog::update_kind);
+#endif
 
     layout->addWidget(new QLabel(tr("Folders and files to back up:")));
     sources_ = new QListWidget;
@@ -341,6 +423,7 @@ QWidget* JobDialog::build_sources() {
     });
     connect(remove_ex, &QPushButton::clicked, this, [this] { qDeleteAll(excludes_->selectedItems()); });
     layout->addWidget(row({add_ex, remove_ex}));
+    layout = outer;  // what follows applies to both kinds
 
 #ifdef _WIN32
     vss_ = new QCheckBox(tr("Back up open and locked files too (Volume Shadow Copy; only when Vaultik "
@@ -809,6 +892,9 @@ void JobDialog::load(const jobs::Job& job) {
         skip_sql_->setEnabled(job.vss);
     }
     if (admin_ != nullptr) admin_->setChecked(job.run_as_admin);
+    fill_disks(job.image_disks);
+    if (kind_ != nullptr) kind_->setCurrentIndex(job.image_disks.empty() ? 0 : 1);
+    update_kind();
     update_on_connect();
     if (on_connect_->isEnabled()) on_connect_->setChecked(job.backup_on_connect);
     check_weekly_->setChecked(job.health.weekly);
@@ -932,6 +1018,14 @@ jobs::Job JobDialog::collect() const {
     j.before_command = u8(before_command_->text().trimmed());
     j.after_command = u8(after_command_->text().trimmed());
     if (admin_ != nullptr) j.run_as_admin = admin_->isChecked();
+    j.image_disks.clear();
+    if (kind_ != nullptr && kind_->currentIndex() == 1) {
+        j.sources.clear();
+        j.run_as_admin = true;
+        for (int i = 0; i < disks_->count(); ++i)
+            if (disks_->item(i)->checkState() == Qt::Checked) j.image_disks.push_back(u8(disks_->item(i)->data(Qt::UserRole).toString()));
+        if (j.image_disks.empty()) j.image_disks.push_back("");  // validate says to pick one
+    }
 
     j.schedule.kind = static_cast<jobs::Schedule::Kind>(schedule_kind_->currentIndex());
     if (j.schedule.kind == jobs::Schedule::Kind::Hourly) {

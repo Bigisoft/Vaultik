@@ -55,6 +55,7 @@
 #include "overview.h"
 #include "report_dialog.h"
 #include "restore_dialog.h"
+#include "image_dialogs.h"
 #include "app_settings.h"
 #include "runner.h"
 #include "settings_dialog.h"
@@ -269,6 +270,18 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         const double secs = std::max(
             std::chrono::duration<double>(std::chrono::steady_clock::now() - run_started_).count(), 0.001);
         const auto bytes = static_cast<std::uint64_t>(ev.value("bytes").toInteger());
+        if (ev.value("image").toBool()) {
+            // A disk image: how far through the disks it is.
+            const double total = ev.value("total").toDouble();
+            bar_->setRange(0, 1000);
+            bar_->setValue(total > 0 ? static_cast<int>(ev.value("done").toDouble() * 1000 / total) : 0);
+            progress_text_->setText(tr("Disk image: %1 read at %2/s, %3 new")
+                                        .arg(format_bytes(bytes))
+                                        .arg(format_bytes(static_cast<std::uint64_t>(static_cast<double>(bytes) / secs)))
+                                        .arg(format_bytes(static_cast<std::uint64_t>(ev.value("new_bytes").toInteger()))));
+            current_file_->setText(ev.value("current").toString());
+            return;
+        }
         progress_text_->setText(tr("%1 read at %2/s, %3 new  ·  %4")
                                     .arg(format_bytes(bytes))
                                     .arg(format_bytes(static_cast<std::uint64_t>(static_cast<double>(bytes) / secs)))
@@ -317,7 +330,11 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             reload_jobs(current_job() ? current_job()->id : id);
             return;
         }
-        if (result == "success" || result == "partial") {
+        if (result == "success" && ev.value("image").toBool()) {
+            msg = tr("Disk image saved: %1 new, %2 stored")
+                      .arg(format_bytes(static_cast<std::uint64_t>(ev.value("new_bytes").toInteger())))
+                      .arg(format_bytes(static_cast<std::uint64_t>(ev.value("stored_bytes").toInteger())));
+        } else if (result == "success" || result == "partial") {
             msg = tr("Backup finished: %1, %2 new, %3 stored")
                       .arg(count_of(static_cast<std::uint64_t>(ev.value("files").toInteger()), tr("file"), tr("files")))
                       .arg(format_bytes(static_cast<std::uint64_t>(ev.value("new_bytes").toInteger())))
@@ -963,6 +980,10 @@ QWidget* MainWindow::build_job_page() {
     menu->addAction(tr("Repair the backup..."), this, &MainWindow::repair_backup)
         ->setToolTip(tr("When a check found damage: rebuild the index and keep what is intact"));
     menu->setToolTipsVisible(true);
+    menu->addAction(tr("Create recovery drive..."), this, [this] {
+        RecoveryDriveDialog dialog(jobs_, this);
+        dialog.exec();
+    })->setToolTip(tr("A USB stick or ISO file that starts a computer and restores a disk image onto it"));
     menu->addAction(tr("Refresh"), this, [this] {
         repos_.clear();
         reload_jobs(current_job() ? current_job()->id : std::string());
@@ -1774,6 +1795,25 @@ void MainWindow::open_restore(int snapshot_index, const QString& select_path) {
     }
     if (it->second.snapshots.empty()) {
         QMessageBox::information(this, windowTitle(), tr("This job has no versions to restore from yet."));
+        return;
+    }
+    // A disk image restores whole disks, not files.
+    const std::vector<SnapshotEntry>& all = it->second.snapshots;
+    const std::size_t picked = static_cast<std::size_t>(std::clamp(snapshot_index, 0, static_cast<int>(all.size()) - 1));
+    if (all[picked].snapshot.image || (!job->image_disks.empty() && select_path.isEmpty())) {
+        std::vector<SnapshotEntry> images;
+        int selected = 0;
+        for (std::size_t i = 0; i < all.size(); ++i) {
+            if (!all[i].snapshot.image) continue;
+            if (i == picked) selected = static_cast<int>(images.size());
+            images.push_back(all[i]);
+        }
+        if (images.empty()) {
+            QMessageBox::information(this, windowTitle(), tr("This job has no disk images to restore from yet."));
+            return;
+        }
+        ImageRestoreDialog dialog(*job, it->second.repo, std::move(images), selected, this);
+        dialog.exec();
         return;
     }
     RestoreDialog dialog(*job, it->second.repo, it->second.snapshots, std::max(snapshot_index, 0), this, {}, {},

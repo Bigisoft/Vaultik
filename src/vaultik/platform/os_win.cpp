@@ -752,7 +752,7 @@ static std::wstring program_path(const std::string& name) {
     return program;
 }
 
-int run_command_elevated(const std::vector<std::string>& argv) {
+int run_command_elevated(const std::vector<std::string>& argv, bool show_window) {
     if (argv.empty()) throw Error("run_command_elevated: no program");
     const std::wstring program = program_path(argv[0]);
     std::wstring params;
@@ -764,7 +764,7 @@ int run_command_elevated(const std::vector<std::string>& argv) {
     info.lpVerb = L"runas";
     info.lpFile = program.c_str();
     info.lpParameters = params.c_str();
-    info.nShow = SW_HIDE;
+    info.nShow = show_window ? SW_SHOWNORMAL : SW_HIDE;
     if (!ShellExecuteExW(&info)) {
         if (GetLastError() == ERROR_CANCELLED) throw Error("administrator approval was declined");
         throw_last_error("cannot start " + argv[0] + " as administrator");
