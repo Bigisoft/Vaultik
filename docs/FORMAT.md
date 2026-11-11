@@ -28,7 +28,13 @@ file. In S3-compatible cloud storage (`s3:https://<endpoint>/<bucket>[/<folder>]
 one object named `<folder>/<path>` with the same layout; object uploads are atomic, so there are no
 temporary names. The cloud drives (`pcloud:`, `onedrive:`, `gdrive:`, `mega:` followed by a
 folder) hold the same layout as real folders and files; an upload either replaces a file whole or
-leaves it as it was. A repository folder copied to or from a bucket or drive stays valid. Write order during a backup is: packs, then the index files that reference them, then the
+leaves it as it was. On WebDAV (`webdav:`) a file is uploaded as `<name>.tmp-<16 hex>` and moved
+into place with MOVE (Overwrite: T). On SFTP (`sftp:`) it is written as `<name>.tmp-<16 hex>` and
+renamed over the name; a server that cannot rename over an existing file gets the old file moved
+aside as `<name>.old` first, removed once the new one is in place, and readers take `<name>.old`
+for the name while the name itself is missing (a replace cut short in between). Listings leave out
+names containing `.tmp-` (left by an upload cut short; they can be deleted by hand) and list
+`<name>.old` as the name. A repository folder copied to or from a bucket or drive stays valid. Write order during a backup is: packs, then the index files that reference them, then the
 snapshot. A crash leaves at worst unreferenced packs, never a snapshot pointing at missing data;
 the next prune removes them. Lock files (see below) were added in Vaultik 0.2 without a format
 version change: older versions ignore them.
