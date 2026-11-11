@@ -103,6 +103,8 @@ Start `vaultik-gui`, then **New backup job**:
   writes of programs that take part in it, such as SQL Server. "Do not pause SQL Server" leaves
   SQL Server running; its database files are then saved as they would be after a power cut,
   which SQL Server recovers from when the files are attached again.
+- **Virtual machines:** WSL distributions and Hyper-V virtual machines to back up through their
+  own export tools (see "WSL and Hyper-V" below).
 - **Schedule:** manually, every few hours, daily, or on selected weekdays. Schedules are kept by
   Task Scheduler (Windows, task folder `\Vaultik`) or a systemd user timer (Linux), so Vaultik does
   not need to stay open; a run missed while the computer was off starts at the next chance.
@@ -611,6 +613,42 @@ with their publisher and version, to install by hand. From the command line, `va
 and `vaultik apps install <id>... [--snapshot <version>]` installs packages of that list (no
 other ids are taken).
 
+### WSL and Hyper-V
+
+The disk files of a WSL distribution (`ext4.vhdx`) and of a Hyper-V machine (`.vhdx`, `.avhdx`)
+are open while it runs, so a plain file backup gets a half-written copy or none at all. The
+**Virtual machines** tab of a job backs them up through their own export tools instead:
+
+- **WSL distributions:** each ticked one is exported with `wsl --export <name> -`, streamed
+  straight into the backup as the file `WSL\<name>.tar` of the version (no copy on disk first;
+  deduplication stores only what changed since the last export). Its `ext4.vhdx` is left out of
+  the file backup automatically. Exporting a running distribution can catch files half-written,
+  so by default a running one is left out that time with a warning (and old versions are kept);
+  the job can instead export it while it runs, or stop it first (`wsl --terminate`, which closes
+  the programs running in it; it starts again when next used). Vaultik never stops a distribution
+  unless the job says so. WSL belongs to your own account, so this is for jobs without
+  administrator rights. To get one back, pick `WSL\<name>.tar` in the restore window and choose
+  **Import as new...**: it is installed as a new distribution with `wsl --import <new name>
+  <folder> -`, fed from the backup. An existing distribution of that name is replaced only after
+  you confirm it (it is unregistered first, which deletes its disk). The `.tar` can also simply be
+  restored as a file.
+- **Hyper-V machines** (a job with administrator rights): each ticked machine is exported with
+  `Export-VM` (a consistent copy, also of a running machine, through a checkpoint Hyper-V takes
+  and merges itself) into an export folder (`ProgramData\Vaultik\hyperv-export` unless set; only
+  administrators can read it, and it needs room for the largest machine), backed up from there as
+  the folder `Hyper-V\<name>` with its configuration and disks, and removed again. The machines'
+  own disk files are left out of the file backup. **List machines** needs Vaultik started as
+  administrator; a machine can also be added by name. To get one back, pick `Hyper-V\<name>` and
+  choose **Import as new...**: its files are restored into `<folder>\Exported`, then imported
+  (after an administrator approval) with `Import-VM -Copy -GenerateNewId` into `<folder>\Machine`
+  under a new name; an existing machine is never replaced.
+
+From the command line: `vaultik backup ... --wsl <name> [--wsl-running skip|export|stop]
+--hyperv <machine> [--hyperv-staging <folder>]`, `vaultik wsl list`, `vaultik wsl import
+<version> <distro> --name <new name> --to <folder> [--replace]`, `vaultik hyperv list` and, as
+administrator, `vaultik hyperv restore <version> <machine> --to <folder> [--name <new name>]`
+(or `vaultik hyperv import <restored folder> --to <folder>` for files restored already).
+
 ### Repairing a damaged backup
 
 When a check or a restore found damage (a bad sector on the backup drive, a file changed by
@@ -864,7 +902,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    pausing a backup and a slower speed during working hours, a Bulgarian translation,
    Windows Hello before backups are opened, and the installed programs kept with each version
    to install again with winget on a new PC. Several PCs in one view (done): computers sharing
-   a repository see how each other's backups are doing.
+   a repository see how each other's backups are doing. WSL distributions and Hyper-V machines
+   (done): backed up through `wsl --export` and `Export-VM` instead of their open disk files, and
+   imported back as new ones.
 8. Linux port, SteamOS on the Steam Deck first. The review before it is done; its Linux hazards
    are listed in docs/LINUX_PORT.md. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
