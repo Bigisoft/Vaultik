@@ -106,6 +106,7 @@ void set_alert_secret(const std::string& which, const std::string& secret, const
         return;
     }
     Bytes sealed = os::protect_secret(bytes_of(secret), in_admin_store(path));
+    os::make_private_dirs(os::parent_of(path));  // Linux: the 0700 folder is what keeps others out
     os::write_file_atomic(path, sealed, 0600);
 }
 

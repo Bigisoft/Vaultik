@@ -453,7 +453,7 @@ std::string to_json(const MonthlyReport& r) {
     const nlohmann::json j = {{"month", r.month},  {"computer", r.computer}, {"made", r.made},
                               {"start", r.start},  {"end", r.end},           {"jobs", jobs},
                               {"drives", drives},  {"attention", attention}};
-    return j.dump(2);
+    return j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 Alert summary_alert(const MonthlyReport& r) {
