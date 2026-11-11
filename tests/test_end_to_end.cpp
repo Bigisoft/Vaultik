@@ -93,12 +93,15 @@ Bytes text(std::string_view s) {
     return Bytes(s.begin(), s.end());
 }
 
-// Relative path -> content, for every regular file below `root` not ending in .tmp.
+// Relative path (UTF-8) -> content, for every regular file below `root` not ending in .tmp. The
+// names are UTF-8, not the system code page, which cannot hold every name the tests use (Windows
+// with code page 1252, as on GitHub's runners).
 std::map<std::string, Bytes> snapshot_of_dir(const fs::path& root) {
     std::map<std::string, Bytes> files;
     for (const auto& e : fs::recursive_directory_iterator(root)) {
         if (!e.is_regular_file() || e.path().extension() == ".tmp") continue;
-        files[fs::relative(e.path(), root).generic_string()] = read_file(e.path());
+        const std::u8string name = fs::relative(e.path(), root).generic_u8string();
+        files[std::string(name.begin(), name.end())] = read_file(e.path());
     }
     return files;
 }
@@ -1244,7 +1247,10 @@ TEST_CASE("several readers make the same snapshot as one") {
     std::map<std::string, Bytes> expected = snapshot_of_dir(src);
     expected.erase("gone.bin");
 #ifdef _WIN32
+    // Reading the source here cannot open the locked file either: what the backup should have
+    // stored is its content, or nothing when the backup could not read it.
     if (locked_unreadable) expected.erase("locked.bin");
+    else expected["locked.bin"] = seeded_bytes(70000, 6);
 #endif
     CHECK(snapshot_of_dir(restored_location(out, src)) == expected);
 
