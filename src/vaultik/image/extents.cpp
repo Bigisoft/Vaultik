@@ -18,7 +18,8 @@ void add(std::vector<Extent>& out, std::uint64_t offset, std::uint64_t length, E
 }  // namespace
 
 std::vector<Extent> plan_extents(ByteSpan bitmap, std::uint64_t clusters, std::uint32_t cluster_size,
-                                 std::uint64_t partition_length, const Ranges& unused, std::uint64_t min_hole) {
+                                 std::uint64_t partition_length, const Ranges& unused, std::uint64_t min_hole,
+                                 const Ranges& keep) {
     if (cluster_size == 0) throw Error("cluster size of 0");
     clusters = std::min<std::uint64_t>(clusters, partition_length / cluster_size);
     const std::uint64_t mapped = std::min<std::uint64_t>(clusters, std::uint64_t{bitmap.size()} * 8);
@@ -91,12 +92,35 @@ std::vector<Extent> plan_extents(ByteSpan bitmap, std::uint64_t clusters, std::u
         runs = std::move(next);
     }
 
-    // Long unused runs become holes.
+    // Ranges a restore must write, widened to whole clusters.
+    Ranges written;
+    for (const auto& [off, len] : keep) {
+        if (len == 0) continue;
+        const std::uint64_t b = off / cluster_size * cluster_size;
+        const std::uint64_t e = std::min<std::uint64_t>((off + len + cluster_size - 1) / cluster_size * cluster_size,
+                                                        partition_length);
+        if (e > b) written.emplace_back(b, e - b);
+    }
+    std::sort(written.begin(), written.end());
+
+    // Long unused runs become holes, but for the ranges to write, which stay zeros.
     std::vector<Extent> out;
     for (const Extent& r : runs) {
-        const Extent::Kind kind =
-            r.kind == Extent::Kind::Zero && r.length >= min_hole ? Extent::Kind::Hole : r.kind;
-        add(out, r.offset, r.length, kind);
+        if (r.kind != Extent::Kind::Zero || r.length < min_hole) {
+            add(out, r.offset, r.length, r.kind);
+            continue;
+        }
+        std::uint64_t pos = r.offset;
+        const std::uint64_t end = r.offset + r.length;
+        for (const auto& [wb, wl] : written) {
+            const std::uint64_t b = std::max(wb, pos);
+            const std::uint64_t e = std::min(wb + wl, end);
+            if (e <= b) continue;
+            add(out, pos, b - pos, Extent::Kind::Hole);
+            add(out, b, e - b, Extent::Kind::Zero);
+            pos = e;
+        }
+        add(out, pos, end - pos, Extent::Kind::Hole);
     }
     return out;
 }

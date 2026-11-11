@@ -62,12 +62,14 @@ struct MemDisk : DiskSource {
     DiskLayout l;
     Bytes bytes;
     std::map<std::size_t, Bytes> bitmaps;  // per Used partition
+    std::map<std::size_t, Ranges> keep;    // per Used partition: unused ranges a restore writes
     std::uint32_t cluster = 4096;
 
     DiskLayout& layout() override { return l; }
     std::vector<Extent> plan(std::size_t i) override {
         const Partition& p = l.partitions[i];
-        if (p.method == ReadMethod::Used) return plan_extents(bitmaps[i], p.length / cluster, cluster, p.length);
+        if (p.method == ReadMethod::Used)
+            return plan_extents(bitmaps[i], p.length / cluster, cluster, p.length, {}, kMinHole, keep[i]);
         return {{0, p.length, Extent::Kind::Data}};
     }
     void read(std::size_t i, std::uint64_t offset, std::uint8_t* dst, std::size_t length) override {
@@ -308,6 +310,22 @@ TEST_CASE("image: extents from a volume bitmap") {
     CHECK(x[3] == Extent{4 * 4096, 2 * 4096, Extent::Kind::Zero});
     CHECK(x[4] == Extent{6 * 4096, 4096, Extent::Kind::Data});
     CHECK(x[5] == Extent{7 * 4096, 9 * 4096, Extent::Kind::Zero});  // free clusters and the cut one merged
+
+    // A hibernation file over clusters 8-15 (in use): its first cluster is written by a restore
+    // (zeros, never a hole), the rest is a hole. A range to write inside data changes nothing.
+    x = plan_extents(Bytes{0xFF, 0xFF}, 16, 4096, 16 * 4096, {{8 * 4096, 8 * 4096}}, 4 * 4096,
+                     {{8 * 4096, 100}, {4096, 4096}});
+    REQUIRE(x.size() == 3);
+    CHECK(x[0] == Extent{0, 8 * 4096, Extent::Kind::Data});
+    CHECK(x[1] == Extent{8 * 4096, 4096, Extent::Kind::Zero});
+    CHECK(x[2] == Extent{9 * 4096, 7 * 4096, Extent::Kind::Hole});
+    CHECK(holes_of(x) == Ranges{{9 * 4096, 7 * 4096}});
+    // In the middle of a free run: hole, zeros, hole.
+    x = plan_extents(Bytes{0x00, 0x00}, 16, 4096, 16 * 4096, {}, 4 * 4096, {{6 * 4096, 2 * 4096}});
+    REQUIRE(x.size() == 3);
+    CHECK(x[0] == Extent{0, 6 * 4096, Extent::Kind::Hole});
+    CHECK(x[1] == Extent{6 * 4096, 2 * 4096, Extent::Kind::Zero});
+    CHECK(x[2] == Extent{8 * 4096, 8 * 4096, Extent::Kind::Hole});
 
     // A bitmap shorter than the clusters: the rest is read.
     x = plan_extents(Bytes{0xFF}, 16, 4096, 16 * 4096);

@@ -296,7 +296,10 @@ All nodes have zero attributes, mode and times, so an unchanged segment or group
 tree blob as before. A segment's size is its length; its chunks, concatenated, are its bytes.
 Partitions read "used" (NTFS) store unused clusters as zeros: runs shorter than 16 MiB inside
 the data stream (chunked with it), longer runs ("holes") as chunks of `chunk_max` zero bytes and
-one shorter one. A restore recognises zero chunks by their id (the id of that many zero bytes,
+one shorter one. The clusters of `pagefile.sys`, `hiberfil.sys` and `swapfile.sys` (as the volume
+read, the shadow copy, has them) count as unused, but the first 1 MiB of each (rounded out to
+whole clusters) is never part of a hole, so a restore onto a disk with old data writes it: a
+hibernation file left there could otherwise be resumed over the restored volume. A restore recognises zero chunks by their id (the id of that many zero bytes,
 looked up through the blob's raw length in the index) and need not load or write them on a new
 virtual disk, nor in a hole on a disk being overwritten.
 

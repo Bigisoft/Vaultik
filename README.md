@@ -814,7 +814,9 @@ image)"): every partition (Windows, its EFI system, MSR and recovery partitions,
 partitions) and the partition table, so a computer whose disk died is brought back onto a new
 one, Windows, programs and all. NTFS volumes are read from a Volume Shadow Copy (one consistent
 moment for every disk of the job) and only their clusters in use (the volume bitmap); unused
-space, the page file and the hibernation file come back as zeros. Other partitions (the FAT32
+space, the page file and the hibernation file come back as zeros (a restore onto a disk with old
+data writes the start of each, so no hibernated Windows that was on that disk wakes up over the
+restored one). Other partitions (the FAT32
 EFI partition, MSR, unknown file systems) are read byte for byte. The data goes into the same
 deduplicating repository as file backups, so the next image stores only what changed, and
 pruning, health checks, second copies and repair work on images as on any version. An image job

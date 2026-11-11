@@ -33,10 +33,12 @@ constexpr std::uint64_t kMinHole = 16u << 20;
 // `bitmap` has one bit per cluster (bit 0 of byte 0 = cluster 0), `clusters` of them. Clusters
 // past the bitmap and bytes past the last cluster (NTFS keeps a copy of its boot sector there)
 // are read. `unused` are byte ranges to treat as not in use even when their clusters are (the
-// page file and hibernation file).
+// page file and hibernation file). `keep` are unused ranges a restore must still write (as
+// zeros), so they never become holes: the start of the hibernation file, which a restore onto a
+// disk that held another Windows must not leave as it was (Windows would resume from it).
 std::vector<Extent> plan_extents(ByteSpan bitmap, std::uint64_t clusters, std::uint32_t cluster_size,
                                  std::uint64_t partition_length, const Ranges& unused = {},
-                                 std::uint64_t min_hole = kMinHole);
+                                 std::uint64_t min_hole = kMinHole, const Ranges& keep = {});
 
 // The extents clipped to [from, to).
 std::vector<Extent> clip(const std::vector<Extent>& extents, std::uint64_t from, std::uint64_t to);

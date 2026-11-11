@@ -294,6 +294,7 @@ public:
         disk_ = open_device(disk_path(number), GENERIC_READ, FILE_FLAG_NO_BUFFERING);
         if (!disk_.valid()) throw_last_error("opening disk " + std::to_string(number) + " (administrator rights are needed)");
         handles_.resize(layout_.partitions.size());
+        fs_end_.resize(layout_.partitions.size(), 0);
     }
 
     DiskLayout& layout() override { return layout_; }
@@ -307,12 +308,13 @@ public:
         }
         // From the shadow copy when there is one, otherwise the live volume.
         std::wstring device = volume_device(volume);
+        std::wstring root = widen(volume);  // where its files are, with a trailing backslash
         if (shadow_->copy) {
             const std::string mapped = shadow_->copy->map(volume);
             if (mapped != volume) {
-                std::wstring w = widen(mapped);
-                if (!w.empty() && w.back() == L'\\') w.pop_back();
-                device = w;
+                root = widen(mapped);
+                if (root.empty() || root.back() != L'\\') root.push_back(L'\\');
+                device = root.substr(0, root.size() - 1);
                 p.shadow_copy = true;
             }
         }
@@ -339,20 +341,37 @@ public:
                                                            (bm.size() - header) * 8);
         const ByteSpan bitmap(bm.data() + header, static_cast<std::size_t>((bits + 7) / 8));
         // The page file, hibernation file and swap file come back empty after a restore: Windows
-        // makes them again.
+        // makes them again. Their clusters are asked of the volume read (the shadow copy), as they
+        // were at that moment: the live files may have moved or grown since, onto clusters that
+        // held other files then. Their first 1 MiB is still written by a restore, as zeros: a
+        // hibernation file left as it was on the target (another Windows, hibernated or shut
+        // down with fast startup) would be resumed over the restored volume.
         Ranges unused;
+        Ranges keep;
         for (const wchar_t* f : {L"pagefile.sys", L"hiberfil.sys", L"swapfile.sys"}) {
-            const Ranges r = file_clusters(widen(volume) + f, nv.BytesPerCluster);
+            const Ranges r = file_clusters(root + f, nv.BytesPerCluster);
+            if (r.empty()) continue;
             unused.insert(unused.end(), r.begin(), r.end());
+            keep.emplace_back(r.front().first, std::min<std::uint64_t>(r.front().second, 1u << 20));
         }
+        // Bytes past the last cluster (the copy of the boot sector) lie outside the file system,
+        // and a volume handle refuses them: read() takes them from the disk.
+        fs_end_[i] = std::min<std::uint64_t>(clusters * nv.BytesPerCluster, p.length);
         handles_[i] = std::move(h);
-        return plan_extents(bitmap, std::min<std::uint64_t>(clusters, bits), nv.BytesPerCluster, p.length, unused);
+        return plan_extents(bitmap, std::min<std::uint64_t>(clusters, bits), nv.BytesPerCluster, p.length, unused,
+                            kMinHole, keep);
     }
 
     void read(std::size_t i, std::uint64_t offset, std::uint8_t* dst, std::size_t length) override {
         const Partition& p = layout_.partitions[i];
-        if (handles_[i].valid()) read_at(handles_[i].get(), offset, dst, length, buf_, describe(p));
-        else read_at(disk_.get(), p.offset + offset, dst, length, buf_, "disk " + std::to_string(number_));
+        if (handles_[i].valid() && offset < fs_end_[i]) {
+            const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(length, fs_end_[i] - offset));
+            read_at(handles_[i].get(), offset, dst, n, buf_, describe(p));
+            offset += n;
+            dst += n;
+            length -= n;
+        }
+        if (length > 0) read_at(disk_.get(), p.offset + offset, dst, length, buf_, "disk " + std::to_string(number_));
     }
 
     void read_disk(std::uint64_t offset, std::uint8_t* dst, std::size_t length) override {
@@ -366,6 +385,7 @@ private:
     std::vector<std::string> volumes_;  // per partition: its volume name, or empty
     UniqueHandle disk_;
     std::vector<UniqueHandle> handles_;  // per partition: the volume read from (Used)
+    std::vector<std::uint64_t> fs_end_;  // per partition: where the volume's clusters end (Used)
     AlignedBuffer buf_;
 };
 
