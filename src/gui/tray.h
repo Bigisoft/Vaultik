@@ -38,7 +38,9 @@ public:
 private:
     void rebuild_menu();
     // Shows a notification whose click brings the window to the front (icon: QSystemTrayIcon::MessageIcon).
-    void show_message(const QString& title, const QString& text, int kind, int msecs);
+    // A notification replaces the one shown before it. `urgent` (a ransomware warning) is never
+    // replaced by a later one of the same look at the history (check()).
+    void show_message(const QString& title, const QString& text, int kind, int msecs, bool urgent = false);
 
     MainWindow* window_;
     const vaultik::jobs::JobStore& store_;
@@ -51,6 +53,8 @@ private:
     std::function<void()> click_;  // what a click on the newest notification does
     QTimer timer_;
     bool first_check_ = true;
+    bool in_check_ = false;
+    bool urgent_shown_ = false;  // in this check()
     bool attention_ = false;
     std::map<std::string, std::uint64_t> seen_;      // job id -> start of the newest run already reported
     std::map<std::string, QDate> overdue_reported_;  // job id -> the day it was last reported overdue
