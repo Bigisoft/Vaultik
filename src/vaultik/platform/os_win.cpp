@@ -6,6 +6,7 @@
 #include <thread>
 #include <map>
 #include <atomic>
+#include <mutex>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -1014,7 +1015,218 @@ int run_command(const std::vector<std::string>& argv, const CommandOptions& opti
     o.output = options.output;
     o.timeout = options.timeout;
     o.cancelled = options.cancelled;
+    o.clean_environment = options.clean_environment;
+    o.extra_environment = options.extra_environment;
     return run_process(program_path(argv[0]), std::move(cmdline), o, 1u << 20);
+}
+
+struct PipedProcess::Impl {
+    Direction direction = Direction::FromProgram;
+    UniqueHandle process;
+    UniqueHandle job;
+    UniqueHandle data;  // our end of the stream
+    UniqueHandle messages_pipe;
+    std::thread reader;
+    std::atomic<bool> reader_done{false};
+    mutable std::mutex lock;
+    std::string messages;
+    bool waited = false;
+    int exit_code = 0;
+
+    void finish_reader() {
+        if (!reader.joinable()) return;
+        // The program has ended; a program it left running may still hold the pipe open.
+        for (int i = 0; i < 100 && !reader_done; ++i) Sleep(20);
+        while (!reader_done) {
+            CancelSynchronousIo(reader.native_handle());
+            Sleep(20);
+        }
+        reader.join();
+    }
+};
+
+PipedProcess::PipedProcess(const std::vector<std::string>& argv, Direction direction,
+                           const std::vector<std::pair<std::string, std::string>>& environment)
+    : impl_(std::make_unique<Impl>()) {
+    if (argv.empty()) throw Error("PipedProcess: no program");
+    impl_->direction = direction;
+    std::wstring cmdline;
+    for (const std::string& a : argv) cmdline += (cmdline.empty() ? L"" : L" ") + quote_arg(widen(a));
+    const std::wstring program = program_path(argv[0]);
+
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE data_read = nullptr, data_write = nullptr, msg_read = nullptr, msg_write = nullptr;
+    // A large pipe buffer: the stream moves in big pieces (a distribution is gigabytes).
+    if (!CreatePipe(&data_read, &data_write, &sa, 1u << 20)) throw_last_error("cannot create pipe");
+    UniqueHandle dr(data_read), dw(data_write);
+    if (!CreatePipe(&msg_read, &msg_write, &sa, 0)) throw_last_error("cannot create pipe");
+    UniqueHandle mr(msg_read), mw(msg_write);
+    SetHandleInformation(mr.get(), HANDLE_FLAG_INHERIT, 0);
+    UniqueHandle nul(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, nullptr));
+    if (!nul.valid()) throw_last_error("cannot open NUL");
+
+    HANDLE child_in = nullptr, child_out = nullptr;
+    if (direction == Direction::FromProgram) {
+        SetHandleInformation(dr.get(), HANDLE_FLAG_INHERIT, 0);
+        child_in = nul.get();
+        child_out = dw.get();
+    } else {
+        SetHandleInformation(dw.get(), HANDLE_FLAG_INHERIT, 0);
+        child_in = dr.get();
+        child_out = mw.get();
+    }
+    // Only the program's own handles are passed on (see run_process).
+    std::vector<HANDLE> inherit = {child_in, child_out};
+    if (child_out != mw.get()) inherit.push_back(mw.get());
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<std::uint8_t> attr_buf(attr_size);
+    auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size)) throw_last_error("cannot start " + argv[0]);
+    struct AttrGuard {
+        LPPROC_THREAD_ATTRIBUTE_LIST a;
+        ~AttrGuard() { DeleteProcThreadAttributeList(a); }
+    } attr_guard{attrs};
+    if (!UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
+                                   inherit.size() * sizeof(HANDLE), nullptr, nullptr))
+        throw_last_error("cannot start " + argv[0]);
+
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = child_in;
+    si.StartupInfo.hStdOutput = child_out;
+    si.StartupInfo.hStdError = mw.get();
+    si.lpAttributeList = attrs;
+
+    // This process's environment with the given variables replaced or added.
+    std::wstring env;
+    if (!environment.empty()) {
+        std::map<std::wstring, std::wstring> vars;
+        std::map<std::wstring, std::wstring> folded;  // upper-case name -> name as found
+        if (wchar_t* block = GetEnvironmentStringsW()) {
+            for (const wchar_t* p = block; *p != L'\0'; p += wcslen(p) + 1) {
+                const std::wstring entry = p;
+                const std::size_t eq = entry.find(L'=', 1);  // ("=C:=C:\..." entries start with '=')
+                if (eq == std::wstring::npos) continue;
+                vars[entry.substr(0, eq)] = entry.substr(eq + 1);
+            }
+            FreeEnvironmentStringsW(block);
+        }
+        for (const auto& [name, value] : vars) {
+            std::wstring upper = name;
+            CharUpperBuffW(upper.data(), static_cast<DWORD>(upper.size()));
+            folded[upper] = name;
+        }
+        for (const auto& [name, value] : environment) {
+            std::wstring w = widen(name);
+            std::wstring upper = w;
+            CharUpperBuffW(upper.data(), static_cast<DWORD>(upper.size()));
+            if (const auto it = folded.find(upper); it != folded.end()) vars.erase(it->second);
+            vars[w] = widen(value);
+        }
+        for (const auto& [name, value] : vars) env += name + L"=" + value + L'\0';
+        env += L'\0';
+    }
+
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED |
+                            (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT),
+                        env.empty() ? nullptr : env.data(), nullptr, &si.StartupInfo, &pi))
+        throw_last_error("cannot start " + argv[0]);
+    impl_->process = UniqueHandle(pi.hProcess);
+    UniqueHandle thread(pi.hThread);
+    // Everything it starts is in a job, so stop() ends it all; closing the job (this object going
+    // away) ends it too.
+    impl_->job = UniqueHandle(CreateJobObjectW(nullptr, nullptr));
+    if (impl_->job.valid()) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(impl_->job.get(), JobObjectExtendedLimitInformation, &limits, sizeof limits);
+        AssignProcessToJobObject(impl_->job.get(), impl_->process.get());
+    }
+    ResumeThread(thread.get());
+
+    // Our ends only: the program holds its own copies.
+    impl_->data = direction == Direction::FromProgram ? std::move(dr) : std::move(dw);
+    impl_->messages_pipe = std::move(mr);
+    dr.reset();
+    dw.reset();
+    mw.reset();
+    nul.reset();
+    Impl* impl = impl_.get();
+    impl_->reader = std::thread([impl] {
+        char buf[4096];
+        DWORD n = 0;
+        while (ReadFile(impl->messages_pipe.get(), buf, sizeof buf, &n, nullptr) && n > 0) {
+            const std::lock_guard<std::mutex> guard(impl->lock);
+            if (impl->messages.size() < (64u << 10)) impl->messages.append(buf, n);
+        }
+        impl->reader_done = true;
+    });
+}
+
+PipedProcess::~PipedProcess() {
+    if (!impl_->waited) {
+        stop();
+        impl_->data.reset();
+        WaitForSingleObject(impl_->process.get(), 5000);
+    }
+    impl_->finish_reader();
+}
+
+std::size_t PipedProcess::read(std::uint8_t* dst, std::size_t max) {
+    if (impl_->direction != Direction::FromProgram || !impl_->data.valid()) return 0;
+    std::size_t total = 0;
+    // Fill the buffer as far as the pipe allows, so chunking sees large reads.
+    while (total < max) {
+        DWORD n = 0;
+        const DWORD want = static_cast<DWORD>(std::min<std::size_t>(max - total, 1u << 24));
+        if (!ReadFile(impl_->data.get(), dst + total, want, &n, nullptr)) {
+            const DWORD e = GetLastError();
+            if (e == ERROR_BROKEN_PIPE) break;
+            throw OsError("cannot read the program's output", e);
+        }
+        if (n == 0) break;
+        total += n;
+        if (total >= (1u << 16)) break;  // enough for one call; the next one continues
+    }
+    return total;
+}
+
+void PipedProcess::write(ByteSpan data) {
+    if (impl_->direction != Direction::ToProgram || !impl_->data.valid()) throw Error("the program's input is closed");
+    std::size_t done = 0;
+    while (done < data.size()) {
+        DWORD n = 0;
+        const DWORD want = static_cast<DWORD>(std::min<std::size_t>(data.size() - done, 1u << 24));
+        if (!WriteFile(impl_->data.get(), data.data() + done, want, &n, nullptr))
+            throw OsError("the program stopped reading its input", GetLastError());
+        done += n;
+    }
+}
+
+int PipedProcess::wait() {
+    if (impl_->waited) return impl_->exit_code;
+    impl_->data.reset();
+    WaitForSingleObject(impl_->process.get(), INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(impl_->process.get(), &code);
+    impl_->finish_reader();
+    impl_->waited = true;
+    impl_->exit_code = static_cast<int>(code);
+    return impl_->exit_code;
+}
+
+void PipedProcess::stop() {
+    if (impl_->job.valid()) TerminateJobObject(impl_->job.get(), 1);
+    else if (impl_->process.valid()) TerminateProcess(impl_->process.get(), 1);
+}
+
+std::string PipedProcess::messages() const {
+    const std::lock_guard<std::mutex> guard(impl_->lock);
+    return impl_->messages;
 }
 
 std::string executable_path() {

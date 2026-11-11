@@ -532,6 +532,25 @@ int run_command_elevated(const std::vector<std::string>&) {
     throw Error("running as administrator is only supported on Windows");
 }
 
+// Streamed programs are used for WSL and Hyper-V only, which exist on Windows alone.
+struct PipedProcess::Impl {};
+PipedProcess::PipedProcess(const std::vector<std::string>&, Direction,
+                           const std::vector<std::pair<std::string, std::string>>&) {
+    throw Error("streaming a program's output is only supported on Windows");
+}
+PipedProcess::~PipedProcess() = default;
+std::size_t PipedProcess::read(std::uint8_t*, std::size_t) {
+    return 0;
+}
+void PipedProcess::write(ByteSpan) {}
+int PipedProcess::wait() {
+    return -1;
+}
+void PipedProcess::stop() {}
+std::string PipedProcess::messages() const {
+    return {};
+}
+
 int run_command(const std::vector<std::string>& argv, std::string* output) {
     if (argv.empty()) throw Error("run_command: no program");
     int pipefd[2] = {-1, -1};
