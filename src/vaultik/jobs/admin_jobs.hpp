@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/job.hpp"
 
 namespace vaultik::jobs {
@@ -64,6 +65,14 @@ bool event_backup_due(const JobStore& store, const Job& job);
 // every folder above those, changeable by administrators only. run_job_command also runs such a
 // command with a fixed environment, in the admin store. No-op on POSIX.
 void check_admin_command(const std::string& command, const std::string& what);
+
+// Windows: the question the elevated step asks (in a window a program without administrator
+// rights cannot answer) before it copies `job` into the admin store, as UTF-8: everything that
+// gives the job its power (commands, destinations and their keys, Object Lock, the second copy,
+// what is removed, folders, whole disks, Hyper-V machines and their export folder, alerts).
+// `changed`: an approved copy exists and differs. Throws Error when it would not fit on screen in
+// full, since what is approved must be exactly what is seen.
+std::string approval_question(const Job& job, bool changed, bool same_secrets, const AlertSettings& alerts);
 
 // Whether the admin store holds the job (so removing it needs administrator rights).
 bool has_admin_copy(const std::string& id);

@@ -14,6 +14,7 @@
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/restore.hpp"
@@ -333,6 +334,44 @@ TEST_CASE("a file changed through its other name (a hard link) is read again") {
     bo.check_every_file = true;
     const BackupResult checked = run_backup(*repo, bo);
     CHECK(read_text(restored(checked, "out2") / "b" / "plain.txt") == "PLAIN, changed through a new name");
+}
+
+TEST_CASE("the approval of a job with administrator rights shows everything that gives it its power") {
+    jobs::Job job;
+    job.name = "Disks";
+    job.repository = "s3:https://s3.example.com/bucket/vaultik";
+    job.cloud_lock_days = 30;
+    job.cloud_lock_compliance = true;
+    job.image_disks = {"0", "system"};
+    job.second_copy.repository = "sftp://backup@nas.example.com/vaultik";
+    job.second_copy.cloud_region = "SHA256:abcdef";
+    job.second_copy.cloud_lock_days = 7;
+    job.retention.last = 1;
+    const jobs::AlertSettings alerts;
+    std::string q = jobs::approval_question(job, false, true, alerts);
+    CHECK(q.find("the whole disk 0 (every partition)") != std::string::npos);
+    CHECK(q.find("the whole disk Windows runs from") != std::string::npos);
+    CHECK(q.find("locked for 30 days (compliance mode") != std::string::npos);
+    CHECK(q.find("locked for 7 days (governance mode)") != std::string::npos);
+    CHECK(q.find("trusting the server key SHA256:abcdef") != std::string::npos);
+    CHECK(q.find("Removes old versions, keeping") != std::string::npos);
+
+    jobs::Job vm;
+    vm.name = "Machines";
+    vm.repository = "D:\\Backups";
+    vm.hyperv_vms = {"Web"};
+    q = jobs::approval_question(vm, false, true, alerts);
+    CHECK(q.find("Hyper-V virtual machine Web") != std::string::npos);
+    CHECK(q.find("exported first into Vaultik's folder in ProgramData") != std::string::npos);
+    CHECK(q.find("Keeps every version.") != std::string::npos);
+    vm.hyperv_staging = "E:\\Exports";
+    CHECK(jobs::approval_question(vm, false, true, alerts).find("exported first into a new folder in E:\\Exports") != std::string::npos);
+
+    // What does not fit on screen is refused rather than cut.
+    job.image_disks.assign(13, "1");
+    CHECK_THROWS(jobs::approval_question(job, false, true, alerts));
+    job.image_disks.assign(12, "gpt-01234567-89ab-cdef-0123-456789abcdef");
+    CHECK_THROWS(jobs::approval_question(job, false, true, alerts));
 }
 
 #endif  // _WIN32
