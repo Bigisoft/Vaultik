@@ -844,6 +844,7 @@
  "The destination drive is not connected now. Connect it to turn this on.": "Дискът за архивиране сега не е свързан. Свържете го, за да включите това.",
  "The destination is on the Windows drive, which is always connected.": "Местоназначението е на диска с Windows, който винаги е свързан.",
  "The disk Windows runs from cannot be replaced while it runs: start the computer from the recovery drive (More > Create recovery drive) to restore it.": "Дискът, от който работи Windows, не може да бъде заменен, докато Windows работи: стартирайте компютъра от устройството за възстановяване (Още > Създаване на устройство за възстановяване), за да го възстановите.",
+ "The disks changed since this window listed them (%1). Nothing was written. Check the list and choose the disk again.": "Дисковете се промениха, откакто този прозорец ги изброи (%1). Нищо не беше записано. Проверете списъка и изберете диска отново.",
  "The drive with the backup reports a problem (%1: %2). Copy the backup to another drive soon, before it fails.": "Дискът с архива съобщава за проблем (%1: %2). Копирайте архива на друг диск скоро, преди да се повреди.",
  "The drives open in a window of their own; press Enter there to close them.": "Дяловете се отварят в собствен прозорец; натиснете Enter там, за да ги затворите.",
  "The first backup takes roughly %1 to an external hard disk.": "Първото архивиране отнема около %1 към външен твърд диск.",

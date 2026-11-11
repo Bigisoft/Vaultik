@@ -389,10 +389,69 @@ private:
     AlignedBuffer buf_;
 };
 
+// What disk `n`, open as `h`, is: size, sectors, model, serial, bus, partition style and id
+// (not its volumes, nor whether Windows runs from it). False when it has no medium.
+bool probe_disk(HANDLE h, int n, DiskInfo& d) {
+    d.number = n;
+    const Bytes geo = ioctl(h, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, 1024);
+    if (geo.size() < sizeof(DISK_GEOMETRY_EX) - 1) return false;  // no medium (an empty card reader)
+    const auto* g = reinterpret_cast<const DISK_GEOMETRY_EX*>(geo.data());
+    d.size = static_cast<std::uint64_t>(g->DiskSize.QuadPart);
+    d.sector_size = g->Geometry.BytesPerSector;
+    d.physical_sector_size = d.sector_size;
+    d.removable = g->Geometry.MediaType == RemovableMedia;
+
+    STORAGE_PROPERTY_QUERY q{};
+    q.PropertyId = StorageDeviceProperty;
+    q.QueryType = PropertyStandardQuery;
+    const Bytes desc = ioctl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, 4096);
+    if (desc.size() >= sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
+        const auto* sd = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(desc.data());
+        const std::string vendor = descriptor_string(desc, sd->VendorIdOffset);
+        const std::string product = descriptor_string(desc, sd->ProductIdOffset);
+        d.model = trim(vendor.empty() || product.starts_with(vendor) ? product : vendor + " " + product);
+        d.serial = descriptor_string(desc, sd->SerialNumberOffset);
+        d.bus = bus_name(sd->BusType);
+        if (sd->RemovableMedia) d.removable = true;
+    }
+    q.PropertyId = StorageAccessAlignmentProperty;
+    STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR al{};
+    DWORD got = 0;
+    if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &al, sizeof al, &got, nullptr) &&
+        got >= sizeof al && al.BytesPerPhysicalSector != 0)
+        d.physical_sector_size = al.BytesPerPhysicalSector;
+
+    const RawLayout l = read_layout(h);
+    if (l.style == PARTITION_STYLE_GPT) {
+        d.style = "GPT";
+        d.id = "gpt-" + l.disk_guid;
+    } else if (l.style == PARTITION_STYLE_MBR) {
+        d.style = "MBR";
+        char sig[16];
+        std::snprintf(sig, sizeof sig, "%08X", l.signature);
+        d.id = std::string("mbr-") + sig;
+    } else {
+        d.style = "RAW";
+    }
+    for (const Partition& p : l.partitions)
+        if (!is_container(p.mbr_type)) ++d.partitions;
+    return true;
+}
+
 class WinDiskTarget : public DiskTarget {
 public:
-    explicit WinDiskTarget(const DiskInfo& d) : number_(d.number), size_(d.size), sector_(d.sector_size), buf_(4u << 20) {
-        // Every volume on the disk goes offline first, so nothing writes to it meanwhile.
+    WinDiskTarget(const DiskInfo& d, const DiskIdentity& expected)
+        : number_(d.number), size_(d.size), sector_(d.sector_size), buf_(4u << 20) {
+        // The disk first, and the disk this handle reaches checked against what the user chose:
+        // its number may belong to another disk by now.
+        disk_ = open_device(disk_path(d.number), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
+        if (!disk_.valid()) throw_last_error("opening disk " + std::to_string(d.number) + " for writing");
+        DiskInfo now;
+        if (!probe_disk(disk_.get(), d.number, now)) throw Error("disk " + std::to_string(d.number) + " has no medium");
+        const std::string other = identity_mismatch(now, expected);
+        if (!other.empty()) throw Error(other + "; nothing was written");
+        if (now.sector_size != sector_ || now.size != size_) throw Error("disk " + std::to_string(d.number) + " changed; nothing was written");
+        // Every volume on the disk goes offline, so nothing writes to it meanwhile.
         for (const DiskVolume& v : volumes_of(d.number)) {
             UniqueHandle h = open_device(volume_device(v.name), GENERIC_READ | GENERIC_WRITE);
             if (!h.valid()) throw_last_error("opening " + (v.mount.empty() ? v.name : v.mount));
@@ -403,8 +462,6 @@ public:
             DeviceIoControl(h.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
             locked_.push_back(std::move(h));
         }
-        disk_ = open_device(disk_path(d.number), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
-        if (!disk_.valid()) throw_last_error("opening disk " + std::to_string(d.number) + " for writing");
     }
 
     std::uint64_t size() const override { return size_; }
@@ -430,7 +487,9 @@ public:
     }
 
     void finish() override {
-        FlushFileBuffers(disk_.get());
+        // Every byte on the disk before the volumes come back (a failure here means the restore
+        // did not finish).
+        if (!FlushFileBuffers(disk_.get())) throw_last_error("writing disk " + std::to_string(number_));
         DWORD got = 0;
         DeviceIoControl(disk_.get(), IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
         locked_.clear();
@@ -536,49 +595,7 @@ std::vector<DiskInfo> list_disks() {
         UniqueHandle h = open_device(disk_path(n), 0);
         if (!h.valid()) continue;
         DiskInfo d;
-        d.number = n;
-        const Bytes geo = ioctl(h.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, 1024);
-        if (geo.size() < sizeof(DISK_GEOMETRY_EX) - 1) continue;  // no medium (an empty card reader)
-        const auto* g = reinterpret_cast<const DISK_GEOMETRY_EX*>(geo.data());
-        d.size = static_cast<std::uint64_t>(g->DiskSize.QuadPart);
-        d.sector_size = g->Geometry.BytesPerSector;
-        d.physical_sector_size = d.sector_size;
-        d.removable = g->Geometry.MediaType == RemovableMedia;
-
-        STORAGE_PROPERTY_QUERY q{};
-        q.PropertyId = StorageDeviceProperty;
-        q.QueryType = PropertyStandardQuery;
-        const Bytes desc = ioctl(h.get(), IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, 4096);
-        if (desc.size() >= sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
-            const auto* sd = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(desc.data());
-            const std::string vendor = descriptor_string(desc, sd->VendorIdOffset);
-            const std::string product = descriptor_string(desc, sd->ProductIdOffset);
-            d.model = trim(vendor.empty() || product.starts_with(vendor) ? product : vendor + " " + product);
-            d.serial = descriptor_string(desc, sd->SerialNumberOffset);
-            d.bus = bus_name(sd->BusType);
-            if (sd->RemovableMedia) d.removable = true;
-        }
-        q.PropertyId = StorageAccessAlignmentProperty;
-        STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR al{};
-        DWORD got = 0;
-        if (DeviceIoControl(h.get(), IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &al, sizeof al, &got, nullptr) &&
-            got >= sizeof al && al.BytesPerPhysicalSector != 0)
-            d.physical_sector_size = al.BytesPerPhysicalSector;
-
-        const RawLayout l = read_layout(h.get());
-        if (l.style == PARTITION_STYLE_GPT) {
-            d.style = "GPT";
-            d.id = "gpt-" + l.disk_guid;
-        } else if (l.style == PARTITION_STYLE_MBR) {
-            d.style = "MBR";
-            char sig[16];
-            std::snprintf(sig, sizeof sig, "%08X", l.signature);
-            d.id = std::string("mbr-") + sig;
-        } else {
-            d.style = "RAW";
-        }
-        for (const Partition& p : l.partitions)
-            if (!is_container(p.mbr_type)) ++d.partitions;
+        if (!probe_disk(h.get(), n, d)) continue;
         for (const VolumeOnDisk& v : volumes)
             if (v.disk == n) d.volumes.push_back(v.v);
         std::sort(d.volumes.begin(), d.volumes.end(), [](const DiskVolume& a, const DiskVolume& b) { return a.offset < b.offset; });
@@ -663,13 +680,16 @@ std::vector<std::unique_ptr<DiskSource>> open_disk_sources(const std::vector<int
     return out;
 }
 
-std::unique_ptr<DiskTarget> open_disk_target(int number) {
+std::unique_ptr<DiskTarget> open_disk_target(int number, const DiskIdentity& expected,
+                                             const std::vector<int>& protected_disks) {
     const std::vector<DiskInfo> disks = list_disks();
     auto it = std::find_if(disks.begin(), disks.end(), [number](const DiskInfo& d) { return d.number == number; });
     if (it == disks.end()) throw Error("disk " + std::to_string(number) + " is not connected");
-    const std::string why = target_refusal(*it, system_disks(), {});
+    const std::string why = target_refusal(*it, system_disks(), protected_disks);
     if (!why.empty()) throw Error("disk " + std::to_string(number) + " cannot be restored to: " + why);
-    return std::make_unique<WinDiskTarget>(*it);
+    const std::string other = identity_mismatch(*it, expected);
+    if (!other.empty()) throw Error(other + "; nothing was written");
+    return std::make_unique<WinDiskTarget>(*it, expected);
 }
 
 std::unique_ptr<RandomFile> create_random_file(const std::string& path) {
@@ -722,11 +742,14 @@ std::unique_ptr<AttachedDisk> attach_vhdx(const std::string& path, bool read_onl
 }
 
 std::string repair_boot(int number) {
-    // The new partitions show up a moment after the restore.
+    // The new partitions, and the file systems on them, show up a moment after the restore.
     std::vector<DiskVolume> vols;
+    auto has_ntfs = [&] {
+        return std::any_of(vols.begin(), vols.end(), [](const DiskVolume& v) { return v.filesystem == "NTFS"; });
+    };
     for (int i = 0; i < 75; ++i) {
         vols = volumes_of(number);
-        if (!vols.empty()) break;
+        if (has_ntfs()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     if (vols.empty()) throw Error("the restored disk shows no volumes yet; restart and try again");
@@ -756,7 +779,9 @@ std::string repair_boot(int number) {
 
     DiskVolume* windows = nullptr;
     for (DiskVolume& v : vols) {
-        if (v.filesystem != "NTFS" && !v.filesystem.empty()) continue;
+        // Only NTFS volumes get a letter to look for Windows: a volume without a file system
+        // (unknown, damaged or encrypted) would make Explorer offer to format it.
+        if (v.filesystem != "NTFS") continue;
         const std::string root = mount_of(v);
         if (os::exists(os::join(root, "Windows\\System32\\config\\SYSTEM"))) {
             windows = &v;

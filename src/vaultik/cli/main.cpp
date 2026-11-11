@@ -353,7 +353,10 @@ Disk images (Windows, administrator rights except image disks and --vhdx):
                                the disk Windows runs from, nor the one holding the
                                backup; asks you to type ERASE DISK <number>
       --confirm <text>         That text, given beforehand
-      --boot                   Then make the disk start Windows (bcdboot)
+      --expect-size <bytes>, --expect-serial <s>, --expect-id <id>
+                               The disk you chose from a listing: stops when the
+                               disk at that number is another one by now
+      --boot                 Then make the disk start Windows (bcdboot)
       --disk-index <n>         Which disk of the image (default 1)
   image mount <snapshot>       Open a disk image's drives read-only in File
                                Explorer until Enter is pressed (it is copied to a
@@ -426,7 +429,7 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--disk-index", "--iso", "--usb", "--size"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",

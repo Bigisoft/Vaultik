@@ -323,8 +323,32 @@ void ImageRestoreDialog::start() {
     }
     const int n = target_disk();
     if (!image::confirmed(u8(confirm_->text()), n)) return;
+    // The disk shown when the user typed the confirmation, checked against the disks now (a disk
+    // unplugged meanwhile can pass its number to another), and again by the engine when it opens
+    // the disk.
+    auto shown = std::find_if(disks_.begin(), disks_.end(), [n](const image::DiskInfo& d) { return d.number == n; });
+    if (shown == disks_.end()) return;
+    const image::DiskIdentity chosen = image::identity_of(*shown);
+    const std::vector<image::DiskInfo> now = image::list_disks();
+    auto current = std::find_if(now.begin(), now.end(), [n](const image::DiskInfo& d) { return d.number == n; });
+    const std::string other = current == now.end() ? "disk " + std::to_string(n) + " is not connected any more"
+                                                   : image::identity_mismatch(*current, chosen);
+    if (!other.empty()) {
+        confirm_->clear();
+        disks_ = now;
+        fill_targets();
+        update_state();
+        QMessageBox::warning(this, windowTitle(),
+                             tr("The disks changed since this window listed them (%1). Nothing was written. Check the "
+                                "list and choose the disk again.")
+                                 .arg(qs(other)));
+        return;
+    }
     QStringList args{"image", "restore", qs(id_hex(snap.id)), "--job", qs(job_.id), "--disk-index", index,
-                     "--to-disk", QString::number(n), "--confirm", qs(image::confirmation_text(n)), "--pause"};
+                     "--to-disk", QString::number(n), "--confirm", qs(image::confirmation_text(n)),
+                     "--expect-size", QString::number(chosen.size), "--pause"};
+    if (!chosen.serial.empty()) args << "--expect-serial" << qs(chosen.serial);
+    if (!chosen.id.empty()) args << "--expect-id" << qs(chosen.id);
     if (boot_->isChecked()) args << "--boot";
     QString error;
     const int code = run_engine_elevated(this, tr("Restoring onto disk %1 in its own window...").arg(n), args, error);

@@ -838,7 +838,11 @@ Explorer** in the restore window copy the image to a temporary virtual disk with
 and open it read-only, to take single files out. Restoring onto a disk replaces everything on
 it, so it is guarded: never the disk Windows runs from, nor the one holding the backup or
 Vaultik; the disk's model, size and serial number are shown and you type `ERASE DISK <number>`
-(in the window or with `--confirm`). The target needs the same sector size and room for every
+(in the window or with `--confirm`). Disk numbers move when disks are plugged in or out, so
+the restore stops, before writing, when the disk at that number is no longer the one shown (its
+size, serial number or partition table id differ). The partition tables are written last: a
+restore that stops halfway leaves a disk without partitions, not one with half-written ones.
+The target needs the same sector size and room for every
 partition (a larger disk is fine; the partitions keep their sizes). Disk and partition ids stay
 the same, so the restored Windows starts as before; `--boot` (or the recovery menu) also runs
 `bcdboot` to write its boot files.

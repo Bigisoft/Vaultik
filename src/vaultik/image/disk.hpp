@@ -67,9 +67,24 @@ int find_disk(const std::vector<DiskInfo>& disks, const std::string& id);
 std::vector<std::unique_ptr<DiskSource>> open_disk_sources(const std::vector<int>& disks, bool shadow_copy,
                                                            const std::function<void(const std::string&)>& warn);
 
-// Writing onto disk `number` (administrator rights). Refuses a disk Windows runs from. Takes
-// every volume on it offline until the restore is done; then Windows reads the new partitions.
-std::unique_ptr<DiskTarget> open_disk_target(int number);
+// What the user saw of the disk they agreed to erase. Disk numbers pass to other disks when
+// disks are unplugged or plugged in, so a restore checks again, when it opens the disk, that the
+// disk at that number is still this one.
+struct DiskIdentity {
+    std::string serial;
+    std::uint64_t size = 0;
+    std::string id;  // DiskInfo::id
+};
+DiskIdentity identity_of(const DiskInfo& d);
+// Why `now` is not the disk `expected` describes; empty when it is.
+std::string identity_mismatch(const DiskInfo& now, const DiskIdentity& expected);
+
+// Writing onto disk `number` (administrator rights). Refuses a disk Windows runs from, one in
+// `protected_disks` (see target_refusal), and one that is not `expected` (checked on the opened
+// disk itself). Takes every volume on it offline until the restore is done; then Windows reads
+// the new partitions.
+std::unique_ptr<DiskTarget> open_disk_target(int number, const DiskIdentity& expected,
+                                             const std::vector<int>& protected_disks);
 
 // A new dynamic VHDX file at `path` of `size` bytes (it must not exist yet).
 class VhdxTarget : public DiskTarget {

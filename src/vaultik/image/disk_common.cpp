@@ -79,6 +79,21 @@ int find_disk(const std::vector<DiskInfo>& disks, const std::string& id) {
     return -1;
 }
 
+DiskIdentity identity_of(const DiskInfo& d) {
+    return {d.serial, d.size, d.id};
+}
+
+std::string identity_mismatch(const DiskInfo& now, const DiskIdentity& expected) {
+    const std::string number = "disk " + std::to_string(now.number);
+    if (now.size != expected.size)
+        return number + " is not the disk that was chosen any more (its size differs); list the disks again";
+    if (trim_upper(now.serial) != trim_upper(expected.serial))
+        return number + " is not the disk that was chosen any more (its serial number differs); list the disks again";
+    if (trim_upper(now.id) != trim_upper(expected.id))
+        return number + " is not the disk that was chosen any more (its partition table changed); list the disks again";
+    return {};
+}
+
 VhdxTarget::VhdxTarget(std::unique_ptr<RandomFile> file, std::uint64_t size, std::uint32_t sector_size,
                        std::uint32_t physical_sector_size)
     : file_(std::move(file)),

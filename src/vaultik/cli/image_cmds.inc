@@ -293,15 +293,41 @@ void confirm_erase(const Args& a, const image::DiskInfo& target) {
     if (!image::confirmed(typed, target.number)) throw Error("not confirmed; nothing was written");
 }
 
+// The disk the caller showed the user (--expect-size, --expect-serial, --expect-id, as the GUI
+// passes them), or nothing when none is given.
+std::optional<image::DiskIdentity> expected_disk(const Args& a) {
+    const auto size = a.value("--expect-size");
+    if (!size) {
+        if (a.value("--expect-serial") || a.value("--expect-id")) throw Error("--expect-serial and --expect-id need --expect-size");
+        return std::nullopt;
+    }
+    image::DiskIdentity d;
+    if (size->empty() || !std::all_of(size->begin(), size->end(), [](unsigned char c) { return std::isdigit(c); }))
+        throw Error("--expect-size takes a number of bytes");
+    d.size = std::stoull(*size);
+    d.serial = a.value("--expect-serial").value_or(std::string());
+    d.id = a.value("--expect-id").value_or(std::string());
+    return d;
+}
+
 // Restores image disk `index` of `ref` onto physical disk `number`, after every check. The repo
-// location protects its own disk.
+// location protects its own disk. `expected` is the disk the user chose from an earlier listing:
+// the restore stops when the disk at `number` is another one by now (disks come and go, and
+// their numbers move). Without it, the disk listed here is the one confirmed and written.
 void restore_onto_disk(Repository& repo, const SnapshotRef& ref, std::size_t index, int number,
-                       const std::string& repo_location, const Args* a, bool boot) {
+                       const std::string& repo_location, const Args* a, bool boot,
+                       const std::optional<image::DiskIdentity>& expected) {
     const std::vector<image::DiskInfo> disks = image::list_disks();
     auto it = std::find_if(disks.begin(), disks.end(), [number](const image::DiskInfo& d) { return d.number == number; });
     if (it == disks.end()) throw Error("there is no disk " + std::to_string(number));
-    const std::string why = image::target_refusal(*it, image::system_disks(), protected_disks(repo_location));
+    const std::vector<int> keep = protected_disks(repo_location);
+    const std::string why = image::target_refusal(*it, image::system_disks(), keep);
     if (!why.empty()) throw Error("disk " + std::to_string(number) + " cannot be restored to: " + why);
+    if (expected) {
+        const std::string other = image::identity_mismatch(*it, *expected);
+        if (!other.empty()) throw Error(other + "; nothing was written");
+    }
+    const image::DiskIdentity confirmed = expected ? *expected : image::identity_of(*it);
     const std::vector<image::DiskLayout> layouts = image::image_disks(repo, ref.snapshot);
     if (index >= layouts.size()) throw Error("the image has no disk " + std::to_string(index + 1));
     const std::string fit = image::fits(layouts[index], it->size, it->sector_size);
@@ -313,7 +339,8 @@ void restore_onto_disk(Repository& repo, const SnapshotRef& ref, std::size_t ind
     o.should_cancel = [] { return stop_requested(); };
     const auto start = std::chrono::steady_clock::now();
     o.on_progress = restore_progress(start);
-    auto target = image::open_disk_target(number);
+    // Opened by number, and checked again there to be the disk confirmed.
+    auto target = image::open_disk_target(number, confirmed, keep);
     image::run_image_restore(repo, ref.snapshot, *target, o);
     target.reset();
     if (!g_json) {
@@ -349,7 +376,7 @@ int cmd_image_restore(const Args& a) {
 
     if (to_disk) {
         const int number = disk_arg(image::list_disks(), *to_disk);
-        restore_onto_disk(*repo, ref, index, number, repo_path(a), &a, a.has("--boot"));
+        restore_onto_disk(*repo, ref, index, number, repo_path(a), &a, a.has("--boot"), expected_disk(a));
         if (g_json) emit({{"event", "done"}, {"status", "success"}, {"message", "disk " + std::to_string(number) + " restored"}});
         return kExitOk;
     }
@@ -691,10 +718,15 @@ void recovery_restore() {
     }
     const std::string which = ask("Number of the disk to restore onto (Enter: back): ");
     if (which.empty() || !std::all_of(which.begin(), which.end(), [](unsigned char c) { return std::isdigit(c); })) return;
+    if (which.size() > 3) return;
     const int number = std::stoi(which);
+    // The disk listed above under that number: the restore stops if the number is another
+    // disk's by now.
+    auto shown = std::find_if(targets.begin(), targets.end(), [number](const image::DiskInfo& d) { return d.number == number; });
+    if (shown == targets.end()) throw Error("there is no disk " + which);
 
     Args none;  // the confirmation is typed at the console
-    restore_onto_disk(*repo, ref, index, number, location, &none, false);
+    restore_onto_disk(*repo, ref, index, number, location, &none, false, image::identity_of(*shown));
     lock.reset();
 
     // 5. Starting Windows from it.

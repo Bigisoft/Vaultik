@@ -733,6 +733,29 @@ TEST_CASE("image: restores never write to the disk Windows runs from") {
     CHECK_FALSE(confirmed("yes", 3));
     CHECK_FALSE(confirmed("", 3));
 
+    // The disk confirmed against the disk at that number when the restore opens it.
+    DiskInfo chosen = d;
+    chosen.serial = "S64ANS0R123456";
+    chosen.id = "gpt-AAAA";
+    const DiskIdentity want = identity_of(chosen);
+    CHECK(identity_mismatch(chosen, want).empty());
+    DiskInfo same = chosen;
+    same.serial = "  s64ans0r123456 ";  // as some drives pad it
+    same.model = "another name";
+    CHECK(identity_mismatch(same, want).empty());
+    DiskInfo other = chosen;  // another disk got the number
+    other.serial = "WD-1234";
+    CHECK(identity_mismatch(other, want).find("disk 2") == 0);
+    other = chosen;
+    other.size += 512;
+    CHECK_FALSE(identity_mismatch(other, want).empty());
+    other = chosen;
+    other.id = "mbr-12345678";  // its partition table changed since it was shown
+    CHECK_FALSE(identity_mismatch(other, want).empty());
+    other = chosen;
+    other.serial.clear();  // a disk without a serial number is not the one with it
+    CHECK_FALSE(identity_mismatch(other, want).empty());
+
     DiskInfo a = d;
     a.number = 0;
     a.id = "gpt-AAAA";

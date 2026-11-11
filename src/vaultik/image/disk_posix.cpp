@@ -71,7 +71,7 @@ std::vector<std::unique_ptr<DiskSource>> open_disk_sources(const std::vector<int
     windows_only();
 }
 
-std::unique_ptr<DiskTarget> open_disk_target(int) {
+std::unique_ptr<DiskTarget> open_disk_target(int, const DiskIdentity&, const std::vector<int>&) {
     windows_only();
 }
 
