@@ -122,6 +122,7 @@ public:
     struct FileJob {
         std::string io_path;
         bool opened = false;  // opening was tried (open_error says how it went)
+        std::uint32_t names = 1;  // the file's number of names, once opened
         os::ErrorCode open_error = 0;
         std::deque<Piece> pieces;
         std::size_t queued = 0;      // bytes in `pieces`
@@ -260,6 +261,7 @@ private:
                 std::lock_guard g(mu_);
                 job.opened = true;
                 job.open_error = file.valid() ? 0 : err;
+                if (file.valid()) job.names = file.names();
                 job.done = !file.valid();
             }
             to_engine_.notify_all();
@@ -377,6 +379,10 @@ private:
     bool scan_file(const std::string& path, Node& node, const Node* parent, ReaderPool::FileJob* job);
     // Whether a file is unchanged since the parent snapshot, so its chunk list can be reused.
     bool reusable(const Node& node, const Node* parent) const;
+    // A listed file that could be reused: on Windows the listing shows a hard-linked file's size
+    // and times as of the last change through that name, so the file itself is asked when it
+    // had several names (or the job asks for every file). Leaves `info` as listed when that fails.
+    void refresh_info(const std::string& path, os::FileInfo& info, const Node* pnode) const;
     bool take_file(const std::string& path, Node& node, const Node* parent, ReaderPool::FileJob& job);
     bool file_read(const std::string& path, Node& node, const Node* parent, std::uint64_t total, bool random_start);
     // With several readers, folders are listed ahead of the engine (see look_ahead) and their
@@ -608,6 +614,21 @@ void BackupEngine::scan_streams(const std::string& path, Node& node) {
     }
 }
 
+void BackupEngine::refresh_info(const std::string& path, os::FileInfo& info, const Node* pnode) const {
+#ifdef _WIN32
+    if (info.type != os::EntryType::File || pnode == nullptr || pnode->kind != NodeKind::File) return;
+    if (pnode->names <= 1 && !options_.check_every_file) return;
+    os::FileInfo fresh;
+    os::ErrorCode err = 0;
+    if (os::stat(io(path), fresh, err) && fresh.type == os::EntryType::File) info = fresh;
+#else
+    // lstat, which the listing uses, reads the file's own record.
+    (void)path;
+    (void)info;
+    (void)pnode;
+#endif
+}
+
 bool BackupEngine::reusable(const Node& node, const Node* parent) const {
     // Unchanged since the parent snapshot: reuse its chunk list without reading the file. Its
     // streams too: writing a stream changes the file's modification time.
@@ -629,6 +650,7 @@ bool BackupEngine::take_file(const std::string& path, Node& node, const Node* pa
         warn("skipped " + path + ": " + os::error_message(err));
         return false;
     }
+    node.names = job.names > 1 ? job.names : 0;
     progress_.current = path;
     report();
     std::uint64_t total = 0;
@@ -673,6 +695,7 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
     if (job != nullptr) return take_file(path, node, parent, *job);
     if (reusable(node, parent)) {
         node.content = parent->content;
+        node.names = parent->names;
         // A version made before streams were kept has no extras for any file: look once more.
         // (One made since carries the file's security descriptor, so an empty list is real.)
         if (parent->streams.empty() && !parent->security) scan_streams(path, node);
@@ -688,6 +711,8 @@ bool BackupEngine::scan_file(const std::string& path, Node& node, const Node* pa
         warn("skipped " + path + ": " + os::error_message(err));
         return false;
     }
+    const std::uint32_t names = file.names();
+    node.names = names > 1 ? names : 0;
 
     progress_.current = path;
     report();
@@ -802,8 +827,9 @@ Tree BackupEngine::scan_children(const std::string& dir, std::uint64_t device, c
             check_cancel();
             const std::string child = os::join(dir, name);
             if (excluder_.excluded(name, child)) continue;
+            const Node* pnode = parent != nullptr ? parent->find(name) : nullptr;
+            refresh_info(child, info, pnode);
             Node node = node_from_info(info, name);
-            const Node* pnode = parent != nullptr ? parent->find(node.name) : nullptr;
             if (scan_entry(child, info, device, node, pnode)) {
                 note_change(node, pnode);
                 tree.nodes.push_back(std::move(node));
@@ -853,9 +879,10 @@ std::shared_ptr<PreparedDir> BackupEngine::prepare(const std::string& dir, std::
         if (excluder_.excluded(name, child)) continue;
         PreparedDir::Entry e;
         e.path = std::move(child);
+        e.pnode = listed->parent != nullptr ? listed->parent->find(name) : nullptr;
+        refresh_info(e.path, info, e.pnode);
         e.info = info;
         e.node = node_from_info(info, name);
-        e.pnode = listed->parent != nullptr ? listed->parent->find(e.node.name) : nullptr;
         listed->entries.push_back(std::move(e));
     }
     if (!reader.ok()) {

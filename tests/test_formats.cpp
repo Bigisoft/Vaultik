@@ -110,6 +110,14 @@ TEST_CASE("tree v2 keeps POSIX metadata and symlink targets") {
     CHECK(bf->mode == 0755);
     CHECK(bf->uid == 1000);
     CHECK(bf->gid == 100);
+    CHECK(bf->names == 0);
+
+    // A hard-linked file keeps its number of names.
+    for (Node& n : t.nodes)
+        if (n.name == "script.sh") n.names = 3;
+    const Tree linked = parse_tree(serialize_tree(t));
+    REQUIRE(linked.find("script.sh") != nullptr);
+    CHECK(linked.find("script.sh")->names == 3);
 }
 
 TEST_CASE("tree v1 (phase 1 repositories) still parses") {

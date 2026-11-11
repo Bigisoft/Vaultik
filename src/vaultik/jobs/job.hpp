@@ -147,6 +147,9 @@ struct Job {
     // Save a version only when something changed since the last one (a run that finds nothing
     // changed is recorded as a success without a version).
     bool skip_unchanged = false;
+    // Ask every file for its real size and times instead of trusting the folder listing (see
+    // BackupOptions::check_every_file): for folders with hard links, such as package stores.
+    bool check_every_file = false;
     // Keep the list of programs installed on this computer with each version (see ops/apps.hpp),
     // so they can be installed again on a new one.
     bool record_apps = true;

@@ -56,6 +56,10 @@ struct Node {
     std::optional<Id> security;
     std::vector<DataStream> streams;
     std::optional<LinkInfo> link;  // Reparse nodes that are symlinks or junctions
+    // Files with more than one name (hard links): how many it had when last read; 0 for one. A
+    // Windows folder listing only shows the size and times as of the last change through that
+    // name, so for these the backup asks the file itself before taking it for unchanged.
+    std::uint32_t names = 0;
 };
 
 // Every Data blob a node needs: its content, its streams' content and its security descriptor.

@@ -106,6 +106,9 @@ Commands:
       --no-parent              Re-read every file instead of reusing unchanged ones
       --parent <snapshot>      Compare against this snapshot instead of the latest
       --skip-unchanged         Save no snapshot when nothing changed since it
+      --check-every-file       Ask every file for its size and times instead of
+                               trusting the folder listing (slower; catches files
+                               changed through another name, a hard link)
       --threads <n>            Compress and encrypt on n worker threads (default: up
                                to 4; 0 at background priority or with --max-memory)
       --read-threads <n>       Read, chunk and hash n files at once (default: up to
@@ -427,7 +430,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1202,6 +1205,7 @@ int cmd_backup(const Args& a) {
     o.tags = a.all("--tag");
     o.use_parent = !a.has("--no-parent");
     o.skip_unchanged = a.has("--skip-unchanged");
+    o.check_every_file = a.has("--check-every-file");
     if (auto p = a.value("--parent")) o.parent = resolve_snapshot(*repo, *p).id;
     if (a.has("--apps")) o.app_list = app_list_in_background();
     const auto machines_guard = add_virtual_machines(o, distros, when, machines, a.value("--hyperv-staging").value_or(""));
@@ -2494,6 +2498,7 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
+        o.check_every_file = job->check_every_file;
         if (job->record_apps && job->image_disks.empty()) {
             // Within a day of the last backup (continuous or triggered runs, hourly schedules) the
             // last version's list is kept; winget lists the programs again after that.

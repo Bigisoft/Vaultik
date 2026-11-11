@@ -171,6 +171,8 @@ public:
                               ErrorCode& err);
     // This file's id; empty when it cannot be told (POSIX).
     std::optional<FileId> id() const;
+    // How many names (hard links) the file has; 1 when it cannot be told.
+    std::uint32_t names() const;
     // Windows: creates a new folder and keeps it open, so its permissions can be set on exactly
     // the folder made, whatever happens to its path. Fails (is_exists) when something is there.
     // Not supported on POSIX.

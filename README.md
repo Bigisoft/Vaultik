@@ -799,6 +799,14 @@ changed, the last backup skipped files), every folder is read again. The journal
 kept with the job's settings (`journal\<job>.json`). Without administrator rights, on FAT and
 exFAT drives and on Linux, every folder is read as before.
 
+Windows' folder listing shows a file with several names (hard links) with the size and times of
+its last change through that name, so a change through its other name would look like no change.
+Vaultik remembers which files have several names and asks those files themselves. A file that
+gets its second name only after a backup and is then changed through it is still missed by the
+listing: for folders where hard links come and go (package stores, build output), tick **Check
+every file** in the job's Schedule tab (`--check-every-file`), which asks every file and makes
+scanning unchanged files about three times slower.
+
 ### Disk images and the recovery drive
 
 A job can back up whole disks instead of folders (**What to back up**: "Whole disks (disk

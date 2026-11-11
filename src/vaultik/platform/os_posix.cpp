@@ -1037,6 +1037,12 @@ std::optional<FileId> File::id() const {
     return std::nullopt;
 }
 
+std::uint32_t File::names() const {
+    struct stat st{};
+    if (!valid() || ::fstat(as_fd(h_), &st) != 0 || st.st_nlink == 0) return 1;
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(st.st_nlink, 0xFFFFFFFFu));
+}
+
 File File::create_directory(const std::string& /*path*/, ErrorCode& err) {
     err = ENOTSUP;
     return File();

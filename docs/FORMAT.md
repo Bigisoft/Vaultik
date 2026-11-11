@@ -199,6 +199,7 @@ Extras (readers skip tags they do not know):
 | 1 | id (32) | a Data blob holding the Windows security descriptor (owner, group, access list; self-relative). Identical descriptors are one blob. |
 | 2 | name (string), size (varint), chunk count (varint), chunk ids (32 each) | an NTFS alternate data stream of the file ("file:name") |
 | 3 | reparse tag (u32), flags (u8, bit 0 = relative), target (string) | the target of a Windows symlink (`0xA000000C`) or junction (`0xA0000003`) on a kind 2 node; absolute targets without the `\??\` prefix |
+| 4 | count (varint, 2 or more) | the file had this many names (hard links) when it was read. A Windows folder listing shows a hard-linked file's size and times as of the last change through that name, so the next backup asks the file itself before reusing its content. Older readers skip it. |
 
 Every blob an extra names counts as in use for prune, is copied with the version, and is checked
 by verify like file content.

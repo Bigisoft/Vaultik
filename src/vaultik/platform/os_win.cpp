@@ -474,6 +474,12 @@ ErrorCode File::set_security(ByteSpan descriptor) {
     return GetLastError();
 }
 
+std::uint32_t File::names() const {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!valid() || !GetFileInformationByHandle(as_handle(h_), &info) || info.nNumberOfLinks == 0) return 1;
+    return info.nNumberOfLinks;
+}
+
 std::optional<FileId> File::id() const {
     FILE_ID_INFO info{};
     if (!valid() || !GetFileInformationByHandleEx(as_handle(h_), FileIdInfo, &info, sizeof info)) return std::nullopt;

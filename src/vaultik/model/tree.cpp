@@ -15,9 +15,10 @@ constexpr std::uint64_t kTreeVersion = 3;
 constexpr std::uint8_t kExtraSecurity = 1;  // id (32): Data blob with the security descriptor
 constexpr std::uint8_t kExtraStream = 2;    // name, varint size, varint count, ids
 constexpr std::uint8_t kExtraLink = 3;      // u32 tag, u8 flags (1 = relative), target
+constexpr std::uint8_t kExtraNames = 4;     // varint: number of names of a hard-linked file (> 1)
 
 bool has_extras(const Node& n) {
-    return n.security.has_value() || !n.streams.empty() || n.link.has_value();
+    return n.security.has_value() || !n.streams.empty() || n.link.has_value() || n.names > 1;
 }
 
 void write_extras(ByteWriter& w, const Node& n) {
@@ -41,6 +42,11 @@ void write_extras(ByteWriter& w, const Node& n) {
         e.u8(n.link->relative ? 1 : 0);
         e.str(n.link->target);
         extras.emplace_back(kExtraLink, e.take());
+    }
+    if (n.names > 1) {
+        ByteWriter e;
+        e.varint(n.names);
+        extras.emplace_back(kExtraNames, e.take());
     }
     w.varint(extras.size());
     for (const auto& [tag, bytes] : extras) {
@@ -79,6 +85,11 @@ void read_extras(ByteReader& r, Node& n) {
                 l.relative = (e.u8() & 1) != 0;
                 l.target = e.str();
                 n.link = std::move(l);
+                break;
+            }
+            case kExtraNames: {
+                const std::uint64_t names = e.varint();
+                n.names = names > 1 ? static_cast<std::uint32_t>(std::min<std::uint64_t>(names, 0xFFFFFFFFu)) : 0;
                 break;
             }
             default:

@@ -458,6 +458,7 @@ std::string to_json(const Job& job) {
         {"continuous", job.continuous},
         {"continuous_minutes", job.continuous_minutes},
         {"skip_unchanged", job.skip_unchanged},
+        {"check_every_file", job.check_every_file},
         {"record_apps", job.record_apps},
         {"wsl", {{"distros", job.wsl_distros}, {"when_running", job.wsl_when_running}}},
         {"hyperv", {{"machines", job.hyperv_vms}, {"staging", job.hyperv_staging}}},
@@ -563,6 +564,7 @@ Job job_from_json(const std::string& text) {
         job.schedule.on_sign_out = job.schedule.on_sign_out && !job.run_as_admin;
         job.before_command = j.value("before_command", std::string());
         job.skip_unchanged = j.value("skip_unchanged", false);
+        job.check_every_file = j.value("check_every_file", false);
         job.record_apps = j.value("record_apps", true);
         if (j.contains("wsl")) {  // missing in jobs saved before virtual machines were backed up
             const json& w = j.at("wsl");

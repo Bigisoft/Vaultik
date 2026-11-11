@@ -546,6 +546,13 @@ QWidget* JobDialog::build_schedule() {
     skip_unchanged_->setToolTip(tr("A run that finds every file as it was shows in the Activity tab as \"nothing "
                                    "changed\" and still counts as a backup; no new version is added."));
     form->addRow(tr("Versions:"), skip_unchanged_);
+    check_every_file_ = new QCheckBox(tr("Check every file, not only the folder listing (slower)"));
+    check_every_file_->setToolTip(
+        tr("Windows' folder listing can show a file with several names (a hard link) as unchanged when it "
+           "was changed through its other name. Vaultik checks files it knows have several names anyway; "
+           "this also checks every other file, for folders where hard links come and go, such as package "
+           "stores."));
+    form->addRow(QString(), check_every_file_);
     record_apps_ = new QCheckBox(tr("Keep a list of the installed programs with each version"));
     record_apps_->setToolTip(tr("On a new computer, \"Reinstall programs\" in the restore window then installs the "
                                 "missing ones with winget. The list is small and stored encrypted like the files."));
@@ -967,6 +974,7 @@ void JobDialog::load(const jobs::Job& job) {
     for (int d = 0; d < 7; ++d) days_[d]->setChecked((job.schedule.weekdays >> d) & 1u);
     skip_battery_->setChecked(job.schedule.skip_on_battery);
     skip_unchanged_->setChecked(job.skip_unchanged);
+    check_every_file_->setChecked(job.check_every_file);
     record_apps_->setChecked(job.record_apps);
     {
         int at = repair_data_->findData(static_cast<int>(job.repair_data));
@@ -1112,6 +1120,7 @@ jobs::Job JobDialog::collect() const {
         if (days_[d]->isChecked()) j.schedule.weekdays |= static_cast<std::uint8_t>(1u << d);
     j.schedule.skip_on_battery = skip_battery_->isChecked();
     j.skip_unchanged = skip_unchanged_->isChecked();
+    j.check_every_file = check_every_file_->isChecked();
     j.record_apps = record_apps_->isChecked();
     j.repair_data = static_cast<unsigned>(repair_data_->currentData().toInt());
     j.schedule.wake_computer = wake_->isChecked();

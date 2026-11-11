@@ -59,6 +59,11 @@ struct BackupOptions {
     // Save no new snapshot when nothing changed since the parent (the same tree: every file,
     // folder and their metadata as before). The result then says so (unchanged).
     bool skip_unchanged = false;
+    // Ask every file that looks unchanged for its real size and times instead of trusting the
+    // folder listing (Windows): slower, but also catches a file that got a second name (hard
+    // link) after the last backup and was changed through it. Files known to have several names
+    // are always asked.
+    bool check_every_file = false;
 
     // The change journal (Windows, with administrator rights; see platform/usn_journal.hpp): when
     // the parent snapshot is `journal_parent`, a folder for which `dir_unchanged(path)` is true had

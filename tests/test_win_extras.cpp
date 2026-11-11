@@ -290,4 +290,49 @@ TEST_CASE("a command runs with a time limit, and programs it leaves running are 
     CHECK(env.find("[success]") != std::string::npos);
 }
 
+TEST_CASE("a file changed through its other name (a hard link) is read again") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    fs::create_directories(src / "b");
+    fs::create_directories(src / "c");
+    write_text(src / "b" / "linked.txt", "linked");
+    fs::create_hard_link(src / "b" / "linked.txt", src / "c" / "linked-too.txt");
+
+    LocalBackend backend(u8(repo_dir), true);
+    InitOptions io;
+    io.kdf_iterations = 1000;
+    Repository::init(backend, "pw", io);
+    auto repo = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), "pw");
+    BackupOptions bo;
+    bo.paths = {u8(src)};
+    run_backup(*repo, bo);
+
+    // Through the second name: the folder listing of b still shows the old size and times.
+    write_text(src / "c" / "linked-too.txt", "LINKED, changed through the other name");
+    const BackupResult second = run_backup(*repo, bo);
+
+    const auto restored = [&](const BackupResult& b, const char* out_name) {
+        RestoreOptions ro;
+        ro.target = u8(tmp.path / out_name);
+        CHECK(run_restore(*repo, b.snapshot, ro).errors == 0);
+        fs::path out = tmp.path / out_name;
+        for (const std::string& c : os::path_components(u8(src))) out /= fs::path(std::u8string(c.begin(), c.end()));
+        return out;
+    };
+    const fs::path out = restored(second, "out");
+    CHECK(read_text(out / "b" / "linked.txt") == "LINKED, changed through the other name");
+    CHECK(read_text(out / "c" / "linked-too.txt") == "LINKED, changed through the other name");
+
+    // A file that got its second name after the last backup is only caught when every file is
+    // checked.
+    write_text(src / "b" / "plain.txt", "plain");
+    run_backup(*repo, bo);
+    fs::create_hard_link(src / "b" / "plain.txt", src / "c" / "plain-too.txt");
+    write_text(src / "c" / "plain-too.txt", "PLAIN, changed through a new name");
+    bo.check_every_file = true;
+    const BackupResult checked = run_backup(*repo, bo);
+    CHECK(read_text(restored(checked, "out2") / "b" / "plain.txt") == "PLAIN, changed through a new name");
+}
+
 #endif  // _WIN32
