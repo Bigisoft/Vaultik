@@ -331,8 +331,9 @@ struct CommandOptions {
     // run_command throws Error. Standard input is empty.
     std::chrono::seconds timeout = std::chrono::hours(4);
     std::function<bool()> cancelled;
-    // Windows: a fixed minimal environment plus these variables (see ShellOptions). Values passed
-    // this way never have to be quoted into a command line.
+    // A fixed minimal environment plus these variables (see ShellOptions); without
+    // `clean_environment` the variables go on top of this process's. Values passed this way never
+    // have to be quoted into a command line.
     bool clean_environment = false;
     std::vector<std::pair<std::string, std::string>> extra_environment;
 };
@@ -385,8 +386,9 @@ struct ShellOptions {
     // run_shell throws Error. Programs it starts and leaves running are not waited for.
     std::chrono::seconds timeout = std::chrono::hours(4);
     std::function<bool()> cancelled;
-    // Windows: a fixed minimal environment (the system folders on Path) instead of this
-    // process's, plus `extra_environment`; for commands run with administrator rights.
+    // A fixed minimal environment (Windows: the system folders on Path; POSIX: the system bin
+    // folders on PATH plus HOME, USER, LOGNAME, LANG and TZ) instead of this process's, plus
+    // `extra_environment`; for commands run with administrator rights.
     bool clean_environment = false;
     std::vector<std::pair<std::string, std::string>> extra_environment;
     std::string directory;  // the working folder (empty: this process's)

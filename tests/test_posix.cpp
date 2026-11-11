@@ -126,6 +126,37 @@ TEST_CASE("POSIX: run_shell environment and working folder") {
     CHECK(out.find("|0") != std::string::npos);  // a clean environment carries no password
 }
 
+TEST_CASE("POSIX: run_command clean environment and extra variables") {
+    ::setenv("VAULTIK_TEST_LEAK", "secret", 1);
+    std::string out;
+    os::CommandOptions o;
+    o.output = &out;
+    o.clean_environment = true;
+    o.extra_environment = {{"VAULTIK_TEST_VALUE", "a b"}};
+    CHECK(os::run_command({"/bin/sh", "-c", "printf '%s|%s|' \"$VAULTIK_TEST_VALUE\" \"${VAULTIK_TEST_LEAK:-none}\""}, o) == 0);
+    CHECK(out == "a b|none|");
+
+    // Without a clean environment the extra variables go on top of this process's.
+    out.clear();
+    o.clean_environment = false;
+    CHECK(os::run_command({"/bin/sh", "-c", "printf '%s|%s|' \"$VAULTIK_TEST_VALUE\" \"${VAULTIK_TEST_LEAK:-none}\""}, o) == 0);
+    CHECK(out == "a b|secret|");
+    ::unsetenv("VAULTIK_TEST_LEAK");
+}
+
+TEST_CASE("POSIX: process ids past the pid_t range are not alive") {
+    CHECK(os::process_alive(os::process_id()));
+    CHECK_FALSE(os::process_alive(0xFFFFFFFFu));
+}
+
+TEST_CASE("POSIX: the home folder without HOME comes from the password database") {
+    const std::string saved = os::get_env("HOME");
+    ::unsetenv("HOME");
+    const std::string home = os::user_folder(os::UserFolder::Profile);
+    if (!saved.empty()) ::setenv("HOME", saved.c_str(), 1);
+    CHECK_FALSE(home.empty());
+}
+
 TEST_CASE("POSIX: private folders are 0700") {
     PosixTemp tmp;
     const std::string dir = os::join(os::join(tmp.path, "a"), "secrets");

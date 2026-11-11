@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #include "vaultik/util/resources.hpp"
 
@@ -829,8 +830,10 @@ int spawn_and_wait(const Spawn& s) {
             break;
         }
         if (done < 0 && errno != EINTR) {
-            status = 0;
-            break;
+            // Its exit code is lost (it was reaped elsewhere): never report that as success.
+            const int e = errno;
+            if (pipefd[0] >= 0) ::close(pipefd[0]);
+            throw_error("cannot wait for " + argv[0], static_cast<ErrorCode>(e));
         }
         if (s.cancelled != nullptr && *s.cancelled && (*s.cancelled)()) stop_reason = "cancelled";
         else if (std::chrono::steady_clock::now() > deadline) stop_reason = "did not finish in time";
@@ -900,11 +903,16 @@ int run_shell(const std::string& command, const ShellOptions& options) {
 }
 
 int run_command(const std::vector<std::string>& argv, const CommandOptions& options) {
+    // The same environment rules as run_shell: a clean one when asked, extra variables on top.
+    std::vector<std::string> env;
+    const bool own_env = options.clean_environment || !options.extra_environment.empty();
+    if (own_env) env = shell_environment(options.clean_environment, options.extra_environment);
     Spawn s;
     s.argv = &argv;
     s.output = options.output;
     s.timeout = options.timeout;
     s.cancelled = &options.cancelled;
+    s.environment = own_env ? &env : nullptr;
     return spawn_and_wait(s);
 }
 
@@ -987,6 +995,9 @@ std::uint32_t process_id() {
 
 bool process_alive(std::uint32_t pid) {
     if (pid == 0) return true;
+    // No process has an id that big (pid_max is at most 2^22), and as a negative pid_t kill()
+    // would test a whole process group instead.
+    if (pid > static_cast<std::uint32_t>(std::numeric_limits<pid_t>::max())) return false;
     return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
 }
 
@@ -1012,7 +1023,10 @@ std::string get_env(const char* name) {
 }
 
 std::string user_folder(UserFolder folder) {
-    const std::string home = get_env("HOME");
+    std::string home = get_env("HOME");
+    // Without HOME (some service managers and cron set none) the password database knows it.
+    if (home.empty())
+        if (const struct passwd* pw = ::getpwuid(::geteuid()); pw != nullptr && pw->pw_dir != nullptr) home = pw->pw_dir;
     if (home.empty()) return {};
     const auto xdg = [&](const char* var, const char* fallback) {
         const std::string v = get_env(var);
