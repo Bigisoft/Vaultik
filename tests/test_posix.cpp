@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <string>
@@ -173,6 +174,39 @@ TEST_CASE("POSIX: folders other accounts than root can change") {
         ::chmod(dir.c_str(), 0770);
         CHECK(os::others_can_change(dir));  // its group may write
     }
+}
+
+TEST_CASE("POSIX: secrets are sealed with a key kept in this account's settings") {
+    PosixTemp tmp;
+    const std::string saved = os::get_env("VAULTIK_CONFIG_DIR");
+    ::setenv("VAULTIK_CONFIG_DIR", tmp.path.c_str(), 1);
+    const std::string plain = "correct horse battery staple";
+    const ByteSpan in(reinterpret_cast<const std::uint8_t*>(plain.data()), plain.size());
+    const Bytes sealed = os::protect_secret(in);
+    // The plain text is not in what lands on the disk.
+    CHECK(std::search(sealed.begin(), sealed.end(), plain.begin(), plain.end()) == sealed.end());
+    const Bytes back = os::unprotect_secret(sealed);
+    CHECK(std::string(back.begin(), back.end()) == plain);
+
+    const std::string key = os::join(os::join(tmp.path, "secrets"), "local.key");
+    struct stat st{};
+    REQUIRE(::stat(key.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0600);
+    CHECK(st.st_size == 32);
+
+    Bytes tampered = sealed;
+    tampered.back() ^= 1;
+    CHECK_THROWS_AS(os::unprotect_secret(tampered), Error);
+    CHECK_THROWS_AS(os::unprotect_secret(in), Error);  // plain text is not taken as a sealed secret
+
+    // On another computer (no key there) it cannot be opened, and a new key does not open it.
+    REQUIRE(::unlink(key.c_str()) == 0);
+    CHECK_THROWS_AS(os::unprotect_secret(sealed), Error);
+    (void)os::protect_secret(in);
+    CHECK_THROWS_AS(os::unprotect_secret(sealed), Error);
+
+    if (saved.empty()) ::unsetenv("VAULTIK_CONFIG_DIR");
+    else ::setenv("VAULTIK_CONFIG_DIR", saved.c_str(), 1);
 }
 
 TEST_CASE("POSIX: private folders are 0700") {

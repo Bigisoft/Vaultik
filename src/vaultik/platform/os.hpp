@@ -319,10 +319,13 @@ void append_file(const std::string& path, ByteSpan data, std::uint32_t mode = 06
 // permissions already keep other accounts out). Throws OsError.
 void make_private_dirs(const std::string& path);
 
-// Encrypts a secret so only the current user can read it back (Windows DPAPI). On POSIX the
-// data is returned unchanged and protection comes from the file mode (0600) inside a 0700 folder
-// (make_private_dirs): anyone who can read the account's files (root, a backup of the home
-// folder, a program running as the user) can read it, as with an SSH key without a passphrase.
+// Encrypts a secret so only the current user can read it back (Windows DPAPI). On POSIX it is
+// sealed (AES-256-GCM) with a random key kept in this account's own settings folder
+// (secrets/local.key under VAULTIK_CONFIG_DIR, $XDG_CONFIG_HOME/vaultik or ~/.config/vaultik), so
+// a copy of the sealed files alone (a portable copy's settings on a backup drive) does not reveal
+// it; on the computer itself protection comes from the file modes (0600 in a 0700 folder,
+// make_private_dirs): anyone who can read the account's files (root, a program running as the
+// user) can still read it, as with an SSH key without a passphrase.
 // `machine`: sealed with the computer's key instead of the account's (Windows), so another account
 // (the system account of a job with administrator rights) can open it; the file's permissions are
 // then all that keeps others out.
