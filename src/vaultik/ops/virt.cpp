@@ -15,6 +15,10 @@
 #include "vaultik/util/error.hpp"
 
 #ifdef _WIN32
+#include <windows.h>
+
+#include <winioctl.h>
+
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/util/win.hpp"
 #include "vaultik/util/win_handle.hpp"
@@ -181,6 +185,18 @@ std::string powershell_path() {
     const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) throw Error("cannot find the system folder");
     return narrow(std::wstring(sys, n) + L"\\WindowsPowerShell\\v1.0\\powershell.exe");
+}
+
+// Hyper-V refuses virtual disks in an NTFS-compressed folder: files made in `dir` from now on are
+// not compressed, whatever its parent folder says. Best effort (FAT and network drives).
+void stop_compression(const std::string& dir) {
+    const UniqueHandle h(CreateFileW(widen(dir).c_str(), GENERIC_READ | GENERIC_WRITE,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                     FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+    if (!h.valid()) return;
+    USHORT format = COMPRESSION_FORMAT_NONE;
+    DWORD returned = 0;
+    DeviceIoControl(h.get(), FSCTL_SET_COMPRESSION, &format, sizeof format, nullptr, 0, &returned, nullptr);
 }
 
 // The line a failed script's message is written on (see run_powershell).
@@ -648,6 +664,7 @@ std::string hyperv_import(const std::string& folder, const std::string& new_name
         if (reader.next(entry, info)) throw Error(dest + " is not empty; choose a new or empty folder for the machine");
     }
     os::make_dirs(dest);
+    stop_compression(dest);
     // Compare-VM reads the exported configuration (and its name) without importing anything, so
     // the name is checked before a single file is copied; Import-VM then copies with a new id, and
     // never registers over an existing machine.
