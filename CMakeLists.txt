@@ -7,6 +7,7 @@ if(NOT WIN32 AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 option(VAULTIK_BUILD_GUI "Build the Qt 6 frontend (vaultik-gui)" ON)
+option(VAULTIK_BUILD_TESTS "Build the tests (vaultik_tests, needs doctest)" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,12 +15,58 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Static CRT: a single self-contained exe, which phase 5 also needs for the WinPE recovery stick.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-find_package(zstd CONFIG REQUIRED)
-find_package(BLAKE3 CONFIG REQUIRED)
-find_package(doctest CONFIG REQUIRED)
-find_package(nlohmann_json CONFIG REQUIRED)
-if(NOT WIN32)
+# Windows: everything from vcpkg (build.cmd). Linux: vcpkg when its toolchain is given (the
+# linux-vcpkg-* presets), otherwise the distribution's packages (build.sh, the linux-* presets):
+#   Debian/Ubuntu: g++ cmake ninja-build pkg-config libzstd-dev libssl-dev libcurl4-openssl-dev
+#                  nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev (and libblake3-dev
+#                  where the distribution has it; otherwise BLAKE3 is downloaded and built)
+#   Arch/SteamOS:  base-devel cmake ninja zstd openssl curl nlohmann-json doctest qt6-base qt6-svg blake3
+if(WIN32)
+    find_package(zstd CONFIG REQUIRED)
+    find_package(BLAKE3 CONFIG REQUIRED)
+    find_package(doctest CONFIG REQUIRED)
+    find_package(nlohmann_json CONFIG REQUIRED)
+else()
+    find_package(PkgConfig)
+    find_package(Threads REQUIRED)
     find_package(OpenSSL REQUIRED)
+    find_package(CURL REQUIRED)
+    find_package(nlohmann_json CONFIG REQUIRED)
+    if(VAULTIK_BUILD_TESTS)
+        find_package(doctest CONFIG QUIET)
+        if(NOT doctest_FOUND)
+            find_path(VAULTIK_DOCTEST_DIR doctest/doctest.h PATH_SUFFIXES include REQUIRED)
+            add_library(doctest::doctest INTERFACE IMPORTED)
+            target_include_directories(doctest::doctest INTERFACE ${VAULTIK_DOCTEST_DIR})
+        endif()
+    endif()
+    find_package(zstd CONFIG QUIET)
+    if(NOT zstd_FOUND OR NOT (TARGET zstd::libzstd_static OR TARGET zstd::libzstd OR TARGET zstd::libzstd_shared))
+        pkg_check_modules(VAULTIK_ZSTD_PC REQUIRED IMPORTED_TARGET libzstd)
+        add_library(zstd::libzstd ALIAS PkgConfig::VAULTIK_ZSTD_PC)
+    endif()
+    find_package(BLAKE3 CONFIG QUIET)
+    if(NOT BLAKE3_FOUND AND PkgConfig_FOUND)
+        pkg_check_modules(VAULTIK_BLAKE3_PC QUIET IMPORTED_TARGET libblake3)
+        if(VAULTIK_BLAKE3_PC_FOUND)
+            add_library(BLAKE3::blake3 ALIAS PkgConfig::VAULTIK_BLAKE3_PC)
+        endif()
+    endif()
+    if(NOT TARGET BLAKE3::blake3)
+        # Not packaged by every distribution (Ubuntu 24.04 has none): the official C sources, at
+        # a fixed release and hash.
+        include(FetchContent)
+        FetchContent_Declare(blake3
+            URL https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.5.4.tar.gz
+            URL_HASH SHA256=ddd24f26a31d23373e63d9be2e723263ac46c8b6d49902ab08024b573fd2a416
+            SOURCE_SUBDIR c
+            DOWNLOAD_EXTRACT_TIMESTAMP ON)
+        set(BUILD_SHARED_LIBS_SAVED ${BUILD_SHARED_LIBS})
+        set(BUILD_SHARED_LIBS OFF)
+        FetchContent_MakeAvailable(blake3)
+        set(BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS_SAVED})
+        set_target_properties(blake3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    endif()
 endif()
 
 if(TARGET zstd::libzstd_static)
@@ -144,7 +191,7 @@ else()
     target_compile_definitions(vaultik_core PUBLIC _GNU_SOURCE _FILE_OFFSET_BITS=64)
     target_compile_options(vaultik_core PUBLIC -Wall -Wextra -Wpedantic $<$<CONFIG:Release>:-O2>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
-                          OpenSSL::Crypto)
+                          OpenSSL::Crypto CURL::libcurl Threads::Threads)
 endif()
 
 # ---- command line -----------------------------------------------------------------------------
@@ -175,7 +222,12 @@ endif()
 # ---- frontend ---------------------------------------------------------------------------------
 
 if(VAULTIK_BUILD_GUI)
-    find_package(Qt6 6.5 COMPONENTS Widgets Svg)
+    if(WIN32)
+        find_package(Qt6 6.5 COMPONENTS Widgets Svg)
+    else()
+        # Network: the single-instance socket (QLocalServer).
+        find_package(Qt6 6.4 COMPONENTS Widgets Svg Network)
+    endif()
     if(Qt6_FOUND)
         qt_add_executable(vaultik-gui WIN32
             src/gui/main.cpp
@@ -226,6 +278,13 @@ if(VAULTIK_BUILD_GUI)
         target_link_libraries(vaultik-make-icon PRIVATE Qt6::Gui Qt6::Svg)
         if(WIN32)
             target_link_libraries(vaultik-gui PRIVATE windowscodecs uiautomationcore windowsapp)  # previews, accessibility, Windows Hello
+        else()
+            target_link_libraries(vaultik-gui PRIVATE Qt6::Network)
+            install(TARGETS vaultik vaultik-gui RUNTIME DESTINATION bin)
+            install(FILES packaging/linux/io.github.bigisoft.Vaultik.desktop DESTINATION share/applications)
+            install(FILES src/gui/app_icon.svg DESTINATION share/icons/hicolor/scalable/apps
+                    RENAME io.github.bigisoft.Vaultik.svg)
+            install(FILES packaging/linux/io.github.bigisoft.Vaultik.metainfo.xml DESTINATION share/metainfo)
         endif()
         # The GUI starts the engine (and the scheduler starts the launcher) from its own folder.
         add_dependencies(vaultik-gui vaultik)
@@ -239,6 +298,7 @@ endif()
 
 # ---- tests ------------------------------------------------------------------------------------
 
+if(VAULTIK_BUILD_TESTS)
 enable_testing()
 add_executable(vaultik_tests
     tests/test_main.cpp
@@ -263,6 +323,7 @@ add_executable(vaultik_tests
     tests/test_recovery.cpp
     tests/test_apps.cpp
     tests/test_computers.cpp
+    tests/test_posix.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # Assertions run on the main thread only. Without per-thread copies of doctest's state, threads that
@@ -270,6 +331,7 @@ target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # check would report.
 target_compile_definitions(vaultik_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
 add_test(NAME vaultik_tests COMMAND vaultik_tests)
+endif()
 
 # The programs load the system libraries they need from System32 only, never from their own folder
 # (a library planted next to them would otherwise load into an elevated run).

@@ -17,6 +17,14 @@
     {
       "name": "openssl",
       "platform": "linux"
+    },
+    {
+      "name": "curl",
+      "default-features": false,
+      "features": [
+        "openssl"
+      ],
+      "platform": "linux"
     }
   ],
   "features": {

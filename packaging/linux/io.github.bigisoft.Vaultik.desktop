@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Vaultik
+GenericName=Backup
+Comment=Encrypted, deduplicated backups of your files
+Exec=vaultik-gui
+Icon=io.github.bigisoft.Vaultik
+Terminal=false
+Categories=Utility;Archiving;Qt;
+Keywords=backup;restore;versions;encryption;
+StartupWMClass=vaultik-gui
