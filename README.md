@@ -795,7 +795,9 @@ administrator) read the NTFS change journal instead, which Windows keeps of ever
 volume: a folder in which nothing was added, removed, renamed or changed since the last backup,
 and which was not changed itself, is taken from that version without being read. A file with
 several names (hard links) changed through one of them also counts as a change in the folders of
-its other names. Once a week, and
+its other names. Inside a folder that was itself renamed, moved or created since the last backup
+nothing is taken from it: two folders that swapped names leave no trace in the journal for what is
+in them. Once a week, and
 whenever the journal cannot answer (it wrapped, it was recreated, the job's folders or exclusions
 changed, the last backup skipped files), every folder is read again. The journal's position is
 kept with the job's settings (`journal\<job>.json`). Without administrator rights, on FAT and
@@ -804,10 +806,12 @@ exFAT drives and on Linux, every folder is read as before.
 Windows' folder listing shows a file with several names (hard links) with the size and times of
 its last change through that name, so a change through its other name would look like no change.
 Vaultik remembers which files have several names and asks those files themselves. A file that
-gets its second name only after a backup and is then changed through it is still missed by the
-listing: for folders where hard links come and go (package stores, build output), tick **Check
-every file** in the job's Schedule tab (`--check-every-file`), which asks every file and makes
-scanning unchanged files about three times slower.
+gets its second name only after a backup and is then changed through it is caught when the run
+uses the change journal (it names the folders of the changed file's other names, and every file
+in those folders is asked). Runs that read every folder (without administrator rights, and the
+weekly full read) still miss it: for folders where hard links come and go (package stores, build
+output), tick **Check every file** in the job's Schedule tab (`--check-every-file`), which asks
+every file and makes scanning unchanged files about three times slower.
 
 ### Disk images and the recovery drive
 
@@ -896,8 +900,9 @@ changed ones; a program without administrator rights cannot answer that window f
 Backups, restores and checks of the same repository can run at the same time, also from several
 computers. `forget` and `prune` need the repository to themselves: they wait for nothing by
 default and stop with exit code 5 when another run is active (`--lock-wait 10m` waits instead;
-scheduled jobs wait up to 10 minutes). A run that crashes leaves a lock behind that expires after
-30 minutes, or at once on the same computer; `vaultik unlock` removes expired locks and
+scheduled jobs wait up to 10 minutes). A run that crashes leaves a lock behind that expires at once
+on the same computer and after 2 hours for the other computers (a computer whose clock runs ahead
+cannot take a live lock for an old one); `vaultik unlock` removes expired locks and
 `vaultik unlock --all` every lock.
 
 ## Resource use

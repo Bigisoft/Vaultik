@@ -333,6 +333,19 @@ TEST_CASE("a file changed through its other name (a hard link) is read again") {
     bo.check_every_file = true;
     const BackupResult checked = run_backup(*repo, bo);
     CHECK(read_text(restored(checked, "out2") / "b" / "plain.txt") == "PLAIN, changed through a new name");
+
+    // With the change journal, which names the folders holding another name of a changed file,
+    // that is caught without checking every file.
+    bo.check_every_file = false;
+    write_text(src / "b" / "journal.txt", "journal");
+    const BackupResult base = run_backup(*repo, bo);
+    fs::create_hard_link(src / "b" / "journal.txt", src / "c" / "journal-too.txt");
+    write_text(src / "c" / "journal-too.txt", "JOURNAL, changed through a new name");
+    bo.journal_parent = base.snapshot_id;
+    bo.dir_unchanged = [](const std::string&) { return false; };  // every folder is read
+    bo.refresh_dir = [](const std::string& dir) { return dir.ends_with("\\b"); };
+    const BackupResult journaled = run_backup(*repo, bo);
+    CHECK(read_text(restored(journaled, "out3") / "b" / "journal.txt") == "JOURNAL, changed through a new name");
 }
 
 #endif  // _WIN32

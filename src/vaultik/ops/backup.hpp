@@ -72,6 +72,16 @@ struct BackupOptions {
     // folder. Its subfolders are asked in turn. Unset: every folder is read.
     std::optional<Id> journal_parent;
     std::function<bool(const std::string& dir)> dir_unchanged;
+    // Asked of a folder `dir_unchanged` said no to: whether the folder itself has a record (it was
+    // renamed, moved in, created or its attributes changed). Then nothing inside it is taken from
+    // the parent: the parent version's folder of that name may have been another folder (two
+    // folders swapping names write no records for what is in them). Unset: treated as no.
+    std::function<bool(const std::string& dir)> dir_moved;
+    // Asked of each folder that is read while the journal is used: whether it holds another name
+    // (hard link) of a file that changed since `journal_parent`. A change through one name leaves
+    // the other names' folder listings as they were, so every file in such a folder is asked for
+    // its real size and times (as check_every_file does everywhere). Unset: no folder.
+    std::function<bool(const std::string& dir)> refresh_dir;
 
     // Where to read a path from (for example inside a shadow copy). Snapshot paths, excludes and
     // messages always use the real path. Unset: read the path itself.

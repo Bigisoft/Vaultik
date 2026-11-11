@@ -8,6 +8,7 @@
 #include "vaultik/model/snapshot.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/backup.hpp"
+#include "vaultik/ops/prune.hpp"
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/repo/pack.hpp"
 #include "vaultik/util/hex.hpp"
@@ -143,7 +144,43 @@ RepairResult run_repair(Repository& repo, const RepairOptions& o) {
 
     // A. Read and judge everything, writing nothing yet.
     // A1. The index, from the packs themselves.
-    const std::vector<std::string> pack_names = backend.list("data");
+    std::vector<std::string> pack_names = backend.list("data");
+    {
+        // The packs the old index files list but the listing did not show: each is checked
+        // directly, since a short listing would otherwise make all their data lost. Index files
+        // that cannot be read are what a repair is for, so they are skipped here.
+        std::unordered_set<std::string> listed(pack_names.begin(), pack_names.end());
+        std::vector<std::string> indexed;
+        std::unordered_set<std::string> indexed_set;
+        for (const std::string& name : repo.list_index_files()) {
+            IndexFileContent content;
+            try {
+                content = repo.read_index_file(name);
+            } catch (const std::exception& e) {
+                stop_unless_damage(e);
+                continue;
+            }
+            for (const auto& entry : content) {
+                std::string pack = Repository::pack_name(entry.first);
+                if (indexed_set.insert(pack).second) indexed.push_back(std::move(pack));
+            }
+        }
+        const std::unordered_set<std::string> was_listed = listed;
+        const std::vector<std::string> missing = confirm_missing_packs(backend, indexed, listed);
+        for (const std::string& name : indexed)
+            if (listed.contains(name) && !was_listed.contains(name))
+                pack_names.push_back(name);  // there after all: read like the others
+        std::sort(pack_names.begin(), pack_names.end());
+        if (too_many_missing_packs(missing.size(), indexed.size()) && !o.accept_missing_packs)
+            throw Error("repair stopped, nothing was changed: " + std::to_string(missing.size()) + " of the " +
+                        std::to_string(indexed.size()) + " packs the index lists are missing from " +
+                        backend.location() +
+                        ". Check that this is the right destination and that it can be read; if the data is really "
+                        "gone, run the repair again with --accept-missing-packs");
+        r.packs_missing = missing.size();
+        for (const std::string& name : missing)
+            warn("pack " + name.substr(name.find_last_of('/') + 1, 8) + " is listed in the index but missing; its data is lost");
+    }
     IndexFileContent fresh;
     std::unordered_set<Id, IdHash> seen;
     // A pack rebuilt from its repair data is written back at once: it then holds exactly the

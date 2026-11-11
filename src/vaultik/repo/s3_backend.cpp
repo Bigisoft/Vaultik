@@ -252,22 +252,26 @@ RestoreHeader parse_restore_header(std::string_view value) {
 
 ListPage parse_list(std::string_view xml) {
     ListPage page;
+    // Everything outside the <Contents> elements: IsTruncated and NextContinuationToken. AWS and
+    // MinIO send them before the first object, other servers after the last one, so they are read
+    // from the whole document minus the objects (a key named like a tag cannot match there).
+    std::string outside;
     std::size_t pos = 0;
     for (;;) {
         const std::size_t a = xml.find("<Contents>", pos);
         if (a == std::string_view::npos) break;
         const std::size_t b = xml.find("</Contents>", a);
         if (b == std::string_view::npos) break;
+        outside.append(xml.substr(pos, a - pos));
         const std::string_view item = xml.substr(a, b - a);
         const std::string key = xml_value(item, "Key");
         const std::string size = xml_value(item, "Size");
         if (!key.empty()) page.objects.emplace_back(key, std::strtoull(size.c_str(), nullptr, 10));
-        pos = b;
+        pos = b + std::string_view("</Contents>").size();
     }
-    // IsTruncated and NextContinuationToken come after the objects.
-    const std::string_view tail = xml.substr(pos);
-    page.truncated = xml_value(tail, "IsTruncated") == "true";
-    page.next_token = xml_value(tail, "NextContinuationToken");
+    outside.append(xml.substr(pos));
+    page.truncated = xml_value(outside, "IsTruncated") == "true";
+    page.next_token = xml_value(outside, "NextContinuationToken");
     return page;
 }
 

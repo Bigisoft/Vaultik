@@ -99,8 +99,10 @@ LockInfo parse_lock(ByteSpan data) {
 }
 
 bool is_stale(const LockInfo& info, std::uint64_t now) {
-    if (now > info.time && now - info.time > kLockStaleTicks) return true;
-    return info.hostname == os::hostname() && !os::process_alive(info.pid);
+    const bool here = info.hostname == os::hostname();
+    const std::uint64_t limit = here ? kLockStaleTicks : kLockStaleOtherTicks;
+    if (now > info.time && now - info.time > limit) return true;
+    return here && !os::process_alive(info.pid);
 }
 
 std::string describe(const LockInfo& info) {
@@ -199,7 +201,9 @@ void RepoLock::release() {
 
 RepoLock::State RepoLock::probe() {
     try {
-        return repo_.backend().exists(name_) ? State::Held : State::Gone;
+        // From the storage itself: a cached "still there" would keep a lock someone removed
+        // alive, and the refresh would write it back.
+        return repo_.backend().exists_now(name_) ? State::Held : State::Gone;
     } catch (const Error&) {
         return State::Unknown;
     }

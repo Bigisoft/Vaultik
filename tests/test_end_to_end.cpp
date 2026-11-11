@@ -16,6 +16,7 @@
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/diff.hpp"
 #include "vaultik/ops/move_here.hpp"
+#include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore_test.hpp"
@@ -534,6 +535,45 @@ TEST_CASE("folders the change journal calls unchanged are taken from the parent"
     }
 }
 
+TEST_CASE("the change journal is not trusted inside a folder that was renamed") {
+    // Two folders swap names: the journal has records for the two folders and the folder they are
+    // in, none for what is inside them, so proj\code looks unchanged. It is another folder now.
+    for (const unsigned readers : {0u, 4u}) {
+        CAPTURE(readers);
+        TempDir tmp;
+        const fs::path src = tmp.path / "top";
+        const fs::path repo_dir = tmp.path / "repo";
+        write_file(src / "proj" / "code" / "x.txt", text("old project"));
+        write_file(src / "proj_new" / "code" / "x.txt", text("new project"));
+        init_repo(repo_dir);
+        auto repo = open_repo(repo_dir);
+        BackupOptions options;
+        options.paths = {u8(src)};
+        options.read_threads = readers;
+        const BackupResult first = run_backup(*repo, options);
+
+        fs::rename(src / "proj", src / "proj_old");
+        fs::rename(src / "proj_new", src / "proj");
+        const auto named = [](const std::string& dir, const std::string& name) {
+            return dir.ends_with("\\" + name) || dir.ends_with("/" + name);
+        };
+        // The journal: records for both folders (renamed) and for the folder they are in.
+        const auto moved = [named](const std::string& dir) { return named(dir, "proj") || named(dir, "proj_old"); };
+        options.journal_parent = first.snapshot_id;
+        options.dir_unchanged = [named, moved](const std::string& dir) { return !named(dir, "top") && !moved(dir); };
+        options.dir_moved = moved;
+        const BackupResult second = run_backup(*repo, options);
+
+        const fs::path out = tmp.path / "out";
+        RestoreOptions ro;
+        ro.target = u8(out);
+        run_restore(*repo, repo->load_snapshot(second.snapshot_id), ro);
+        const auto files = snapshot_of_dir(restored_location(out, src));
+        CHECK(files.at("proj/code/x.txt") == text("new project"));
+        CHECK(files.at("proj_old/code/x.txt") == text("old project"));
+    }
+}
+
 TEST_CASE("files that look encrypted by ransomware raise the alarm") {
     TempDir tmp;
     const fs::path src = tmp.path / "src";
@@ -688,6 +728,55 @@ TEST_CASE("a second copy of a backup") {
     options.tags = {"job:other"};
     run_backup(*a, options);
     CHECK(copy_snapshots(*a, *b, co).copied == 0);
+}
+
+TEST_CASE("a second copy does not trust a folder listing a prune of the target left without its data") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path a_dir = tmp.path / "a";
+    const fs::path b_dir = tmp.path / "b";
+    const Bytes c = random_data(300000, 51);
+    // V1 stores f.txt's data; V2 moves it to another folder (its listing new, the data not) and
+    // adds keep.txt; V3 only keeps keep.txt, so V2's pack stays when V1 and V2 are gone.
+    write_file(src / "one" / "f.txt", c);
+    init_repo(a_dir);
+    init_repo(b_dir);
+    auto a = open_repo(a_dir);
+    auto b = open_repo(b_dir);
+    BackupOptions options;
+    options.paths = {u8(src)};
+    options.tags = {"job:docs"};
+    const BackupResult v1 = run_backup(*a, options);
+    fs::remove_all(src / "one");
+    write_file(src / "two" / "f.txt", c);
+    write_file(src / "keep.txt", random_data(300000, 52));
+    const BackupResult v2 = run_backup(*a, options);
+    fs::remove_all(src / "two");
+    run_backup(*a, options);
+
+    CopyOptions co;
+    co.tags = {"job:docs"};
+    co.map_file = u8(tmp.path / "copy.map");
+    REQUIRE(copy_snapshots(*a, *b, co).copied == 3);
+
+    // In the copy, V1 and V2 go and a prune drops the data of f.txt (V1's pack is mostly unused)
+    // but keeps V2's pack (mostly keep.txt), with V2's folder listings in it.
+    for (const Id& id : b->list_snapshot_ids()) {
+        const Snapshot s = b->load_snapshot(id);
+        if (s.copy_of && (*s.copy_of == v1.snapshot_id || *s.copy_of == v2.snapshot_id))
+            b->backend().remove(Repository::snapshot_name(id));
+    }
+    const PruneResult pr = run_prune(*b, PruneOptions{});
+    REQUIRE(pr.packs_deleted + pr.packs_repacked >= 1);
+    b = open_repo(b_dir);
+
+    // V1 is gone from the original too; copying again brings V2 back, with its data.
+    a->backend().remove(Repository::snapshot_name(v1.snapshot_id));
+    CHECK(copy_snapshots(*a, *b, co).copied == 1);
+    b = open_repo(b_dir);
+    VerifyOptions vo;
+    vo.read_data = true;
+    CHECK(run_verify(*b, vo).errors == 0);
 }
 
 TEST_CASE("comparing two versions") {

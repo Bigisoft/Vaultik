@@ -4,9 +4,11 @@
 #include <fstream>
 #include <map>
 #include <random>
+#include <unordered_set>
 
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
+#include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/platform/os.hpp"
@@ -155,12 +157,23 @@ TEST_CASE("repository locks") {
         CHECK_THROWS_AS(RepoLock(*repo, RepoLock::Mode::Shared, "backup"), LockedError);
     }
 
+    // Another computer's lock is judged by this computer's clock: an hour without a refresh can
+    // be a clock running ahead here, so only a much older one is stale.
+    LockInfo ahead;
+    ahead.hostname = "other-pc";
+    ahead.time = os::now() - 60 * kTicksPerMinute;
+    CHECK_FALSE(is_stale(ahead, os::now()));
+    LockInfo mine = ahead;
+    mine.hostname = os::hostname();
+    mine.pid = os::process_id();
+    CHECK(is_stale(mine, os::now()));  // this computer's own clock: stale after 30 minutes
+
     // A lock not refreshed for longer than the stale time, and one of a process that has ended,
     // are ignored and cleaned up.
     LockInfo old;
     old.hostname = "other-pc";
     old.command = "backup";
-    old.time = os::now() - kLockStaleTicks - kTicksPerMinute;
+    old.time = os::now() - kLockStaleOtherTicks - kTicksPerMinute;
     write_lock(*repo, "locks/" + id_hex(random_id()), old);
     LockInfo dead;
     dead.hostname = os::hostname();
@@ -283,4 +296,122 @@ TEST_CASE("the newest version always stays, even when every rule has passed it")
     CHECK(kept_count(d) == 1);
     CHECK(d[0].keep);
     CHECK(d[0].reason == "newest");
+}
+
+namespace {
+
+// A local repository whose listing of data/ leaves out the packs named in `hidden`, as a cloud
+// listing that came back short would.
+class ShortListing final : public Backend {
+public:
+    ShortListing(const fs::path& dir, std::unordered_set<std::string> hidden)
+        : inner_(u8(dir)), hidden_(std::move(hidden)) {}
+    std::string location() const override { return inner_.location(); }
+    bool exists(const std::string& name) override { return inner_.exists(name); }
+    void put(const std::string& name, ByteSpan data) override { inner_.put(name, data); }
+    Bytes get(const std::string& name) override { return inner_.get(name); }
+    Bytes get_range(const std::string& name, std::uint64_t offset, std::size_t length) override {
+        return inner_.get_range(name, offset, length);
+    }
+    std::uint64_t size(const std::string& name) override { return inner_.size(name); }
+    std::vector<std::string> list(const std::string& dir) override {
+        std::vector<std::string> out = inner_.list(dir);
+        std::erase_if(out, [&](const std::string& n) { return hidden_.contains(n); });
+        return out;
+    }
+    void remove(const std::string& name) override { inner_.remove(name); }
+
+private:
+    LocalBackend inner_;
+    std::unordered_set<std::string> hidden_;
+};
+
+// A repository with one pack per backup, `n` backups of different files.
+std::vector<std::string> make_packs(const fs::path& src, const fs::path& repo_dir, int n) {
+    auto repo = make_repo(repo_dir);
+    BackupOptions bo;
+    bo.paths = {u8(src)};
+    for (int i = 0; i < n; ++i) {
+        write_file(src / ("f" + std::to_string(i) + ".bin"), random_data(200u << 10, 40 + i));
+        run_backup(*repo, bo);
+    }
+    return repo->backend().list("data");
+}
+
+}  // namespace
+
+TEST_CASE("a pack missing from one listing is checked before prune or repair drops it") {
+    TempDir tmp;
+    const fs::path repo_dir = tmp.path / "repo";
+    const std::vector<std::string> packs = make_packs(tmp.path / "src", repo_dir, 3);
+    REQUIRE(packs.size() >= 3);
+    const std::unordered_set<std::string> hidden = {packs[0], packs[1], packs[2]};
+
+    // Prune: the hidden packs are still there, so they stay indexed and in place.
+    {
+        auto repo = Repository::open(std::make_unique<ShortListing>(repo_dir, hidden), kPassword);
+        std::vector<std::string> warnings;
+        PruneOptions po;
+        po.on_warning = [&](const std::string& w) { warnings.push_back(w); };
+        const PruneResult pr = run_prune(*repo, po);
+        CHECK(pr.packs_deleted == 0);
+        CHECK(warnings.empty());
+    }
+    {
+        auto repo = reopen(repo_dir);
+        VerifyOptions vo;
+        vo.read_data = true;
+        CHECK(run_verify(*repo, vo).errors == 0);
+    }
+
+    // Repair: the same, its new index still holds the hidden packs.
+    {
+        auto bare = Repository::open(std::make_unique<ShortListing>(repo_dir, hidden), kPassword, false);
+        const RepairResult rr = run_repair(*bare, {});
+        CHECK(rr.packs_missing == 0);
+        CHECK(rr.snapshots_repaired == 0);
+        CHECK(rr.snapshots_removed == 0);
+    }
+    auto repo = reopen(repo_dir);
+    VerifyOptions vo;
+    vo.read_data = true;
+    CHECK(run_verify(*repo, vo).errors == 0);
+    CHECK(repo->list_snapshot_ids().size() == 3);
+}
+
+TEST_CASE("prune and repair stop when many indexed packs are gone") {
+    CHECK_FALSE(too_many_missing_packs(0, 5));
+    CHECK_FALSE(too_many_missing_packs(1, 1));   // one lost pack is just that
+    CHECK_FALSE(too_many_missing_packs(2, 20));  // a tenth
+    CHECK(too_many_missing_packs(3, 20));
+    CHECK(too_many_missing_packs(2, 2));
+
+    TempDir tmp;
+    const fs::path repo_dir = tmp.path / "repo";
+    const std::vector<std::string> packs = make_packs(tmp.path / "src", repo_dir, 3);
+    REQUIRE(packs.size() >= 3);
+    // Really gone (a wrong folder or a storage that lost them): nothing may be dropped silently.
+    for (int i = 0; i < 2; ++i) fs::rename(repo_dir / packs[i], tmp.path / ("aside" + std::to_string(i)));
+    const std::size_t index_files = reopen(repo_dir)->list_index_files().size();
+    {
+        auto repo = reopen(repo_dir);
+        CHECK_THROWS_WITH(run_prune(*repo, PruneOptions{}), doctest::Contains("missing"));
+    }
+    CHECK(reopen(repo_dir)->list_index_files().size() == index_files);  // nothing was changed
+    {
+        auto bare = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), kPassword, false);
+        CHECK_THROWS_WITH(run_repair(*bare, {}), doctest::Contains("--accept-missing-packs"));
+    }
+    CHECK(reopen(repo_dir)->list_snapshot_ids().size() == 3);
+    {
+        auto bare = Repository::open(std::make_unique<LocalBackend>(u8(repo_dir)), kPassword, false);
+        RepairOptions ro;
+        ro.accept_missing_packs = true;
+        const RepairResult rr = run_repair(*bare, ro);
+        CHECK(rr.packs_missing == 2);
+        CHECK(rr.changed());
+    }
+    // After the repair accepted the loss, prune has nothing missing left.
+    auto repo = reopen(repo_dir);
+    CHECK_NOTHROW(run_prune(*repo, PruneOptions{}));
 }

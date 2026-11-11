@@ -26,6 +26,7 @@ public:
 
     std::string location() const override;
     bool exists(const std::string& name) override;
+    bool exists_now(const std::string& name) override;
     void put(const std::string& name, ByteSpan data) override;
     Bytes get(const std::string& name) override;
     Bytes get_range(const std::string& name, std::uint64_t offset, std::size_t length) override;

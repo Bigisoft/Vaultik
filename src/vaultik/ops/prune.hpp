@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "vaultik/repo/repository.hpp"
@@ -121,5 +122,17 @@ struct PruneResult {
 // are written before anything is deleted. The repository object's in-memory index is out of date
 // afterwards; open the repository again before using it for anything else.
 PruneResult run_prune(Repository& repo, const PruneOptions& options);
+
+// The packs in `indexed` that a listing of data/ (`listed`) did not show, after checking each one
+// directly: a listing can come back short (a page lost, a server error read as its end), and a
+// pack taken for missing is dropped from the index for good. Packs found by the direct check are
+// added to `listed`. Shared by prune and repair.
+std::vector<std::string> confirm_missing_packs(Backend& backend, const std::vector<std::string>& indexed,
+                                               std::unordered_set<std::string>& listed);
+
+// Whether `missing` of `indexed` packs gone is too many to be a pack lost here and there: more
+// than one, and more than a tenth. Then the storage itself is more likely at fault (a wrong
+// folder, a short listing) and prune and repair stop rather than drop that much data.
+bool too_many_missing_packs(std::size_t missing, std::size_t indexed);
 
 }  // namespace vaultik

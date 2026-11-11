@@ -104,6 +104,25 @@ TEST_CASE("S3 list responses") {
     CHECK(page.truncated);
     CHECK(page.next_token == "1ueGcxLPRx1Tr/XYExHnhbYLgveDs2J/wm36Hy4vbOwM=");
 
+    // AWS and MinIO send IsTruncated and NextContinuationToken before the objects; reading them
+    // only after the last object made every listing stop after its first 1000 keys.
+    const std::string aws = R"(<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>b</Name><Prefix>pc/data/</Prefix>
+<NextContinuationToken>tok/2=</NextContinuationToken><KeyCount>2</KeyCount><MaxKeys>1000</MaxKeys>
+<IsTruncated>true</IsTruncated><Contents><Key>pc/data/ab/ab12</Key><Size>1</Size></Contents>
+<Contents><Key>pc/data/cd/cd34</Key><Size>2</Size></Contents></ListBucketResult>)";
+    const s3::ListPage first = s3::parse_list(aws);
+    REQUIRE(first.objects.size() == 2);
+    CHECK(first.objects[1].first == "pc/data/cd/cd34");
+    CHECK(first.truncated);
+    CHECK(first.next_token == "tok/2=");
+    const s3::ListPage last = s3::parse_list(
+        "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>k</Key><Size>3</Size></Contents>"
+        "</ListBucketResult>");
+    REQUIRE(last.objects.size() == 1);
+    CHECK_FALSE(last.truncated);
+    CHECK(last.next_token.empty());
+
     CHECK(s3::xml_value("<Error><Code>NoSuchKey</Code></Error>", "Code") == "NoSuchKey");
     CHECK(s3::xml_value("<a/>", "Code").empty());
 }

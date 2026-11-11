@@ -19,6 +19,10 @@ public:
     virtual std::string location() const = 0;
 
     virtual bool exists(const std::string& name) = 0;
+    // exists(), asking the storage itself even where exists() may answer from what this process
+    // saw earlier (Google Drive, MEGA). For checks whose answer must be current: whether a lock is
+    // still there, whether a pack a listing did not show is really gone.
+    virtual bool exists_now(const std::string& name) { return exists(name); }
 
     // Creates or replaces `name` atomically: readers see the old file or the complete new one.
     virtual void put(const std::string& name, ByteSpan data) = 0;

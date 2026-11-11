@@ -12,6 +12,10 @@ namespace vaultik {
 constexpr std::uint32_t kFormatVersion = 1;
 constexpr std::uint32_t kKdfPbkdf2Sha256 = 1;
 constexpr std::uint32_t kDefaultKdfIterations = 600000;
+// The most PBKDF2 iterations a config or recovery file may ask for. The count is read before
+// anything is authenticated, so whoever can write to the storage could otherwise make every
+// opening of the repository spend hours stretching the password.
+constexpr std::uint32_t kMaxKdfIterations = 20'000'000;
 constexpr int kDefaultZstdLevel = 3;
 
 // Contents of the plaintext `config` file (see docs/FORMAT.md).

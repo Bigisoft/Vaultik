@@ -28,7 +28,13 @@ file. In S3-compatible cloud storage (`s3:https://<endpoint>/<bucket>[/<folder>]
 one object named `<folder>/<path>` with the same layout; object uploads are atomic, so there are no
 temporary names. The cloud drives (`pcloud:`, `onedrive:`, `gdrive:`, `mega:` followed by a
 folder) hold the same layout as real folders and files; an upload either replaces a file whole or
-leaves it as it was. A repository folder copied to or from a bucket or drive stays valid. Write order during a backup is: packs, then the index files that reference them, then the
+leaves it as it was. On WebDAV (`webdav:`) a file is uploaded as `<name>.tmp-<16 hex>` and moved
+into place with MOVE (Overwrite: T). On SFTP (`sftp:`) it is written as `<name>.tmp-<16 hex>` and
+renamed over the name; a server that cannot rename over an existing file gets the old file moved
+aside as `<name>.old` first, removed once the new one is in place, and readers take `<name>.old`
+for the name while the name itself is missing (a replace cut short in between). Listings leave out
+names containing `.tmp-` (left by an upload cut short; they can be deleted by hand) and list
+`<name>.old` as the name. A repository folder copied to or from a bucket or drive stays valid. Write order during a backup is: packs, then the index files that reference them, then the
 snapshot. A crash leaves at worst unreferenced packs, never a snapshot pointing at missing data;
 the next prune removes them. Lock files (see below) were added in Vaultik 0.2 without a format
 version change: older versions ignore them.
@@ -57,7 +63,7 @@ key replaces the file.
 magic            8 bytes  "VKRECOV\0"
 version          u32      1
 repo_id          16 bytes the repo_id from config
-iterations       u32      100000
+iterations       u32      100000; 1000 to 20000000, others are refused
 salt             32 bytes
 --- end of header (AAD) ---
 wrapped_len      u32      92
@@ -74,7 +80,7 @@ magic            8 bytes  "VAULTIK\0"
 version          u32      1
 repo_id          16 bytes random
 kdf              u32      1 = PBKDF2-HMAC-SHA256
-kdf_iterations   u32      default 600000
+kdf_iterations   u32      default 600000; 1000 to 20000000, others are refused
 salt             32 bytes
 chunk_min        u32      default 262144   (256 KiB)
 chunk_avg        u32      default 1048576  (1 MiB, power of two)
@@ -347,11 +353,16 @@ username    string
 command     string  "backup", "prune", ...
 ```
 
-Backup, restore, ls and verify take a shared lock; forget and prune take an exclusive one,
-because they delete objects. A run writes its own lock first and then lists the others; on a
+Backup, restore, ls, verify, a second copy (on both repositories), the repair data setting and
+the other reading commands take a shared lock; forget, prune and repair take an exclusive one,
+because they delete or replace objects. A run writes its own lock first and then lists the others; on a
 conflict it removes its lock again and waits or gives up. Holders rewrite their lock every 5
-minutes. A lock not refreshed for 30 minutes, or held by a process that no longer runs on the
-same computer, is stale: it is ignored and deleted by whoever finds it.
+minutes. A lock is stale when it is held by a process that no longer runs on the same computer,
+when a lock of the same computer was not refreshed for 30 minutes, or when another computer's
+lock was not refreshed for 2 hours (its time is that computer's clock, judged by the reader's, so
+clocks up to about an hour and a half apart cannot remove each other's live locks). A stale lock
+is ignored and deleted by whoever finds it. Whether a lock is still there is asked of the storage
+itself, never answered from a listing the run made earlier (Google Drive, MEGA).
 
 ## Status records
 
@@ -425,7 +436,12 @@ snapshot or folder listing cannot be read; (2) write new packs with the blobs st
 packs that are mostly unused (sealed blobs are copied as they are, after authenticating them);
 (3) write fresh index files for every pack that stays; (4) delete the old index files; (5) delete
 the packs nothing uses any more. Packs that no index file lists are read through their own
-header: kept and indexed again if they hold blobs in use, deleted otherwise.
+header: kept and indexed again if they hold blobs in use, deleted otherwise. A pack an index file
+lists but the listing of `data/` does not show is checked directly (a listing can come back short);
+when it is really gone it is left out of the new index files (its blobs are lost, which `vaultik
+verify` reports and a repair cleans up). When more than one, and more than a tenth, of the indexed
+packs are gone, prune stops without changing anything: the destination is more likely wrong or
+unreadable than the data lost.
 
 ## Repair
 
@@ -433,7 +449,9 @@ Repair (`vaultik repair`) holds the exclusive lock and opens the repository with
 index files. In this order, so a crash at any point leaves a repository that opens: (1) read
 every pack's header and (unless `--quick`) decode and hash-check every blob; the first intact
 copy of each blob goes into the new index, packs that cannot be read are left in place and not
-indexed; (2) write new index files for that index, then delete every old index file; (3) delete
+indexed. A pack the old index files list but the listing does not show is checked directly first;
+when more than one, and more than a tenth, of them are gone, repair stops without changing
+anything unless it is run with `--accept-missing-packs`; (2) write new index files for that index, then delete every old index file; (3) delete
 snapshot files that cannot be opened or whose root tree is lost; for the others, rewrite every
 tree that references a lost blob (dropping the file nodes whose chunks are missing and the
 directory nodes whose tree is missing), save the snapshot again with the new root tree and a note

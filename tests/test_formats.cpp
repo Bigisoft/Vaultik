@@ -222,6 +222,12 @@ TEST_CASE("config key wrap") {
     CHECK(got.id == k.id);
     CHECK_THROWS_AS(unwrap_master_key(back, "wrong"), AuthError);
 
+    // An iteration count nobody would choose, from a config anyone with write access to the
+    // storage can change before it is authenticated: refused before any work.
+    RepoConfig slow = back;
+    slow.kdf_iterations = kMaxKdfIterations + 1;
+    CHECK_THROWS_AS(parse_config(serialize_config(slow)), Error);
+
     // Changing a header parameter breaks the key wrap.
     RepoConfig changed = back;
     changed.zstd_level = 19;

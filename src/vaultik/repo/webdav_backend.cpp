@@ -9,6 +9,7 @@
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/util/base64.hpp"
+#include "vaultik/util/hex.hpp"
 
 namespace vaultik {
 
@@ -253,8 +254,21 @@ bool WebDavBackend::exists(const std::string& name) {
 
 void WebDavBackend::put(const std::string& name, ByteSpan data) {
     ensure_collections(name);
-    const http::Response r = request("PUT", url_of(name), data, {{"Content-Type", "application/octet-stream"}});
-    if (r.status != 200 && r.status != 201 && r.status != 204) fail("uploading " + name, r);
+    // Uploaded under a temporary name and moved into place: some servers write a PUT straight
+    // into the file, so one cut short would leave a partial config, key or snapshot. MOVE within
+    // a server is a rename. Temporary names are left out of listings.
+    std::uint8_t rnd[8];
+    random_bytes(rnd);
+    const std::string tmp = name + ".tmp-" + to_hex(ByteSpan(rnd, sizeof rnd));
+    const http::Response r = request("PUT", url_of(tmp), data, {{"Content-Type", "application/octet-stream"}});
+    if (r.status != 200 && r.status != 201 && r.status != 204) {
+        request("DELETE", url_of(tmp));
+        fail("uploading " + name, r);
+    }
+    const http::Response m = request("MOVE", url_of(tmp), {}, {{"Destination", url_of(name)}, {"Overwrite", "T"}});
+    if (m.status == 201 || m.status == 204 || m.status == 200) return;
+    request("DELETE", url_of(tmp));
+    fail("uploading " + name + " (moving it into place)", m);
 }
 
 Bytes WebDavBackend::get(const std::string& name) {
@@ -315,7 +329,7 @@ std::vector<std::string> WebDavBackend::list(const std::string& dir) {
             if (child.empty() || child.find('/') != std::string::npos) continue;
             const std::string full = rel.empty() ? child : rel + "/" + child;
             if (folder) walk(full);
-            else out.push_back(full);
+            else if (child.find(".tmp-") == std::string::npos) out.push_back(full);  // (see put)
         }
     };
     walk(dir);

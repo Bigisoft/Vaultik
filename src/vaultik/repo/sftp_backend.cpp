@@ -353,7 +353,13 @@ std::vector<std::string> SftpBackend::list(const std::string& dir) {
             std::vector<std::string> folders;
             for (;;) {
                 const int n = libssh2_sftp_readdir_ex(h, name, sizeof name, nullptr, 0, &attrs);
-                if (n <= 0) break;
+                if (n == 0) break;  // the end of the folder
+                if (n < 0) {
+                    // A failed read is not the end: a partial listing would make prune and repair
+                    // take the files not listed for lost. Fail, so the call is retried.
+                    libssh2_sftp_close(h);
+                    c.fail(location_ + ": listing " + (rel.empty() ? std::string("files") : rel), n);
+                }
                 const std::string entry(name, static_cast<std::size_t>(n));
                 if (entry == "." || entry == "..") continue;
                 const std::string full = rel.empty() ? entry : rel + "/" + entry;
