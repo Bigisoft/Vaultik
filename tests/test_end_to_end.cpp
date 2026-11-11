@@ -544,7 +544,9 @@ TEST_CASE("the change journal is not trusted inside a folder that was renamed") 
         const fs::path src = tmp.path / "top";
         const fs::path repo_dir = tmp.path / "repo";
         write_file(src / "proj" / "code" / "x.txt", text("old project"));
-        write_file(src / "proj_new" / "code" / "x.txt", text("new project"));
+        // Another length: two files of one size written in the same instant can share their times,
+        // and size and times are all a listing compares.
+        write_file(src / "proj_new" / "code" / "x.txt", text("the new project"));
         init_repo(repo_dir);
         auto repo = open_repo(repo_dir);
         BackupOptions options;
@@ -569,7 +571,7 @@ TEST_CASE("the change journal is not trusted inside a folder that was renamed") 
         ro.target = u8(out);
         run_restore(*repo, repo->load_snapshot(second.snapshot_id), ro);
         const auto files = snapshot_of_dir(restored_location(out, src));
-        CHECK(files.at("proj/code/x.txt") == text("new project"));
+        CHECK(files.at("proj/code/x.txt") == text("the new project"));
         CHECK(files.at("proj_old/code/x.txt") == text("old project"));
     }
 }
