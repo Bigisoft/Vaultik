@@ -86,6 +86,21 @@ jobs:
         with:
           path: ${{ github.workspace }}\vcpkg-cache
           key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}-${{ github.run_id }}
+      # Run directly rather than through ctest, which keeps only the end of a long output: a failed
+      # comparison can print whole file maps. The log gets the failures (shortened); the full output
+      # is kept as an artifact.
       - name: Test
-        shell: cmd
-        run: ctest --preset release
+        shell: pwsh
+        run: |
+          & build\release\vaultik_tests.exe *> tests.log
+          $code = $LASTEXITCODE
+          Get-Content tests.log | Where-Object { $_ -match 'TEST CASE|ERROR|values:|THREW|test cases|assertions' } |
+              ForEach-Object { if ($_.Length -gt 400) { $_.Substring(0, 400) + ' ...' } else { $_ } }
+          exit $code
+      - name: Keep the test output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tests-log
+          path: tests.log
+          if-no-files-found: ignore
