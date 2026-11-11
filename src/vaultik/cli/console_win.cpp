@@ -94,4 +94,37 @@ std::string read_password(std::string_view prompt) {
     return utf8;
 }
 
+std::string read_line(std::string_view prompt) {
+    err(prompt);
+    HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    std::string utf8;
+    if (GetConsoleMode(in, &mode)) {
+        std::wstring line;
+        wchar_t buf[256];
+        for (;;) {
+            DWORD n = 0;
+            if (!ReadConsoleW(in, buf, 256, &n, nullptr) || n == 0) {
+                if (line.empty()) throw Error("no more input");
+                break;
+            }
+            line.append(buf, n);
+            if (line.find(L'\n') != std::wstring::npos) break;
+        }
+        utf8 = narrow(line);
+    } else {
+        char c = 0;
+        DWORD n = 0;
+        bool any = false;
+        while (ReadFile(in, &c, 1, &n, nullptr) && n == 1) {
+            any = true;
+            if (c == '\n') break;
+            utf8.push_back(c);
+        }
+        if (!any) throw Error("no more input");
+    }
+    while (!utf8.empty() && (utf8.back() == '\n' || utf8.back() == '\r')) utf8.pop_back();
+    return utf8;
+}
+
 }  // namespace vaultik::cli

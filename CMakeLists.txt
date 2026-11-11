@@ -166,8 +166,11 @@ target_link_libraries(vaultik PRIVATE vaultik_core)
 vaultik_version_resource(vaultik "Vaultik backup engine and command line")
 if(WIN32)
     # The Projected File System (vaultik mount) is an optional Windows feature: load its DLL only
-    # when a version is browsed, so vaultik still starts where the feature is off.
-    target_link_options(vaultik PRIVATE /DELAYLOAD:ProjectedFSLib.dll)
+    # when a version is browsed, so vaultik still starts where the feature is off. The same for
+    # what Windows PE (the recovery drive) may lack: shadow copies, HTTP (cloud storage), virtual
+    # disks and the network account calls.
+    target_link_options(vaultik PRIVATE /DELAYLOAD:ProjectedFSLib.dll /DELAYLOAD:VSSAPI.DLL /DELAYLOAD:WINHTTP.dll
+                        /DELAYLOAD:VirtDisk.dll /DELAYLOAD:NETAPI32.dll)
     target_link_libraries(vaultik PRIVATE delayimp)
 endif()
 if(WIN32)

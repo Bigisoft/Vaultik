@@ -8,6 +8,7 @@
 #include <iostream>
 #include <thread>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +29,8 @@
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/model/tree.hpp"
+#include "vaultik/image/disk.hpp"
+#include "vaultik/image/recovery_media.hpp"
 #include "vaultik/ops/apps.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
@@ -62,6 +65,8 @@
 #include "vaultik/platform/drive_health.hpp"
 
 #ifdef _WIN32
+#include <windows.h>
+
 #include <cstdlib>
 #if defined(_MSC_VER) && defined(_DEBUG)
 #include <crtdbg.h>
@@ -273,6 +278,39 @@ Commands:
   admin-job install|remove     Used by schedule and the frontend for jobs with
                                administrator rights (asks for approval)
 
+Disk images (Windows, administrator rights except image disks and --vhdx):
+  image disks                  The disks of this computer, with their numbers
+  image backup <disk>...       Back up whole disks (a number from image disks,
+                               "system" for the disk Windows runs from, or an id):
+                               every partition and the partition table, NTFS
+                               volumes from a shadow copy and only their used
+                               space (--vss off: read them while in use)
+  image info <snapshot>        The disks and partitions in a disk image
+  image restore <snapshot>     Restore a disk image
+      --vhdx <file>            ... to a new virtual disk file (no administrator
+                               rights needed); open it in File Explorer or use it
+                               in Hyper-V
+      --size <size>            Its size (default: the size of the disk imaged)
+      --new-ids                New disk and partition ids, so it can be attached
+                               next to the original disk
+      --to-disk <number>       ... onto a disk, replacing everything on it. Never
+                               the disk Windows runs from, nor the one holding the
+                               backup; asks you to type ERASE DISK <number>
+      --confirm <text>         That text, given beforehand
+      --boot                   Then make the disk start Windows (bcdboot)
+      --disk-index <n>         Which disk of the image (default 1)
+  image mount <snapshot>       Open a disk image's drives read-only in File
+                               Explorer until Enter is pressed (it is copied to a
+                               temporary virtual disk file first; --target <folder>)
+  recovery-media               Make a recovery drive: Windows PE (needs the free
+                               Windows ADK with its Windows PE add-on) with
+                               Vaultik, to restore a disk image onto a computer
+                               that does not start
+      --iso <file>             ... as an ISO file, or
+      --usb <drive>            ... on a USB stick (erased; asks you to type
+                               ERASE <drive>, or give --confirm)
+  recovery                     The restore menu the recovery drive starts with
+
 <snapshot> is an ID prefix (at least 4 characters) or "latest".
 
 Resource use (any command):
@@ -332,11 +370,12 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot",
+    "--vhdx", "--to-disk", "--confirm", "--disk-index", "--iso", "--usb", "--size"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing", "--new-ids", "--boot", "--pause"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1363,6 +1402,7 @@ int restore_check(const Args& a, const jobs::JobStore& store, Repository& repo, 
         }
         if (newest_tagged != nullptr) newest = newest_tagged;
         if (newest == nullptr) throw Error("the backup has no versions yet");
+        if (newest->snapshot.image) throw Error("a test restore restores files; disk images are checked by the health check");
         RestoreTestOptions o;
         o.work_dir = work;
         o.seed = record.started;
@@ -2074,6 +2114,8 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
     return code;
 }
 
+#include "vaultik/cli/image_cmds.inc"
+
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
     const jobs::JobStore store = job_store(a);
@@ -2158,7 +2200,7 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
-        if (job->record_apps) {
+        if (job->record_apps && job->image_disks.empty()) {
             // Within a day of the last backup (continuous or triggered runs, hourly schedules) the
             // last version's list is kept; winget lists the programs again after that.
             const auto history = jobs::combined_history(store, job->id, 50);
@@ -2186,9 +2228,14 @@ int cmd_run_job(const Args& a) {
             RepoLock lock(*repo, RepoLock::Mode::Shared, "backup (job " + job->id + ")",
                           lock_wait(a, std::chrono::minutes(10)));
             repo->reload_index();  // a prune may have finished before the lock was granted
-            code = backup_and_report(*repo, std::move(o), job->repository, record, lock,
-                                     vss_arg(a, job->vss ? kDefaultVss : VssMode::Off),
-                                     !(job->vss_skip_sql || a.has("--vss-skip-sql")), &journal);
+            if (!job->image_disks.empty())
+                code = image_backup_and_report(*repo, job_disks(*job), o.tags, job->repository,
+                                               vss_arg(a, job->vss ? VssMode::Auto : VssMode::Off) != VssMode::Off, record,
+                                               lock);
+            else
+                code = backup_and_report(*repo, std::move(o), job->repository, record, lock,
+                                         vss_arg(a, job->vss ? kDefaultVss : VssMode::Off),
+                                         !(job->vss_skip_sql || a.has("--vss-skip-sql")), &journal);
         }
         refresh_drive_copy(*job);
         // The destination drive's own health, as the system reports it: a warning here is the
@@ -2288,8 +2335,9 @@ int cmd_run_job(const Args& a) {
         alert_for(*job, check, store.dir());
     }
 
-    // And the monthly test restore, when it is on and due. Like the check, its own entry.
-    if (g_cancel.load() || !jobs::restore_test_due(job->health, jobs::combined_history(store, job->id, 500), os::now()))
+    // And the monthly test restore, when it is on and due. Like the check, its own entry. (Disk
+    // images are checked by the health check alone: a test restore restores files.)
+    if (g_cancel.load() || !job->image_disks.empty() || !jobs::restore_test_due(job->health, jobs::combined_history(store, job->id, 500), os::now()))
         return code;
     jobs::RunRecord test;
     try {
@@ -3402,6 +3450,8 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "uninstall-cleanup") return cmd_uninstall_cleanup();
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);
+    if (a.command == "recovery") return cmd_recovery(a);
+    if (a.command == "recovery-media") return cmd_recovery_media(a);
 
     const ResourcePolicy policy = resource_policy(a);
     apply_resource_policy(policy);
@@ -3430,6 +3480,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "diff") return cmd_diff(a);
     if (a.command == "estimate") return cmd_estimate(a);
     if (a.command == "find") return cmd_find(a);
+    if (a.command == "image") return cmd_image(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }
 
@@ -3447,10 +3498,8 @@ int fail(const char* status, const std::string& message, int code) {
     return code;
 }
 
-int run_main(const std::vector<std::string>& args) {
+int run_guarded(const std::vector<std::string>& args) {
     using namespace vaultik::cli;
-    init_console();
-    vaultik::jobs::log_runs_to_system(true);  // every recorded run also goes to the Event Log
     try {
         return run(args);
     } catch (const vaultik::Cancelled&) {
@@ -3473,6 +3522,21 @@ int run_main(const std::vector<std::string>& args) {
     }
 }
 
+int run_main(const std::vector<std::string>& args) {
+    using namespace vaultik::cli;
+    init_console();
+    vaultik::jobs::log_runs_to_system(true);  // every recorded run also goes to the Event Log
+    const int code = run_guarded(args);
+    // A window of its own (a restore started with administrator rights from the frontend) stays
+    // open until the result is read.
+    if (std::find(args.begin(), args.end(), "--pause") != args.end()) {
+        err("\nPress Enter to close this window.");
+        std::string line;
+        std::getline(std::cin, line);
+    }
+    return code;
+}
+
 }  // namespace
 
 #ifdef _WIN32
@@ -3488,6 +3552,9 @@ int wmain(int argc, wchar_t** argv) {
         _CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
     }
 #endif
+    // Libraries loaded later (delay-loaded ones such as the virtual disk library) only from the
+    // system folder, never from the program's folder or the current one.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     // Arguments arrive as UTF-16; everything inside Vaultik is UTF-8.
     std::vector<std::string> args;
     args.reserve(static_cast<std::size_t>(argc));
