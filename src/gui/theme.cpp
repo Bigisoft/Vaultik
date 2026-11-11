@@ -89,7 +89,9 @@ QPalette make_palette(const Theme& t) {
     p.setColor(QPalette::BrightText, t.danger);
     p.setColor(QPalette::Highlight, t.accent);
     p.setColor(QPalette::HighlightedText, t.accent_text);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
     p.setColor(QPalette::Accent, t.accent);
+#endif
     p.setColor(QPalette::Link, t.accent);
     p.setColor(QPalette::LinkVisited, t.accent);
     p.setColor(QPalette::PlaceholderText, t.text_faint);
@@ -303,7 +305,14 @@ QHash<QString, QIcon>& icon_cache() {
 }
 
 bool system_is_dark() {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+#else
+    // Qt before 6.5 (Ubuntu 24.04 has 6.4) cannot tell the colour scheme: a dark system palette is
+    // one whose window is darker than its text.
+    const QPalette p = QGuiApplication::palette();
+    return p.color(QPalette::Window).lightness() < p.color(QPalette::WindowText).lightness();
+#endif
 }
 
 void apply(QApplication& app) {
@@ -327,7 +336,11 @@ ThemeNotifier* ThemeNotifier::instance() {
 
 void apply_theme(QApplication& app) {
     // The Windows accent colour, read from the system palette before ours replaces it.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
     g_system_accent = QApplication::palette().color(QPalette::Accent);
+#else
+    g_system_accent = QApplication::palette().color(QPalette::Highlight);
+#endif
     if (QStyle* fusion = QStyleFactory::create(QStringLiteral("Fusion"))) app.setStyle(fusion);  // the app owns it
 
     QFont font = app.font();
@@ -348,10 +361,12 @@ void apply_theme(QApplication& app) {
         icon_cache().squeeze();
         g_sheet_icons.reset();
     });
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     QObject::connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, &app, [&app] {
         apply(app);
         emit ThemeNotifier::instance()->changed();
     });
+#endif
 }
 
 QIcon app_icon() {

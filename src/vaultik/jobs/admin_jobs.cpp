@@ -444,6 +444,12 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
 
 #ifndef _WIN32
 void check_admin_command(const std::string&, const std::string&) {}
+
+// No separate store for administrator jobs off Windows: a run as root works in root's own
+// settings folder, which other accounts cannot change.
+std::string own_admin_store() {
+    return config_dir();
+}
 #endif
 
 std::string elevated_run_refusal(const Job& job, bool automatic) {

@@ -11,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/base64.hpp"
 #include "vaultik/util/error.hpp"
@@ -20,7 +21,6 @@
 
 #include <winioctl.h>
 
-#include "vaultik/platform/acl.hpp"
 #include "vaultik/util/win.hpp"
 #include "vaultik/util/win_handle.hpp"
 #endif
