@@ -51,6 +51,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_history.hpp"
+#include "vaultik/jobs/report.hpp"
 #include "vaultik/jobs/update_check.hpp"
 #include "vaultik/ops/change_journal.hpp"
 #include "vaultik/ops/move_here.hpp"
@@ -233,6 +234,13 @@ Commands:
       --full                   Read all of the stored data
   alert-test                   Send a test message to the alert channels set up
                                in Settings (ntfy, Telegram, webhook)
+  report                       Monthly report of every saved job: backups and their
+                               results, data added, backup size and its growth,
+                               health checks, test restores, drive warnings and
+                               what needs attention (plain text)
+      --month <YYYY-MM>        The month (default: the month before this one)
+      --html <file>            Write it as a web page instead
+      --json                   Print it as JSON
   update-check                 Ask GitHub whether a newer Vaultik was released
                                (only asks; nothing is downloaded)
   test-restore <job>           Restore a few files of the newest version into a
@@ -305,11 +313,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier"};
+    "--read-threads", "--days", "--tier", "--month", "--html"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -984,7 +992,7 @@ int cmd_schedule(const Args& a, bool install) {
 
 // After a job's backup: removes its snapshots beyond its retention, then the data nothing uses any
 // more. Never fails the run; a problem becomes a warning and a note for the history.
-std::string clean_up(Repository& repo, const jobs::Job& job) {
+std::string clean_up(Repository& repo, const jobs::Job& job, bool* pruned = nullptr) {
     try {
         // Exclusive, without waiting: if another run is busy, cleaning up can wait for next time.
         RepoLock lock(repo, RepoLock::Mode::Exclusive, "cleanup (job " + job.id + ")");
@@ -1011,6 +1019,7 @@ std::string clean_up(Repository& repo, const jobs::Job& job) {
         }
         if (!g_json) clear_status();
         if (removed == 0) return size_note;
+        if (pruned != nullptr) *pruned = true;
         const PruneResult pr = prune_and_report(repo, lock, false);
         std::string note = "removed " + std::to_string(removed) + " old snapshot(s), freed " +
                            format_bytes(space_freed(pr));
@@ -1901,6 +1910,35 @@ void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string
     for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
 }
 
+// "report [--month YYYY-MM] [--html file] [--json]": the monthly report (see jobs/report.hpp).
+// "report --deliver" sends last month's summary to the alert channels when it is due (the
+// frontend runs it, since scheduled runs may not happen every month).
+int cmd_report(const Args& a) {
+    const jobs::JobStore store;
+    if (a.has("--deliver")) {
+        const std::vector<std::string> failed = jobs::deliver_monthly_summary(store);
+        for (const std::string& f : failed) err(f + "\n");
+        if (g_json) emit({{"event", "done"}, {"status", failed.empty() ? "success" : "failed"}, {"failed", failed}});
+        return failed.empty() ? kExitOk : kExitError;
+    }
+    const std::string month = a.value("--month").value_or(jobs::previous_month(jobs::month_of(os::now())));
+    if (!jobs::valid_month(month)) throw Error("invalid month \"" + month + "\" (use YYYY-MM, e.g. 2026-10)");
+    const jobs::MonthlyReport report = jobs::report_for(store, month);
+    if (auto file = a.value("--html")) {
+        const std::string html = jobs::render_html(report);
+        os::write_file_atomic(os::absolute_path(*file), ByteSpan(reinterpret_cast<const std::uint8_t*>(html.data()), html.size()));
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"file", *file}});
+        else out("The report for " + month + " was written to " + *file + "\n");
+        return kExitOk;
+    }
+    if (g_json) {
+        out(jobs::to_json(report) + "\n");
+        return kExitOk;
+    }
+    out(jobs::render_text(report));
+    return kExitOk;
+}
+
 // "update-check": whether a newer Vaultik has been released (nothing is downloaded).
 int cmd_update_check(const Args&) {
     const std::optional<jobs::Release> r = jobs::newer_release(VAULTIK_VERSION);
@@ -2088,8 +2126,22 @@ int cmd_run_job(const Args& a) {
                 record.message += std::string(record.message.empty() ? "" : "; ") +
                                   "old versions were not removed because of the warning";
         } else if (!job->retention.empty()) {
-            const std::string note = clean_up(*repo, *job);
+            bool pruned = false;
+            const std::string note = clean_up(*repo, *job, &pruned);
             if (!note.empty()) record.message += (record.message.empty() ? "" : "; ") + note;
+            if (pruned) {
+                // The cleanup rewrote the index; read it again for the size below.
+                try {
+                    repo->reload_index();
+                } catch (const std::exception&) {
+                }
+            }
+        }
+        // The stored size of the whole destination now, for the monthly report.
+        if (record.status != jobs::RunStatus::Failed) {
+            std::uint64_t stored = 0;
+            repo->index().for_each([&stored](const Id&, const BlobLocation& loc) { stored += loc.length; });
+            record.backup_size = stored;
         }
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the backup started
@@ -2108,6 +2160,11 @@ int cmd_run_job(const Args& a) {
     store.append_history(job->id, record);
     run_after(jobs::to_string(record.status));
     alert_for(*job, record, store.dir());
+    // Last month's summary to the alert channels, once, when asked for. Only from the user's own
+    // settings: a run with administrator rights uses the admin store's copy of the alerts, and
+    // both would send it.
+    if (store.dir() == jobs::config_dir())
+        for (const std::string& f : jobs::deliver_monthly_summary(store)) warning("could not send the monthly summary: " + f);
 
     // The second copy, after a backup that saved a version. Its result is its own history entry.
     const bool copy_waits = a.has("--scheduled") && job->schedule.skip_metered &&
@@ -3037,6 +3094,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "check-job") return cmd_check_job(a);
     if (a.command == "test-restore") return cmd_test_restore(a);
     if (a.command == "alert-test") return cmd_alert_test(a);
+    if (a.command == "report") return cmd_report(a);
     if (a.command == "update-check") return cmd_update_check(a);
     if (a.command == "copy") return cmd_copy(a);
     if (a.command == "cloud-rollback") return cmd_cloud_rollback(a);

@@ -26,4 +26,5 @@ private:
     QCheckBox* on_failure_ = nullptr;
     QCheckBox* on_damage_ = nullptr;
     QCheckBox* on_success_ = nullptr;
+    QCheckBox* monthly_ = nullptr;
 };

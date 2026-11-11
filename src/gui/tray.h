@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QTimer>
 
+#include <functional>
 #include <map>
 #include <string>
 
@@ -30,11 +31,14 @@ public:
     void check();
     // Tells the user, once, that closing the window left Vaultik running here.
     void explain_hidden();
-    // A notification from the icon; `warning` shows it as one.
-    void notify(const QString& title, const QString& text, bool warning = false);
+    // A notification from the icon; `warning` shows it as one. A click on it runs `on_click`, or
+    // without one brings the window to the front.
+    void notify(const QString& title, const QString& text, bool warning = false, std::function<void()> on_click = {});
 
 private:
     void rebuild_menu();
+    // Shows a notification whose click brings the window to the front (icon: QSystemTrayIcon::MessageIcon).
+    void show_message(const QString& title, const QString& text, int kind, int msecs);
 
     MainWindow* window_;
     const vaultik::jobs::JobStore& store_;
@@ -43,6 +47,8 @@ private:
     QMenu* run_menu_ = nullptr;
     QAction* open_ = nullptr;
     QAction* settings_ = nullptr;
+    QAction* report_ = nullptr;
+    std::function<void()> click_;  // what a click on the newest notification does
     QTimer timer_;
     bool first_check_ = true;
     bool attention_ = false;

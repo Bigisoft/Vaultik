@@ -49,6 +49,8 @@ public:
     // computer, in the job that backs it up.
     void show_history_for(const QString& local_path);
     void open_settings();
+    // The monthly report of `month` ("YYYY-MM"; empty: last month).
+    void open_report(const std::string& month = {});
     // Ends Vaultik, also when it lives in the tray.
     void quit_app();
 
@@ -89,6 +91,10 @@ private:
     void delete_version(int index);
     // Creates or removes the tray icon to match the settings.
     void update_tray();
+    // Once a month: a notification leading to last month's report, and its summary to the alert
+    // channels when they ask for one (by "vaultik report --deliver").
+    void check_monthly();
+    std::string monthly_done_;  // the month whose report was looked at in this process
 
     vaultik::jobs::JobStore store_;
     std::vector<vaultik::jobs::Job> jobs_;
@@ -99,6 +105,7 @@ private:
     QPushButton* open_backup_ = nullptr;
     QPushButton* keys_ = nullptr;
     QPushButton* settings_ = nullptr;
+    QPushButton* report_ = nullptr;
 
     Tray* tray_ = nullptr;  // child of this window, while the tray is on
     bool started_in_tray_ = false;

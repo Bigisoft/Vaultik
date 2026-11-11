@@ -78,6 +78,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/job.cpp
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
+    src/vaultik/jobs/report.cpp
     src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/profile_items.cpp
     src/vaultik/ops/move_here.cpp
@@ -192,6 +193,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/settings_dialog.cpp
             src/gui/updates.cpp
             src/gui/alerts_dialog.cpp
+            src/gui/report_dialog.cpp
             src/gui/tray.cpp
             src/gui/drive_watcher.cpp
             src/gui/event_runs.cpp
@@ -245,6 +247,7 @@ add_executable(vaultik_tests
     tests/test_formats.cpp
     tests/test_end_to_end.cpp
     tests/test_jobs.cpp
+    tests/test_report.cpp
     tests/test_prune.cpp
     tests/test_keys.cpp
     tests/test_s3.cpp

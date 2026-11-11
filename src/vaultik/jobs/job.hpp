@@ -221,6 +221,9 @@ struct RunRecord {
     // Set when the destination drive reported a problem (its health or condition) at the end of
     // the run, e.g. "WD My Passport 2627: warning (Predictive failure)".
     std::string drive;
+    // A backup: the stored size of the whole destination after it (and after its cleanup), from
+    // the repository's index; 0 when not known (older runs, other kinds of runs).
+    std::uint64_t backup_size = 0;
 };
 
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file

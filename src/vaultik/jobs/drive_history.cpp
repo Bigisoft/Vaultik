@@ -188,6 +188,26 @@ void record_drives(const std::vector<os::DriveHealth>& drives) {
     }
 }
 
+std::vector<DriveReading> all_drive_readings(const std::string& dir) {
+    return load(dir);
+}
+
+std::vector<DriveReading> all_drive_readings() {
+    std::vector<DriveReading> out = load(config_dir());
+    try {
+        const std::string admin = admin_store_dir();
+        if (admin != config_dir()) {
+            std::vector<DriveReading> more = load(admin);
+            out.insert(out.end(), more.begin(), more.end());
+            std::stable_sort(out.begin(), out.end(),
+                             [](const DriveReading& a, const DriveReading& b) { return a.time < b.time; });
+        }
+    } catch (const std::exception&) {
+        // no admin store here (POSIX)
+    }
+    return out;
+}
+
 std::vector<DriveReading> drive_history(const std::string& key) {
     std::vector<DriveReading> out = drive_history(key, config_dir());
     try {

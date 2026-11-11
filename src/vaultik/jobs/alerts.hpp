@@ -20,6 +20,7 @@ struct AlertSettings {
     bool on_failure = true;  // a backup failed, or could not read some files
     bool on_damage = true;   // a check or test restore found damage, or the backup drive is failing
     bool on_success = false; // every finished backup too
+    bool monthly_summary = false;  // a short summary of the month's backups once a month
     std::string ntfy_url;    // "https://ntfy.sh/my-secret-topic"
     std::string ntfy_email;  // ntfy forwards the message to this address too (optional)
     std::string telegram_chat;  // the chat id the bot writes to

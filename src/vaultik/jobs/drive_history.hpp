@@ -46,6 +46,9 @@ void record_drives(const std::vector<os::DriveHealth>& drives);
 std::vector<DriveReading> drive_history(const std::string& key, const std::string& dir);
 // Those of the user's config folder and the admin store together, oldest first.
 std::vector<DriveReading> drive_history(const std::string& key);
+// Every stored reading of every drive in `dir`, or in both places, oldest first.
+std::vector<DriveReading> all_drive_readings(const std::string& dir);
+std::vector<DriveReading> all_drive_readings();
 
 // One way a drive changed within the window.
 struct DriveChange {

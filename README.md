@@ -252,6 +252,7 @@ vaultik prune     -r E:\Backups\vaultik
 vaultik jobs
 vaultik run-job   documents
 vaultik check-job documents --full
+vaultik report    --month 2026-10 --html report.html
 vaultik copy      documents
 vaultik diff      --job documents latest
 vaultik estimate  --job documents
@@ -609,6 +610,34 @@ every channel. A job with administrator rights never reads your own alert settin
 copied into the admin-only store with the job, shown in the question before it is approved, and
 updated the next time such a job is saved.
 
+**Send a monthly summary** (off by default) also sends, at the start of each month, one short
+message about the month before: how many jobs and backups, how many succeeded, partly or failed,
+and how many things need attention, in the same fixed words and without job or drive names. The
+first backup of the month sends it, or Vaultik in the notification area when no backup runs.
+
+### Monthly report
+
+Once a month Vaultik sums up every job from its run history: how many backups ran and how they
+ended, when the last one succeeded, how much data they added, how big the backup is and how much
+it grew over the month, the health checks and test restores and what they found, the second
+copies, what the backup drive reported, and drives whose health got worse. A list at the top
+says what needs attention: a job that has not saved a version for too long (2 days for an hourly
+schedule, 7 daily, 14 weekly, 31 by hand), a last backup that failed, damage found, checks or
+test restores that could not run, a failed second copy, a ransomware warning, a backup drive that
+reported a problem, or a drive getting worse.
+
+At the start of a month, Vaultik in the notification area shows a notification that opens the
+report of the month before; **Monthly report...** in the sidebar (or the tray menu) shows any of
+the last twelve months, and **Save as...** keeps it as a web page or a text file. The page is
+self-contained (no scripts, no links). `vaultik report` prints it (`--month 2026-10`, by default
+the month before this one; `--html <file>` writes the page; `--json` for scripts). The backup size
+comes from each backup's history entry (`"backup_size"`, the stored size of the whole destination
+after the backup and its cleanup), so it is known from the first backup of this version on. Each
+job's history keeps its newest 2,000 runs, over a month of hourly backups. Which month a run
+belongs to follows the local calendar. A marker file in `reports` in Vaultik's settings folder
+remembers that a month's notification and summary went out, so each goes out once, whichever
+Vaultik process gets there first.
+
 ### Faster backups with the change journal
 
 A backup normally lists every folder and compares every file's size and times with the last
@@ -759,6 +788,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    - Ransomware warning (done): when a backup sees many files that look encrypted or were renamed
      with an added extension, it warns, pins the version before it and skips cleanup, so the
      last clean version is never removed automatically.
+   - Monthly report (done): what every job did last month and what needs attention, as a
+     notification, a page to save, `vaultik report`, and optionally a summary to the alert
+     channels.
    - Locked cloud copies (done): S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded
      data undeletable for a set time, even with the keys, and `cloud-rollback` brings it back.
    - Archive storage classes (done): a long-term cloud copy keeps its data in S3 Infrequent

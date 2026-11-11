@@ -52,6 +52,7 @@
 #include "job_dialog.h"
 #include "key_dialog.h"
 #include "overview.h"
+#include "report_dialog.h"
 #include "restore_dialog.h"
 #include "app_settings.h"
 #include "runner.h"
@@ -60,6 +61,8 @@
 #include "tray.h"
 #include "versions_view.h"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/report.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/os.hpp"
@@ -378,6 +381,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     connect(timer, &QTimer::timeout, this, [this] {
         // Not under a dialog: the code that opened it may hold on to the jobs or versions.
         if (!runner_->running() && QApplication::activeModalWidget() == nullptr) refresh_sidebar();
+        check_monthly();
     });
     timer->start(30000);
 
@@ -770,6 +774,39 @@ void MainWindow::open_settings() {
     if (tray_ != nullptr) tray_->check();
 }
 
+void MainWindow::open_report(const std::string& month) {
+    bring_to_front();
+    ReportDialog dialog(store_, month, this);
+    dialog.exec();
+}
+
+void MainWindow::check_monthly() {
+    const std::string month = jobs::previous_month(jobs::month_of(os::now()));
+    if (month == monthly_done_ || tray_ == nullptr) return;  // the notice needs the tray icon
+    monthly_done_ = month;
+    try {
+        if (!jobs::report_claimed(store_.dir(), "notice", month)) {
+            const jobs::MonthlyReport report = jobs::report_for(store_, month);
+            // Of several Vaultik windows (other sessions of the account), one tells.
+            if (report.any_runs() && jobs::claim_report(store_.dir(), "notice", month)) {
+                const QString text =
+                    report.attention.empty()
+                        ? tr("All backups are fine. Click to see what they did last month.")
+                        : tr("Things that need attention: %1. Click to see the report.")
+                              .arg(report.attention.size());
+                tray_->notify(tr("Your monthly backup report"), text, !report.attention.empty(),
+                              [this, month] { open_report(month); });
+            }
+        }
+        // The summary to the phone: sent by the command line, which waits for the network.
+        const jobs::AlertSettings alerts = jobs::load_alerts(store_.dir());
+        if (alerts.monthly_summary && alerts.any() && !jobs::report_claimed(store_.dir(), "alert", month))
+            QProcess::startDetached(Runner::engine_path(), {QStringLiteral("report"), QStringLiteral("--deliver")});
+    } catch (const std::exception&) {
+        // the report is a help; try again after the next start
+    }
+}
+
 void MainWindow::quit_app() {
     quitting_ = true;
     if (close()) {
@@ -822,6 +859,12 @@ QWidget* MainWindow::build_sidebar() {
     keys_->setToolTip(tr("Change a backup's password, or set a new one with the recovery key"));
     connect(keys_, &QPushButton::clicked, this, &MainWindow::open_keys);
     l->addWidget(keys_);
+
+    report_ = new QPushButton(tr("Monthly report..."));
+    report_->setProperty("role", "flat");
+    report_->setToolTip(tr("What every backup job did in a month, and what needs attention"));
+    connect(report_, &QPushButton::clicked, this, [this] { open_report(); });
+    l->addWidget(report_);
 
     settings_ = new QPushButton(tr("Settings..."));
     settings_->setProperty("role", "flat");
@@ -1025,6 +1068,7 @@ void MainWindow::refresh_icons() {
     open_backup_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
     keys_->setIcon(icon(QStringLiteral("key_20_regular")));
     settings_->setIcon(icon(QStringLiteral("settings_20_regular")));
+    report_->setIcon(icon(QStringLiteral("document_20_regular")));
     if (tray_ != nullptr) tray_->refresh_icons();
     restore_->setIcon(icon(QStringLiteral("arrow_counterclockwise_20_regular")));
     more_->setIcon(icon(QStringLiteral("more_horizontal_20_regular")));

@@ -35,6 +35,7 @@ Tray::Tray(MainWindow* window, const jobs::JobStore& store) : QObject(window), w
     open_ = menu_->addAction(tr("Open Vaultik"), window_, &MainWindow::bring_to_front);
     run_menu_ = menu_->addMenu(tr("Back up now"));  // owned by menu_
     menu_->addSeparator();
+    report_ = menu_->addAction(tr("Monthly report..."), window_, [this] { window_->open_report(); });
     settings_ = menu_->addAction(tr("Settings..."), window_, &MainWindow::open_settings);
     menu_->addAction(tr("Quit Vaultik"), window_, &MainWindow::quit_app);
     icon_ = new QSystemTrayIcon(this);
@@ -44,7 +45,10 @@ Tray::Tray(MainWindow* window, const jobs::JobStore& store) : QObject(window), w
         if (reason == QSystemTrayIcon::Trigger && single) window_->toggle_visible();
         else if (reason == QSystemTrayIcon::DoubleClick && !single) window_->bring_to_front();
     });
-    connect(icon_, &QSystemTrayIcon::messageClicked, this, [this] { window_->bring_to_front(); });
+    connect(icon_, &QSystemTrayIcon::messageClicked, this, [this] {
+        if (click_) click_();
+        else window_->bring_to_front();
+    });
     connect(&timer_, &QTimer::timeout, this, &Tray::check);
     timer_.start(60000);
     refresh_icons();
@@ -62,6 +66,7 @@ void Tray::refresh_icons() {
     open_->setIcon(icon(QStringLiteral("window_20_regular")));
     run_menu_->setIcon(icon(QStringLiteral("play_20_regular")));
     settings_->setIcon(icon(QStringLiteral("settings_20_regular")));
+    report_->setIcon(icon(QStringLiteral("document_20_regular")));
 }
 
 void Tray::rebuild_menu() {
@@ -75,13 +80,19 @@ void Tray::rebuild_menu() {
 }
 
 void Tray::explain_hidden() {
-    icon_->showMessage(tr("Vaultik is still running"),
+    show_message(tr("Vaultik is still running"),
                        tr("It keeps an eye on your backups from here. Use Quit in this icon's menu to end it."),
                        QSystemTrayIcon::Information, 8000);
 }
 
-void Tray::notify(const QString& title, const QString& text, bool warning) {
-    icon_->showMessage(title, text, warning ? QSystemTrayIcon::Warning : QSystemTrayIcon::Information, 10000);
+void Tray::notify(const QString& title, const QString& text, bool warning, std::function<void()> on_click) {
+    show_message(title, text, warning ? QSystemTrayIcon::Warning : QSystemTrayIcon::Information, 10000);
+    click_ = std::move(on_click);
+}
+
+void Tray::show_message(const QString& title, const QString& text, int kind, int msecs) {
+    click_ = nullptr;  // a click on this one opens the window
+    icon_->showMessage(title, text, static_cast<QSystemTrayIcon::MessageIcon>(kind), msecs);
 }
 
 void Tray::check() {
@@ -101,35 +112,35 @@ void Tray::check() {
                                &r == jobs::last_copy(records) || &r == jobs::last_restore_test(records);
             if (r.kind == jobs::RunKind::Copy) {
                 if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed)
-                    icon_->showMessage(tr("Second copy of %1 failed").arg(name), qs(r.message).left(200),
+                    show_message(tr("Second copy of %1 failed").arg(name), qs(r.message).left(200),
                                        QSystemTrayIcon::Warning, 15000);
             } else if (r.kind == jobs::RunKind::RestoreTest) {
                 // Files that did not come back right; a test that could not run is not news.
                 if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed && r.errors > 0)
-                    icon_->showMessage(tr("Test restore of %1 found problems").arg(name), qs(r.message).left(250),
+                    show_message(tr("Test restore of %1 found problems").arg(name), qs(r.message).left(250),
                                        QSystemTrayIcon::Critical, 15000);
             } else if (r.kind != jobs::RunKind::Backup) {
                 // A check that could not run is not news: the backup before it failed the same way.
                 if (fresh && settings.notify_failures && jobs::found_damage(r))
-                    icon_->showMessage(tr("Health check of %1 found problems").arg(name),
+                    show_message(tr("Health check of %1 found problems").arg(name),
                                        tr("Some backed-up data could not be read back. Open Vaultik to see "
                                           "what is affected, and back up again soon."),
                                        QSystemTrayIcon::Critical, 15000);
             } else if (fresh && !r.alert.empty() && !r.on_connect) {  // (a connected-drive run says it itself)
                 // Always shown: this is the one that must not be missed.
-                icon_->showMessage(tr("%1: files may be encrypted by ransomware").arg(name),
+                show_message(tr("%1: files may be encrypted by ransomware").arg(name),
                                    qs(r.alert).left(250), QSystemTrayIcon::Critical, 30000);
             } else if (fresh && settings.notify_failures && !r.drive.empty() && r.status != jobs::RunStatus::Failed) {
                 // Saved, but the drive it is on says it is failing: the time to act is now.
-                icon_->showMessage(tr("The backup drive of %1 reports a problem").arg(name),
+                show_message(tr("The backup drive of %1 reports a problem").arg(name),
                                    tr("%1. Copy the backup to another drive soon, before it fails.").arg(qs(r.drive)),
                                    QSystemTrayIcon::Warning, 30000);
             } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Failed) {
-                icon_->showMessage(tr("Backup failed: %1").arg(name), qs(r.message).left(200), QSystemTrayIcon::Critical,
+                show_message(tr("Backup failed: %1").arg(name), qs(r.message).left(200), QSystemTrayIcon::Critical,
                                    15000);
             } else if (fresh && settings.notify_failures && r.status == jobs::RunStatus::Partial && !r.on_connect) {
                 // (a run for a connected drive reports when it ends, with what was skipped)
-                icon_->showMessage(tr("Backup of %1 skipped files").arg(name),
+                show_message(tr("Backup of %1 skipped files").arg(name),
                                    tr("%1 could not be read. Open Vaultik to see which.")
                                        .arg(count_of(r.errors, tr("file"), tr("files"))),
                                    QSystemTrayIcon::Warning, 15000);
@@ -151,7 +162,7 @@ void Tray::check() {
             if (settings.notify_overdue && overdue_reported_[job.id] != QDate::currentDate()) {
                 overdue_reported_[job.id] = QDate::currentDate();
                 const auto ago = static_cast<int>((now - saved) / kTicksPerDay);
-                icon_->showMessage(tr("%1 has not been backed up for %2").arg(name, count_of(ago, tr("day"), tr("days"))),
+                show_message(tr("%1 has not been backed up for %2").arg(name, count_of(ago, tr("day"), tr("days"))),
                                    job.schedule.kind == jobs::Schedule::Kind::Manual
                                        ? tr("Open Vaultik and choose Back up now.")
                                        : tr("Its scheduled backups are not running. Is the destination connected?"),

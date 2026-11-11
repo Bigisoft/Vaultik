@@ -19,8 +19,8 @@ namespace {
 using nlohmann::json;
 
 constexpr int kJobFormatVersion = 1;
-constexpr std::size_t kHistoryTrimBytes = 1u << 20;  // rewrite the history file beyond this
-constexpr std::size_t kHistoryKeep = 500;
+constexpr std::size_t kHistoryTrimBytes = 2u << 20;  // rewrite the history file beyond this
+constexpr std::size_t kHistoryKeep = 2000;  // over a month of hourly runs, for the monthly report
 
 const char* kWeekdays[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
 
@@ -549,6 +549,7 @@ std::string to_json(const RunRecord& r) {
     if (!r.alert.empty()) j["alert"] = r.alert;
     if (!r.hold.empty()) j["hold"] = r.hold;
     if (!r.drive.empty()) j["drive"] = r.drive;
+    if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     return j.dump();
 }
 
@@ -568,6 +569,7 @@ RunRecord record_from_json(const std::string& text) {
         r.alert = j.value("alert", std::string());
         r.hold = j.value("hold", std::string());
         r.drive = j.value("drive", std::string());
+        r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.started = j.value("started", std::uint64_t{0});
         r.finished = j.value("finished", std::uint64_t{0});
         r.status = status_from(j.value("status", std::string("failed")));

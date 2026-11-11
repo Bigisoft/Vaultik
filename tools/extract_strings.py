@@ -37,12 +37,22 @@ def decode(text: str) -> str:
     return "".join(out)
 
 
+# The monthly report's fixed phrases (src/vaultik/jobs/report.cpp), which the frontend translates.
+SAY = re.compile(r'\bsay\(\s*((?:' + LITERAL + r'\s*)+)[,)]')
+MONTHS = re.compile(r'kMonthNames\[\]\s*=\s*\{([^}]*)\}')
+
+
 def texts() -> list[str]:
     found = set(QT_TEXTS)
     for path in sorted((ROOT / "src" / "gui").glob("*.cpp")) + sorted((ROOT / "src" / "gui").glob("*.h")):
         source = path.read_text(encoding="utf-8")
         for m in CALL.finditer(source):
             found.add("".join(decode(p) for p in PIECE.findall(m.group(1))))
+    report = (ROOT / "src" / "vaultik" / "jobs" / "report.cpp").read_text(encoding="utf-8")
+    for m in SAY.finditer(report):
+        found.add("".join(decode(p) for p in PIECE.findall(m.group(1))))
+    for m in MONTHS.finditer(report):
+        found.update(decode(p) for p in PIECE.findall(m.group(1)))
     return sorted(found)
 
 

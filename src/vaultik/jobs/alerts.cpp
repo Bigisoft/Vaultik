@@ -62,6 +62,7 @@ AlertSettings load_alerts(const std::string& dir) {
         s.on_failure = j.value("on_failure", s.on_failure);
         s.on_damage = j.value("on_damage", s.on_damage);
         s.on_success = j.value("on_success", s.on_success);
+        s.monthly_summary = j.value("monthly_summary", s.monthly_summary);
         s.ntfy_url = j.value("ntfy_url", std::string());
         s.ntfy_email = j.value("ntfy_email", std::string());
         s.telegram_chat = j.value("telegram_chat", std::string());
@@ -79,7 +80,8 @@ void save_alerts(const AlertSettings& s, const std::string& dir) {
     for (const std::string* url : {&s.ntfy_url, &s.webhook_url})
         if (!url->empty()) check_url(*url);
     const nlohmann::json j = {{"on_failure", s.on_failure},   {"on_damage", s.on_damage},
-                              {"on_success", s.on_success},   {"ntfy_url", s.ntfy_url},
+                              {"on_success", s.on_success},   {"monthly_summary", s.monthly_summary},
+                              {"ntfy_url", s.ntfy_url},
                               {"ntfy_email", s.ntfy_email},   {"telegram_chat", s.telegram_chat},
                               {"webhook_url", s.webhook_url}};
     os::write_file_atomic(settings_path(dir), bytes_of(j.dump(2) + "\n"), 0600);

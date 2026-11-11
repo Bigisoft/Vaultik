@@ -54,6 +54,9 @@ AlertsDialog::AlertsDialog(QWidget* parent) : QDialog(parent) {
     on_damage_->setChecked(s.on_damage);
     on_success_ = new QCheckBox(tr("After every backup too"));
     on_success_->setChecked(s.on_success);
+    monthly_ = new QCheckBox(tr("Send a monthly summary"));
+    monthly_->setToolTip(tr("At the start of each month: how many backups ran last month and how many need attention"));
+    monthly_->setChecked(s.monthly_summary);
 
     auto* form = new QFormLayout;
     form->addRow(tr("ntfy topic URL:"), ntfy_url_);
@@ -79,6 +82,7 @@ AlertsDialog::AlertsDialog(QWidget* parent) : QDialog(parent) {
     layout->addWidget(on_failure_);
     layout->addWidget(on_damage_);
     layout->addWidget(on_success_);
+    layout->addWidget(monthly_);
     layout->addWidget(note(tr("Alerts name the computer and the job, and say what happened; never your files. "
                               "Tokens are stored readable only by your account.")));
     layout->addWidget(buttons);
@@ -94,6 +98,7 @@ bool AlertsDialog::save() {
     s.on_failure = on_failure_->isChecked();
     s.on_damage = on_damage_->isChecked();
     s.on_success = on_success_->isChecked();
+    s.monthly_summary = monthly_->isChecked();
     try {
         jobs::save_alerts(s);
         if (!ntfy_token_->text().isEmpty()) jobs::set_alert_secret("ntfy", u8(ntfy_token_->text().trimmed()));
