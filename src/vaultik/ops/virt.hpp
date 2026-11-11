@@ -109,7 +109,9 @@ struct VirtProgress {
 // `name` installed in `folder` (created when missing; it must hold no ext4.vhdx yet), streaming it
 // from the repository into "wsl --import <name> <folder> -". A distribution of that name must not
 // exist, unless `replace`, which unregisters it first (deleting its disk; the caller asked and the
-// user confirmed). Throws Error (also when cancelled).
+// user confirmed), but only after every piece of the export was read and checked, so a damaged or
+// incomplete backup never costs the existing distribution (progress then counts both passes).
+// Throws Error (also when cancelled).
 void wsl_import(Repository& repo, const Node& file, const std::string& name, const std::string& folder, bool replace,
                 const std::function<void(const VirtProgress&)>& progress = {},
                 const std::function<bool()>& cancelled = {});

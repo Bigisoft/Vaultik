@@ -458,10 +458,32 @@ void wsl_import(Repository& repo, const Node& file, const std::string& name, con
     const std::vector<WslDistro> installed = wsl_distros();
     const auto existing = std::find_if(installed.begin(), installed.end(),
                                        [&](const WslDistro& d) { return fold(d.name) == fold(name); });
+    VirtProgress p;
+    p.total = file.size;
     if (existing != installed.end()) {
         if (!replace)
             throw Error("a WSL distribution called " + existing->name +
                         " exists already; choose another name (or replace it explicitly)");
+        // Unregistering deletes the distribution's disk at once, and an import that fails later
+        // would leave neither: first make sure every piece of the export is there and intact
+        // (read and checked once; the import reads it again).
+        for (const Id& id : file.content)
+            if (!repo.index().contains(id))
+                throw Error("the backup of this distribution is incomplete (a piece of it is missing), so " +
+                            existing->name + " was left as it is");
+        p.total = 2 * file.size;
+        for (const Id& id : file.content) {
+            if (cancelled && cancelled()) throw Error("cancelled");
+            Bytes chunk;
+            try {
+                chunk = repo.load_blob(BlobType::Data, id);
+            } catch (const std::exception& e) {
+                throw Error("the backup of this distribution cannot be read in full (" + std::string(e.what()) +
+                            "), so " + existing->name + " was left as it is");
+            }
+            p.bytes += chunk.size();
+            if (progress) progress(p);
+        }
         int code = 0;
         const std::string text = run_wsl({"--unregister", existing->name}, &code, std::chrono::minutes(10));
         if (code != 0) throw Error("could not remove the WSL distribution " + existing->name + ": " + first_line(text));
@@ -472,8 +494,6 @@ void wsl_import(Repository& repo, const Node& file, const std::string& name, con
 
     os::PipedProcess wsl({"wsl.exe", "--import", name, target, "-"}, os::PipedProcess::Direction::ToProgram,
                          {{"WSL_UTF8", "1"}});
-    VirtProgress p;
-    p.total = file.size;
     try {
         for (const Id& id : file.content) {
             if (cancelled && cancelled()) throw Error("cancelled");

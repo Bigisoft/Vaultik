@@ -668,8 +668,9 @@ are open while it runs, so a plain file backup gets a half-written copy or none 
   administrator rights. To get one back, pick `WSL\<name>.tar` in the restore window and choose
   **Import as new...**: it is installed as a new distribution with `wsl --import <new name>
   <folder> -`, fed from the backup. An existing distribution of that name is replaced only after
-  you confirm it (it is unregistered first, which deletes its disk). The `.tar` can also simply be
-  restored as a file.
+  you confirm it, and only after the whole export was read from the backup and checked (it is
+  unregistered first, which deletes its disk, so a damaged backup must not get that far). The
+  `.tar` can also simply be restored as a file.
 - **Hyper-V machines** (a job with administrator rights): each ticked machine is exported with
   `Export-VM` (a consistent copy, also of a running machine, through a checkpoint Hyper-V takes
   and merges itself) into an export folder (`ProgramData\Vaultik\hyperv-export`, or a folder
