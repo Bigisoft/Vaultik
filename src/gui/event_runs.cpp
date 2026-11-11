@@ -273,6 +273,12 @@ void EventRuns::poll_requests() {
     QStringList args = {QStringLiteral("computers"), QStringLiteral("--poll"), QStringLiteral("--json")};
     if (cloud) args << QStringLiteral("--cloud");
     QProcess* process = request_poll_;
+    // One that cannot start sends no "finished": without this, no look would ever start again.
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart) return;
+        request_poll_ = nullptr;
+        process->deleteLater();
+    });
     connect(process, &QProcess::finished, this, [this, process] {
         request_poll_ = nullptr;
         process->deleteLater();

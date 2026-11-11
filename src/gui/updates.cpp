@@ -39,6 +39,14 @@ void check_for_update(QObject* owner, std::function<void(const UpdateResult&)> d
         process->deleteLater();
         if (alive) done(r);
     });
+    // An engine that cannot start sends no "finished": answer (and clean up) here instead.
+    QObject::connect(process, &QProcess::errorOccurred, owner, [process, alive, done](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart) return;
+        UpdateResult r;
+        r.error = QObject::tr("Vaultik could not check for a new version.");
+        process->deleteLater();
+        if (alive) done(r);
+    });
     process->setProcessEnvironment(Runner::engine_environment());
     process->start(Runner::engine_path(), {QStringLiteral("update-check"), QStringLiteral("--json")});
 }
