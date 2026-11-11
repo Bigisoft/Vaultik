@@ -2,6 +2,8 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <random>
 
@@ -11,6 +13,7 @@
 #include "vaultik/image/layout.hpp"
 #include "vaultik/image/recovery_media.hpp"
 #include "vaultik/image/vhdx.hpp"
+#include "vaultik/compress/zstd.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -783,4 +786,146 @@ TEST_CASE("image: recovery drive pieces") {
     CHECK(std::find(dlls.begin(), dlls.end(), "KERNEL32.DLL") != dlls.end());
     CHECK_FALSE(usb_refusal("not a drive", {}).empty());
 #endif
+}
+
+// ---- the disk image test's virtual disks ---------------------------------------------------
+// The elevated disk image test (a script outside the test suite) needs a source disk with an EFI
+// partition and an NTFS volume. Windows will not format virtual disks on every computer (a disk
+// filter driver can refuse), so the disks are written here instead: the NTFS volume comes from
+// tests/data/ntfs-1746m.vkfix, made once with mkntfs (tools/make_ntfs_fixture.sh).
+
+namespace {
+
+constexpr std::uint64_t kTestDiskSize = 2048 * kMiB;
+constexpr std::uint64_t kTestEfiOffset = 1 * kMiB;
+constexpr std::uint64_t kTestEfiLength = 300 * kMiB;
+constexpr std::uint64_t kTestNtfsOffset = 301 * kMiB;
+constexpr std::uint64_t kTestNtfsLength = 1746 * kMiB;
+
+// A volume kept as its chunks that are not all zeros (see tools/make_ntfs_fixture.sh).
+struct VolumeFixture {
+    std::uint64_t size = 0;
+    std::uint32_t chunk = 0;
+    std::vector<std::uint64_t> offsets;
+    Bytes data;  // the chunks, one after the other
+};
+
+VolumeFixture load_volume_fixture(const fs::path& path) {
+    const Bytes raw = [&] {
+        std::ifstream f(path, std::ios::binary);
+        REQUIRE(f.good());
+        return Bytes((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    }();
+    std::size_t at = 0;
+    const auto u = [&](int bytes) {
+        REQUIRE(at + static_cast<std::size_t>(bytes) <= raw.size());
+        std::uint64_t v = 0;
+        for (int i = 0; i < bytes; ++i) v |= static_cast<std::uint64_t>(raw[at + static_cast<std::size_t>(i)]) << (8 * i);
+        at += static_cast<std::size_t>(bytes);
+        return v;
+    };
+    REQUIRE(raw.size() > 8);
+    REQUIRE(std::memcmp(raw.data(), "VKFIX001", 8) == 0);
+    at = 8;
+    VolumeFixture v;
+    v.size = u(8);
+    v.chunk = static_cast<std::uint32_t>(u(4));
+    const std::uint64_t count = u(4);
+    for (std::uint64_t i = 0; i < count; ++i) v.offsets.push_back(u(8));
+    const std::uint64_t raw_len = u(8);
+    REQUIRE(raw_len == count * v.chunk);
+    ZstdDecompressor z;
+    v.data = z.decompress(ByteSpan(raw.data() + at, raw.size() - at), static_cast<std::size_t>(raw_len));
+    return v;
+}
+
+std::uint64_t le(const Bytes& b, std::size_t at, int bytes) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < bytes; ++i) v |= static_cast<std::uint64_t>(b[at + static_cast<std::size_t>(i)]) << (8 * i);
+    return v;
+}
+
+const fs::path kNtfsFixture = fs::path(VAULTIK_TEST_DATA) / "ntfs-1746m.vkfix";
+
+}  // namespace
+
+TEST_CASE("image: the NTFS fixture is an empty volume made for the test disk's data partition") {
+    const VolumeFixture v = load_volume_fixture(kNtfsFixture);
+    CHECK(v.size == kTestNtfsLength);
+    REQUIRE_FALSE(v.offsets.empty());
+    CHECK(v.offsets.front() == 0);
+    const Bytes boot(v.data.begin(), v.data.begin() + 512);
+    CHECK(std::memcmp(&boot[3], "NTFS    ", 8) == 0);
+    CHECK(le(boot, 11, 2) == 512);                          // bytes per sector
+    CHECK(le(boot, 13, 1) == 8);                            // sectors per cluster: 4 KiB clusters
+    CHECK(le(boot, 28, 4) == kTestNtfsOffset / 512);        // hidden sectors: where the partition starts
+    CHECK(le(boot, 40, 8) == kTestNtfsLength / 512 - 1);    // sectors, less the backup boot sector
+    CHECK(boot[510] == 0x55);
+    CHECK(boot[511] == 0xAA);
+    // The backup boot sector, in the volume's last sector.
+    CHECK(v.offsets.back() + v.chunk == v.size);
+}
+
+TEST_CASE("image: the test disk for the elevated disk image test (only when asked)") {
+    // Writes <dir>\source.vhdx (GPT: an EFI partition of known random bytes and the empty NTFS
+    // volume) and <dir>\target.vhdx (blank, the same size), for the elevated test script.
+    const std::string dir = os::get_env("VAULTIK_TEST_DISK_DIR");
+    if (dir.empty()) {
+        MESSAGE("skipped: VAULTIK_TEST_DISK_DIR is not set");
+        return;
+    }
+    const fs::path out(std::u8string(dir.begin(), dir.end()));
+    REQUIRE(fs::is_directory(out));
+    const auto path_of = [&](const char* name) {
+        const std::u8string p = (out / name).u8string();
+        return std::string(p.begin(), p.end());
+    };
+    REQUIRE_FALSE(fs::exists(out / "source.vhdx"));
+    REQUIRE_FALSE(fs::exists(out / "target.vhdx"));
+
+    DiskLayout l;
+    l.style = PartitionStyle::Gpt;
+    l.size = kTestDiskSize;
+    l.disk_guid = format_guid(random_guid());
+    Partition efi;
+    efi.number = 1;
+    efi.offset = kTestEfiOffset;
+    efi.length = kTestEfiLength;
+    efi.type = std::string(kEfiSystemType);
+    efi.guid = format_guid(random_guid());
+    efi.name = "EFI system partition";
+    Partition data;
+    data.number = 2;
+    data.offset = kTestNtfsOffset;
+    data.length = kTestNtfsLength;
+    data.type = std::string(kBasicDataType);
+    data.guid = format_guid(random_guid());
+    data.name = "Basic data partition";
+    l.partitions = {efi, data};
+    l.id = disk_id(l);
+
+    {
+        auto file = create_random_file(path_of("source.vhdx"));
+        VhdxWriter w(*file, kTestDiskSize);
+        for (const DiskWrite& t : partition_tables(l, kTestDiskSize)) w.write(t.offset, t.data);
+        // The EFI partition: random bytes (it is copied byte for byte, not as a file system).
+        Bytes chunk(static_cast<std::size_t>(kMiB));
+        for (std::uint64_t at = 0; at < kTestEfiLength; at += kMiB) {
+            fill_random(chunk.data(), chunk.size(), static_cast<std::uint32_t>(1000 + at / kMiB));
+            w.write(kTestEfiOffset + at, chunk);
+        }
+        // The NTFS volume: its chunks that are not zeros; the rest of the new disk is zeros.
+        const VolumeFixture v = load_volume_fixture(kNtfsFixture);
+        REQUIRE(v.size == kTestNtfsLength);
+        for (std::size_t i = 0; i < v.offsets.size(); ++i)
+            w.write(kTestNtfsOffset + v.offsets[i],
+                    ByteSpan(v.data.data() + i * v.chunk, v.chunk));
+        w.finish();
+    }
+    {
+        auto file = create_random_file(path_of("target.vhdx"));
+        VhdxWriter w(*file, kTestDiskSize);
+        w.finish();
+    }
+    MESSAGE("wrote " << path_of("source.vhdx") << " (disk " << l.disk_guid << ") and " << path_of("target.vhdx"));
 }

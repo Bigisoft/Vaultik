@@ -352,7 +352,8 @@ target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # Assertions run on the main thread only. Without per-thread copies of doctest's state, threads that
 # Windows starts in the process (and that are still running at exit) leave nothing the debug leak
 # check would report.
-target_compile_definitions(vaultik_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING)
+target_compile_definitions(vaultik_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING
+    VAULTIK_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
 add_test(NAME vaultik_tests COMMAND vaultik_tests)
 endif()
 

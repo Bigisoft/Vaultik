@@ -4,3 +4,5 @@
 *.sh text eol=lf
 # Kept byte for byte: vcpkg checks its hash (see .github/workflows/build.yml).
 tools/ci/*.json -text
+# Test fixtures, kept byte for byte.
+tests/data/** -text
