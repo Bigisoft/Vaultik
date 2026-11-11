@@ -179,14 +179,25 @@ void ask_backup(Repository& repo, const StatusFile& status, std::vector<std::str
 // repository) it lists, unless it expired. Empty when none.
 std::vector<std::string> requested_jobs(const BackupRequest& request, const std::vector<std::string>& local,
                                         std::uint64_t now);
+
+// Requests carry no secret the storage side lacks to repeat them: it can put back a copy of an
+// old, genuine one. So this computer remembers when the last request it took up was made
+// (`taken`, 0: none) and takes up only newer ones: Take a newer one, Keep the one it took up
+// (marked "running" then; its runs may still be going; it is not run again), Drop an older one
+// and the one it took up when it shows as "pending" again (the asker's copy put back).
+enum class RequestStep { Take, Keep, Drop };
+RequestStep request_step(const BackupRequest& request, std::uint64_t taken);
 // The request after `job_id` ran: without that job; empty when nothing is left.
 std::optional<BackupRequest> after_run(BackupRequest request, const std::string& job_id);
 
-// This computer, at a poll or the start of a run: the request addressed to it, if any; the job
-// ids among `local` it asks for (marking it taken up), or empty (an expired request, or one for
-// jobs this computer does not have here, is removed). Never throws: a request that cannot be read
-// is left alone.
-std::vector<std::string> take_request(Repository& repo, const std::vector<std::string>& local, std::uint64_t now) noexcept;
+// This computer, at a poll: the request addressed to it, if any; the job ids among `runnable` it
+// asks for (marking it taken up, and remembering that in `state_dir`, see RequestStep), or empty.
+// An expired request, one for jobs this computer does not have here (`known`: all of its jobs on
+// this repository, those with administrator rights too, whose own runs answer it), and a copy of
+// an older one are removed. Never throws: a request that cannot be read is left alone.
+std::vector<std::string> take_request(Repository& repo, const std::vector<std::string>& known,
+                                      const std::vector<std::string>& runnable, std::uint64_t now,
+                                      const std::string& state_dir = config_dir()) noexcept;
 // After `job_id` ran on this computer: removes it from the request addressed here (and the request
 // when it was the last). Never throws.
 void finish_request(Repository& repo, const std::string& job_id) noexcept;

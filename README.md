@@ -443,14 +443,21 @@ the other run's note replaced its own.
 no longer backs up there, after asking; its versions stay. It refuses this computer's own note.
 
 **Ask to back up now** (or `vaultik computers --ask <name or id>`, `--ask-job <job id>` for one
-job) leaves an encrypted request for that computer in the repository. The other computer runs its
-jobs on that repository once (recorded with the trigger "request") when one of them runs anyway,
-or when Vaultik there looks for requests: every 15 minutes for folders, drives and network shares
-and every hour for cloud storage, where each look costs a few billed requests and counts against
-the cloud drives' rate limits (not over a metered connection). A look opens the repository
-without its index and reads one small file. The view shows a request as "asked to back up" until
-the last job ran; a request nobody took up within 7 days is dropped. Requests only name saved jobs
-of that computer: they cannot make it run anything else.
+job) leaves an encrypted request for that computer in the repository. Vaultik on the other
+computer looks for requests every 15 minutes for folders, drives and network shares and every hour
+for cloud storage, where each look costs a few billed requests and counts against the cloud
+drives' rate limits (not over a metered connection); a look opens the repository without its
+index and reads one small file. It then runs the asked jobs on that repository once (recorded
+with the trigger "request"). A job that runs anyway (on its schedule) counts as having answered
+the request for that job; a job with administrator rights is only answered that way, since Vaultik
+does not start those itself. The view shows a request as "asked to back up" until the last job
+ran; a request is dropped 7 days after it was made, whether or not it was taken up. Requests only
+name saved jobs of that computer: they cannot make it run anything else. Whoever can write to
+the storage (a cloud provider, someone with access to the share) cannot make or change a request,
+but could put an old one back; each computer remembers the newest request it took up and ignores
+that one and older ones. They could likewise put back an older status note: a note older than
+that computer's newest version is marked as such ("status record older than its newest version",
+health at least "warning").
 
 ### External drives
 

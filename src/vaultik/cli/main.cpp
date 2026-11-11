@@ -3251,7 +3251,11 @@ int cmd_find(const Args& a) {
 int poll_requests(const Args& a) {
     const jobs::JobStore store = job_store(a);
     std::map<std::string, std::vector<jobs::Job>> by_repo;
+    // Every job a repository has here, those with administrator rights too: a request for one of
+    // them is answered by its own run, not removed as unknown.
+    std::map<std::string, std::vector<std::string>> known_by_repo;
     for (const jobs::Job& job : store.list()) {
+        known_by_repo[job.repository].push_back(job.id);
         if (job.run_as_admin || (is_cloud_location(job.repository) && !a.has("--cloud"))) continue;
         if (!jobs::drive_connected(job)) continue;
         by_repo[job.repository].push_back(job);
@@ -3267,7 +3271,8 @@ int poll_requests(const Args& a) {
             secure_wipe(pw.data(), pw.size());
             std::vector<std::string> local;
             for (const jobs::Job& j : list) local.push_back(j.id);
-            for (const std::string& id : jobs::take_request(*repo, local, os::now())) asked.push_back(id);
+            for (const std::string& id : jobs::take_request(*repo, known_by_repo[location], local, os::now(), store.dir()))
+                asked.push_back(id);
         } catch (const std::exception& e) {
             secure_wipe(pw.data(), pw.size());
             failed.push_back(location + ": " + e.what());

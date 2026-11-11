@@ -591,18 +591,63 @@ std::optional<BackupRequest> after_run(BackupRequest r, const std::string& job_i
     return r;
 }
 
-std::vector<std::string> take_request(Repository& repo, const std::vector<std::string>& local,
-                                      std::uint64_t now) noexcept {
+RequestStep request_step(const BackupRequest& r, std::uint64_t taken) {
+    if (r.created > taken) return RequestStep::Take;
+    // The one taken up is marked "running" here when it is taken up; the same one still
+    // "pending" is the asker's copy put back.
+    return r.created == taken && r.state == "running" ? RequestStep::Keep : RequestStep::Drop;
+}
+
+namespace {
+
+// When the last request taken up from each repository was made: requests-taken.json in the
+// settings folder, {"<request name>": created}.
+std::string taken_path(const std::string& dir) {
+    return os::join(dir, "requests-taken.json");
+}
+
+json read_taken(const std::string& dir) {
+    try {
+        const Bytes data = os::read_file(taken_path(dir), 1u << 20);
+        json j = json::parse(std::string(data.begin(), data.end()));
+        if (j.is_object()) return j;
+    } catch (const std::exception&) {
+    }
+    return json::object();
+}
+
+}  // namespace
+
+std::vector<std::string> take_request(Repository& repo, const std::vector<std::string>& known,
+                                      const std::vector<std::string>& runnable, std::uint64_t now,
+                                      const std::string& state_dir) noexcept {
     try {
         const Id me = computer_id(repo, os::machine_id());
         std::optional<BackupRequest> r = read_request(repo, me);
         if (!r) return {};
-        std::vector<std::string> ids = requested_jobs(*r, local, now);
-        if (ids.empty()) {
+        if (requested_jobs(*r, known, now).empty()) {
             // Expired, or for jobs this computer has not got here (any more): nobody will run it.
             remove_request(repo, me);
             return {};
         }
+        const std::string key = request_name(me);
+        json taken = read_taken(state_dir);
+        const std::uint64_t last = taken.contains(key) && taken[key].is_number_unsigned() ? taken[key].get<std::uint64_t>() : 0;
+        switch (request_step(*r, last)) {
+            case RequestStep::Drop:
+                remove_request(repo, me);
+                return {};
+            case RequestStep::Keep:
+                return {};
+            case RequestStep::Take:
+                break;
+        }
+        const std::vector<std::string> ids = requested_jobs(*r, runnable, now);
+        // Only jobs with administrator rights asked for: their own runs answer it.
+        if (ids.empty()) return {};
+        taken[key] = r->created;
+        const std::string text = taken.dump(1) + "\n";
+        os::write_file_atomic(taken_path(state_dir), Bytes(text.begin(), text.end()), 0600);
         if (r->state != "running") {
             r->state = "running";
             r->started = now;
