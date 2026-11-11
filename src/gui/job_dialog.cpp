@@ -18,6 +18,8 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScreen>
+#include <QScrollArea>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QTabWidget>
@@ -76,19 +78,31 @@ QStringList items_of(const QListWidget* list) {
     return out;
 }
 
+// A tab's page inside a scroll area: the page keeps its natural size, and the dialog can be made
+// smaller than the longest page (which would otherwise set its minimum height and push it under
+// the taskbar on small screens).
+QWidget* scrolled(QWidget* page) {
+    auto* area = new QScrollArea;
+    area->setWidget(page);
+    area->setWidgetResizable(true);
+    area->setFrameShape(QFrame::NoFrame);
+    return area;
+}
+
 }  // namespace
 
 JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWidget* parent)
     : QDialog(parent), store_(store), editing_(existing != nullptr) {
     setWindowTitle(editing_ ? tr("Edit backup job") : tr("New backup job"));
-    resize(640, 520);
+    setWindowFlag(Qt::WindowMaximizeButtonHint, true);
+    setSizeGripEnabled(true);
 
     auto* tabs = new QTabWidget;
-    tabs->addTab(build_general(), tr("General"));
-    tabs->addTab(build_sources(), tr("What to back up"));
-    tabs->addTab(build_schedule(), tr("Schedule"));
-    tabs->addTab(build_resources(), tr("Resources"));
-    tabs->addTab(build_retention(), tr("Old backups"));
+    tabs->addTab(scrolled(build_general()), tr("General"));
+    tabs->addTab(scrolled(build_sources()), tr("What to back up"));
+    tabs->addTab(scrolled(build_schedule()), tr("Schedule"));
+    tabs->addTab(scrolled(build_resources()), tr("Resources"));
+    tabs->addTab(scrolled(build_retention()), tr("Old backups"));
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, this, &JobDialog::accept);
@@ -97,6 +111,18 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
     auto* layout = new QVBoxLayout(this);
     layout->addWidget(tabs);
     layout->addWidget(buttons);
+
+    // Start at a comfortable size, but never larger than the screen's free area (without the
+    // taskbar), and centred on it.
+    QScreen* screen = parent != nullptr && parent->screen() != nullptr ? parent->screen() : QGuiApplication::primaryScreen();
+    if (screen != nullptr) {
+        const QRect free = screen->availableGeometry();
+        const QSize size(std::min(720, free.width() - 40), std::min(640, free.height() - 60));
+        resize(size);
+        move(free.center() - QPoint(size.width() / 2, size.height() / 2));
+    } else {
+        resize(720, 640);
+    }
 
     if (existing != nullptr) {
         job_ = *existing;
