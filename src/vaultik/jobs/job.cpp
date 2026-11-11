@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/ops/virt.hpp"
 #include "vaultik/platform/os.hpp"
 
 namespace vaultik::jobs {
@@ -291,9 +292,26 @@ void validate(const Job& job) {
             if (job.cloud_key_id.empty())
                 throw Error(std::string("sign in to ") + cloud_kind_name(cloud_kind(job.repository)) + " first");
     }
-    if (job.sources.empty()) throw Error("the job needs at least one folder or file to back up");
+    if (job.sources.empty() && job.wsl_distros.empty() && job.hyperv_vms.empty())
+        throw Error("the job needs at least one folder or file to back up");
     for (const std::string& s : job.sources)
         if (s.empty()) throw Error("empty source path");
+    for (const std::string& d : job.wsl_distros)
+        if (!valid_distro_name(d)) throw Error("invalid WSL distribution name \"" + d + "\"");
+    parse_wsl_when_running(job.wsl_when_running);  // throws with what is wrong
+    if (!job.wsl_distros.empty() && job.run_as_admin)
+        throw Error("WSL distributions belong to your own account: back them up in a job without administrator rights");
+    for (const std::string& vm : job.hyperv_vms) {
+        check_text("a virtual machine's name", vm);
+        if (!valid_vm_name(vm)) throw Error("invalid virtual machine name \"" + vm + "\"");
+    }
+    if (!job.hyperv_vms.empty() && !job.run_as_admin)
+        throw Error("backing up Hyper-V virtual machines needs a job with administrator rights");
+    check_text("the folder for exported virtual machines", job.hyperv_staging);
+    const std::string& st = job.hyperv_staging;
+    if (!st.empty() && !(st.size() >= 3 && std::isalpha(static_cast<unsigned char>(st[0])) && st[1] == ':' &&
+                         (st[2] == '\\' || st[2] == '/')))
+        throw Error("the folder for exported virtual machines must be a full path on a local drive");
     const Schedule& s = job.schedule;
     if (s.hour < 0 || s.hour > 23 || s.minute < 0 || s.minute > 59) throw Error("invalid schedule time");
     if (s.kind == Schedule::Kind::Weekly && (s.weekdays & 0x7F) == 0) throw Error("pick at least one weekday");
@@ -405,6 +423,8 @@ std::string to_json(const Job& job) {
         {"continuous_minutes", job.continuous_minutes},
         {"skip_unchanged", job.skip_unchanged},
         {"record_apps", job.record_apps},
+        {"wsl", {{"distros", job.wsl_distros}, {"when_running", job.wsl_when_running}}},
+        {"hyperv", {{"machines", job.hyperv_vms}, {"staging", job.hyperv_staging}}},
         {"repair_data", job.repair_data},
         {"before_command", job.before_command},
         {"after_command", job.after_command},
@@ -501,6 +521,16 @@ Job job_from_json(const std::string& text) {
         job.before_command = j.value("before_command", std::string());
         job.skip_unchanged = j.value("skip_unchanged", false);
         job.record_apps = j.value("record_apps", true);
+        if (j.contains("wsl")) {  // missing in jobs saved before virtual machines were backed up
+            const json& w = j.at("wsl");
+            job.wsl_distros = strings(w, "distros");
+            job.wsl_when_running = w.value("when_running", std::string("skip"));
+        }
+        if (j.contains("hyperv")) {
+            const json& h = j.at("hyperv");
+            job.hyperv_vms = strings(h, "machines");
+            job.hyperv_staging = h.value("staging", std::string());
+        }
         // Jobs from before repair data: on for drives, where bad sectors are the risk; cloud
         // storage keeps its own copies.
         job.repair_data = std::min(50u, j.value("repair_data", is_cloud_location(job.repository) ? 0u : 5u));

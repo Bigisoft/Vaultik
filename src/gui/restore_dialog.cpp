@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -31,6 +32,8 @@
 #include "theme.h"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/move_here.hpp"
+#include "vaultik/ops/virt.hpp"
+#include "vaultik/platform/os.hpp"
 
 using namespace vaultik;
 
@@ -105,6 +108,11 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     connect(thaw_, &QPushButton::clicked, this, &RestoreDialog::request_thaw);
     apps_ = buttons->addButton(tr("Reinstall programs..."), QDialogButtonBox::ActionRole);
     connect(apps_, &QPushButton::clicked, this, &RestoreDialog::reinstall_programs);
+    import_ = buttons->addButton(tr("Import as new..."), QDialogButtonBox::ActionRole);
+    connect(import_, &QPushButton::clicked, this, &RestoreDialog::import_machine);
+#ifndef _WIN32
+    import_->hide();
+#endif
     restore_ = buttons->addButton(tr("Restore"), QDialogButtonBox::AcceptRole);
     restore_->setDefault(true);
     connect(restore_, &QPushButton::clicked, this, &RestoreDialog::start_restore);
@@ -165,7 +173,27 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
         restore_->setEnabled(true);
         move_->setEnabled(true);
         thaw_->setEnabled(true);
+        import_->setEnabled(true);
         snapshot_->setEnabled(true);
+        const Importing importing = importing_;
+        importing_ = Importing::None;
+        if (importing == Importing::Wsl) {
+            status_->setText(result == "success"
+                                 ? tr("Imported the WSL distribution %1 into %2. Start it with: wsl -d %1")
+                                       .arg(import_name_, import_folder_)
+                             : result == "cancelled" ? tr("Import cancelled.")
+                                                     : tr("The import failed: %1").arg(ev.value("message").toString()));
+            return;
+        }
+        if (importing == Importing::HyperV) {
+            if (result == "success") finish_hyperv_import();
+            else if (result == "cancelled") status_->setText(tr("Restore cancelled. Files already restored were kept."));
+            else
+                status_->setText(result == "partial"
+                                     ? tr("Some files of the machine could not be restored, so it was not imported.")
+                                     : tr("Restore failed: %1").arg(ev.value("message").toString()));
+            return;
+        }
         const bool thaw = thaw_running_;
         thaw_running_ = false;
         if (thaw && result == "success") {
@@ -390,6 +418,14 @@ void RestoreDialog::update_target_state() {
     target_->setEnabled(to_folder_->isChecked());
     browse_->setEnabled(to_folder_->isChecked());
     restore_->setText(path.isEmpty() ? tr("Restore everything") : tr("Restore selected"));
+    const bool wsl = !distro_of_path(u8(path)).empty();
+    const bool vm = !machine_of_path(u8(path)).empty();
+    import_->setEnabled(wsl || vm);
+    import_->setToolTip(wsl  ? tr("Install this exported WSL distribution as a new distribution")
+                        : vm ? tr("Import this virtual machine into Hyper-V as a new machine (needs administrator "
+                                  "approval)")
+                             : tr("Pick an exported WSL distribution (WSL\\<name>.tar) or a Hyper-V machine "
+                                  "(Hyper-V\\<name>) first"));
 }
 
 void RestoreDialog::start_restore() {
@@ -563,4 +599,133 @@ void RestoreDialog::reject() {
         runner_->cancel();
     }
     QDialog::reject();
+}
+
+void RestoreDialog::import_machine() {
+    if (runner_->running() || snapshots_.empty()) return;
+    const SnapshotEntry& snap = snapshots_[static_cast<std::size_t>(snapshot_->currentIndex())];
+    const QString path = selected_path();
+    const QString distro = qs(distro_of_path(u8(path)));
+    const QString machine = qs(machine_of_path(u8(path)));
+    if (distro.isEmpty() && machine.isEmpty()) return;
+    const bool wsl = !distro.isEmpty();
+
+    QDialog ask(this);
+    ask.setWindowTitle(wsl ? tr("Import WSL distribution") : tr("Import virtual machine"));
+    ask.resize(620, 220);
+    auto* form = new QFormLayout(&ask);
+    auto* intro = new QLabel(wsl ? tr("%1 is installed as a new WSL distribution. Your existing distributions are not "
+                                      "changed.")
+                                       .arg(path)
+                                 : tr("The machine's files are restored into the folder below (Exported), then "
+                                      "imported into Hyper-V as a new machine with a new id (Machine). Importing "
+                                      "asks for administrator approval. Existing machines are not changed."));
+    intro->setWordWrap(true);
+    intro->setTextFormat(Qt::PlainText);
+    form->addRow(intro);
+    auto* name = new QLineEdit(wsl ? distro + "-restored" : machine + " (restored)");
+    form->addRow(tr("New name:"), name);
+    auto* folder = new QLineEdit;
+    const QString base = QDir::toNativeSeparators(QDir::homePath() + (wsl ? "/WSL/" : "/Hyper-V/"));
+    folder->setText(base + name->text());
+    connect(name, &QLineEdit::textEdited, &ask, [folder, name, base] { folder->setText(base + name->text()); });
+    auto* browse = new QPushButton(tr("Browse..."));
+    connect(browse, &QPushButton::clicked, &ask, [this, folder] {
+        const QString dir = QFileDialog::getExistingDirectory(this, tr("Folder"), folder->text());
+        if (!dir.isEmpty()) folder->setText(QDir::toNativeSeparators(dir));
+    });
+    auto* folder_row = new QHBoxLayout;
+    folder_row->addWidget(folder, 1);
+    folder_row->addWidget(browse);
+    form->addRow(tr("Folder:"), folder_row);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
+    QPushButton* go = buttons->addButton(tr("Import"), QDialogButtonBox::AcceptRole);
+    set_role(go, "primary");
+    connect(go, &QPushButton::clicked, &ask, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &ask, &QDialog::reject);
+    form->addRow(buttons);
+    if (ask.exec() != QDialog::Accepted) return;
+
+    const QString new_name = name->text().trimmed();
+    const QString target = QDir::toNativeSeparators(folder->text().trimmed());
+    if (target.isEmpty() || !QDir::isAbsolutePath(target)) {
+        QMessageBox::warning(this, windowTitle(), tr("Choose a full folder path."));
+        return;
+    }
+    QStringList args;
+    if (wsl) {
+        if (!valid_distro_name(u8(new_name))) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("A WSL distribution name can have letters, digits, '.', '_' and '-' only."));
+            return;
+        }
+        args = QStringList{"wsl", "import"} << repo_args() << qs(id_hex(snap.id)) << distro << "--name" << new_name
+                                             << "--to" << target;
+        for (const WslDistro& d : wsl_distros()) {
+            if (QString::compare(qs(d.name), new_name, Qt::CaseInsensitive) != 0) continue;
+            // Replacing deletes the existing distribution's disk: only on an explicit yes.
+            QMessageBox box(QMessageBox::Warning, windowTitle(), QString(), QMessageBox::Yes | QMessageBox::No, this);
+            box.setTextFormat(Qt::PlainText);
+            box.setText(tr("A WSL distribution called %1 exists already. REPLACE it? It is unregistered first, which "
+                           "deletes its disk and everything in it.")
+                            .arg(qs(d.name)));
+            box.setDefaultButton(QMessageBox::No);
+            if (box.exec() != QMessageBox::Yes) return;
+            args << "--replace";
+        }
+        importing_ = Importing::Wsl;
+    } else {
+        if (!new_name.isEmpty() && !valid_vm_name(u8(new_name))) {
+            QMessageBox::warning(this, windowTitle(), tr("A machine name cannot contain * ? [ ] or `."));
+            return;
+        }
+        if (QDir(target + "/Exported").exists() || QDir(target + "/Machine").exists()) {
+            QMessageBox::warning(this, windowTitle(), tr("Choose a new or empty folder."));
+            return;
+        }
+        args = QStringList{"restore"} << repo_args() << qs(id_hex(snap.id)) << "--target" << target + "\\Exported"
+                                      << "--path" << path;
+        importing_ = Importing::HyperV;
+        import_source_ = machine;
+    }
+    import_name_ = new_name;
+    import_folder_ = target;
+    warnings_ = 0;
+    bar_->show();
+    restore_->setEnabled(false);
+    move_->setEnabled(false);
+    thaw_->setEnabled(false);
+    import_->setEnabled(false);
+    snapshot_->setEnabled(false);
+    status_->setText(tr("Starting..."));
+    runner_->start(args, password_, cloud_);
+}
+
+void RestoreDialog::finish_hyperv_import() {
+    const QString exported = import_folder_ + "\\Exported\\" + qs(vm_file_name(u8(import_source_)));
+    const QString machine = import_folder_ + "\\Machine";
+    const QString report = import_folder_ + "\\import-result.txt";
+    status_->setText(tr("Importing the virtual machine (approve the administrator prompt)..."));
+    int code = -1;
+    const QString error = run_busy(this, tr("Importing the virtual machine..."), [&](const std::function<bool()>&) {
+        code = os::run_command_elevated({u8(Runner::engine_path()), "hyperv", "import", u8(exported), "--to", u8(machine),
+                                         "--name", u8(import_name_), "--report", u8(report)});
+    });
+    if (!error.isEmpty()) {
+        status_->setText(tr("The machine's files are in %1; it was not imported: %2").arg(exported, error));
+        return;
+    }
+    QString result;
+    QFile file(report);
+    if (file.open(QIODevice::ReadOnly)) result = QString::fromUtf8(file.readAll());
+    file.close();
+    QFile::remove(report);
+    const QString detail = result.section('\n', 1);
+    if (code == 0 && result.startsWith("ok")) {
+        QDir(import_folder_ + "/Exported").removeRecursively();  // Import-VM copied everything into Machine
+        status_->setText(tr("Imported the virtual machine %1 into %2.").arg(detail, machine));
+    } else {
+        status_->setText(tr("The machine's files are in %1; the import failed: %2")
+                             .arg(exported, detail.isEmpty() ? tr("exit code %1").arg(code) : detail));
+    }
 }

@@ -218,6 +218,15 @@ network paths; on Linux they are the top-level folders (`home`, `etc`, ...). Bel
 the path components down to each backed-up source. Virtual directories have zero attributes,
 mode and timestamps.
 
+Two more children hold virtual machines backed up through their export tools (Windows; never a
+drive letter, so they cannot clash with backed-up paths): `WSL` holds one file `<distro>.tar` per
+WSL distribution, the output of `wsl --export <distro> -` (a tar archive; its node's mtime and
+ctime are the snapshot's time, its attributes 0x20, mode 0100644), and `Hyper-V` holds one folder
+per Hyper-V machine (its name with `<>:"/\|?*` and control characters as `_`), the folder
+`Export-VM` wrote: `Virtual Machines` (the `.vmcx` configuration and its state files), `Virtual
+Hard Disks` and, when it has checkpoints, `Snapshots`. A snapshot's `paths` list only the
+backed-up folders and files, not these.
+
 ## Snapshots
 
 Sealed with AAD `"VKSNAP01" || snapshot id`. The snapshot id is 32 random bytes. Plaintext:

@@ -372,6 +372,12 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
     }
     text += L"Backs up:\n";
     for (const std::string& src : job.sources) text += L"    " + shown(src, "a folder to back up") + L"\n";
+    // Hyper-V machines are exported (with their disks, so all their data) into a staging folder.
+    if (job.hyperv_vms.size() > 12) throw Error("the job has too many virtual machines to show for approval (at most 12)");
+    for (const std::string& vm : job.hyperv_vms)
+        text += L"    Hyper-V virtual machine " + shown(vm, "a virtual machine's name") + L"\n";
+    if (!job.hyperv_vms.empty() && !job.hyperv_staging.empty())
+        text += L"    exported first into " + shown(job.hyperv_staging, "the export folder") + L"\n";
     if (!job.excludes.empty()) {
         text += L"Skipping:\n";
         for (const std::string& ex : job.excludes) text += L"    " + shown(ex, "a pattern to skip") + L"\n";

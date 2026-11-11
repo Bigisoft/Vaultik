@@ -57,6 +57,11 @@ private:
     QStringList repo_args() const;
     // The programs of this version that are missing here, to install again with winget.
     void reinstall_programs();
+    // A WSL distribution (WSL/<name>.tar) or Hyper-V machine (Hyper-V/<name>) of this version,
+    // imported as a new one: never over an existing one unless the user confirms it.
+    void import_machine();
+    // After a machine's files were restored: imports them, with administrator approval.
+    void finish_hyperv_import();
 
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;
@@ -80,6 +85,12 @@ private:
     QPushButton* thaw_ = nullptr;
     bool thaw_running_ = false;  // the engine runs cloud-thaw, not a restore
     QPushButton* apps_ = nullptr;
+    QPushButton* import_ = nullptr;
+    enum class Importing { None, Wsl, HyperV };
+    Importing importing_ = Importing::None;  // what the engine runs, when not a plain restore
+    QString import_name_;
+    QString import_folder_;
+    QString import_source_;  // Hyper-V: the machine's name in the version
     Runner* runner_ = nullptr;
     int warnings_ = 0;
 };

@@ -58,6 +58,8 @@
 #include "vaultik/jobs/update_check.hpp"
 #include "vaultik/ops/change_journal.hpp"
 #include "vaultik/ops/move_here.hpp"
+#include "vaultik/ops/virt.hpp"
+#include "vaultik/util/hex.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
@@ -114,6 +116,42 @@ Commands:
                                after a power cut (SQL Server recovers them)
       --apps                   Keep the list of installed programs with the
                                snapshot (saved jobs do this unless turned off)
+      --wsl <distro>           Windows: also back up this WSL distribution
+                               (repeatable), exported with wsl --export into the
+                               file WSL/<distro>.tar; its ext4.vhdx is then left
+                               out of the file backup
+      --wsl-running <what>     A chosen distribution that is running: skip (the
+                               default; it is left out with a warning), export
+                               (as it runs) or stop (wsl --terminate it first)
+      --hyperv <machine>       Windows, as administrator: also back up this
+                               Hyper-V virtual machine (repeatable), exported with
+                               Export-VM into the folder Hyper-V/<machine>
+      --hyperv-staging <dir>   Where machines are exported to first (default:
+                               ProgramData\Vaultik\hyperv-export; needs room for
+                               the largest one; emptied afterwards)
+  wsl list                     The WSL distributions of this account, whether they
+                               run, and their disk files
+  wsl import <snapshot> <distro>
+                               Install the distribution exported in that snapshot
+                               (WSL/<distro>.tar) as a NEW distribution
+      --name <name>            Its name (required); an existing distribution of
+                               that name is never replaced unless --replace
+      --to <folder>            Where to install it (required)
+      --replace                Unregister an existing distribution of that name
+                               first (deletes its disk)
+  hyperv list                  Hyper-V virtual machines (needs administrator rights)
+  hyperv restore <snapshot> <machine>
+                               Restore a backed-up machine and import it as a new
+                               machine (as administrator): its files go to
+                               <folder>\Exported, the machine to <folder>\Machine
+      --to <folder>            A new or empty folder (required)
+      --name <name>            The new machine's name (default: the old one, which
+                               must then not exist any more)
+  hyperv import <folder>       Import a restored Hyper-V/<machine> folder as a new
+                               machine (Import-VM -Copy -GenerateNewId)
+      --to <folder>            A new or empty folder for its files (required)
+      --name <name>            As for hyperv restore
+      --report <file>          Also write the result to this file
   snapshots                    List snapshots
   computers                    Every computer backing up into the repository:
                                how its jobs last ran (each run of a saved job
@@ -345,11 +383,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -984,8 +1022,133 @@ unsigned apply_parallelism(Repository& repo, const Args& a, const std::string& l
     return readers;
 }
 
+// The virtual machine part of a backup (see ops/virt.hpp), set up before the files are read: WSL
+// distributions become streamed exports, Hyper-V machines are exported into a staging folder that
+// the backup then reads. Each one that cannot be backed up becomes an item that fails, so the run
+// warns about it and old versions (which still have it) are kept. The staging folder of this run is
+// removed when this goes away.
+struct VirtualMachines {
+    std::string staging_run;
+    VirtualMachines() = default;
+    VirtualMachines(const VirtualMachines&) = delete;
+    VirtualMachines& operator=(const VirtualMachines&) = delete;
+    ~VirtualMachines() {
+        if (staging_run.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(std::u8string(staging_run.begin(), staging_run.end())), ec);
+        if (ec) warning("could not remove the exported virtual machines in " + staging_run + ": " + ec.message());
+    }
+};
+
+ExtraSource failed_extra(std::vector<std::string> place, const std::string& why) {
+    ExtraSource x;
+    x.place = std::move(place);
+    x.open = [why]() -> std::unique_ptr<StreamSource> { throw Error(why); };
+    return x;
+}
+
+std::unique_ptr<VirtualMachines> add_virtual_machines(BackupOptions& o, const std::vector<std::string>& distros,
+                                                      WslWhenRunning when, const std::vector<std::string>& machines,
+                                                      const std::string& staging) {
+    auto vm = std::make_unique<VirtualMachines>();
+    if (!distros.empty()) {
+        const std::vector<WslDistro> installed = wsl_distros();
+        std::vector<std::string> running;
+        const bool any_installed = std::any_of(installed.begin(), installed.end(), [&](const WslDistro& d) {
+            return std::any_of(distros.begin(), distros.end(),
+                               [&](const std::string& n) { return os::fold_case(n) == os::fold_case(d.name); });
+        });
+        if (any_installed) {
+            try {
+                running = wsl_running();
+            } catch (const std::exception& e) {
+                // Not knowing counts as running: never export one as it runs unless the job allows it.
+                warning(std::string("could not tell which WSL distributions are running: ") + e.what());
+                running = distros;
+            }
+        }
+        const WslPlan plan = plan_wsl(distros, installed, running, when);
+        std::vector<std::string> disks;
+        for (const std::string& want : distros)
+            for (const WslDistro& d : installed)
+                if (os::fold_case(d.name) == os::fold_case(want) && !d.disk.empty()) disks.push_back(d.disk);
+        for (const std::string& ex : disk_excludes(disks)) o.excludes.push_back(ex);
+        // One that is not installed any more is only mentioned; a running one is an item that could
+        // not be read this time.
+        for (const std::string& name : plan.not_installed)
+            warning("the WSL distribution " + name + " is not installed (any more), so it was left out");
+        for (const auto& [name, why] : plan.running_skipped) o.extras.push_back(failed_extra(wsl_place(name), why));
+        for (const std::string& name : plan.export_names) {
+            if (std::find(plan.stop_first.begin(), plan.stop_first.end(), name) != plan.stop_first.end()) {
+                if (!g_json) status("Stopping the WSL distribution " + name + "...");
+                try {
+                    wsl_terminate(name);
+                } catch (const std::exception& e) {
+                    o.extras.push_back(failed_extra(wsl_place(name), e.what()));
+                    continue;
+                }
+                if (!g_json) clear_status();
+                if (!g_json) err("Stopped the WSL distribution " + name + " for its backup\n");
+            }
+            o.extras.push_back(wsl_export_source(name, [] { return stop_requested(); }));
+        }
+    }
+    if (!machines.empty()) {
+        if (!os::process_elevated()) {
+            for (const std::string& m : machines)
+                o.extras.push_back(failed_extra(hyperv_place(m), "backing up a Hyper-V virtual machine needs administrator rights"));
+            return vm;
+        }
+        const HyperVList list = hyperv_machines();
+        if (!list.available) {
+            for (const std::string& m : machines) o.extras.push_back(failed_extra(hyperv_place(m), list.problem));
+            return vm;
+        }
+        const std::string root = staging.empty() ? default_hyperv_staging() : staging;
+        // Only administrators can read the exported disks (they hold all of the machine's data).
+        os::make_admin_dir(root);
+        std::uint8_t rnd[6];
+        random_bytes(rnd);
+        vm->staging_run = os::join(root, "run-" + to_hex(rnd));
+        o.excludes.push_back(root);  // a file backup of the drive does not read the exports twice
+        o.excludes.push_back(os::join(root, "*"));
+        std::size_t index = 0;
+        for (const std::string& name : machines) {
+            const auto it = std::find_if(list.machines.begin(), list.machines.end(),
+                                         [&](const HyperVm& m) { return m.name == name; });
+            if (it == list.machines.end()) {
+                o.extras.push_back(failed_extra(hyperv_place(name), "there is no Hyper-V virtual machine called " + name));
+                continue;
+            }
+            for (const std::string& ex : disk_excludes(it->disks)) o.excludes.push_back(ex);
+            if (stop_requested()) throw Cancelled();
+            if (!g_json) status("Exporting the virtual machine " + name + " (this can take a while)...");
+            try {
+                const std::string folder = hyperv_export(name, os::join(vm->staging_run, std::to_string(++index)),
+                                                         [] { return stop_requested(); });
+                ExtraSource x;
+                x.place = hyperv_place(name);
+                x.folder = folder;
+                o.extras.push_back(std::move(x));
+            } catch (const std::exception& e) {
+                o.extras.push_back(failed_extra(hyperv_place(name), std::string("Export-VM failed: ") + e.what()));
+            }
+            if (!g_json) clear_status();
+        }
+    }
+    return vm;
+}
+
 int cmd_backup(const Args& a) {
-    if (a.positional.empty()) throw Error("usage: vaultik backup -r <repo> <path>...");
+    const std::vector<std::string> distros = a.all("--wsl");
+    const std::vector<std::string> machines = a.all("--hyperv");
+    if (a.positional.empty() && distros.empty() && machines.empty())
+        throw Error("usage: vaultik backup -r <repo> <path>...");
+    const WslWhenRunning when = parse_wsl_when_running(a.value("--wsl-running").value_or("skip"));
+    for (const std::string& d : distros)
+        if (!valid_distro_name(d)) throw Error("invalid WSL distribution name \"" + d + "\"");
+    for (const std::string& m : machines)
+        if (!valid_vm_name(m)) throw Error("invalid virtual machine name \"" + m + "\"");
     auto repo = open_repo(a);
     const unsigned readers = apply_parallelism(*repo, a, repo_path(a), resource_policy(a));
     RepoLock lock(*repo, RepoLock::Mode::Shared, "backup", lock_wait(a));
@@ -1000,6 +1163,7 @@ int cmd_backup(const Args& a) {
     o.skip_unchanged = a.has("--skip-unchanged");
     if (auto p = a.value("--parent")) o.parent = resolve_snapshot(*repo, *p).id;
     if (a.has("--apps")) o.app_list = app_list_in_background();
+    const auto machines_guard = add_virtual_machines(o, distros, when, machines, a.value("--hyperv-staging").value_or(""));
     jobs::RunRecord record;
     return backup_and_report(*repo, std::move(o), repo_path(a), record, lock, vss_arg(a, kDefaultVss),
                              !a.has("--vss-skip-sql"));
@@ -2234,6 +2398,12 @@ int cmd_run_job(const Args& a) {
         // read again (see ops/change_journal.hpp).
         ChangeJournal journal(store.dir(), job->id, job->sources, job->excludes);
         journal.apply(o);
+        // Virtual machines: WSL distributions are exported as the backup reads them, Hyper-V
+        // machines into a staging folder now (removed when the run ends).
+        std::unique_ptr<VirtualMachines> machines_guard;
+        if (!job->wsl_distros.empty() || !job->hyperv_vms.empty())
+            machines_guard = add_virtual_machines(o, job->wsl_distros, parse_wsl_when_running(job->wsl_when_running),
+                                                  job->hyperv_vms, job->hyperv_staging);
         // The job's repair data setting becomes the destination's (every writer then follows it).
         if (repo->parity_percent() != job->repair_data) {
             try {
@@ -3097,6 +3267,177 @@ int cmd_ls(const Args& a) {
     return kExitOk;
 }
 
+// "wsl list" and "wsl import <snapshot> <distro> --name <new> --to <folder> [--replace]".
+int cmd_wsl(const Args& a) {
+    const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
+    if (sub == "list") {
+        const std::vector<WslDistro> distros = wsl_distros();
+        std::vector<std::string> running;
+        std::string unknown;
+        try {
+            running = wsl_running();
+        } catch (const std::exception& e) {
+            unknown = e.what();
+        }
+        const auto is_running = [&](const std::string& n) {
+            return std::any_of(running.begin(), running.end(),
+                               [&](const std::string& r) { return os::fold_case(r) == os::fold_case(n); });
+        };
+        if (g_json) {
+            for (const WslDistro& d : distros)
+                emit({{"event", "distro"},
+                      {"name", d.name},
+                      {"version", d.version},
+                      {"folder", d.folder},
+                      {"disk", d.disk},
+                      {"running", unknown.empty() ? nlohmann::json(is_running(d.name)) : nlohmann::json(nullptr)}});
+            emit({{"event", "done"}, {"status", "success"}, {"message", unknown}});
+            return kExitOk;
+        }
+        if (distros.empty()) out("No WSL distributions are installed for this account.\n");
+        for (const WslDistro& d : distros)
+            out(pad(d.name, 24) + pad("WSL " + std::to_string(d.version), 7) +
+                pad(unknown.empty() ? (is_running(d.name) ? "running" : "stopped") : "?", 9) +
+                (d.disk.empty() ? d.folder : d.disk) + "\n");
+        if (!unknown.empty()) warning("could not tell which distributions are running: " + unknown);
+        return kExitOk;
+    }
+    if (sub != "import" || a.positional.size() < 3)
+        throw Error("usage: vaultik wsl list | wsl import <snapshot> <distro> --name <new name> --to <folder> [--replace]");
+    const auto name = a.value("--name");
+    const auto to = a.value("--to");
+    if (!name || !to) throw Error("wsl import needs --name <new name> and --to <folder>");
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "wsl import", lock_wait(a));
+    repo->reload_index();
+    const SnapshotRef ref = resolve_snapshot(*repo, a.positional[1]);
+    // The distribution's name, or its path in the version ("WSL/Ubuntu.tar").
+    const std::string from =
+        distro_of_path(a.positional[2]).empty() ? a.positional[2] : distro_of_path(a.positional[2]);
+    Node node;
+    if (!resolve_snapshot_path(*repo, ref.snapshot, wsl_snapshot_path(from), node) || node.kind != NodeKind::File)
+        throw Error("snapshot " + short_id(ref.id) + " holds no WSL distribution called " + from);
+    const auto start = std::chrono::steady_clock::now();
+    if (!g_json) err("Importing " + wsl_snapshot_path(from) + " as the WSL distribution " + *name + " in " + *to + "\n");
+    wsl_import(
+        *repo, node, *name, *to, a.has("--replace"),
+        [&](const VirtProgress& p) {
+            if (g_json) {
+                emit({{"event", "progress"}, {"files", 0}, {"bytes", p.bytes}, {"total", p.total}, {"current", *name}});
+                return;
+            }
+            status(format_bytes(p.bytes) + " of " + format_bytes(p.total));
+        },
+        [&lock] { return stop_requested() || lock.lost(); });
+    if (g_json) {
+        emit({{"event", "done"},
+              {"status", "success"},
+              {"files", 1},
+              {"bytes", node.size},
+              {"name", *name},
+              {"seconds", seconds_since(start)}});
+        return kExitOk;
+    }
+    clear_status();
+    out("Imported the WSL distribution " + *name + " (" + format_bytes(node.size) + ") in " +
+        format_duration(seconds_since(start)) + "; start it with: wsl -d " + *name + "\n");
+    return kExitOk;
+}
+
+void write_text(const std::string& path, const std::string& text) {
+    os::write_file_atomic(path, ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+}
+
+// "hyperv list", "hyperv import <folder> --to <folder> [--name <n>] [--report <file>]" and
+// "hyperv restore <snapshot> <machine> --to <folder> [--name <n>]".
+int cmd_hyperv(const Args& a) {
+    const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
+    if (sub == "list") {
+        const HyperVList list = hyperv_machines();
+        if (g_json) {
+            for (const HyperVm& m : list.machines)
+                emit({{"event", "machine"}, {"name", m.name}, {"state", m.state}, {"disks", m.disks}});
+            emit({{"event", "done"}, {"status", list.available ? "success" : "failed"}, {"message", list.problem}});
+            return list.available ? kExitOk : kExitError;
+        }
+        if (!list.available) throw Error(list.problem);
+        if (list.machines.empty()) out("There are no Hyper-V virtual machines on this computer.\n");
+        for (const HyperVm& m : list.machines) {
+            out(pad(m.name, 32) + m.state + "\n");
+            for (const std::string& d : m.disks) out("    " + d + "\n");
+        }
+        return kExitOk;
+    }
+    const auto to = a.value("--to");
+    const std::string name = a.value("--name").value_or("");
+    if (sub == "import" && a.positional.size() >= 2) {
+        // The frontend runs this with administrator rights and reads the result from --report.
+        const auto report = a.value("--report");
+        try {
+            if (!to) throw Error("hyperv import needs --to <folder> for the machine's files");
+            if (!os::process_elevated()) throw Error("importing a Hyper-V virtual machine needs administrator rights");
+            const std::string made = hyperv_import(a.positional[1], name, *to);
+            if (report) write_text(*report, "ok\n" + made);
+            if (g_json) emit({{"event", "done"}, {"status", "success"}, {"name", made}});
+            else out("Imported the virtual machine " + made + " into " + *to + "\n");
+            return kExitOk;
+        } catch (const std::exception& e) {
+            if (report) {
+                try {
+                    write_text(*report, std::string("error\n") + e.what());
+                } catch (const std::exception&) {
+                }
+            }
+            throw;
+        }
+    }
+    if (sub != "restore" || a.positional.size() < 3)
+        throw Error("usage: vaultik hyperv list | hyperv restore <snapshot> <machine> --to <folder> [--name <name>] | "
+                    "hyperv import <folder> --to <folder> [--name <name>]");
+    if (!to) throw Error("hyperv restore needs --to <folder>");
+    if (!os::process_elevated()) throw Error("importing a Hyper-V virtual machine needs administrator rights");
+    const std::string target = os::absolute_path(*to);
+    const std::string exported = os::join(target, "Exported");
+    const std::string machine_dir = os::join(target, "Machine");
+    if (os::exists(exported) || os::exists(machine_dir))
+        throw Error(target + " has an Exported or Machine folder already; choose a new or empty folder");
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "hyperv restore", lock_wait(a));
+    repo->reload_index();
+    const SnapshotRef ref = resolve_snapshot(*repo, a.positional[1]);
+    const std::string machine =
+        machine_of_path(a.positional[2]).empty() ? a.positional[2] : machine_of_path(a.positional[2]);
+    const std::string path = hyperv_snapshot_path(machine);
+    Node node;
+    if (!resolve_snapshot_path(*repo, ref.snapshot, path, node) || node.kind != NodeKind::Dir)
+        throw Error("snapshot " + short_id(ref.id) + " holds no virtual machine called " + machine);
+    RestoreOptions o;
+    o.target = exported;
+    o.subpath = path;
+    o.on_warning = [](const std::string& msg) { warning(msg); };
+    o.should_cancel = [] { return stop_requested(); };
+    o.on_progress = [](const RestoreProgress& p) {
+        if (g_json) emit({{"event", "progress"}, {"files", p.files}, {"bytes", p.bytes}, {"current", p.current}});
+        else status(std::to_string(p.files) + " files, " + format_bytes(p.bytes) + "  " + p.current);
+    };
+    const RestoreResult r = run_restore(*repo, ref.snapshot, o);
+    if (!g_json) clear_status();
+    if (r.errors > 0)
+        throw Error(std::to_string(r.errors) + " file(s) of the machine could not be restored into " + exported);
+    if (!g_json) status("Importing the virtual machine...");
+    const std::string made = hyperv_import(os::join(exported, vm_file_name(machine)), name, machine_dir);
+    if (!g_json) clear_status();
+    // Import-VM copied everything into the machine's folder: the restored export is not needed.
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path(std::u8string(exported.begin(), exported.end())), ec);
+    if (g_json) {
+        emit({{"event", "done"}, {"status", "success"}, {"files", r.files}, {"bytes", r.bytes}, {"name", made}});
+        return kExitOk;
+    }
+    out("Imported the virtual machine " + made + " into " + machine_dir + "\n");
+    return kExitOk;
+}
+
 int cmd_restore(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik restore -r <repo> <snapshot> --target <folder>");
     const auto target = a.value("--target");
@@ -3548,6 +3889,8 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "computers") return cmd_computers(a);
     if (a.command == "ls") return cmd_ls(a);
     if (a.command == "restore") return cmd_restore(a);
+    if (a.command == "wsl") return cmd_wsl(a);
+    if (a.command == "hyperv") return cmd_hyperv(a);
     if (a.command == "verify") return cmd_verify(a);
     if (a.command == "stats") return cmd_stats(a);
     if (a.command == "forget") return cmd_forget(a);

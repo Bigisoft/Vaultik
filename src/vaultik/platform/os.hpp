@@ -322,8 +322,43 @@ struct CommandOptions {
     // run_command throws Error. Standard input is empty.
     std::chrono::seconds timeout = std::chrono::hours(4);
     std::function<bool()> cancelled;
+    // Windows: a fixed minimal environment plus these variables (see ShellOptions). Values passed
+    // this way never have to be quoted into a command line.
+    bool clean_environment = false;
+    std::vector<std::pair<std::string, std::string>> extra_environment;
 };
 int run_command(const std::vector<std::string>& argv, const CommandOptions& options);
+
+// A program whose standard output is read (FromProgram) or whose standard input is written
+// (ToProgram) as a stream, without a window, e.g. "wsl --export <distro> -". Everything else it
+// prints (standard error, and standard output when writing to it) is kept as its messages (the
+// first 64 KiB). The program is stopped, with everything it started, when this object goes away
+// before it ended. argv[0] is resolved as for run_command. Throws OsError when it cannot start.
+class PipedProcess {
+public:
+    enum class Direction { FromProgram, ToProgram };
+    // `environment`: variables set for the program on top of this process's own.
+    PipedProcess(const std::vector<std::string>& argv, Direction direction,
+                 const std::vector<std::pair<std::string, std::string>>& environment = {});
+    ~PipedProcess();
+    PipedProcess(const PipedProcess&) = delete;
+    PipedProcess& operator=(const PipedProcess&) = delete;
+
+    // FromProgram: up to `max` bytes of its output; 0 once it closed it.
+    std::size_t read(std::uint8_t* dst, std::size_t max);
+    // ToProgram: writes all of `data`; throws OsError when the program stopped reading.
+    void write(ByteSpan data);
+    // Closes the stream (ToProgram: the program sees the end of its input), waits for the
+    // program to end and returns its exit code.
+    int wait();
+    // Stops the program and everything it started.
+    void stop();
+    std::string messages() const;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 // Windows: like run_command, but with administrator rights, so the user sees an approval (UAC)
 // prompt unless the process already has them. Output is not captured. Throws Error when the

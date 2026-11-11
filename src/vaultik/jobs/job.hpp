@@ -146,6 +146,18 @@ struct Job {
     // Keep the list of programs installed on this computer with each version (see ops/apps.hpp),
     // so they can be installed again on a new one.
     bool record_apps = true;
+    // Windows: WSL distributions to back up through "wsl --export" (see ops/virt.hpp), each as the
+    // file WSL/<name>.tar of a version, and what to do with one that is running: "skip" it (with a
+    // warning), "export" it as it runs, or "stop" it first. WSL belongs to the user's own account,
+    // so a job with administrator rights (which runs as the system account) cannot have any.
+    std::vector<std::string> wsl_distros;
+    std::string wsl_when_running = "skip";
+    // Windows: Hyper-V virtual machines to back up through Export-VM, each as the folder
+    // Hyper-V/<name>/ of a version. Needs run_as_admin. They are exported into `hyperv_staging`
+    // first (empty: <ProgramData>\Vaultik\hyperv-export), which needs room for the largest one,
+    // and removed from there after the backup.
+    std::vector<std::string> hyperv_vms;
+    std::string hyperv_staging;
     // Repair data written with each pack, in percent of its size (0: none; see
     // Repository::set_parity_percent). A backup sets the destination's setting to this.
     unsigned repair_data = 5;

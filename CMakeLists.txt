@@ -86,6 +86,7 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/move_here.cpp
     src/vaultik/ops/apps.cpp
     src/vaultik/ops/change_journal.cpp
+    src/vaultik/ops/virt.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
 )
@@ -265,6 +266,7 @@ add_executable(vaultik_tests
     tests/test_recovery.cpp
     tests/test_apps.cpp
     tests/test_computers.cpp
+    tests/test_virt.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # Assertions run on the main thread only. Without per-thread copies of doctest's state, threads that
