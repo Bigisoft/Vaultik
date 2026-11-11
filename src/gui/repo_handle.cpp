@@ -46,9 +46,11 @@ void RepoHandle::open_async(QObject* context, std::string repository, std::strin
         }
         secure_wipe(password.data(), password.size());
     });
+    // The thread goes away when it is done, also when `context` went first (that connection is
+    // then gone with it).
+    QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     QPointer<QObject> guard(context);
-    QObject::connect(thread, &QThread::finished, context, [thread, result, guard, done = std::move(done)] {
-        thread->deleteLater();
+    QObject::connect(thread, &QThread::finished, context, [result, guard, done = std::move(done)] {
         if (guard) done(result->repo, std::move(result->snapshots), result->error);
     });
     thread->start();
@@ -68,9 +70,11 @@ void RepoHandle::action_async(QObject* context, std::string repository, std::str
         }
         secure_wipe(password.data(), password.size());
     });
+    // The thread goes away when it is done, also when `context` went first (that connection is
+    // then gone with it).
+    QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     QPointer<QObject> guard(context);
-    QObject::connect(thread, &QThread::finished, context, [thread, error, guard, done = std::move(done)] {
-        thread->deleteLater();
+    QObject::connect(thread, &QThread::finished, context, [error, guard, done = std::move(done)] {
         if (guard) done(*error);
     });
     thread->start();
@@ -95,9 +99,11 @@ void RepoHandle::computers_async(QObject* context, std::string repository, std::
         }
         secure_wipe(password.data(), password.size());
     });
+    // The thread goes away when it is done, also when `context` went first (that connection is
+    // then gone with it).
+    QObject::connect(thread, &QThread::finished, thread, &QObject::deleteLater);
     QPointer<QObject> guard(context);
-    QObject::connect(thread, &QThread::finished, context, [thread, result, guard, done = std::move(done)] {
-        thread->deleteLater();
+    QObject::connect(thread, &QThread::finished, context, [result, guard, done = std::move(done)] {
         if (guard) done(std::move(result->computers), result->error);
     });
     thread->start();
