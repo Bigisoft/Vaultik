@@ -36,7 +36,9 @@ jobs:
 
   windows:
     name: Windows (release)
-    runs-on: windows-2022
+    # Visual Studio 2026, as the release builds use: with Visual Studio 2022, vcpkg's Qt comes out
+    # with the older coroutine ABI that the Windows Hello code's C++20 coroutines cannot link with.
+    runs-on: windows-2025
     env:
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
       # Packages vcpkg built (Qt above all) are kept between runs, so only the first one builds them.
