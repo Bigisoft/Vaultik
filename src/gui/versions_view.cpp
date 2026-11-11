@@ -37,6 +37,7 @@ QString group_of(const QDate& day, const QDate& today) {
 QString changes_text(const Snapshot& s) {
     const SnapshotStats& st = s.stats;
     const QLocale locale;
+    if (s.image) return QObject::tr("Disk image, %1").arg(format_bytes(st.bytes));
     if (!st.changes_known) return count_of(st.files, QObject::tr("file"), QObject::tr("files"));
     if (!s.parent) return QObject::tr("First backup, %1").arg(count_of(st.files, QObject::tr("file"), QObject::tr("files")));
     QStringList parts;

@@ -110,4 +110,22 @@ std::string read_password(std::string_view prompt) {
     return result;
 }
 
+std::string read_line(std::string_view prompt) {
+    err(prompt);
+    std::string line;
+    char c = 0;
+    bool any = false;
+    for (;;) {
+        const ssize_t n = ::read(STDIN_FILENO, &c, 1);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        any = true;
+        if (c == '\n') break;
+        line.push_back(c);
+    }
+    if (!any) throw Error("no more input");
+    while (!line.empty() && line.back() == '\r') line.pop_back();
+    return line;
+}
+
 }  // namespace vaultik::cli

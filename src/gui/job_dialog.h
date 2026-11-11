@@ -31,6 +31,10 @@ public:
 private:
     QWidget* build_general();
     QWidget* build_sources();
+    // Windows: the disks a disk image job backs up, instead of folders.
+    QWidget* build_disks();
+    void fill_disks(const std::vector<std::string>& checked);
+    void update_kind();
     QWidget* build_schedule();
     QWidget* build_resources();
     QWidget* build_retention();
@@ -55,6 +59,10 @@ private:
     QLineEdit* copy_repository_ = nullptr;  // the second copy (empty: none)
     CloudTarget copy_cloud_;
     QListWidget* sources_ = nullptr;
+    QComboBox* kind_ = nullptr;      // folders and files, or whole disks (Windows)
+    QWidget* files_box_ = nullptr;
+    QWidget* disks_box_ = nullptr;
+    QListWidget* disks_ = nullptr;   // checkable; data: the disk's id ("system" for Windows' own)
     QListWidget* excludes_ = nullptr;
     std::vector<QCheckBox*> preset_boxes_;  // in the order of jobs::exclusion_presets()
     QLabel* estimate_ = nullptr;

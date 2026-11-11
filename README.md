@@ -788,6 +788,51 @@ changed, the last backup skipped files), every folder is read again. The journal
 kept with the job's settings (`journal\<job>.json`). Without administrator rights, on FAT and
 exFAT drives and on Linux, every folder is read as before.
 
+### Disk images and the recovery drive
+
+A job can back up whole disks instead of folders (**What to back up**: "Whole disks (disk
+image)"): every partition (Windows, its EFI system, MSR and recovery partitions, data
+partitions) and the partition table, so a computer whose disk died is brought back onto a new
+one, Windows, programs and all. NTFS volumes are read from a Volume Shadow Copy (one consistent
+moment for every disk of the job) and only their clusters in use (the volume bitmap); unused
+space, the page file and the hibernation file come back as zeros. Other partitions (the FAT32
+EFI partition, MSR, unknown file systems) are read byte for byte. The data goes into the same
+deduplicating repository as file backups, so the next image stores only what changed, and
+pruning, health checks, second copies and repair work on images as on any version. An image job
+needs administrator rights (its scheduled runs have them; **Back up now** works when Vaultik
+runs as administrator), and its destination must be on another disk.
+
+```
+vaultik image disks                                      # the disks, with their numbers
+vaultik image backup -r E:\Backups\vaultik system        # the disk Windows runs from
+vaultik image info -r E:\Backups\vaultik latest
+vaultik image restore -r E:\Backups\vaultik latest --vhdx D:\pc.vhdx
+vaultik image mount -r E:\Backups\vaultik latest         # its drives, read-only, until Enter
+vaultik image restore -r E:\Backups\vaultik latest --to-disk 2 --boot
+```
+
+Restoring to a `.vhdx` file needs no administrator rights: File Explorer opens it (double-click)
+and Hyper-V starts it (generation 2 for a GPT disk). `image mount` and **Open its drives in File
+Explorer** in the restore window copy the image to a temporary virtual disk with new disk ids
+and open it read-only, to take single files out. Restoring onto a disk replaces everything on
+it, so it is guarded: never the disk Windows runs from, nor the one holding the backup or
+Vaultik; the disk's model, size and serial number are shown and you type `ERASE DISK <number>`
+(in the window or with `--confirm`). The target needs the same sector size and room for every
+partition (a larger disk is fine; the partitions keep their sizes). Disk and partition ids stay
+the same, so the restored Windows starts as before; `--boot` (or the recovery menu) also runs
+`bcdboot` to write its boot files.
+
+The disk Windows runs from is restored from the **recovery drive** (More > **Create recovery
+drive**, or `vaultik recovery-media --usb E:` / `--iso <file>`): Windows PE with Vaultik on a
+USB stick (erased; FAT32, so up to 32 GB) or an ISO file. It needs Microsoft's free Windows ADK
+with its Windows PE add-on (`winget install Microsoft.WindowsADK` and `winget install
+Microsoft.ADKPEAddon`); the ADK, not the computer's own recovery environment, because WinRE
+differs between computers, lives in a hidden partition and is often missing. Started from it, a
+computer opens a menu: it finds backups on the connected drives (or a network share), asks for
+the password, lists the disk images and the disks, and after the typed confirmation restores
+and makes the disk start. Vaultik is one program with no other files, so the same drive works
+for every computer.
+
 ### Event Log
 
 Every run of a job (backup, second copy, health check, test restore) is also written to the
@@ -884,6 +929,10 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
   Linux: content, permissions, owner (restored when running as root), modification time and
   symlinks are kept; extended attributes and ACLs are not. Kernel file systems (`/proc`, `/sys`,
   `/dev`, tmpfs) are skipped.
+- Disk images: basic disks only (not dynamic disks or Storage Spaces); a BitLocker volume is
+  stored as its unlocked content and comes back unencrypted (turn BitLocker on again after a
+  restore); partitions are restored at their original size, so the target disk must be at least
+  as large as the end of the last partition and have the same sector size.
 - NTFS names that are not valid UTF-16 (unpaired surrogates, very rare) cannot be backed up.
 - The program list knows only what the Windows uninstall list and winget know. Jobs with
   administrator rights run as the system account, which has no winget and its own per-user list:
@@ -960,8 +1009,11 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    are listed in docs/LINUX_PORT.md. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
    and the browser sign-in are Windows-only so far). Packaged as in 6.
-9. Volume image backup, restore to a volume or `.vhdx`
-10. Bare-metal restore from a recovery USB (WinPE on Windows)
+9. Disk image backup (done, Windows): whole disks from shadow copies, used space only, in the
+   deduplicating repository; restore to a `.vhdx`, onto a disk, or browse an image's drives.
+   Still to come: shrinking partitions onto a smaller disk, images of Linux disks.
+10. Bare-metal restore (done, Windows): a recovery USB stick or ISO (Windows PE from the ADK)
+    that restores a disk image onto a computer that does not start.
 
 ## License
 

@@ -89,6 +89,12 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/virt.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
+    src/vaultik/image/layout.cpp
+    src/vaultik/image/extents.cpp
+    src/vaultik/image/vhdx.cpp
+    src/vaultik/image/image.cpp
+    src/vaultik/image/disk_common.cpp
+    src/vaultik/image/recovery_media.cpp
 )
 target_include_directories(vaultik_core PUBLIC src)
 
@@ -123,6 +129,7 @@ if(WIN32)
         src/vaultik/platform/usn_journal_win.cpp
         src/vaultik/platform/win_extras.cpp
         src/vaultik/repo/sftp_backend.cpp
+        src/vaultik/image/disk_win.cpp
     )
     find_package(libssh2 CONFIG REQUIRED)
     target_compile_definitions(vaultik_core PUBLIC
@@ -131,7 +138,7 @@ if(WIN32)
         /W4 /permissive- /utf-8 /EHsc /Zc:__cplusplus /Zc:preprocessor
         $<$<CONFIG:Release>:/O2 /Gy /Gw>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
-                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib wbemuuid oleaut32 netapi32
+                          bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib wbemuuid oleaut32 netapi32 virtdisk
                           libssh2::libssh2)
 else()
     target_sources(vaultik_core PRIVATE
@@ -142,6 +149,7 @@ else()
         src/vaultik/ops/apps_posix.cpp
         src/vaultik/platform/drive_health_posix.cpp
         src/vaultik/platform/usn_journal_posix.cpp
+        src/vaultik/image/disk_posix.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC _GNU_SOURCE _FILE_OFFSET_BITS=64)
     target_compile_options(vaultik_core PUBLIC -Wall -Wextra -Wpedantic $<$<CONFIG:Release>:-O2>)
@@ -160,8 +168,11 @@ target_link_libraries(vaultik PRIVATE vaultik_core)
 vaultik_version_resource(vaultik "Vaultik backup engine and command line")
 if(WIN32)
     # The Projected File System (vaultik mount) is an optional Windows feature: load its DLL only
-    # when a version is browsed, so vaultik still starts where the feature is off.
-    target_link_options(vaultik PRIVATE /DELAYLOAD:ProjectedFSLib.dll)
+    # when a version is browsed, so vaultik still starts where the feature is off. The same for
+    # what Windows PE (the recovery drive) may lack: shadow copies, HTTP (cloud storage), virtual
+    # disks and the network account calls.
+    target_link_options(vaultik PRIVATE /DELAYLOAD:ProjectedFSLib.dll /DELAYLOAD:VSSAPI.DLL /DELAYLOAD:WINHTTP.dll
+                        /DELAYLOAD:VirtDisk.dll /DELAYLOAD:NETAPI32.dll)
     target_link_libraries(vaultik PRIVATE delayimp)
 endif()
 if(WIN32)
@@ -186,6 +197,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/repo_handle.cpp
             src/gui/job_dialog.cpp
             src/gui/restore_dialog.cpp
+            src/gui/image_dialogs.cpp
             src/gui/apps_dialog.cpp
             src/gui/key_dialog.cpp
             src/gui/cloud_dialog.cpp
@@ -267,6 +279,7 @@ add_executable(vaultik_tests
     tests/test_apps.cpp
     tests/test_computers.cpp
     tests/test_virt.cpp
+    tests/test_image.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # Assertions run on the main thread only. Without per-thread copies of doctest's state, threads that

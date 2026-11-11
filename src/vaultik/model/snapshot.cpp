@@ -21,6 +21,7 @@ constexpr std::string_view kNoteTag = "vaultik:note=";
 constexpr std::string_view kChangesTag = "vaultik:changes=";
 constexpr std::string_view kCopyOfTag = "vaultik:copy-of=";
 constexpr std::string_view kAppsTag = "vaultik:apps=";
+constexpr std::string_view kImageTag = "vaultik:image";
 
 std::string id_tag(std::string_view prefix, const Id& id) {
     return std::string(prefix) + to_hex(ByteSpan(id.data(), id.size()));
@@ -48,6 +49,7 @@ std::vector<std::string> all_tags(const Snapshot& s) {
     if (!s.note.empty()) tags.push_back(std::string(kNoteTag) + s.note);
     if (s.copy_of) tags.push_back(id_tag(kCopyOfTag, *s.copy_of));
     if (s.apps) tags.push_back(id_tag(kAppsTag, *s.apps));
+    if (s.image) tags.emplace_back(kImageTag);
     if (s.stats.changes_known) {
         tags.push_back(std::string(kChangesTag) + std::to_string(s.stats.files_new) + "," +
                        std::to_string(s.stats.files_changed) + "," + std::to_string(s.stats.items_removed));
@@ -58,6 +60,8 @@ std::vector<std::string> all_tags(const Snapshot& s) {
 void read_reserved(Snapshot& s, const std::string& tag) {
     if (tag == kPinnedTag) {
         s.pinned = true;
+    } else if (tag == kImageTag) {
+        s.image = true;
     } else if (tag.starts_with(kNoteTag)) {
         s.note = tag.substr(kNoteTag.size());
     } else if (tag.starts_with(kCopyOfTag)) {

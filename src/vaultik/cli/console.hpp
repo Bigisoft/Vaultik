@@ -17,6 +17,9 @@ void clear_status();
 
 // Reads a line from the console without echo. Throws when stdin is not a console.
 std::string read_password(std::string_view prompt);
+// Reads a line typed at the console (shown as typed). Throws when there is no console and stdin
+// has ended.
+std::string read_line(std::string_view prompt);
 
 std::string format_bytes(std::uint64_t bytes);
 std::string format_duration(double seconds);

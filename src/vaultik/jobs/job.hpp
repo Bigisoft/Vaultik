@@ -112,6 +112,10 @@ struct Job {
     std::string cloud_storage_class;
     std::vector<std::string> sources;
     std::vector<std::string> excludes;
+    // A disk image job (Windows, administrator rights): whole disks instead of `sources`, by their
+    // stable id ("system" for the disk Windows runs from, "gpt-<GUID>", "mbr-<signature>"; see
+    // image/disk.hpp). Empty for a job backing up files.
+    std::vector<std::string> image_disks;
     std::vector<std::string> tags;
     // Windows: read from a Volume Shadow Copy when the run has administrator rights, so open and
     // locked files are backed up too. Without the rights the files are read live.

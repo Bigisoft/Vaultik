@@ -11,7 +11,8 @@ namespace vaultik::os {
 
 class ShadowCopy {
 public:
-    // Shadow copies of every local volume holding one of `paths` (network paths are skipped).
+    // Shadow copies of every local volume holding one of `paths` (network paths are skipped). A
+    // path may also be a volume name ("\\?\Volume{GUID}\"), for volumes without a drive letter.
     // Needs administrator rights. Throws Error with a readable reason when it cannot be done;
     // on POSIX it always throws (not supported).
     // With `pause_sql_server` false the SQL Server writer is left out: SQL Server keeps working

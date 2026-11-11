@@ -45,6 +45,8 @@ struct Snapshot {
     std::optional<Id> copy_of;
     // A Data blob with the programs installed when the version was made (see ops/apps.hpp).
     std::optional<Id> apps;
+    // A disk image (see image/image.hpp): the tree holds whole disks, not files.
+    bool image = false;
 };
 
 Bytes serialize_snapshot(const Snapshot& s);
