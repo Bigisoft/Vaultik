@@ -30,6 +30,9 @@ Qt 6 frontend. Linux support is planned: the platform code is written but not ye
 - **Easy to get files back.** A timeline of versions, a search across all of them, the history
   of any file, a preview of pictures and code without restoring, and each version as a folder in
   File Explorer.
+- **Several PCs in one view.** Computers that back up into the same place (a shared folder, a
+  NAS, a cloud bucket) leave an encrypted status note there, so any of them shows how every
+  computer's backups are doing.
 
 The on-disk format is specified in [docs/FORMAT.md](docs/FORMAT.md).
 
@@ -243,6 +246,7 @@ script); without one, Windows SmartScreen warns when the download is opened.
 vaultik init      -r E:\Backups\vaultik
 vaultik backup    -r E:\Backups\vaultik C:\Users\me\Documents D:\Projects --exclude node_modules --exclude *.tmp
 vaultik snapshots -r E:\Backups\vaultik
+vaultik computers -r \\nas\backups\vaultik
 vaultik ls        -r E:\Backups\vaultik latest C/Users/me/Documents
 vaultik restore   -r E:\Backups\vaultik latest --target D:\Restore --path C/Users/me/Documents/report.docx
 vaultik verify    -r E:\Backups\vaultik --read-data
@@ -394,6 +398,31 @@ keys, so every chunk is decrypted and stored again under the copy's key; data th
 has is not stored twice, and `<settings>\copies\<job>.map` remembers what was copied so later
 runs read only what is new. The job's keep rules apply to the copy too. A copy is its own entry
 in the history ("copy"), so a failed copy shows in the tray without failing the backup.
+
+### Several computers in one backup
+
+Several computers can back up into the same repository: a shared folder, a NAS or a cloud
+bucket, with the same password. Each snapshot already records the computer it came from; on top
+of that, after every run of a saved job (backup, health check, second copy, test restore) a
+computer leaves a small encrypted status note in the repository (`status/`, see
+docs/FORMAT.md): its name, its Vaultik version, and per job the last run and its result, the
+last version saved, the next scheduled run, and warnings such as a failing drive or a ransomware
+warning. Each computer is known by an id made from Windows' machine GUID and the repository's
+key, so renaming it does not matter and nobody without the password can tell that two
+repositories hold notes of the same computer. Writing the note never fails a run.
+
+**All computers...** in the frontend's sidebar lists, for every destination your jobs use, each
+computer with its state (OK, warning, failed, or overdue: no run for more than 3 days past its
+schedule), its last backup and its versions; click one for its jobs. On the command line:
+
+```
+vaultik computers --job documents
+vaultik computers -r \\nas\backups\vaultik --json
+```
+
+Computers that backed up with an older Vaultik, or without a saved job, show with their versions
+only. Prune, repair and health checks leave the notes alone, and S3 Object Lock does not lock
+them (they are rewritten after each run).
 
 ### External drives
 
@@ -832,7 +861,8 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    "Earlier versions in Vaultik" in File Explorer's right-click menu, ready-made exclusions,
    pausing a backup and a slower speed during working hours, a Bulgarian translation,
    Windows Hello before backups are opened, and the installed programs kept with each version
-   to install again with winget on a new PC.
+   to install again with winget on a new PC. Several PCs in one view (done): computers sharing
+   a repository see how each other's backups are doing.
 8. Linux port, SteamOS on the Steam Deck first. The review before it is done; its Linux hazards
    are listed in docs/LINUX_PORT.md. Then: build and test the existing POSIX platform layer,
    systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client

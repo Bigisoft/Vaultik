@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/platform/os.hpp"
 #include "vaultik/repo/backends.hpp"
 
 using namespace vaultik;
@@ -49,6 +50,33 @@ void RepoHandle::open_async(QObject* context, std::string repository, std::strin
     QObject::connect(thread, &QThread::finished, context, [thread, result, guard, done = std::move(done)] {
         thread->deleteLater();
         if (guard) done(result->repo, std::move(result->snapshots), result->error);
+    });
+    thread->start();
+}
+
+void RepoHandle::computers_async(QObject* context, std::string repository, std::string password,
+                                 CloudCredentials cloud, ComputersDone done) {
+    struct Result {
+        std::vector<jobs::Computer> computers;
+        QString error;
+    };
+    auto result = std::make_shared<Result>();
+    QThread* thread = QThread::create([result, repository, password, cloud]() mutable {
+        try {
+            // Snapshots and status records only: the index is not needed.
+            std::unique_ptr<Repository> repo = Repository::open(open_backend(repository, &cloud), password, false);
+            result->computers = jobs::list_computers(*repo, os::now());
+        } catch (const AuthError&) {
+            result->error = QObject::tr("The password does not open this backup.");
+        } catch (const std::exception& e) {
+            result->error = QString::fromUtf8(e.what());
+        }
+        secure_wipe(password.data(), password.size());
+    });
+    QPointer<QObject> guard(context);
+    QObject::connect(thread, &QThread::finished, context, [thread, result, guard, done = std::move(done)] {
+        thread->deleteLater();
+        if (guard) done(std::move(result->computers), result->error);
     });
     thread->start();
 }

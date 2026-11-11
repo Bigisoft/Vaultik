@@ -85,6 +85,8 @@ private:
     void open_restore(int snapshot_index, const QString& select_path = {});
     void restore_from_folder();
     void open_keys();
+    // "All computers": every computer backing up into the destinations of the user's jobs.
+    void show_computers();
     void set_running(bool running);
     // Pin, note and delete on the open repository of the current job.
     void change_version(int index, bool pin, bool note);
@@ -104,6 +106,7 @@ private:
     QPushButton* new_job_ = nullptr;
     QPushButton* open_backup_ = nullptr;
     QPushButton* keys_ = nullptr;
+    QPushButton* computers_ = nullptr;
     QPushButton* settings_ = nullptr;
     QPushButton* report_ = nullptr;
 

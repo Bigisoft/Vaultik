@@ -44,6 +44,7 @@
 #include "updates.h"
 #include "common.h"
 #include "compare_dialog.h"
+#include "computers_dialog.h"
 #include "drive_watcher.h"
 #include "event_runs.h"
 #include "find_page.h"
@@ -865,6 +866,11 @@ QWidget* MainWindow::build_sidebar() {
     report_->setToolTip(tr("What every backup job did in a month, and what needs attention"));
     connect(report_, &QPushButton::clicked, this, [this] { open_report(); });
     l->addWidget(report_);
+    computers_ = new QPushButton(tr("All computers..."));
+    computers_->setProperty("role", "flat");
+    computers_->setToolTip(tr("How the backups of every computer saving to the same places as your jobs are doing"));
+    connect(computers_, &QPushButton::clicked, this, &MainWindow::show_computers);
+    l->addWidget(computers_);
 
     settings_ = new QPushButton(tr("Settings..."));
     settings_->setProperty("role", "flat");
@@ -1067,6 +1073,7 @@ void MainWindow::refresh_icons() {
     new_job_->setIcon(icon(QStringLiteral("add_20_regular"), t.accent_text));
     open_backup_->setIcon(icon(QStringLiteral("folder_open_20_regular")));
     keys_->setIcon(icon(QStringLiteral("key_20_regular")));
+    computers_->setIcon(icon(QStringLiteral("window_20_regular")));
     settings_->setIcon(icon(QStringLiteral("settings_20_regular")));
     report_->setIcon(icon(QStringLiteral("document_20_regular")));
     if (tray_ != nullptr) tray_->refresh_icons();
@@ -1666,6 +1673,76 @@ void MainWindow::restore_from_folder() {
             }
             password.fill(QChar(0));
         });
+}
+
+void MainWindow::show_computers() {
+    if (!unlock()) return;
+    // One entry per destination, with the jobs saving there.
+    struct Group {
+        std::string key;
+        std::vector<jobs::Job> jobs;
+    };
+    std::vector<Group> groups;
+    for (jobs::Job job : store_.list()) {
+        jobs::relocate(job);
+        std::string key = job.repository;
+        if (cloud_kind(key) == CloudKind::None) {
+            key = u8(QDir::cleanPath(QDir::fromNativeSeparators(qs(key))).toLower());
+        }
+        auto it = std::find_if(groups.begin(), groups.end(), [&key](const Group& g) { return g.key == key; });
+        if (it == groups.end()) {
+            groups.push_back({key, {}});
+            it = groups.end() - 1;
+        }
+        it->jobs.push_back(std::move(job));
+    }
+    std::vector<ComputerSource> sources;
+    for (const Group& g : groups) {
+        ComputerSource s;
+        const jobs::Job& first = g.jobs.front();
+        QStringList names;
+        for (const jobs::Job& j : g.jobs) names << qs(j.name);
+        s.title = tr("%1 (%2)").arg(location_text(first.repository), names.join(QStringLiteral(", ")));
+        s.repository = first.repository;
+        if (!jobs::drive_connected(first)) {
+            s.error = tr("The backup drive is not connected.");
+            sources.push_back(std::move(s));
+            continue;
+        }
+        // The password of any job saving there; asked for (and saved) when none has one.
+        const jobs::Job* with = nullptr;
+        for (const jobs::Job& j : g.jobs) {
+            try {
+                std::string pw = store_.password(j.id);
+                if (!pw.empty()) {
+                    with = &j;
+                    s.password = std::move(pw);
+                    break;
+                }
+            } catch (const Error&) {
+            }
+        }
+        if (with == nullptr && ensure_password(first)) {
+            with = &first;
+            try {
+                s.password = store_.password(first.id);
+            } catch (const Error&) {
+            }
+        }
+        if (with == nullptr || s.password.empty()) {
+            s.error = tr("This backup needs its password.");
+        } else {
+            try {
+                s.cloud = store_.cloud_credentials(*with);
+            } catch (const Error& e) {
+                s.error = QString::fromUtf8(e.what());
+            }
+        }
+        if (!s.error.isEmpty()) secure_wipe(s.password.data(), s.password.size());
+        sources.push_back(std::move(s));
+    }
+    ComputersDialog dialog(std::move(sources), this);
+    dialog.exec();
 }
 
 void MainWindow::open_keys() {

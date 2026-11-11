@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "vaultik/crypto/hash.hpp"
+#include "vaultik/jobs/computers.hpp"
 #include "vaultik/model/snapshot.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -34,4 +35,10 @@ public:
     // keys for a cloud storage location.
     static void open_async(QObject* context, std::string repository, std::string password,
                            vaultik::CloudCredentials cloud, Done done);
+
+    // Opens the repository on a worker thread without loading its index, and reads the computers
+    // backing up there (jobs/computers.hpp). The repository is closed again on that thread.
+    using ComputersDone = std::function<void(std::vector<vaultik::jobs::Computer>, QString error)>;
+    static void computers_async(QObject* context, std::string repository, std::string password,
+                                vaultik::CloudCredentials cloud, ComputersDone done);
 };
