@@ -581,14 +581,26 @@ QWidget* JobDialog::build_schedule() {
                               "the notification area holds up the restart that follows until the backup is done. "
                               "Defender definitions and Store apps do not start a backup."));
     event_gap_ = spin(1, 168, tr(" h"), QString());
+#ifdef _WIN32
     form->addRow(tr("Also back up:"), on_idle_);
     form->addRow(QString(), on_lock_);
     form->addRow(QString(), on_sign_out_);
     form->addRow(QString(), on_update_);
     form->addRow(QString(), row({new QLabel(tr("but not again within")), event_gap_, new QLabel(tr("of the last backup"))}));
+    const QString continuous_label;
+#else
+    // Idle, lock and sign-out are Task Scheduler and Windows session events; Linux has no
+    // counterpart that works for every desktop, so these stay off (and hidden) there.
+    for (QWidget* w : std::initializer_list<QWidget*>{on_idle_, on_lock_, on_sign_out_, event_gap_}) {
+        w->setParent(this);
+        w->hide();
+    }
+    const QString continuous_label = tr("Also back up:");
+#endif
     continuous_ = new QCheckBox(tr("Continuously,"));
     continuous_minutes_ = spin(1, 1440, tr(" min"), QString());
-    form->addRow(QString(), row({continuous_, continuous_minutes_, new QLabel(tr("after files in the job's folders change"))}));
+    form->addRow(continuous_label,
+                 row({continuous_, continuous_minutes_, new QLabel(tr("after files in the job's folders change"))}));
     events_note_ = new QLabel;
     events_note_->setWordWrap(true);
     events_note_->setForegroundRole(QPalette::PlaceholderText);

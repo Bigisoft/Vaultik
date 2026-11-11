@@ -8,6 +8,11 @@
 #include <windows.h>
 // After <windows.h>.
 #include <winhttp.h>
+#else
+#include <curl/curl.h>
+
+#include <algorithm>
+#include <cstring>
 #endif
 
 namespace vaultik::http {
@@ -192,11 +197,161 @@ Response Client::send(const Request& request) {
 
 #else
 
-Client::Client() = default;
+// libcurl, with the system's certificate store and the usual http_proxy / https_proxy variables.
+
+namespace {
+
+// One easy handle per thread, reset for every request: its connection cache keeps connections to
+// the same server open between requests, as WinHTTP does.
+struct ThreadHandle {
+    CURL* h = nullptr;
+    ~ThreadHandle() {
+        if (h != nullptr) curl_easy_cleanup(h);
+    }
+};
+
+void global_init() {
+    static const bool ok = curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK;
+    if (!ok) throw NetworkError("cannot start the web client");
+}
+
+std::string lower(std::string s) {
+    for (char& c : s)
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return s;
+}
+
+struct Upload {
+    ByteSpan body;
+    std::size_t done = 0;
+};
+
+std::size_t on_body(char* data, std::size_t size, std::size_t count, void* user) {
+    Bytes& body = *static_cast<Bytes*>(user);
+    body.insert(body.end(), reinterpret_cast<const std::uint8_t*>(data),
+                reinterpret_cast<const std::uint8_t*>(data) + size * count);
+    return size * count;
+}
+
+std::size_t on_header(char* data, std::size_t size, std::size_t count, void* user) {
+    auto& headers = *static_cast<std::vector<std::pair<std::string, std::string>>*>(user);
+    std::string line(data, size * count);
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+    if (line.starts_with("HTTP/")) {
+        headers.clear();  // a new response (after "100 Continue" or a proxy's answer)
+    } else if (const std::size_t c = line.find(':'); c != std::string::npos) {
+        std::size_t v = c + 1;
+        while (v < line.size() && line[v] == ' ') ++v;
+        headers.emplace_back(lower(line.substr(0, c)), line.substr(v));
+    }
+    return size * count;
+}
+
+std::size_t on_read(char* buffer, std::size_t size, std::size_t count, void* user) {
+    Upload& u = *static_cast<Upload*>(user);
+    const std::size_t n = std::min(size * count, u.body.size() - u.done);
+    std::memcpy(buffer, u.body.data() + u.done, n);
+    u.done += n;
+    return n;
+}
+
+[[noreturn]] void fail(const std::string& what, CURLcode code, const char* detail) {
+    std::string reason;
+    switch (code) {
+        case CURLE_OPERATION_TIMEDOUT: reason = "the server did not answer in time"; break;
+        case CURLE_COULDNT_RESOLVE_HOST: reason = "the server name was not found"; break;
+        case CURLE_COULDNT_CONNECT: reason = "cannot connect to the server"; break;
+        case CURLE_SEND_ERROR:
+        case CURLE_RECV_ERROR:
+        case CURLE_GOT_NOTHING:
+        case CURLE_PARTIAL_FILE: reason = "the connection was broken"; break;
+        case CURLE_PEER_FAILED_VERIFICATION:
+        case CURLE_SSL_CACERT_BADFILE:
+        case CURLE_SSL_CONNECT_ERROR: reason = "the server's certificate is not trusted"; break;
+        default: reason = curl_easy_strerror(code);
+    }
+    if (detail != nullptr && *detail != '\0') reason += " (" + std::string(detail) + ")";
+    throw NetworkError(what + ": " + reason);
+}
+
+}  // namespace
+
+Client::Client() {
+    global_init();
+}
+
 Client::~Client() = default;
 
-Response Client::send(const Request& /*request*/) {
-    throw Error("cloud storage is not available on this system yet");
+Response Client::send(const Request& request) {
+    const Url url = parse_url(request.url);
+    const std::string what = request.method + " " + url.host_header();
+    thread_local ThreadHandle handle;
+    if (handle.h == nullptr) handle.h = curl_easy_init();
+    if (handle.h == nullptr) throw NetworkError(what + ": cannot start the web client");
+    CURL* h = handle.h;
+    curl_easy_reset(h);
+
+    Response resp;
+    char error[CURL_ERROR_SIZE] = {};
+    curl_easy_setopt(h, CURLOPT_ERRORBUFFER, error);
+    curl_easy_setopt(h, CURLOPT_URL, request.url.c_str());
+    curl_easy_setopt(h, CURLOPT_PATH_AS_IS, 1L);  // sent as is, like WinHTTP's escape-disable flags
+#if LIBCURL_VERSION_NUM >= 0x075500
+    curl_easy_setopt(h, CURLOPT_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(h, CURLOPT_PROTOCOLS, static_cast<long>(CURLPROTO_HTTP | CURLPROTO_HTTPS));
+#endif
+    curl_easy_setopt(h, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(h, CURLOPT_NOSIGNAL, 1L);  // threads
+    curl_easy_setopt(h, CURLOPT_SSLVERSION, static_cast<long>(CURL_SSLVERSION_TLSv1_2));
+    curl_easy_setopt(h, CURLOPT_USERAGENT, "Vaultik");
+    // As on Windows: 30 s to connect; a transfer that stalls (under 1 byte/s) for 5 minutes fails.
+    curl_easy_setopt(h, CURLOPT_CONNECTTIMEOUT, 30L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_LIMIT, 1L);
+    curl_easy_setopt(h, CURLOPT_LOW_SPEED_TIME, 300L);
+
+    curl_slist* headers = nullptr;
+    bool has_type = false;
+    bool has_accept = false;
+    for (const auto& [k, v] : request.headers) {
+        const std::string name = lower(k);
+        has_type = has_type || name == "content-type";
+        has_accept = has_accept || name == "accept";
+        headers = curl_slist_append(headers, (k + ": " + v).c_str());
+    }
+    // No headers the caller did not ask for (signed requests list exactly what they send).
+    if (!has_type) headers = curl_slist_append(headers, "Content-Type:");
+    if (!has_accept) headers = curl_slist_append(headers, "Accept:");
+    headers = curl_slist_append(headers, "Expect:");
+    curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+
+    Upload upload{request.body, 0};
+    if (request.method == "HEAD") {
+        curl_easy_setopt(h, CURLOPT_NOBODY, 1L);
+    } else if (request.method == "GET" && request.body.empty()) {
+        curl_easy_setopt(h, CURLOPT_HTTPGET, 1L);
+    } else {
+        curl_easy_setopt(h, CURLOPT_CUSTOMREQUEST, request.method.c_str());
+        if (!request.body.empty() || request.method == "PUT" || request.method == "POST" || request.method == "PATCH") {
+            // Read from memory as it is sent; no copy of a large pack.
+            curl_easy_setopt(h, CURLOPT_UPLOAD, 1L);
+            curl_easy_setopt(h, CURLOPT_READFUNCTION, on_read);
+            curl_easy_setopt(h, CURLOPT_READDATA, &upload);
+            curl_easy_setopt(h, CURLOPT_INFILESIZE_LARGE, static_cast<curl_off_t>(request.body.size()));
+        }
+    }
+    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, on_body);
+    curl_easy_setopt(h, CURLOPT_WRITEDATA, &resp.body);
+    curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, on_header);
+    curl_easy_setopt(h, CURLOPT_HEADERDATA, &resp.headers);
+
+    const CURLcode rc = curl_easy_perform(h);
+    curl_slist_free_all(headers);
+    if (rc != CURLE_OK) fail(what, rc, error);
+    long status = 0;
+    curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
+    resp.status = static_cast<int>(status);
+    return resp;
 }
 
 #endif

@@ -67,6 +67,11 @@ VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     actions->setContentsMargins(0, 0, 0, 0);
     actions->addWidget(restore_);
     actions->addWidget(explore_);
+#ifndef Q_OS_WIN
+    // Showing a version as a folder needs the Windows Projected File System (a FUSE version for
+    // Linux is still to come); restore and Find a file cover it there.
+    explore_->hide();
+#endif
     actions->addWidget(compare_);
     actions->addWidget(pin_);
     actions->addWidget(note_);
@@ -272,8 +277,10 @@ void VersionsView::context_menu(const QPoint& pos) {
     QMenu menu(this);
     menu.addAction(icon(QStringLiteral("arrow_counterclockwise_20_regular")), tr("Restore..."), this,
                    [this, i] { emit restore_requested(i); });
+#ifdef Q_OS_WIN
     menu.addAction(icon(QStringLiteral("folder_open_20_regular")), tr("Open in Explorer"), this,
                    [this, i] { emit explore_requested(i); });
+#endif
     QAction* previous = menu.addAction(icon(QStringLiteral("history_20_regular")), tr("Compare with previous version"),
                                        this, [this, i] { emit compare_requested(i, i + 1); });
     previous->setEnabled(i + 1 < static_cast<int>(versions_.size()));

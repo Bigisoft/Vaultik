@@ -74,6 +74,8 @@
 #include <crtdbg.h>
 #endif
 #include "vaultik/util/win.hpp"
+#else
+#include <unistd.h>
 #endif
 
 namespace vaultik::cli {
@@ -473,6 +475,7 @@ std::atomic<bool> g_paused{false};        // "pause" on stdin (--json) until "re
 
 // Polled between files and chunks: waits while paused, then tells whether to stop.
 bool stop_requested() {
+    if (interrupted()) g_cancel = true;
     while (g_paused.load() && !g_cancel.load() && !g_stdin_closed.load())
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     return g_cancel.load();
@@ -1384,7 +1387,74 @@ void refresh_drive_copy(const jobs::Job& job) {
         warning(std::string("could not update the Vaultik copy on the backup drive: ") + e.what());
     }
 #else
-    (void)job;
+    // Linux: only an AppImage can be copied as one file. Next to the Windows programs, in the
+    // same <drive>/Vaultik folder, with its own note.
+    const std::string appimage = os::get_env("APPIMAGE");
+    if (appimage.empty() || is_cloud_location(job.repository) || ::geteuid() == 0) return;
+    try {
+        const os::VolumeLocation loc = os::volume_of(job.repository);
+        if (loc.volume.empty() || loc.system || !loc.external) return;
+        const std::string target = os::join(loc.root, "Vaultik");
+        // Only a real folder and real files there (or none yet): a link leads somewhere else.
+        const auto plain = [](const std::string& path, os::EntryType want) {
+            os::FileInfo info;
+            os::ErrorCode err = 0;
+            if (!os::stat(path, info, err)) return os::is_not_found(err);
+            return info.type == want;
+        };
+        constexpr const char* kImage = "Vaultik-x86_64.AppImage";
+        constexpr const char* kNote = "How to restore on Linux.txt";
+        constexpr const char* kStamp = "version-linux";
+        bool safe = plain(target, os::EntryType::Dir);
+        for (const char* name : {kImage, kNote, kStamp, "portable"}) safe = safe && plain(os::join(target, name), os::EntryType::File);
+        if (!safe) {
+            warning(target + " on the backup drive is not a plain folder of Vaultik's files, so it was left alone");
+            return;
+        }
+        if (os::absolute_path(appimage) == os::join(target, kImage)) return;  // running from that copy
+        std::string there;
+        try {
+            const Bytes b = os::read_file(os::join(target, kStamp), 64);
+            there.assign(b.begin(), b.end());
+        } catch (const Error&) {
+        }
+        if (!there.empty() && version_parts(there) >= version_parts(VAULTIK_VERSION)) return;
+
+        os::make_dirs(target);
+        const auto fs_path = [](const std::string& s) { return std::filesystem::path(std::u8string(s.begin(), s.end())); };
+        // Deleted first, then created: overwriting would write through a hard link.
+        const std::string dest = os::join(target, kImage);
+        const os::ErrorCode gone = os::remove_file(dest);
+        if (gone != 0 && !os::is_not_found(gone)) os::throw_error("cannot replace " + dest, gone);
+        std::filesystem::copy_file(fs_path(appimage), fs_path(dest), std::filesystem::copy_options::none);
+        std::filesystem::permissions(fs_path(dest), std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
+                                                       std::filesystem::perms::others_exec,
+                                     std::filesystem::perm_options::add);
+        const auto write = [&](const char* name, const std::string& text) {
+            os::write_file_atomic(os::join(target, name),
+                                  ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+        };
+        if (!os::exists(os::join(target, "portable")))
+            write("portable",
+                  "This file makes this copy of Vaultik portable: its settings are kept in the Settings folder "
+                  "(Settings-Linux for the Linux program) next to it, and nothing is written to the computer it "
+                  "runs on.\n");
+        const std::string where = loc.relative.empty() ? std::string("the top of this drive") : loc.relative;
+        write(kNote,
+              "Restoring files from this drive on Linux (also SteamOS on a Steam Deck)\n\n"
+              "1. Start Vaultik-x86_64.AppImage in this folder (nothing needs to be installed; on SteamOS switch to\n"
+              "   Desktop Mode first). If it does not start, allow it to run as a program in its properties, or\n"
+              "   run: chmod +x Vaultik-x86_64.AppImage\n"
+              "2. Choose \"Restore from another backup...\" and select the folder " + where + " on this drive.\n"
+              "3. Enter the backup's password (or use its recovery key), pick a version and restore.\n\n"
+              "The drive's file system must allow programs to run from it (exFAT and ext4 drives mounted by the\n"
+              "desktop do; a drive mounted with \"noexec\" does not: copy the AppImage to your home folder then).\n"
+              "Vaultik keeps this file up to date after each backup to this drive.\n");
+        write(kStamp, VAULTIK_VERSION);
+        if (!g_json) out("Updated the Vaultik copy on the backup drive (" + target + ").\n");
+    } catch (const std::exception& e) {
+        warning(std::string("could not update the Vaultik copy on the backup drive: ") + e.what());
+    }
 #endif
 }
 
@@ -3053,7 +3123,8 @@ int cmd_diff(const Args& a) {
 int cmd_history(const Args& a) {
     if (a.positional.size() != 1) throw Error("usage: vaultik history -r <repo> <path>   e.g. C/Users/me/report.docx");
     std::string path = a.positional[0];
-    std::replace(path.begin(), path.end(), '\\', '/');
+    // A backslash separates folders on Windows only; on Linux it can be part of a name.
+    if (os::kSeparator == '\\') std::replace(path.begin(), path.end(), '\\', '/');
     auto repo = open_repo(a);
     const std::vector<SnapshotRecord> snaps = load_snapshot_records(*repo);
     const std::vector<ItemVersion> versions = item_history(*repo, snaps, path);
@@ -3304,7 +3375,7 @@ int cmd_ls(const Args& a) {
     if (!resolve_snapshot_path(*repo, ref.snapshot, path, node)) throw Error("path not found in snapshot: " + path);
     if (node.kind == NodeKind::Dir) {
         std::string prefix = path;
-        std::replace(prefix.begin(), prefix.end(), '\\', '/');
+        if (os::kSeparator == '\\') std::replace(prefix.begin(), prefix.end(), '\\', '/');
         while (!prefix.empty() && prefix.back() == '/') prefix.pop_back();
         list_tree(*repo, node.subtree, prefix, a.has("--recursive"));
     } else {

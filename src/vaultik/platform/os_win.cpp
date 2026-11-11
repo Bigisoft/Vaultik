@@ -597,6 +597,10 @@ void make_writable(const std::string& path) {
     SetFileAttributesW(native(path).c_str(), FILE_ATTRIBUTE_NORMAL);
 }
 
+void make_private_dirs(const std::string& path) {
+    make_dirs(path);
+}
+
 void set_metadata(const std::string& path, const FileInfo& info) {
     const DWORD attrs = info.attributes & kRestorableAttributes;
     if (info.mtime == 0 && info.ctime == 0 && attrs == 0) return;

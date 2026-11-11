@@ -1,6 +1,7 @@
 #include "vaultik/ops/history.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -77,11 +78,58 @@ bool glob(const std::string& p, std::size_t pi, const std::string& s, std::size_
     return si == s.size();
 }
 
+// Lower case for searching, which ignores case on every system (Linux file names are case
+// sensitive, but someone looking for "report" wants "Report.docx" too). Windows: the system's
+// own folding. Elsewhere: ASCII, Latin-1, Latin Extended-A, Greek and Cyrillic, which covers the
+// languages Vaultik is translated into; other letters compare as they are.
+std::string search_fold(std::string_view s) {
+#ifdef _WIN32
+    return os::fold_case(s);
+#else
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size();) {
+        const auto c = static_cast<unsigned char>(s[i]);
+        std::uint32_t cp = c;
+        std::size_t len = 1;
+        if (c >= 0xC0 && c < 0xE0 && i + 1 < s.size()) {
+            cp = ((c & 0x1Fu) << 6) | (static_cast<unsigned char>(s[i + 1]) & 0x3Fu);
+            len = 2;
+        }
+        if (len == 1) {
+            out.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c + 32) : static_cast<char>(c));
+            i += 1;
+            continue;
+        }
+        std::uint32_t lower = cp;
+        if ((cp >= 0xC0 && cp <= 0xDE && cp != 0xD7) || (cp >= 0x391 && cp <= 0x3AB && cp != 0x3A2) ||
+            (cp >= 0x410 && cp <= 0x42F))
+            lower = cp + 0x20;
+        else if (cp >= 0x400 && cp <= 0x40F)
+            lower = cp + 0x50;
+        else if ((cp >= 0x100 && cp <= 0x137 && cp != 0x130 && cp % 2 == 0) ||
+                 (cp >= 0x139 && cp <= 0x148 && cp % 2 == 1) || (cp >= 0x14A && cp <= 0x177 && cp % 2 == 0) ||
+                 (cp >= 0x179 && cp <= 0x17E && cp % 2 == 1))
+            lower = cp + 1;
+        else if (cp == 0x178)
+            lower = 0xFF;
+        if (lower >= 0x800) {
+            out.append(s.substr(i, len));  // not reached for the ranges above; kept as is
+        } else {
+            out.push_back(static_cast<char>(0xC0 | (lower >> 6)));
+            out.push_back(static_cast<char>(0x80 | (lower & 0x3F)));
+        }
+        i += len;
+    }
+    return out;
+#endif
+}
+
 }  // namespace
 
 bool name_matches(const std::string& pattern, const std::string& name) {
-    const std::string p = os::fold_case(pattern);
-    const std::string n = os::fold_case(name);
+    const std::string p = search_fold(pattern);
+    const std::string n = search_fold(name);
     if (p.find_first_of("*?") == std::string::npos) return n.find(p) != std::string::npos;
     return glob(p, 0, n, 0);
 }

@@ -30,13 +30,23 @@
 
 #ifdef Q_OS_WIN
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <cerrno>
+#include <sys/inotify.h>
+#include <unistd.h>
+
+#include <map>
 #endif
 
 using namespace vaultik;
 
 // Watches one folder and everything below it, calling `on_change` (on the watching thread) when a
-// file or folder in it that counts was added, removed, renamed or written. Windows only; elsewhere
-// it never calls.
+// file or folder in it that counts was added, removed, renamed or written. Windows:
+// ReadDirectoryChangesW. Linux: inotify, one watch per folder (folders made later are added as
+// they appear); past the system's watch limit (fs.inotify.max_user_watches) the rest of the tree
+// is not watched.
 class FolderWatch {
 public:
     FolderWatch(std::string root, std::vector<std::string> ignored, std::vector<std::string> excludes,
@@ -47,6 +57,8 @@ public:
 #ifdef Q_OS_WIN
         stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (stop_ != nullptr) thread_ = std::thread([this] { watch(); });
+#else
+        if (::pipe2(stop_, O_CLOEXEC) == 0) thread_ = std::thread([this] { watch(); });
 #endif
     }
 
@@ -56,6 +68,13 @@ public:
             SetEvent(stop_);
             if (thread_.joinable()) thread_.join();
             CloseHandle(stop_);
+        }
+#else
+        if (stop_[1] >= 0) {
+            (void)::write(stop_[1], "x", 1);
+            if (thread_.joinable()) thread_.join();
+            ::close(stop_[0]);
+            ::close(stop_[1]);
         }
 #endif
     }
@@ -70,7 +89,7 @@ private:
         const std::string folded = os::fold_case(path);
         for (const std::string& i : ignored_) {
             if (folded.size() >= i.size() && folded.compare(0, i.size(), i) == 0 &&
-                (folded.size() == i.size() || folded[i.size()] == '\\' || i.ends_with('\\')))
+                (folded.size() == i.size() || folded[i.size()] == os::kSeparator || i.ends_with(os::kSeparator)))
                 return false;
         }
         return !path_excluded(excludes_, path);
@@ -124,6 +143,64 @@ private:
     }
 
     HANDLE stop_ = nullptr;
+    std::thread thread_;
+#else
+    // Adds a watch on `dir` and every folder below it (links are not followed).
+    void add_tree(int fd, std::map<int, std::string>& dirs, const std::string& dir) {
+        constexpr std::uint32_t kMask = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_CLOSE_WRITE |
+                                        IN_DELETE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW | IN_EXCL_UNLINK;
+        if (!counts(dir) && dir != root_) return;  // a folder the backup leaves out
+        const int wd = ::inotify_add_watch(fd, dir.c_str(), kMask);
+        if (wd < 0) return;  // gone, unreadable, or over the watch limit
+        dirs[wd] = dir;
+        os::DirReader reader(dir);
+        std::string name;
+        os::FileInfo info;
+        while (reader.next(name, info))
+            if (info.type == os::EntryType::Dir) add_tree(fd, dirs, os::join(dir, name));
+    }
+
+    void watch() {
+        const int fd = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+        if (fd < 0) return;
+        std::map<int, std::string> dirs;
+        add_tree(fd, dirs, root_);
+        alignas(struct inotify_event) char buffer[64 * 1024];
+        for (;;) {
+            struct pollfd p[2] = {{fd, POLLIN, 0}, {stop_[0], POLLIN, 0}};
+            if (::poll(p, 2, -1) < 0) {
+                if (errno == EINTR) continue;
+                break;
+            }
+            if (p[1].revents != 0) break;
+            bool relevant = false;
+            for (;;) {
+                const ssize_t got = ::read(fd, buffer, sizeof buffer);
+                if (got <= 0) break;
+                for (ssize_t offset = 0; offset < got;) {
+                    const auto* e = reinterpret_cast<const struct inotify_event*>(buffer + offset);
+                    offset += static_cast<ssize_t>(sizeof(struct inotify_event) + e->len);
+                    if (e->mask & IN_Q_OVERFLOW) {
+                        relevant = true;  // too many changes to list: count them
+                        continue;
+                    }
+                    if (e->mask & IN_IGNORED) {
+                        dirs.erase(e->wd);
+                        continue;
+                    }
+                    const auto it = dirs.find(e->wd);
+                    if (it == dirs.end()) continue;
+                    const std::string path = e->len > 0 ? os::join(it->second, e->name) : it->second;
+                    if ((e->mask & (IN_CREATE | IN_MOVED_TO)) && (e->mask & IN_ISDIR)) add_tree(fd, dirs, path);
+                    if (counts(path)) relevant = true;
+                }
+            }
+            if (relevant) on_change_();
+        }
+        ::close(fd);
+    }
+
+    int stop_[2] = {-1, -1};
     std::thread thread_;
 #endif
 

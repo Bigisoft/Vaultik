@@ -301,8 +301,15 @@ void write_file_atomic(const std::string& path, ByteSpan data, std::uint32_t mod
 // Appends, creating the file and its parent folders if needed. Throws OsError.
 void append_file(const std::string& path, ByteSpan data, std::uint32_t mode = 0644);
 
+// Creates a folder for secrets (and missing parents) that only this account can open: POSIX
+// mode 0700, also set on a folder that is already there. Windows: make_dirs (the profile's
+// permissions already keep other accounts out). Throws OsError.
+void make_private_dirs(const std::string& path);
+
 // Encrypts a secret so only the current user can read it back (Windows DPAPI). On POSIX the
-// data is returned unchanged and protection comes from the file mode (0600).
+// data is returned unchanged and protection comes from the file mode (0600) inside a 0700 folder
+// (make_private_dirs): anyone who can read the account's files (root, a backup of the home
+// folder, a program running as the user) can read it, as with an SSH key without a passphrase.
 // `machine`: sealed with the computer's key instead of the account's (Windows), so another account
 // (the system account of a job with administrator rights) can open it; the file's permissions are
 // then all that keeps others out.

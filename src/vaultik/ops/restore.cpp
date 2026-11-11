@@ -19,7 +19,8 @@ std::vector<std::string> split_snapshot_path(const std::string& path) {
     std::vector<std::string> parts;
     std::string cur;
     for (const char c : path) {
-        if (c == '/' || c == '\\') {
+        // A backslash is an ordinary name character on Linux, so only Windows splits on it.
+        if (c == '/' || (os::kSeparator == '\\' && c == '\\')) {
             if (!cur.empty()) parts.push_back(std::move(cur));
             cur.clear();
         } else {
@@ -36,6 +37,13 @@ std::optional<os::EntryType> entry_type(const std::string& path) {
     os::ErrorCode err = 0;
     if (!os::stat(path, info, err)) return std::nullopt;
     return info.type;
+}
+
+// Whether the node carries POSIX permissions. Nodes made on Windows have mode 0 and Windows
+// attributes (never 0 there: a plain file is FILE_ATTRIBUTE_NORMAL or ARCHIVE); a node made on
+// Linux has attributes 0, so its mode counts even when it is 0 (chmod 000).
+bool has_posix_mode(const Node& node) {
+    return node.mode != 0 || node.attributes == 0;
 }
 
 os::FileInfo info_of(const Node& node) {
@@ -184,7 +192,7 @@ void RestoreEngine::restore_file(const Node& node, const std::string& path) {
     os::ErrorCode err = 0;
     // Private until the content and final permissions are in place; snapshots from Windows carry
     // no permissions, so those get the umask default.
-    os::File file = os::File::create(path, options_.overwrite, err, node.mode != 0 ? 0600 : 0666);
+    os::File file = os::File::create(path, options_.overwrite, err, has_posix_mode(node) ? 0600 : 0666);
     if (file.valid() && !inside(file.final_path())) {
         file.discard();
         file.close();
@@ -488,12 +496,15 @@ bool resolve_snapshot_path(Repository& repo, const Snapshot& snapshot, const std
     Node cur;
     cur.kind = NodeKind::Dir;
     cur.subtree = snapshot.tree;
+    bool top = true;
     for (const std::string& part : split_snapshot_path(path)) {
         if (cur.kind != NodeKind::Dir) return false;
         const Tree tree = parse_tree(repo.load_blob(BlobType::Tree, cur.subtree));
         const Node* n = tree.find(part);
-        // Drive letters are stored upper case; accept "c" for "C".
-        if (n == nullptr && part.size() == 1)
+        // Drive letters are stored upper case; accept "c" for "C". Only at the top, where drive
+        // letters are: below it "a" and "A" are different folders on Linux.
+        const bool drive_level = std::exchange(top, false);
+        if (n == nullptr && drive_level && part.size() == 1)
             n = tree.find(std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(part[0])))));
         if (n == nullptr) return false;
         cur = *n;

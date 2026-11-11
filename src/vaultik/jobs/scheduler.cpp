@@ -61,24 +61,71 @@ std::string events_task_name(const std::string& id) {
 
 #else
 
+// Inside a Flatpak the program cannot see the user's systemd directly: the units are written to
+// the real ~/.config (the manifest grants xdg-config/systemd) and systemctl runs on the host.
+bool in_flatpak() {
+    return !os::get_env("FLATPAK_ID").empty();
+}
+
 std::string unit_dir() {
-    const std::string xdg = os::get_env("XDG_CONFIG_HOME");
-    const std::string base = !xdg.empty() ? xdg : os::join(os::get_env("HOME"), ".config");
+    // A Flatpak points XDG_CONFIG_HOME into its own sandbox folder; systemd reads the real one.
+    const std::string xdg = in_flatpak() ? std::string() : os::get_env("XDG_CONFIG_HOME");
+    std::string base = xdg;
+    if (base.empty()) {
+        std::string home = os::get_env("HOME");
+        if (home.empty()) home = os::user_folder(os::UserFolder::Profile);
+        if (home.empty()) throw Error("cannot find the home folder for the systemd timer (HOME is not set)");
+        base = os::join(home, ".config");
+    }
     return os::join(os::join(base, "systemd"), "user");
 }
 
-// systemd unit files quote arguments with double quotes; backslashes and quotes are escaped.
+int systemctl(const std::vector<std::string>& args, std::string* output) {
+    std::vector<std::string> argv;
+    if (in_flatpak()) argv = {"flatpak-spawn", "--host"};
+    argv.push_back("systemctl");
+    argv.push_back("--user");
+    argv.insert(argv.end(), args.begin(), args.end());
+    return os::run_command(argv, output);
+}
+
+// systemd unit files quote arguments with double quotes; backslashes and quotes are escaped,
+// "%" (specifiers) is doubled, and "$" (variable expansion in ExecStart) too.
 std::string unit_quote(const std::string& s) {
     std::string out = "\"";
     for (const char c : s) {
         if (c == '"' || c == '\\') out.push_back('\\');
-        if (c == '%') {
-            out += "%%";
-            continue;
-        }
+        if (c == '%' || c == '$') out.push_back(c);
         out.push_back(c);
     }
     return out + "\"";
+}
+
+// A job name as a unit Description: one line, specifiers escaped.
+std::string unit_text(const std::string& s) {
+    std::string out;
+    for (const char c : s) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7F) out.push_back(' ');
+        else if (c == '%') out += "%%";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+// What the timer starts. Under an AppImage the program folder is a temporary mount that is gone
+// once the program closes, so the timer starts the AppImage file itself ($APPIMAGE) with --cli
+// (AppRun hands that to the engine). In a Flatpak, "flatpak run" starts the engine.
+std::string exec_start(const std::string& program_dir, const std::string& job_id) {
+    const std::string args = " run-job " + unit_quote(job_id) + " --scheduled";
+    const std::string appimage = os::get_env("APPIMAGE");
+    const std::string appdir = os::get_env("APPDIR");
+    if (!appimage.empty() && !appdir.empty() &&
+        (program_dir == appdir || program_dir.starts_with(appdir.back() == '/' ? appdir : appdir + "/")))
+        return unit_quote(appimage) + " --cli" + args;
+    if (in_flatpak())
+        return "/usr/bin/flatpak run --command=vaultik " + unit_quote(os::get_env("FLATPAK_ID")) + args;
+    return unit_quote(os::join(program_dir, "vaultik")) + args;
 }
 
 #endif
@@ -481,12 +528,13 @@ void apply_schedule(const Job& job, const std::string& program_dir) {
         remove_schedule(job.id);
         return;
     }
-    const std::string service = "[Unit]\nDescription=Vaultik backup job: " + job.name + "\n" +
+    // SIGTERM (systemctl --user stop, shutting down) lets the run stop cleanly and release its
+    // repository lock; it is only killed if it has not after two minutes.
+    const std::string service = "[Unit]\nDescription=Vaultik backup job: " + unit_text(job.name) + "\n" +
                                 (job.schedule.skip_on_battery ? "ConditionACPower=true\n" : "") +
-                                "\n[Service]\nType=oneshot\nExecStart=" +
-                                unit_quote(os::join(program_dir, "vaultik")) + " run-job " + unit_quote(job.id) +
-                                " --scheduled\n";
-    const std::string timer = "[Unit]\nDescription=Schedule for Vaultik backup job: " + job.name +
+                                "\n[Service]\nType=oneshot\nExecStart=" + exec_start(program_dir, job.id) +
+                                "\nKillMode=mixed\nTimeoutStopSec=120\n";
+    const std::string timer = "[Unit]\nDescription=Schedule for Vaultik backup job: " + unit_text(job.name) +
                               "\n\n[Timer]\nOnCalendar=" + schedule_definition(job, program_dir) +
                               "\nPersistent=true\n" + (job.schedule.wake_computer ? "WakeSystem=true\n" : "") +
                               "\n[Install]\nWantedBy=timers.target\n";
@@ -494,22 +542,21 @@ void apply_schedule(const Job& job, const std::string& program_dir) {
     os::write_file_atomic(os::join(dir, base + ".timer"), bytes_of(timer));
 
     std::string output;
-    if (os::run_command({"systemctl", "--user", "daemon-reload"}, &output) != 0)
-        throw Error("systemctl daemon-reload failed: " + trim(output));
+    if (systemctl({"daemon-reload"}, &output) != 0) throw Error("systemctl daemon-reload failed: " + trim(output));
     output.clear();
-    if (os::run_command({"systemctl", "--user", "enable", "--now", base + ".timer"}, &output) != 0)
+    if (systemctl({"enable", "--now", base + ".timer"}, &output) != 0)
         throw Error("cannot enable the systemd timer: " + trim(output));
 }
 
 void remove_schedule(const std::string& job_id) {
-    const std::string dir = unit_dir();
     const std::string base = "vaultik-" + job_id;
     try {
+        const std::string dir = unit_dir();
         std::string ignored;
-        os::run_command({"systemctl", "--user", "disable", "--now", base + ".timer"}, &ignored);
+        systemctl({"disable", "--now", base + ".timer"}, &ignored);
         os::remove_file(os::join(dir, base + ".timer"));
         os::remove_file(os::join(dir, base + ".service"));
-        os::run_command({"systemctl", "--user", "daemon-reload"}, &ignored);
+        systemctl({"daemon-reload"}, &ignored);
     } catch (const Error&) {
     }
 }

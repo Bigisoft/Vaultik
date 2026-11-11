@@ -1,0 +1,54 @@
+# Flatpak build of Vaultik (not yet built or tested; see docs/LINUX_PORT.md).
+#   flatpak install flathub org.kde.Platform//6.8 org.kde.Sdk//6.8
+#   flatpak-builder --user --install --force-clean build-flatpak packaging/flatpak/io.github.bigisoft.Vaultik.yml
+#
+# Permissions, and why:
+#   network              cloud storage, alerts, the update check
+#   filesystem=host      a backup program reads and restores anywhere, also external drives
+#   xdg-config/systemd   scheduled backups: the systemd user timers live in ~/.config/systemd/user
+#   xdg-config/autostart "Start Vaultik when I sign in"
+#   org.freedesktop.Flatpak  "flatpak-spawn --host systemctl --user ..." to load those timers
+id: io.github.bigisoft.Vaultik
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: vaultik-gui
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=host
+  - --filesystem=xdg-config/systemd:create
+  - --filesystem=xdg-config/autostart:create
+  - --talk-name=org.freedesktop.Flatpak
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+modules:
+  - name: nlohmann-json
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DJSON_BuildTests=OFF
+    sources:
+      - type: archive
+        url: https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+        sha256: d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+  - name: blake3
+    buildsystem: cmake-ninja
+    subdir: c
+    config-opts:
+      - -DBUILD_SHARED_LIBS=OFF
+      - -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    sources:
+      - type: archive
+        url: https://github.com/BLAKE3-team/BLAKE3/archive/refs/tags/1.5.4.tar.gz
+        sha256: ddd24f26a31d23373e63d9be2e723263ac46c8b6d49902ab08024b573fd2a416
+  - name: vaultik
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DVAULTIK_BUILD_TESTS=OFF
+    sources:
+      - type: dir
+        path: ../..

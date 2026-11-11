@@ -1,6 +1,7 @@
 // POSIX (Linux) resource controls: nice value, I/O scheduling class, an address-space limit for
 // the memory cap, and a duty-cycle limiter for the CPU cap (cgroups would need root delegation).
 
+#include <malloc.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -86,6 +87,9 @@ private:
 
 CpuCap g_cpu_cap;
 
+// Room for thread stacks (8 MiB each by default) on top of the memory cap.
+constexpr std::uint64_t kThreadStackAllowance = 128ull << 20;
+
 }  // namespace
 
 namespace detail {
@@ -99,14 +103,28 @@ void apply_platform_policy(const ResourcePolicy& p) {
     set_io_priority(p.io);
     // MemoryPriority has no Linux equivalent for an unprivileged process; it is ignored.
 
+    // The memory cap is RLIMIT_DATA (heap and private writable memory, since Linux 4.7), the
+    // closest to the committed memory Windows caps. RLIMIT_AS would also count address space that
+    // is only reserved (64 MiB per malloc arena and thread), so a cap of a few hundred MiB would
+    // fail at once. Fewer malloc arenas keep reserved-but-unused heap down when a cap is set.
+    static bool capped = false;
+    struct rlimit rl{};
+    ::getrlimit(RLIMIT_DATA, &rl);
     if (p.max_memory != 0) {
-        // Only the soft limit, so a later call can lift it again.
-        struct rlimit rl{};
-        ::getrlimit(RLIMIT_AS, &rl);
-        rl.rlim_cur = static_cast<rlim_t>(p.max_memory);
+        // Only the soft limit, so a later call can lift it again. Thread stacks count too, so the
+        // cap leaves room for them.
+        rl.rlim_cur = static_cast<rlim_t>(p.max_memory + kThreadStackAllowance);
         if (rl.rlim_max != RLIM_INFINITY && rl.rlim_cur > rl.rlim_max) rl.rlim_cur = rl.rlim_max;
-        if (::setrlimit(RLIMIT_AS, &rl) != 0)
+        if (::setrlimit(RLIMIT_DATA, &rl) != 0)
             throw Error(std::string("cannot set memory limit: ") + std::strerror(errno));
+#ifdef M_ARENA_MAX
+        ::mallopt(M_ARENA_MAX, 2);
+#endif
+        capped = true;
+    } else if (capped) {
+        rl.rlim_cur = rl.rlim_max;  // lift the cap set earlier
+        (void)::setrlimit(RLIMIT_DATA, &rl);
+        capped = false;
     }
     g_cpu_cap.set(p.cpu_limit_percent);
 }

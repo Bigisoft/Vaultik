@@ -1,5 +1,6 @@
 #include "vaultik/platform/loopback.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 
 #include "vaultik/util/error.hpp"
@@ -14,19 +15,57 @@
 
 #include "vaultik/util/win.hpp"
 
+#else
+
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include "vaultik/platform/os.hpp"
+
+#endif
+
 namespace vaultik::os {
 
 namespace {
 
-constexpr SOCKET kNone = INVALID_SOCKET;
+#ifdef _WIN32
+using Socket = SOCKET;
+constexpr Socket kNone = INVALID_SOCKET;
 
-void ensure_winsock() {
+void ensure_sockets() {
     static const bool ok = [] {
         WSADATA data;
         return WSAStartup(MAKEWORD(2, 2), &data) == 0;
     }();
     if (!ok) throw Error("cannot start Windows networking");
 }
+
+void close_socket(Socket s) {
+    closesocket(s);
+}
+
+Socket open_socket(int family) {
+    return socket(family, SOCK_STREAM, IPPROTO_TCP);
+}
+#else
+using Socket = int;
+constexpr Socket kNone = -1;
+
+void ensure_sockets() {}
+
+void close_socket(Socket s) {
+    ::close(s);
+}
+
+Socket open_socket(int family) {
+    return ::socket(family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+}
+#endif
 
 std::string decode(std::string_view s) {
     std::string out;
@@ -75,7 +114,7 @@ std::string html_escape(const std::string& s) {
     return out;
 }
 
-void reply(SOCKET s, int status, const std::string& text) {
+void reply(Socket s, int status, const std::string& text) {
     const std::string body = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Vaultik</title></head>"
                              "<body style=\"font-family:sans-serif;margin:3em\"><h2>Vaultik</h2><p>" +
                              html_escape(text) + "</p></body></html>";
@@ -83,48 +122,60 @@ void reply(SOCKET s, int status, const std::string& text) {
                              "\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\nContent-Length: " +
                              std::to_string(body.size()) + "\r\n\r\n";
     const std::string all = head + body;
+#ifdef _WIN32
     send(s, all.data(), static_cast<int>(all.size()), 0);
+#else
+    (void)::send(s, all.data(), all.size(), MSG_NOSIGNAL);
+#endif
 }
 
 }  // namespace
 
 LoopbackServer::LoopbackServer(int port) {
-    ensure_winsock();
+    ensure_sockets();
     // IPv4 first, to learn the port when any was asked for.
-    SOCKET v4 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    Socket v4 = open_socket(AF_INET);
     if (v4 == kNone) throw Error("cannot open a local port for the browser sign-in");
     sockaddr_in a4{};
     a4.sin_family = AF_INET;
     a4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a4.sin_port = htons(static_cast<u_short>(port));
+    a4.sin_port = htons(static_cast<std::uint16_t>(port));
     if (bind(v4, reinterpret_cast<sockaddr*>(&a4), sizeof a4) != 0 || listen(v4, 4) != 0) {
-        closesocket(v4);
+        close_socket(v4);
         throw Error("cannot listen on port " + std::to_string(port) +
                     " for the browser sign-in (is another program using it?)");
     }
+#ifdef _WIN32
     int len = sizeof a4;
+#else
+    socklen_t len = sizeof a4;
+#endif
     getsockname(v4, reinterpret_cast<sockaddr*>(&a4), &len);
     port_ = ntohs(a4.sin_port);
-    sockets_[0] = v4;
+    sockets_[0] = static_cast<std::uintptr_t>(v4);
 
     // ::1 on the same port, because browsers may try "localhost" over IPv6 first.
-    SOCKET v6 = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
+    Socket v6 = open_socket(AF_INET6);
     if (v6 != kNone) {
+#ifndef _WIN32
+        const int only = 1;  // IPv6 only: the IPv4 side of the port is the socket above
+        setsockopt(v6, IPPROTO_IPV6, IPV6_V6ONLY, &only, sizeof only);
+#endif
         sockaddr_in6 a6{};
         a6.sin6_family = AF_INET6;
         a6.sin6_addr = in6addr_loopback;
-        a6.sin6_port = htons(static_cast<u_short>(port_));
+        a6.sin6_port = htons(static_cast<std::uint16_t>(port_));
         if (bind(v6, reinterpret_cast<sockaddr*>(&a6), sizeof a6) == 0 && listen(v6, 4) == 0) {
-            sockets_[1] = v6;
+            sockets_[1] = static_cast<std::uintptr_t>(v6);
         } else {
-            closesocket(v6);
+            close_socket(v6);
         }
     }
 }
 
 LoopbackServer::~LoopbackServer() {
     for (std::uintptr_t s : sockets_)
-        if (s != static_cast<std::uintptr_t>(kNone)) closesocket(static_cast<SOCKET>(s));
+        if (s != static_cast<std::uintptr_t>(kNone)) close_socket(static_cast<Socket>(s));
 }
 
 std::map<std::string, std::string> LoopbackServer::wait(std::chrono::seconds timeout,
@@ -136,20 +187,30 @@ std::map<std::string, std::string> LoopbackServer::wait(std::chrono::seconds tim
         if (std::chrono::steady_clock::now() > deadline) throw Error("the browser sign-in was not finished in time");
         fd_set set;
         FD_ZERO(&set);
+        int highest = 0;  // ignored on Windows
         for (std::uintptr_t s : sockets_)
-            if (s != static_cast<std::uintptr_t>(kNone)) FD_SET(static_cast<SOCKET>(s), &set);
+            if (s != static_cast<std::uintptr_t>(kNone)) {
+                FD_SET(static_cast<Socket>(s), &set);
+                highest = std::max(highest, static_cast<int>(s));
+            }
         timeval tv{0, 250000};
-        if (select(0, &set, nullptr, nullptr, &tv) <= 0) continue;
+        if (select(highest + 1, &set, nullptr, nullptr, &tv) <= 0) continue;
         for (std::uintptr_t ls : sockets_) {
-            if (ls == static_cast<std::uintptr_t>(kNone) || !FD_ISSET(static_cast<SOCKET>(ls), &set)) continue;
-            SOCKET c = accept(static_cast<SOCKET>(ls), nullptr, nullptr);
+            if (ls == static_cast<std::uintptr_t>(kNone) || !FD_ISSET(static_cast<Socket>(ls), &set)) continue;
+            Socket c = accept(static_cast<Socket>(ls), nullptr, nullptr);
             if (c == kNone) continue;
+#ifdef _WIN32
             DWORD rto = 5000;
             setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rto), sizeof rto);
+#else
+            ::fcntl(c, F_SETFD, FD_CLOEXEC);
+            timeval rto{5, 0};
+            setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &rto, sizeof rto);
+#endif
             std::string req;
             char buf[2048];
             while (req.find("\r\n\r\n") == std::string::npos && req.size() < 16384) {
-                const int n = recv(c, buf, sizeof buf, 0);
+                const auto n = recv(c, buf, sizeof buf, 0);
                 if (n <= 0) break;
                 req.append(buf, static_cast<std::size_t>(n));
             }
@@ -160,47 +221,40 @@ std::map<std::string, std::string> LoopbackServer::wait(std::chrono::seconds tim
             auto params = query_of(target);
             if (params.empty()) {
                 reply(c, 404, "Nothing here.");
-                closesocket(c);
+                close_socket(c);
                 continue;
             }
             const bool failed = params.contains("error");
             reply(c, 200,
                   failed ? "Signing in did not work: " + params["error"] + ". You can close this tab."
                          : done_message);
-            closesocket(c);
+            close_socket(c);
             return params;
         }
     }
 }
 
 void open_in_browser(const std::string& url) {
+#ifdef _WIN32
     const auto r = reinterpret_cast<INT_PTR>(
         ShellExecuteW(nullptr, L"open", widen(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL));
     if (r <= 32) throw Error("cannot open the web browser");
-}
-
-}  // namespace vaultik::os
-
 #else
-
-namespace vaultik::os {
-
-LoopbackServer::LoopbackServer(int /*port*/) {
-    throw Error("browser sign-in is only available on Windows for now");
-}
-
-LoopbackServer::~LoopbackServer() = default;
-
-std::map<std::string, std::string> LoopbackServer::wait(std::chrono::seconds /*timeout*/,
-                                                        const std::function<bool()>& /*cancelled*/,
-                                                        const std::string& /*done_message*/) {
-    return {};
-}
-
-void open_in_browser(const std::string& /*url*/) {
-    throw Error("opening a browser is only available on Windows for now");
+    // xdg-open hands the address to the desktop's default browser (inside a Flatpak, through the
+    // portal). Web addresses only, so a crafted address cannot open a local file or program.
+    if (!url.starts_with("https://") && !url.starts_with("http://")) throw Error("not a web address: " + url);
+    // In the background: without a desktop environment xdg-open runs the browser itself and only
+    // returns when it is closed. The address is an argument, never part of the command text.
+    try {
+        CommandOptions options;
+        options.timeout = std::chrono::seconds(30);
+        if (run_command({"/bin/sh", "-c", "command -v xdg-open >/dev/null 2>&1 || exit 127; xdg-open \"$1\" &", "sh", url},
+                        options) == 0)
+            return;
+    } catch (const Error&) {
+    }
+    throw Error("cannot open the web browser (is xdg-open installed?); open this address yourself: " + url);
+#endif
 }
 
 }  // namespace vaultik::os
-
-#endif

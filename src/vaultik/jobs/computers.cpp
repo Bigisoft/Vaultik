@@ -113,7 +113,7 @@ json job_json(const JobStatus& s) {
 }  // namespace
 
 std::string to_json(const JobStatus& job) {
-    return job_json(job).dump();
+    return job_json(job).dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 std::string to_json(const HostStatus& status) {
@@ -124,7 +124,7 @@ std::string to_json(const HostStatus& status) {
                     {"version", status.version},
                     {"updated", status.updated},
                     {"jobs", jobs}};
-    return j.dump();
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 HostStatus host_status_from_json(const std::string& text) {

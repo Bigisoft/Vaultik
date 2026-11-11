@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.bigisoft.Vaultik</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Vaultik</name>
+  <summary>Encrypted, deduplicated backups of your files</summary>
+  <description>
+    <p>
+      Vaultik backs up folders to an external drive, a network folder or cloud storage. Every
+      version is compressed, deduplicated and encrypted with your password. Scheduled backups run
+      from systemd user timers, so nothing stays in memory between them.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.bigisoft.Vaultik.desktop</launchable>
+  <url type="homepage">https://github.com/Bigisoft/Vaultik</url>
+  <developer id="io.github.bigisoft">
+    <name>Bigisoft</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+</component>

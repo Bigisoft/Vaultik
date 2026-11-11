@@ -69,9 +69,23 @@ std::string ascii_lower(std::string s) {
 
 }  // namespace
 
+namespace {
+
+// The folder the program was started from: for an AppImage the folder of the .AppImage file
+// ($APPIMAGE), not the temporary mount its programs run from.
+std::string program_home() {
+#ifndef _WIN32
+    if (const std::string appimage = os::get_env("APPIMAGE"); !appimage.empty())
+        return os::parent_of(os::absolute_path(appimage));
+#endif
+    return os::parent_of(os::executable_path());
+}
+
+}  // namespace
+
 bool is_portable() {
     try {
-        return os::exists(os::join(os::parent_of(os::executable_path()), "portable"));
+        return os::exists(os::join(program_home(), "portable"));
     } catch (const Error&) {
         return false;
     }
@@ -80,7 +94,12 @@ bool is_portable() {
 std::string config_dir() {
     const std::string over = os::get_env("VAULTIK_CONFIG_DIR");
     if (!over.empty()) return os::absolute_path(over);
-    if (is_portable()) return os::join(os::parent_of(os::executable_path()), "Settings");
+#ifdef _WIN32
+    if (is_portable()) return os::join(program_home(), "Settings");
+#else
+    // The Windows programs may share the folder (on a backup drive); their jobs name Windows paths.
+    if (is_portable()) return os::join(program_home(), "Settings-Linux");
+#endif
 #ifdef _WIN32
     const std::string base = os::get_env("LOCALAPPDATA");
     if (base.empty()) throw Error("LOCALAPPDATA is not set");
@@ -150,8 +169,15 @@ void record_one(const std::string& location, std::string& volume, std::string& r
     }
     // Otherwise the drive is not connected now: keep what was recorded when it was, unless the
     // location now names another folder ("X:\" plus the recorded folder is still the same one).
+#ifdef _WIN32
     const bool drive_form = location.size() >= 3 && location[1] == ':' && (location[2] == '\\' || location[2] == '/');
-    if (!drive_form || os::fold_case(location.substr(3)) != os::fold_case(relative)) {
+    const bool same = drive_form && os::fold_case(location.substr(3)) == os::fold_case(relative);
+#else
+    // Linux: the drive was mounted somewhere ("/run/media/me/USB") and the location still ends
+    // with the recorded folder below it.
+    const bool same = !relative.empty() && location.size() > relative.size() + 1 && location.ends_with("/" + relative);
+#endif
+    if (!same) {
         volume.clear();
         relative.clear();
     }
@@ -460,7 +486,13 @@ std::string to_json(const Job& job) {
           {"monthly", job.health.monthly},
           {"restore_test", job.health.restore_test}}},
     };
-    return j.dump(2) + "\n";
+    try {
+        return j.dump(2) + "\n";
+    } catch (const json::type_error&) {
+        // Linux allows names that are not UTF-8; a job must keep its paths exactly, so it refuses
+        // them instead of saving a changed path.
+        throw Error("the job has a folder or file name that is not valid UTF-8 text; rename it or leave it out");
+    }
 }
 
 Job job_from_json(const std::string& text) {
@@ -596,7 +628,9 @@ std::string to_json(const RunRecord& r) {
     if (!r.drive.empty()) j["drive"] = r.drive;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
-    return j.dump();
+    // Messages can quote Linux file names, which need not be UTF-8: replace such bytes rather
+    // than lose the record.
+    return j.dump(-1, ' ', false, json::error_handler_t::replace);
 }
 
 RunRecord record_from_json(const std::string& text) {
@@ -770,6 +804,7 @@ std::string copy_secret_path(const std::string& dir, const std::string& id) {
 void seal_to(const std::string& path, const std::string& secret) {
     // In the admin store the system account reads it (see admin_jobs.hpp).
     Bytes sealed = os::protect_secret(bytes_of(secret), in_admin_store(path));
+    os::make_private_dirs(os::parent_of(path));  // Linux: the 0700 folder is what keeps others out
     os::write_file_atomic(path, sealed, 0600);
     secure_wipe(sealed.data(), sealed.size());
 }
@@ -778,6 +813,8 @@ void seal_to(const std::string& path, const std::string& secret) {
 std::string unseal_from(const std::string& path) {
     Bytes sealed;
     try {
+        // Tightens a secrets folder left readable by others (Linux; see make_private_dirs).
+        if (os::is_directory(os::parent_of(path))) os::make_private_dirs(os::parent_of(path));
         sealed = os::read_file(path, 64 * 1024);
     } catch (const os::OsError& e) {
         if (os::is_not_found(e.code())) return {};

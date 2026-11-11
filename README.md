@@ -1,7 +1,8 @@
 # Vaultik
 
 Lightweight, deduplicating, compressed and encrypted backups for Windows, written in C++20, with a
-Qt 6 frontend. Linux support is planned: the platform code is written but not yet built or tested.
+Qt 6 frontend. Linux support (SteamOS on the Steam Deck first) is written but not yet built or
+tested; see [docs/LINUX_PORT.md](docs/LINUX_PORT.md) for its status.
 
 - **Small and idle-free.** The engine is one static ~1 MB executable: no service, no kernel driver.
   Scheduled backups are started by the system scheduler, run, and exit. Peak RAM stays around
@@ -70,18 +71,19 @@ The programs end up in `build\release\`. Dependencies (zstd, BLAKE3, nlohmann-js
 frontend, doctest for tests) come from vcpkg and are linked statically. The first build compiles
 a minimal Qt and takes a while; later builds reuse it.
 
-**Linux (planned, not yet built or tested):** a C++20 compiler (GCC 12+ or Clang 16+), CMake,
-Ninja, vcpkg, OpenSSL and Qt 6 development packages. On Debian or Ubuntu:
+**Linux (not yet built or tested, see [docs/LINUX_PORT.md](docs/LINUX_PORT.md)):** a C++20
+compiler (GCC 12+ or Clang 16+), CMake, Ninja and the distribution's development packages. On
+Debian or Ubuntu:
 
 ```
-sudo apt install build-essential cmake ninja-build pkg-config libssl-dev qt6-base-dev
-export VCPKG_ROOT=~/vcpkg   # a vcpkg checkout
-./build.sh release test
+sudo apt install g++ cmake ninja-build pkg-config libzstd-dev libssl-dev libcurl4-openssl-dev     nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev
+./build.sh release test        # BUILD_DIR=~/vaultik-build to build outside the source folder
 ```
 
-The frontend uses the system Qt on Linux. Configure with `-DVAULTIK_BUILD_GUI=OFF` for a
-command-line-only build (servers). Until the Linux port is verified, the Linux notes in this
-README describe the intended behavior.
+BLAKE3 comes from the distribution where it has it (`libblake3-dev`), otherwise CMake downloads
+release 1.5.4 and checks its SHA-256. `./build.sh vcpkg release test` builds with vcpkg instead
+(`VCPKG_ROOT`). Configure with `-DVAULTIK_BUILD_GUI=OFF` for a command-line-only build (servers).
+Until the Linux port is verified, the Linux notes in this README describe the intended behavior.
 
 ## Using the frontend
 
@@ -192,7 +194,8 @@ else), connect the backup drive (or have the cloud storage keys at hand), pick t
 enter the password.
 
 The password is stored for scheduled runs, readable only by your user account: encrypted with
-DPAPI on Windows, in a file with mode 0600 on Linux. Job files live in `%LOCALAPPDATA%\Vaultik`
+DPAPI on Windows, in a file with mode 0600 inside a 0700 folder on Linux (anything that can read
+your account's files can read it there). Job files live in `%LOCALAPPDATA%\Vaultik`
 or `~/.config/vaultik` (override with `VAULTIK_CONFIG_DIR`).
 
 **Keep the password safe elsewhere too.** Without it the backups cannot be decrypted, and nobody
@@ -227,6 +230,14 @@ backup folder made before the change still opens with the old password.
 After each backup to an external drive (USB, FireWire, memory card), Vaultik also keeps
 `<drive>\Vaultik\` with these portable programs and a "How to restore" note, so any Windows PC
 can restore from the drive with nothing installed. It only replaces an older copy.
+
+On Linux, `tools/appimage.sh` builds `dist/Vaultik-x86_64.AppImage` (window and engine in one
+file; `Vaultik-x86_64.AppImage --cli <command>` runs the command line), and
+`packaging/flatpak/io.github.bigisoft.Vaultik.yml` is a Flatpak manifest; both are untested so
+far. After a backup to an external drive, the AppImage keeps a copy of itself in
+`<drive>/Vaultik/` with "How to restore on Linux.txt", next to the Windows programs; there it is
+portable (settings in `Settings-Linux`), so a Steam Deck in Desktop Mode can restore from the
+drive with nothing installed.
 
 The version is set in `project()` in CMakeLists.txt. The program icon is drawn from
 `src/gui/app_icon.svg`; after changing it, build `vaultik-make-icon` and run
@@ -992,9 +1003,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
      Access, Glacier or Deep Archive, and `cloud-thaw` gets back what a restore needs.
 6. Portable version and installer (done for Windows): a portable folder that keeps its own
    settings, a copy of it kept on external backup drives with a how-to-restore note, and an MSI
-   installer whose uninstall also removes the scheduled tasks. Still to come with the Linux port
-   (8): an AppImage (portable: runs from the backup drive and on SteamOS) and a Flatpak, put on
-   the backup drive next to the Windows programs.
+   installer whose uninstall also removes the scheduled tasks. For Linux (8), written but not yet
+   tested: an AppImage build (portable, kept on the backup drive next to the Windows programs)
+   and a Flatpak manifest.
 7. More convenience and security (done): a second copy of each backup (3-2-1), a size and time
    estimate before the first backup, comparing two versions with a side-by-side text diff,
    "Earlier versions in Vaultik" in File Explorer's right-click menu, ready-made exclusions,
@@ -1005,10 +1016,12 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    retired computers can be removed from the view. WSL distributions and Hyper-V machines
    (done): backed up through `wsl --export` and `Export-VM` instead of their open disk files, and
    imported back as new ones.
-8. Linux port, SteamOS on the Steam Deck first. The review before it is done; its Linux hazards
-   are listed in docs/LINUX_PORT.md. Then: build and test the existing POSIX platform layer,
-   systemd user timers and the frontend, and give the cloud code its Linux parts (an HTTP client
-   and the browser sign-in are Windows-only so far). Packaged as in 6.
+8. Linux port, SteamOS on the Steam Deck first (in progress). The review's hazards are fixed or
+   decided (docs/LINUX_PORT.md); the cloud code has a libcurl client and the browser sign-in,
+   drives are tracked by file system UUID, and the frontend has its Linux parts (single instance,
+   autostart, drive watcher, inotify for continuous backups). Still to do: build and run the
+   tests on Linux, the command line end to end, the AppImage on a Steam Deck, FUSE for browsing
+   a version, drive health.
 9. Disk image backup (done, Windows): whole disks from shadow copies, used space only, in the
    deduplicating repository; restore to a `.vhdx`, onto a disk, or browse an image's drives.
    Still to come: shrinking partitions onto a smaller disk, images of Linux disks.

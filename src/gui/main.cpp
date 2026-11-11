@@ -13,6 +13,13 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <shellapi.h>  // CommandLineToArgvW
+#else
+#include <unistd.h>
+
+#include <QLocalServer>
+#include <QLocalSocket>
+#endif
+#ifdef Q_OS_WIN
 
 // From uiautomationcoreapi.h (UIAutomationCore.dll), whose header needs the full COM headers.
 extern "C" HRESULT WINAPI UiaDisconnectAllProviders();
@@ -185,10 +192,58 @@ private:
     UINT message_;
 };
 #else
-QString history_argument() {
-    const QStringList args = QCoreApplication::arguments();
-    const qsizetype at = args.indexOf(QStringLiteral("--history"));
-    return at >= 0 && at + 1 < args.size() ? args[at + 1] : QString();
+// The path after "--history". Read from argv, because QCoreApplication::arguments() needs the
+// application object, which a second start never creates. Linux file names are bytes in the
+// locale's encoding (UTF-8 nearly everywhere).
+QString history_argument(int argc, char** argv) {
+    for (int i = 1; i + 1 < argc; ++i)
+        if (QByteArray(argv[i]) == "--history") return QString::fromLocal8Bit(argv[i + 1]);
+    return {};
+}
+
+// One Vaultik per user and settings folder, through a local socket in the user's runtime folder:
+// a second start sends "show" or "history <path>" to the first and ends. A copy with other
+// settings (portable, or VAULTIK_CONFIG_DIR) gets another name and so runs on its own.
+QString instance_name() {
+    std::uint64_t h = 1469598103934665603ull;  // FNV-1a of the settings folder
+    for (const char c : vaultik::jobs::config_dir()) {
+        h ^= static_cast<unsigned char>(c);
+        h *= 1099511628211ull;
+    }
+    return QStringLiteral("vaultik-gui-%1-%2").arg(::getuid()).arg(h, 16, 16, QLatin1Char('0'));
+}
+
+// True when another instance took the request (this one should end).
+bool hand_to_running(const QString& history, bool tray) {
+    QLocalSocket socket;
+    socket.connectToServer(instance_name());
+    if (!socket.waitForConnected(1000)) return false;
+    const QByteArray line = !history.isEmpty() ? "history " + history.toUtf8() + "\n" : tray ? QByteArray("tray\n")
+                                                                                              : QByteArray("show\n");
+    socket.write(line);
+    socket.waitForBytesWritten(2000);
+    socket.disconnectFromServer();
+    return true;
+}
+
+// Listens for later starts; the server is owned by `window`.
+void listen_for_starts(MainWindow& window) {
+    auto* server = new QLocalServer(&window);
+    server->setSocketOptions(QLocalServer::UserAccessOption);  // only this account can connect
+    QLocalServer::removeServer(instance_name());               // left behind by a crash
+    if (!server->listen(instance_name())) return;
+    QObject::connect(server, &QLocalServer::newConnection, &window, [server, &window] {
+        while (QLocalSocket* client = server->nextPendingConnection()) {
+            QObject::connect(client, &QLocalSocket::disconnected, client, &QObject::deleteLater);
+            QObject::connect(client, &QLocalSocket::readyRead, &window, [client, &window] {
+                while (client->canReadLine()) {
+                    const QString line = QString::fromUtf8(client->readLine(64 * 1024)).trimmed();
+                    if (line.startsWith(QStringLiteral("history "))) window.show_history_for(line.mid(8));
+                    else if (line == QStringLiteral("show")) window.bring_to_front();
+                }
+            });
+        }
+    });
 }
 #endif
 
@@ -201,7 +256,11 @@ int main(int argc, char** argv) {
     bool tray = false;
     for (int i = 1; i < argc; ++i)
         if (QByteArray(argv[i]) == "--tray") tray = true;
+#ifdef Q_OS_WIN
     const QString history = history_argument();  // from File Explorer's right-click menu
+#else
+    const QString history = history_argument(argc, argv);
+#endif
 
 #ifdef Q_OS_WIN
     const bool elevated = vaultik::os::process_elevated();
@@ -247,6 +306,9 @@ int main(int argc, char** argv) {
 #endif
 
     QApplication app(argc, argv);
+#ifndef Q_OS_WIN
+    if (hand_to_running(history, tray)) return 0;
+#endif
     QApplication::setApplicationName(QStringLiteral("Vaultik"));
     QApplication::setOrganizationName(QStringLiteral("Vaultik"));
     QApplication::setApplicationVersion(QStringLiteral(VAULTIK_VERSION));
@@ -273,6 +335,8 @@ int main(int argc, char** argv) {
         ChangeWindowMessageFilterEx(hwnd, RegisterWindowMessageW(instance_name(L"Vaultik.ShowWindow").c_str()),
                                     MSGFLT_ALLOW, nullptr);
     }
+#else
+    listen_for_starts(window);
 #endif
     if (!tray || !history.isEmpty()) window.show();
     if (!history.isEmpty())
