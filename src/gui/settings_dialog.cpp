@@ -126,8 +126,9 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent) {
 #ifdef Q_OS_WIN
     layout->addWidget(admin_);
     layout->addWidget(note(tr("Windows asks for approval once, then never again. Vaultik can then read all of a "
-                              "drive's health details, but everything it starts, also every backup, runs with "
-                              "administrator rights, and files can no longer be dragged into it from File Explorer."),
+                              "drive's health details and restore into protected folders. Backups still run with "
+                              "your own rights (a job with administrator rights from its approved copy), and files "
+                              "can no longer be dragged into it from File Explorer."),
                            26));
 #else
     // Administrator tasks are Windows only (Linux: run the engine as root from a system timer).

@@ -158,6 +158,7 @@ ImageRestoreDialog::ImageRestoreDialog(const jobs::Job& job, std::shared_ptr<Rep
     layout->addWidget(buttons);
 
     runner_ = new Runner(this);
+    runner_->keep_administrator_rights();  // work started and shown in this window
     connect(runner_, &Runner::progress, this, [this](const QJsonObject& ev) {
         const double total = ev.value("total").toDouble();
         if (total > 0) bar_->setValue(static_cast<int>(ev.value("done").toDouble() * 1000 / total));

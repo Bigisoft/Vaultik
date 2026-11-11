@@ -39,6 +39,7 @@ void check_for_update(QObject* owner, std::function<void(const UpdateResult&)> d
         process->deleteLater();
         if (alive) done(r);
     });
+    process->setProcessEnvironment(Runner::engine_environment());
     process->start(Runner::engine_path(), {QStringLiteral("update-check"), QStringLiteral("--json")});
 }
 

@@ -446,6 +446,20 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
 void check_admin_command(const std::string&, const std::string&) {}
 #endif
 
+std::string elevated_run_refusal(const Job& job, bool automatic) {
+    if (automatic)
+        return "the job \"" + job.name +
+               "\" was started automatically in a program with administrator rights; such runs only start "
+               "without them (Vaultik starts its own that way)";
+    if (!job.before_command.empty() || !job.after_command.empty())
+        return "the job \"" + job.name +
+               "\" runs commands before or after its backup, and those never run with administrator rights from "
+               "your own settings, which any program running as you can change. Run it without administrator "
+               "rights, or turn on \"Run with administrator rights\" for the job, which shows the commands for "
+               "approval";
+    return {};
+}
+
 namespace {
 
 constexpr const char* kSubdirs[] = {"jobs", "secrets", "history"};

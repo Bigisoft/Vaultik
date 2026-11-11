@@ -336,6 +336,35 @@ TEST_CASE("a file changed through its other name (a hard link) is read again") {
     CHECK(read_text(restored(checked, "out2") / "b" / "plain.txt") == "PLAIN, changed through a new name");
 }
 
+TEST_CASE("a program run with the user's own rights runs, writes and returns its exit code") {
+    TempDir tmp;
+    wchar_t system[MAX_PATH];
+    REQUIRE(GetSystemDirectoryW(system, MAX_PATH) > 0);
+    const fs::path cmd = fs::path(system) / L"cmd.exe";
+    const fs::path out = tmp.path / "made.txt";
+    const fs::path groups = tmp.path / "groups.txt";
+    const std::string line = "cmd.exe /d /c \"echo made> \"" + u8(out) + "\" & whoami /groups > \"" + u8(groups) +
+                             "\" & exit 7\"";
+    CHECK(os::run_with_user_rights(u8(cmd), line) == 7);
+    // What it made belongs to the account (it could not have been made with Administrators as owner).
+    CHECK(read_text(out).starts_with("made"));
+    // Never at high integrity, whatever this test runs with.
+    CHECK(read_text(groups).find("High Mandatory Level") == std::string::npos);
+    CHECK_THROWS(os::run_with_user_rights(u8(tmp.path / "missing.exe"), "missing.exe"));
+}
+
+TEST_CASE("an elevated run of a job from the user's settings neither starts on its own nor runs commands") {
+    jobs::Job job;
+    job.name = "Docs";
+    CHECK(jobs::elevated_run_refusal(job, false).empty());
+    CHECK(jobs::elevated_run_refusal(job, true).find("automatically") != std::string::npos);
+    job.before_command = "net user x /add";
+    CHECK(jobs::elevated_run_refusal(job, false).find("commands") != std::string::npos);
+    job.before_command.clear();
+    job.after_command = "C:\\Windows\\System32\\cmd.exe /c exit 0";
+    CHECK(!jobs::elevated_run_refusal(job, false).empty());
+}
+
 TEST_CASE("the approval of a job with administrator rights shows everything that gives it its power") {
     jobs::Job job;
     job.name = "Disks";

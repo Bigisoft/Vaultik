@@ -32,4 +32,14 @@ bool process_elevated();
 // a user can change. Windows only (POSIX: throws).
 std::string program_data_dir();
 
+// Windows: runs `command_line` (the whole line, program name first) of `program` with this
+// process's own token cut down to what an account without administrator rights has: the
+// administrator groups only deny access, every privilege but the few a standard token keeps is
+// removed, and the integrity level is at most medium. It shares this process's console and
+// standard handles, is killed when this process ends, and its exit code is returned. An elevated
+// Vaultik uses it for work a program running as the user could have chosen (a job from the user's
+// own, changeable settings). Throws Error when it cannot start that way; it never falls back to
+// the full rights. Throws on POSIX.
+int run_with_user_rights(const std::string& program, const std::string& command_line);
+
 }  // namespace vaultik::os

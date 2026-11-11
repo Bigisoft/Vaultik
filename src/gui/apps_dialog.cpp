@@ -74,6 +74,7 @@ AppsDialog::AppsDialog(QStringList repo_args, QString snapshot, QString password
     layout->addWidget(buttons);
 
     runner_ = new Runner(this);
+    runner_->keep_administrator_rights();  // work started and shown in this window
     connect(runner_, &Runner::event, this, [this](const QJsonObject& ev) {
         const QString type = ev.value("event").toString();
         if (type == "app" && step_ == Step::Loading) {

@@ -2402,6 +2402,14 @@ int cmd_run_job(const Args& a) {
 
     // The job's own resource settings, unless overridden on the command line.
     const bool on_connect = a.has("--on-connect");
+    // With administrator rights, a job from the user's own settings (which any program running as
+    // the user can change) neither starts on its own nor runs its commands with them.
+    if (!a.has("--admin") && os::process_elevated()) {
+        const bool automatic = on_connect || a.has("--on-event") || a.has("--on-sign-out") || a.has("--on-change") ||
+                               a.has("--on-request");
+        const std::string refusal = jobs::elevated_run_refusal(*job, automatic);
+        if (!refusal.empty()) throw Error(refusal);
+    }
     if (on_connect && !jobs::connect_backup_due(store, *job)) return kExitOk;
     // Started by an event rather than a time: not again soon after a backup.
     std::string trigger = a.has("--on-event") ? "event" : a.has("--on-sign-out") ? "sign-out"
@@ -4108,6 +4116,32 @@ int wmain(int argc, wchar_t** argv) {
     // Libraries loaded later (delay-loaded ones such as the virtual disk library) only from the
     // system folder, never from the program's folder or the current one.
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    // Started by an elevated Vaultik for work a program running as the user could have chosen (a
+    // job from the user's own settings): before reading anything, run again with an ordinary
+    // user's rights, the same command line, and pass its exit code on. Never with the full rights.
+    {
+        wchar_t flag[4] = {};
+        if (GetEnvironmentVariableW(L"VAULTIK_USER_RIGHTS", flag, 4) == 1 && flag[0] == L'1' &&
+            vaultik::os::process_elevated()) {
+            SetEnvironmentVariableW(L"VAULTIK_USER_RIGHTS", L"0");  // the run itself must not try again
+            try {
+                std::wstring self(MAX_PATH, L'\0');
+                for (;;) {
+                    const DWORD n = GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()));
+                    if (n == 0) throw vaultik::Error("cannot find this program's own file");
+                    if (n < self.size()) {
+                        self.resize(n);
+                        break;
+                    }
+                    self.resize(self.size() * 2);
+                }
+                return vaultik::os::run_with_user_rights(vaultik::narrow(self), vaultik::narrow(GetCommandLineW()));
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "%s\n", e.what());
+                return 1;
+            }
+        }
+    }
     // Arguments arrive as UTF-16; everything inside Vaultik is UTF-8.
     std::vector<std::string> args;
     args.reserve(static_cast<std::size_t>(argc));

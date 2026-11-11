@@ -490,8 +490,8 @@ void MainWindow::drives_connected(const QStringList& roots) {
 #endif
             qint64 pid = 0;
             const std::uint64_t started = os::now();
-            if (!QProcess::startDetached(program, {QStringLiteral("run-job"), qs(job.id), QStringLiteral("--on-connect")},
-                                         QString(), &pid))
+            if (!Runner::start_detached(program, {QStringLiteral("run-job"), qs(job.id), QStringLiteral("--on-connect")},
+                                        &pid))
                 continue;
             connect_runs_.push_back({job.id, static_cast<std::uint32_t>(pid), root, started});
             const QString title = tr("Backing up %1").arg(qs(job.name));
@@ -713,6 +713,7 @@ void MainWindow::explore_version(int index) {
         plain_warning(this, tr("Open in Explorer"), error);
     });
     QString program = Runner::engine_path();
+    process->setProcessEnvironment(Runner::engine_environment());
     process->start(program, {QStringLiteral("mount"), QStringLiteral("--job"), qs(job->id), qs(snapshot),
                              QStringLiteral("--json")});
 }
@@ -820,7 +821,7 @@ void MainWindow::check_monthly() {
         // The summary to the phone: sent by the command line, which waits for the network.
         const jobs::AlertSettings alerts = jobs::load_alerts(store_.dir());
         if (alerts.monthly_summary && alerts.any() && !jobs::report_claimed(store_.dir(), "alert", month))
-            QProcess::startDetached(Runner::engine_path(), {QStringLiteral("report"), QStringLiteral("--deliver")});
+            Runner::start_detached(Runner::engine_path(), {QStringLiteral("report"), QStringLiteral("--deliver")});
     } catch (const std::exception&) {
         // the report is a help; try again after the next start
     }
@@ -1955,7 +1956,16 @@ void MainWindow::start_run(const QStringList& args, bool check) {
     progress_text_->setText(tr("Starting..."));
     current_file_->clear();
     set_running(true);
-    runner_->start(args);
+    // In Vaultik started as administrator, a job with administrator rights backs up from its
+    // approved copy (the one its schedule runs, with checked commands) with those rights.
+    // Everything else runs with the user's own rights: the job comes from settings any program
+    // running as the user can change (see Runner::engine_environment).
+    QStringList run_args = args;
+    const bool approved = os::process_elevated() && job->run_as_admin && args.value(0) == QLatin1String("run-job") &&
+                          jobs::has_admin_copy(job->id);
+    if (approved) run_args << QStringLiteral("--admin");
+    runner_->keep_administrator_rights(approved);
+    runner_->start(run_args);
 }
 
 void MainWindow::set_running(bool running) {

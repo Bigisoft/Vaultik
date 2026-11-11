@@ -5,6 +5,8 @@
 #include <QJsonDocument>
 #include <QTimer>
 
+#include "vaultik/platform/acl.hpp"
+
 Runner::Runner(QObject* parent) : QObject(parent) {}
 
 Runner::~Runner() {
@@ -23,6 +25,26 @@ Runner::~Runner() {
         process_->kill();
         process_->waitForFinished(3000);
     }
+}
+
+QProcessEnvironment Runner::engine_environment(bool keep_rights) {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.remove(QStringLiteral("VAULTIK_USER_RIGHTS"));
+#ifdef Q_OS_WIN
+    static const bool elevated = vaultik::os::process_elevated();
+    if (elevated && !keep_rights) env.insert(QStringLiteral("VAULTIK_USER_RIGHTS"), QStringLiteral("1"));
+#else
+    (void)keep_rights;
+#endif
+    return env;
+}
+
+bool Runner::start_detached(const QString& program, const QStringList& args, qint64* pid) {
+    QProcess p;
+    p.setProgram(program);
+    p.setArguments(args);
+    p.setProcessEnvironment(engine_environment());
+    return p.startDetached(pid);
 }
 
 QString Runner::engine_path() {
@@ -58,7 +80,7 @@ void Runner::start(const QStringList& args, const QString& password, const vault
             emit finished(QStringLiteral("failed"), ev);
         }
     });
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    QProcessEnvironment env = engine_environment(keep_rights_);
     env.remove(QStringLiteral("VAULTIK_PASSWORD"));
     if (!password.isEmpty()) env.insert(QStringLiteral("VAULTIK_PASSWORD"), password);
     for (const char* name : {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION",

@@ -251,6 +251,7 @@ void EventRuns::poll_requests() {
             }
         }
     });
+    process->setProcessEnvironment(Runner::engine_environment());
     process->start(Runner::engine_path(), args);
 }
 
@@ -322,7 +323,9 @@ bool EventRuns::start(const jobs::Job& job, const QString& flag, bool sign_out) 
     program = QFileInfo(program).dir().filePath(QStringLiteral("vaultik-task.exe"));
 #endif
     qint64 pid = 0;
-    if (!QProcess::startDetached(program, {QStringLiteral("run-job"), qs(job.id), flag}, QString(), &pid)) return false;
+    // With the user's own rights, also in Vaultik started as administrator (see
+    // Runner::engine_environment): nobody approved what the job does.
+    if (!Runner::start_detached(program, {QStringLiteral("run-job"), qs(job.id), flag}, &pid)) return false;
     runs_.push_back({job.id, static_cast<std::uint32_t>(pid), sign_out});
     if (!poll_->isActive()) poll_->start();
     return true;
