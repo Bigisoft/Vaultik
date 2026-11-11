@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <shellapi.h>  // CommandLineToArgvW
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <QLocalServer>
@@ -201,22 +202,49 @@ QString history_argument(int argc, char** argv) {
     return {};
 }
 
+// A folder only this account can use: owned by it, a real folder (not a link), closed to others.
+bool private_folder(const std::string& path) {
+    struct stat st{};
+    return !path.empty() && path.front() == '/' && ::lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode) &&
+           st.st_uid == ::getuid() && (st.st_mode & 077) == 0;
+}
+
 // One Vaultik per user and settings folder, through a local socket in the user's runtime folder:
 // a second start sends "show" or "history <path>" to the first and ends. A copy with other
 // settings (portable, or VAULTIK_CONFIG_DIR) gets another name and so runs on its own.
+// An absolute path: a bare name would put the socket in /tmp, where another account could make
+// one with that name first (then this one cannot listen, and a second start would hand its
+// request to that account's program). $XDG_RUNTIME_DIR is the account's own 0700 folder; without
+// it, a 0700 folder in the home folder. Empty when there is neither (no single instance then).
 QString instance_name() {
     std::uint64_t h = 1469598103934665603ull;  // FNV-1a of the settings folder
     for (const char c : vaultik::jobs::config_dir()) {
         h ^= static_cast<unsigned char>(c);
         h *= 1099511628211ull;
     }
-    return QStringLiteral("vaultik-gui-%1-%2").arg(::getuid()).arg(h, 16, 16, QLatin1Char('0'));
+    const QString name = QStringLiteral("vaultik-gui-%1.sock").arg(h, 16, 16, QLatin1Char('0'));
+    std::string dir = vaultik::os::get_env("XDG_RUNTIME_DIR");
+    if (!private_folder(dir)) {
+        dir.clear();
+        if (const std::string home = vaultik::os::user_folder(vaultik::os::UserFolder::Profile); !home.empty()) {
+            try {
+                const std::string run = vaultik::os::join(vaultik::os::join(home, ".cache"), "vaultik");
+                vaultik::os::make_private_dirs(run);
+                if (private_folder(run)) dir = run;
+            } catch (const vaultik::Error&) {
+            }
+        }
+    }
+    if (dir.empty()) return {};
+    return QString::fromLocal8Bit(dir.c_str()) + QLatin1Char('/') + name;
 }
 
 // True when another instance took the request (this one should end).
 bool hand_to_running(const QString& history, bool tray) {
+    const QString name = instance_name();
+    if (name.isEmpty()) return false;
     QLocalSocket socket;
-    socket.connectToServer(instance_name());
+    socket.connectToServer(name);
     if (!socket.waitForConnected(1000)) return false;
     const QByteArray line = !history.isEmpty() ? "history " + history.toUtf8() + "\n" : tray ? QByteArray("tray\n")
                                                                                               : QByteArray("show\n");
@@ -228,10 +256,12 @@ bool hand_to_running(const QString& history, bool tray) {
 
 // Listens for later starts; the server is owned by `window`.
 void listen_for_starts(MainWindow& window) {
+    const QString name = instance_name();
+    if (name.isEmpty()) return;
     auto* server = new QLocalServer(&window);
     server->setSocketOptions(QLocalServer::UserAccessOption);  // only this account can connect
-    QLocalServer::removeServer(instance_name());               // left behind by a crash
-    if (!server->listen(instance_name())) return;
+    QLocalServer::removeServer(name);                          // left behind by a crash
+    if (!server->listen(name)) return;
     QObject::connect(server, &QLocalServer::newConnection, &window, [server, &window] {
         while (QLocalSocket* client = server->nextPendingConnection()) {
             QObject::connect(client, &QLocalSocket::disconnected, client, &QObject::deleteLater);
