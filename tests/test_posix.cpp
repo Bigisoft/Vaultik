@@ -81,8 +81,14 @@ TEST_CASE("POSIX: modes without owner read are restored, mode 0 only for Linux n
     os::set_metadata(p, info);
     REQUIRE(os::stat(p, back, err));
     CHECK(back.mode == 0200);
-    // Mode 0 from Linux (attributes 0) is a real mode.
+    // No attributes and no times: a folder a backup put above its sources, never read; it keeps
+    // its permissions.
     info.attributes = 0;
+    os::set_metadata(p, info);
+    REQUIRE(os::stat(p, back, err));
+    CHECK(back.mode == 0200);
+    // Mode 0 from Linux (attributes 0, with its times) is a real mode.
+    info.mtime = os::now();
     os::set_metadata(p, info);
     REQUIRE(os::stat(p, back, err));
     CHECK(back.mode == 0);

@@ -448,8 +448,9 @@ void set_metadata(const std::string& path, const FileInfo& info) {
         (void)::lchown(path.c_str(), static_cast<uid_t>(info.uid), static_cast<gid_t>(info.gid));
     // Mode 0 with Windows attributes comes from a snapshot made on Windows, which has no
     // permissions to restore (the file keeps the umask default); with attributes 0 it is a real
-    // mode 0 from Linux.
-    if (!link && (info.mode != 0 || info.attributes == 0)) {
+    // mode 0 from Linux, unless the entry has no times either: then it is one of the folders a
+    // backup puts above its sources, which were never read and carry no metadata.
+    if (!link && (info.mode != 0 || (info.attributes == 0 && (info.mtime != 0 || info.ctime != 0)))) {
         // Through an O_PATH descriptor opened without following links, so a path swapped for a
         // link cannot redirect the change. O_PATH needs no read access (a file restored with mode
         // 0200 could not be opened for reading) and never opens a pipe. fchmod does not take an

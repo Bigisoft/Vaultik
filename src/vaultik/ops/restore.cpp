@@ -41,9 +41,11 @@ std::optional<os::EntryType> entry_type(const std::string& path) {
 
 // Whether the node carries POSIX permissions. Nodes made on Windows have mode 0 and Windows
 // attributes (never 0 there: a plain file is FILE_ATTRIBUTE_NORMAL or ARCHIVE); a node made on
-// Linux has attributes 0, so its mode counts even when it is 0 (chmod 000).
+// Linux has attributes 0, so its mode counts even when it is 0 (chmod 000). The folders a backup
+// puts above its sources (the path down to them) were never read and carry no metadata at all,
+// not even times: they get the usual permissions, not mode 000.
 bool has_posix_mode(const Node& node) {
-    return node.mode != 0 || node.attributes == 0;
+    return node.mode != 0 || (node.attributes == 0 && (node.mtime != 0 || node.ctime != 0));
 }
 
 os::FileInfo info_of(const Node& node) {
