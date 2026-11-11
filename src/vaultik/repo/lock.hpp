@@ -40,11 +40,16 @@ constexpr std::uint64_t kTicksPerMinute = 60ull * 10'000'000ull;
 constexpr std::uint64_t kLockRefreshTicks = 5 * kTicksPerMinute;
 // Not refreshed for this long: the holder is gone.
 constexpr std::uint64_t kLockStaleTicks = 30 * kTicksPerMinute;
+// The same for another computer's lock. Its time comes from that computer's clock and is judged
+// by this one's, so the two may differ: a computer whose clock runs ahead would otherwise take a
+// live lock for stale and remove it. This much difference is tolerated.
+constexpr std::uint64_t kLockStaleOtherTicks = 2 * 60 * kTicksPerMinute;
 
 Bytes serialize_lock(const LockInfo& info);
 LockInfo parse_lock(ByteSpan data);
 
-// Stale: not refreshed for kLockStaleTicks, or held by a process on this computer that has ended.
+// Stale: held by a process on this computer that has ended or did not refresh it for
+// kLockStaleTicks, or held by another computer that did not refresh it for kLockStaleOtherTicks.
 bool is_stale(const LockInfo& info, std::uint64_t now);
 
 // "shared lock by backup (me@PC, process 1234, refreshed 2026-11-09 10:00:00)"

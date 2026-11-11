@@ -892,8 +892,9 @@ changed ones; a program without administrator rights cannot answer that window f
 Backups, restores and checks of the same repository can run at the same time, also from several
 computers. `forget` and `prune` need the repository to themselves: they wait for nothing by
 default and stop with exit code 5 when another run is active (`--lock-wait 10m` waits instead;
-scheduled jobs wait up to 10 minutes). A run that crashes leaves a lock behind that expires after
-30 minutes, or at once on the same computer; `vaultik unlock` removes expired locks and
+scheduled jobs wait up to 10 minutes). A run that crashes leaves a lock behind that expires at once
+on the same computer and after 2 hours for the other computers (a computer whose clock runs ahead
+cannot take a live lock for an old one); `vaultik unlock` removes expired locks and
 `vaultik unlock --all` every lock.
 
 ## Resource use

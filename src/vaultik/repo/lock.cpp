@@ -99,8 +99,10 @@ LockInfo parse_lock(ByteSpan data) {
 }
 
 bool is_stale(const LockInfo& info, std::uint64_t now) {
-    if (now > info.time && now - info.time > kLockStaleTicks) return true;
-    return info.hostname == os::hostname() && !os::process_alive(info.pid);
+    const bool here = info.hostname == os::hostname();
+    const std::uint64_t limit = here ? kLockStaleTicks : kLockStaleOtherTicks;
+    if (now > info.time && now - info.time > limit) return true;
+    return here && !os::process_alive(info.pid);
 }
 
 std::string describe(const LockInfo& info) {

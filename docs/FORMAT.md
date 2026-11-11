@@ -338,11 +338,16 @@ username    string
 command     string  "backup", "prune", ...
 ```
 
-Backup, restore, ls and verify take a shared lock; forget and prune take an exclusive one,
-because they delete objects. A run writes its own lock first and then lists the others; on a
+Backup, restore, ls, verify, a second copy (on both repositories), the repair data setting and
+the other reading commands take a shared lock; forget, prune and repair take an exclusive one,
+because they delete or replace objects. A run writes its own lock first and then lists the others; on a
 conflict it removes its lock again and waits or gives up. Holders rewrite their lock every 5
-minutes. A lock not refreshed for 30 minutes, or held by a process that no longer runs on the
-same computer, is stale: it is ignored and deleted by whoever finds it.
+minutes. A lock is stale when it is held by a process that no longer runs on the same computer,
+when a lock of the same computer was not refreshed for 30 minutes, or when another computer's
+lock was not refreshed for 2 hours (its time is that computer's clock, judged by the reader's, so
+clocks up to about an hour and a half apart cannot remove each other's live locks). A stale lock
+is ignored and deleted by whoever finds it. Whether a lock is still there is asked of the storage
+itself, never answered from a listing the run made earlier (Google Drive, MEGA).
 
 ## Status records
 

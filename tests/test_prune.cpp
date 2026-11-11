@@ -157,12 +157,23 @@ TEST_CASE("repository locks") {
         CHECK_THROWS_AS(RepoLock(*repo, RepoLock::Mode::Shared, "backup"), LockedError);
     }
 
+    // Another computer's lock is judged by this computer's clock: an hour without a refresh can
+    // be a clock running ahead here, so only a much older one is stale.
+    LockInfo ahead;
+    ahead.hostname = "other-pc";
+    ahead.time = os::now() - 60 * kTicksPerMinute;
+    CHECK_FALSE(is_stale(ahead, os::now()));
+    LockInfo mine = ahead;
+    mine.hostname = os::hostname();
+    mine.pid = os::process_id();
+    CHECK(is_stale(mine, os::now()));  // this computer's own clock: stale after 30 minutes
+
     // A lock not refreshed for longer than the stale time, and one of a process that has ended,
     // are ignored and cleaned up.
     LockInfo old;
     old.hostname = "other-pc";
     old.command = "backup";
-    old.time = os::now() - kLockStaleTicks - kTicksPerMinute;
+    old.time = os::now() - kLockStaleOtherTicks - kTicksPerMinute;
     write_lock(*repo, "locks/" + id_hex(random_id()), old);
     LockInfo dead;
     dead.hostname = os::hostname();
