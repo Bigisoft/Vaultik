@@ -235,6 +235,8 @@ Commands:
                                without what was lost (use --job <job> or -r)
       --quick                  Trust the packs' own headers; read no chunks
       --dry-run                Only show what would be done
+      --accept-missing-packs   Go on when over a tenth of the indexed packs are
+                               gone (otherwise it stops: wrong destination?)
   move-here [<snapshot>]       Move to this PC: put an old computer's Documents,
                                Desktop, pictures, browser profiles, email and game
                                saves from the backup into this account's folders
@@ -430,7 +432,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -2748,6 +2750,7 @@ int cmd_repair(const Args& a) {
     RepairOptions o;
     o.quick = a.has("--quick");
     o.dry_run = a.has("--dry-run");
+    o.accept_missing_packs = a.has("--accept-missing-packs");
     auto repo = open_repo(a, false);
     RepoLock lock(*repo, RepoLock::Mode::Exclusive, "repair", lock_wait(a));
     o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
@@ -2764,6 +2767,7 @@ int cmd_repair(const Args& a) {
     std::string summary = std::to_string(r.blobs) + " intact chunk(s) in " + std::to_string(r.packs) + " pack(s)";
     if (r.packs_rebuilt) summary += ", " + std::to_string(r.packs_rebuilt) + " damaged pack(s) rebuilt from repair data";
     if (r.packs_unreadable) summary += ", " + std::to_string(r.packs_unreadable) + " pack(s) unreadable";
+    if (r.packs_missing) summary += ", " + std::to_string(r.packs_missing) + " pack(s) missing";
     if (r.blobs_damaged) summary += ", " + std::to_string(r.blobs_damaged) + " damaged chunk(s)";
     summary += "; " + std::to_string(r.snapshots) + " version(s)";
     if (r.snapshots_repaired)
@@ -2773,7 +2777,8 @@ int cmd_repair(const Args& a) {
     if (!r.changed()) summary += "; nothing was damaged";
     if (g_json) {
         emit({{"event", "done"}, {"status", "success"}, {"dry_run", o.dry_run}, {"packs", r.packs},
-              {"packs_unreadable", r.packs_unreadable}, {"packs_rebuilt", r.packs_rebuilt}, {"blobs", r.blobs},
+              {"packs_unreadable", r.packs_unreadable}, {"packs_rebuilt", r.packs_rebuilt},
+              {"packs_missing", r.packs_missing}, {"blobs", r.blobs},
               {"blobs_damaged", r.blobs_damaged},
               {"snapshots", r.snapshots}, {"snapshots_repaired", r.snapshots_repaired},
               {"snapshots_removed", r.snapshots_removed}, {"files_lost", r.files_lost},

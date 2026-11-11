@@ -6,6 +6,8 @@
 //
 //   1. Read every pack's own header (and, unless `quick`, decrypt and check every blob in it)
 //      and build the index from what is intact; packs that cannot be read stay where they are.
+//      A pack the old index lists but the listing does not show is checked directly first; when
+//      more than a tenth of them are gone the repair stops unless `accept_missing_packs`.
 //   2. Write fresh index files for it, then delete all the old ones.
 //   3. Check every version: one whose manifest cannot be read is deleted (it cannot be opened
 //      anyway). In the others, files whose data is gone and folders whose listing is gone are
@@ -24,6 +26,9 @@ namespace vaultik {
 struct RepairOptions {
     bool quick = false;    // trust the pack headers; do not read every blob
     bool dry_run = false;  // report what would be done, change nothing
+    // Go on when more than a tenth of the packs the index lists are missing (see
+    // too_many_missing_packs); without it the repair stops, as the storage is more likely at fault.
+    bool accept_missing_packs = false;
     std::function<void(const std::string&)> on_progress;
     std::function<void(const std::string&)> on_warning;  // each problem found, as it is found
     std::function<bool()> should_cancel;                 // checked while reading (before any change)
@@ -33,6 +38,7 @@ struct RepairResult {
     std::uint64_t packs = 0;
     std::uint64_t packs_unreadable = 0;
     std::uint64_t packs_rebuilt = 0;  // damaged, but rebuilt whole from their repair data
+    std::uint64_t packs_missing = 0;  // listed in the old index, gone from the storage
     std::uint64_t blobs = 0;          // intact blobs indexed
     std::uint64_t blobs_damaged = 0;  // blobs that failed their check (left out of the index)
     std::uint64_t index_files_replaced = 0;
@@ -42,7 +48,7 @@ struct RepairResult {
     std::uint64_t files_lost = 0;          // left out of the repaired versions (counted per version)
     std::uint64_t folders_lost = 0;
     bool changed() const {
-        return blobs_damaged > 0 || packs_unreadable > 0 || packs_rebuilt > 0 || snapshots_removed > 0 ||
+        return blobs_damaged > 0 || packs_unreadable > 0 || packs_rebuilt > 0 || packs_missing > 0 || snapshots_removed > 0 ||
                snapshots_repaired > 0;
     }
 };

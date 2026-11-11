@@ -298,6 +298,24 @@ std::size_t remove_snapshots(Repository& repo, const std::vector<SnapshotRecord>
     return n;
 }
 
+std::vector<std::string> confirm_missing_packs(Backend& backend, const std::vector<std::string>& indexed,
+                                               std::unordered_set<std::string>& listed) {
+    std::vector<std::string> missing;
+    for (const std::string& name : indexed) {
+        if (listed.contains(name)) continue;
+        if (backend.exists_now(name)) {
+            listed.insert(name);
+        } else {
+            missing.push_back(name);
+        }
+    }
+    return missing;
+}
+
+bool too_many_missing_packs(std::size_t missing, std::size_t indexed) {
+    return missing > 1 && missing * 10 > indexed;
+}
+
 PruneResult run_prune(Repository& repo, const PruneOptions& o) {
     auto progress = [&](const std::string& m) {
         if (o.on_progress) o.on_progress(m);
@@ -324,6 +342,16 @@ PruneResult run_prune(Repository& repo, const PruneOptions& o) {
     }
     std::unordered_set<std::string> stored;
     for (const std::string& name : backend.list("data")) stored.insert(name);
+    {
+        std::vector<std::string> indexed_names;
+        for (const auto& entry : packs) indexed_names.push_back(Repository::pack_name(entry.first));
+        const std::vector<std::string> missing = confirm_missing_packs(backend, indexed_names, stored);
+        if (too_many_missing_packs(missing.size(), indexed_names.size()))
+            throw Error(std::to_string(missing.size()) + " of the " + std::to_string(indexed_names.size()) +
+                        " packs the index lists are missing from " + backend.location() +
+                        "; nothing was deleted. Check that this is the right destination and that it can be read; "
+                        "if the data is really gone, run vaultik repair --accept-missing-packs first");
+    }
 
     // Packs no index lists: normally left by cancelled or failed backups (no run holds a lock
     // now), but an index file may also have been lost. Each pack describes itself, so read its

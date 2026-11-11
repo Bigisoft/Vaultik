@@ -416,7 +416,12 @@ snapshot or folder listing cannot be read; (2) write new packs with the blobs st
 packs that are mostly unused (sealed blobs are copied as they are, after authenticating them);
 (3) write fresh index files for every pack that stays; (4) delete the old index files; (5) delete
 the packs nothing uses any more. Packs that no index file lists are read through their own
-header: kept and indexed again if they hold blobs in use, deleted otherwise.
+header: kept and indexed again if they hold blobs in use, deleted otherwise. A pack an index file
+lists but the listing of `data/` does not show is checked directly (a listing can come back short);
+when it is really gone it is left out of the new index files (its blobs are lost, which `vaultik
+verify` reports and a repair cleans up). When more than one, and more than a tenth, of the indexed
+packs are gone, prune stops without changing anything: the destination is more likely wrong or
+unreadable than the data lost.
 
 ## Repair
 
@@ -424,7 +429,9 @@ Repair (`vaultik repair`) holds the exclusive lock and opens the repository with
 index files. In this order, so a crash at any point leaves a repository that opens: (1) read
 every pack's header and (unless `--quick`) decode and hash-check every blob; the first intact
 copy of each blob goes into the new index, packs that cannot be read are left in place and not
-indexed; (2) write new index files for that index, then delete every old index file; (3) delete
+indexed. A pack the old index files list but the listing does not show is checked directly first;
+when more than one, and more than a tenth, of them are gone, repair stops without changing
+anything unless it is run with `--accept-missing-packs`; (2) write new index files for that index, then delete every old index file; (3) delete
 snapshot files that cannot be opened or whose root tree is lost; for the others, rewrite every
 tree that references a lost blob (dropping the file nodes whose chunks are missing and the
 directory nodes whose tree is missing), save the snapshot again with the new root tree and a note
