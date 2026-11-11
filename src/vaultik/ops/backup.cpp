@@ -1087,10 +1087,22 @@ bool BackupEngine::scan_extra(const ExtraSource& x, Node& node, const Node* pnod
     }
     const std::string name = node.name;
     node = node_from_info(info, name);
-    // The change journal only knows the job's own folders.
+    // The change journal only knows the job's own folders. The exclusions are for those folders
+    // too: the folder is stored whole (it is an export, kept out of the folders by excluding the
+    // staging area, which would otherwise also empty it here).
     const bool journal = use_journal_;
     use_journal_ = false;
-    const bool ok = scan_entry(x.folder, info, info.device, node, pnode);
+    Excluder excluder({});
+    std::swap(excluder, excluder_);
+    bool ok = false;
+    try {
+        ok = scan_entry(x.folder, info, info.device, node, pnode);
+    } catch (...) {
+        std::swap(excluder, excluder_);
+        use_journal_ = journal;
+        throw;
+    }
+    std::swap(excluder, excluder_);
     use_journal_ = journal;
     return ok;
 }

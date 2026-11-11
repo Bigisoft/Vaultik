@@ -313,6 +313,9 @@ TEST_CASE("streams and folders are backed up at their own places") {
     o.on_warning = [&](const std::string& w) { warnings.push_back(w); };
     o.skip_unchanged = true;
     o.tags = {"job:vms"};
+    // As run-job sets it: the staging area is kept out of the job's folders, but not out of the
+    // exported folder stored from it.
+    o.excludes = {u8(tmp.path / "staging") + std::string(1, vaultik::os::kSeparator) + "*"};
 
     const BackupResult first = run_backup(*repo, o);
     CHECK(first.snapshot.paths.empty());
