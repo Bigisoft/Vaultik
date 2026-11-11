@@ -101,7 +101,9 @@ std::string unit_quote(const std::string& s) {
     return out + "\"";
 }
 
-// A job name as a unit Description: one line, specifiers escaped.
+// A job name as a unit Description: one line, specifiers escaped. A backslash at the end of a
+// line continues it onto the next in a unit file (the next line would become part of the
+// Description), so trailing backslashes become slashes.
 std::string unit_text(const std::string& s) {
     std::string out;
     for (const char c : s) {
@@ -110,6 +112,8 @@ std::string unit_text(const std::string& s) {
         else if (c == '%') out += "%%";
         else out.push_back(c);
     }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    for (auto it = out.rbegin(); it != out.rend() && *it == '\\'; ++it) *it = '/';
     return out;
 }
 
@@ -524,7 +528,10 @@ void remove_schedule(const std::string& job_id) {
 void apply_schedule(const Job& job, const std::string& program_dir) {
     const std::string dir = unit_dir();
     const std::string base = "vaultik-" + job.id;
-    if (!has_system_schedule(job.schedule)) {
+    // Idle, lock and update triggers are Windows events (a job made there may carry them); on
+    // Linux only the time schedule makes a timer, and a Manual job has none (an empty
+    // OnCalendar= would make systemd refuse the timer).
+    if (!has_system_schedule(job.schedule) || job.schedule.kind == Schedule::Kind::Manual) {
         remove_schedule(job.id);
         return;
     }
