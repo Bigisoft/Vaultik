@@ -49,6 +49,7 @@ RecoveryFile parse_recovery(ByteSpan data, const RepoConfig& config) {
     RecoveryFile f;
     f.iterations = r.u32();
     if (f.iterations < 1000) throw Error("recovery key derivation is too weak");
+    if (f.iterations > kMaxKdfIterations) throw Error("malformed recovery key file (key derivation too slow)");
     r.raw_into(f.salt);
     const std::uint32_t len = r.u32();
     if (len != kWrappedSize) throw Error("malformed recovery key file");

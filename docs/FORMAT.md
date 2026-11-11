@@ -63,7 +63,7 @@ key replaces the file.
 magic            8 bytes  "VKRECOV\0"
 version          u32      1
 repo_id          16 bytes the repo_id from config
-iterations       u32      100000
+iterations       u32      100000; 1000 to 20000000, others are refused
 salt             32 bytes
 --- end of header (AAD) ---
 wrapped_len      u32      92
@@ -80,7 +80,7 @@ magic            8 bytes  "VAULTIK\0"
 version          u32      1
 repo_id          16 bytes random
 kdf              u32      1 = PBKDF2-HMAC-SHA256
-kdf_iterations   u32      default 600000
+kdf_iterations   u32      default 600000; 1000 to 20000000, others are refused
 salt             32 bytes
 chunk_min        u32      default 262144   (256 KiB)
 chunk_avg        u32      default 1048576  (1 MiB, power of two)

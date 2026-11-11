@@ -47,6 +47,7 @@ RepoConfig parse_config(ByteSpan data) {
     if (c.kdf != kKdfPbkdf2Sha256) throw Error("unsupported key derivation function");
     c.kdf_iterations = r.u32();
     if (c.kdf_iterations < kMinIterations) throw Error("repository key derivation is too weak");
+    if (c.kdf_iterations > kMaxKdfIterations) throw Error("malformed repository config (key derivation too slow)");
     r.raw_into(c.salt);
     c.chunker.min_size = r.u32();
     c.chunker.avg_size = r.u32();
