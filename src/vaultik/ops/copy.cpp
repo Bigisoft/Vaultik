@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/backup.hpp"  // Cancelled
@@ -11,38 +12,93 @@ namespace vaultik {
 
 namespace {
 
-constexpr char kMapMagic[8] = {'V', 'K', 'C', 'O', 'P', 'Y', '0', '1'};
+constexpr char kMapMagicV1[8] = {'V', 'K', 'C', 'O', 'P', 'Y', '0', '1'};
+constexpr char kMapMagic[8] = {'V', 'K', 'C', 'O', 'P', 'Y', '0', '2'};
 
 using IdMap = std::unordered_map<Id, Id, IdHash>;
 
-// The map file: the magic, then pairs of ids (from, to). A damaged or foreign file is ignored.
-IdMap load_map(const std::string& path) {
-    IdMap map;
+// Which stored item became which in the target. A mapped data blob stands for itself only and is
+// checked against the target's index before use. A mapped folder listing stands for everything
+// below it, which only holds while the target has lost nothing since: a prune keeps folder
+// listings no version uses in the packs it keeps while it deletes the packs with their files'
+// data, and a repair indexes listings whose data is gone. Both replace every index file, so the
+// folder listings are trusted only while every index file the target had when the map was saved
+// is still there.
+struct CopyMap {
+    IdMap data;
+    IdMap trees;
+    std::vector<std::string> index_files;  // the target's, when the map was saved
+};
+
+void put_u32(Bytes& out, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+}
+
+// The map file (version 2): the magic; the number of index file names, each as a 4-byte length
+// and its bytes; the number of folder listing pairs; those pairs (from, to); then the data blob
+// pairs up to the end. Version 1 (the magic, then pairs of any kind) is read as data pairs only.
+// A damaged or foreign file is ignored.
+CopyMap load_map(const std::string& path) {
+    CopyMap map;
     if (path.empty()) return map;
     try {
         const Bytes data = os::read_file(path, 1u << 30);
-        if (data.size() < sizeof kMapMagic || !std::equal(kMapMagic, kMapMagic + sizeof kMapMagic, data.begin()) ||
-            (data.size() - sizeof kMapMagic) % 64 != 0)
+        if (data.size() < 8) return map;
+        std::size_t at = 8;
+        const auto read_pairs = [&](IdMap& into, std::size_t count) {
+            for (std::size_t i = 0; i < count; ++i, at += 64) {
+                Id from{}, to{};
+                std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(at), 32, from.begin());
+                std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(at + 32), 32, to.begin());
+                into.emplace(from, to);
+            }
+        };
+        if (std::equal(kMapMagicV1, kMapMagicV1 + 8, data.begin())) {
+            if ((data.size() - at) % 64 != 0) return map;
+            read_pairs(map.data, (data.size() - at) / 64);
             return map;
-        for (std::size_t at = sizeof kMapMagic; at < data.size(); at += 64) {
-            Id from{}, to{};
-            std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(at), 32, from.begin());
-            std::copy_n(data.begin() + static_cast<std::ptrdiff_t>(at + 32), 32, to.begin());
-            map.emplace(from, to);
         }
+        if (!std::equal(kMapMagic, kMapMagic + 8, data.begin())) return map;
+        const auto u32 = [&]() -> std::uint32_t {
+            if (data.size() - at < 4) throw Error("short copy map");
+            std::uint32_t v = 0;
+            for (int i = 0; i < 4; ++i) v |= std::uint32_t{data[at + static_cast<std::size_t>(i)]} << (8 * i);
+            at += 4;
+            return v;
+        };
+        CopyMap read;
+        const std::uint32_t names = u32();
+        for (std::uint32_t i = 0; i < names; ++i) {
+            const std::uint32_t len = u32();
+            if (data.size() - at < len) return map;
+            read.index_files.emplace_back(reinterpret_cast<const char*>(data.data() + at), len);
+            at += len;
+        }
+        const std::uint32_t trees = u32();
+        if ((data.size() - at) / 64 < trees || (data.size() - at) % 64 != 0) return map;
+        read_pairs(read.trees, trees);
+        read_pairs(read.data, (data.size() - at) / 64);
+        map = std::move(read);
     } catch (const Error&) {
     }
     return map;
 }
 
-void save_map(const std::string& path, const IdMap& map) {
+void save_map(const std::string& path, const CopyMap& map) {
     if (path.empty()) return;
     Bytes data(kMapMagic, kMapMagic + sizeof kMapMagic);
-    data.reserve(data.size() + map.size() * 64);
-    for (const auto& [from, to] : map) {
-        data.insert(data.end(), from.begin(), from.end());
-        data.insert(data.end(), to.begin(), to.end());
+    data.reserve(data.size() + (map.data.size() + map.trees.size()) * 64 + map.index_files.size() * 80 + 8);
+    put_u32(data, static_cast<std::uint32_t>(map.index_files.size()));
+    for (const std::string& name : map.index_files) {
+        put_u32(data, static_cast<std::uint32_t>(name.size()));
+        data.insert(data.end(), name.begin(), name.end());
     }
+    put_u32(data, static_cast<std::uint32_t>(map.trees.size()));
+    for (const IdMap* part : {&map.trees, &map.data})
+        for (const auto& [from, to] : *part) {
+            data.insert(data.end(), from.begin(), from.end());
+            data.insert(data.end(), to.begin(), to.end());
+        }
     os::make_dirs(os::parent_of(path));
     os::write_file_atomic(path, data, 0600);
 }
@@ -52,7 +108,25 @@ public:
     Copier(Repository& from, Repository& to, const CopyOptions& options)
         : from_(from), to_(to), options_(options), map_(load_map(options.map_file)) {}
 
+    // Saves the map with the target's index files as they are now (everything copied so far is
+    // flushed, so their blobs are in them).
+    void save() {
+        if (options_.map_file.empty()) return;
+        map_.index_files = to_.list_index_files();
+        save_map(options_.map_file, map_);
+    }
+
     CopyResult run() {
+        // The target lost or rearranged data since the map was saved (prune, repair): its folder
+        // listings may stand for data that is gone, so every folder is walked again (each data
+        // blob is still checked on its own, so only what is missing is read and stored).
+        if (!map_.trees.empty()) {
+            const std::vector<std::string> now = to_.list_index_files();
+            const std::unordered_set<std::string> present(now.begin(), now.end());
+            if (map_.index_files.empty() || !std::all_of(map_.index_files.begin(), map_.index_files.end(),
+                                                         [&](const std::string& n) { return present.contains(n); }))
+                map_.trees.clear();
+        }
         // The snapshots to copy, oldest first, so a copy's parent is copied before it.
         struct Entry {
             Id id;
@@ -114,9 +188,9 @@ public:
             const Id copy_id = to_.save_snapshot(copy);
             copies.emplace(e.id, copy_id);
             ++result_.copied;
-            save_map(options_.map_file, map_);  // progress survives a later failure
+            save();  // progress survives a later failure
         }
-        save_map(options_.map_file, map_);
+        save();
         return result_;
     }
 
@@ -126,28 +200,28 @@ private:
     }
 
     // A mapped item the target still has (a prune may have removed it since).
-    bool mapped(const Id& from, Id& to) const {
-        const auto it = map_.find(from);
-        if (it == map_.end() || !to_.has_blob(it->second)) return false;
+    bool mapped(const IdMap& map, const Id& from, Id& to) const {
+        const auto it = map.find(from);
+        if (it == map.end() || !to_.has_blob(it->second)) return false;
         to = it->second;
         return true;
     }
 
     Id copy_blob(BlobType type, const Id& id) {
         Id out{};
-        if (mapped(id, out)) return out;
+        if (mapped(map_.data, id, out)) return out;
         const Bytes plain = from_.load_blob(type, id);
         if (to_.save_blob(type, plain, out)) {
             ++result_.blobs;
             result_.bytes += plain.size();
         }
-        map_[id] = out;
+        map_.data[id] = out;
         return out;
     }
 
     Id copy_tree(const Id& id, const std::string& path) {
         Id out{};
-        if (mapped(id, out)) return out;  // the whole folder is already there
+        if (mapped(map_.trees, id, out)) return out;  // the whole folder is already there
         Tree tree = parse_tree(from_.load_blob(BlobType::Tree, id));
         for (Node& node : tree.nodes) {
             check_cancel();
@@ -168,14 +242,14 @@ private:
             ++result_.blobs;
             result_.bytes += serialized.size();
         }
-        map_[id] = out;
+        map_.trees[id] = out;
         return out;
     }
 
     Repository& from_;
     Repository& to_;
     const CopyOptions& options_;
-    IdMap map_;
+    CopyMap map_;
     CopyResult result_;
     std::string label_;
 };
