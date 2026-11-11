@@ -25,6 +25,7 @@
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/repository.hpp"
 #include "vaultik/util/hex.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 
 #ifdef _WIN32
@@ -1154,13 +1155,15 @@ TEST_CASE("several readers make the same snapshot as one") {
 
 #ifdef _WIN32
     // Held open without sharing, so the backup cannot open it (the same for every reader count).
+    // With administrator rights (as on GitHub's runners) the backup privilege opens it anyway.
     int locked_fd = -1;
     REQUIRE(_wsopen_s(&locked_fd, (src / "locked.bin").c_str(), _O_RDONLY | _O_BINARY, _SH_DENYRW, 0) == 0);
     struct CloseFd {
         int fd;
         ~CloseFd() { _close(fd); }
     } close_locked{locked_fd};
-    const std::uint64_t expected_errors = 2;
+    const bool locked_unreadable = !os::process_elevated();
+    const std::uint64_t expected_errors = locked_unreadable ? 2 : 1;
 #else
     const std::uint64_t expected_errors = 1;
 #endif
@@ -1241,7 +1244,7 @@ TEST_CASE("several readers make the same snapshot as one") {
     std::map<std::string, Bytes> expected = snapshot_of_dir(src);
     expected.erase("gone.bin");
 #ifdef _WIN32
-    expected.erase("locked.bin");
+    if (locked_unreadable) expected.erase("locked.bin");
 #endif
     CHECK(snapshot_of_dir(restored_location(out, src)) == expected);
 
