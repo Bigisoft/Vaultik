@@ -95,6 +95,8 @@ HWND instance_window(const wchar_t* prop_base) {
 // program folder is not protected, so the task could not exist anyway.
 bool wants_elevation() {
     if (vaultik::jobs::is_portable()) return false;
+    // Another settings folder: the elevated copy would open the usual one instead.
+    if (!vaultik::os::get_env("VAULTIK_CONFIG_DIR").empty()) return false;
     const QSettings s(QSettings::NativeFormat, QSettings::UserScope, QStringLiteral("Vaultik"), QStringLiteral("Vaultik"));
     return s.value(QStringLiteral("startup/admin"), false).toBool();
 }
