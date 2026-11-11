@@ -1071,9 +1071,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
 8. Linux port, SteamOS on the Steam Deck first (in progress). The review's hazards are fixed or
    decided (docs/LINUX_PORT.md); the cloud code has a libcurl client and the browser sign-in,
    drives are tracked by file system UUID, and the frontend has its Linux parts (single instance,
-   autostart, drive watcher, inotify for continuous backups). Still to do: build and run the
-   tests on Linux, the command line end to end, the AppImage on a Steam Deck, FUSE for browsing
-   a version, drive health.
+   autostart, drive watcher, inotify for continuous backups). It builds and passes its tests on
+   Ubuntu 24.04, and the command line works end to end. Still to do: the AppImage on a Steam
+   Deck, FUSE for browsing a version, drive health.
 9. Disk image backup (done, Windows): whole disks from shadow copies, used space only, in the
    deduplicating repository; restore to a `.vhdx`, onto a disk, or browse an image's drives.
    Still to come: shrinking partitions onto a smaller disk, images of Linux disks.

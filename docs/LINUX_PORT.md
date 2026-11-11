@@ -6,12 +6,12 @@ it means) or **open**. Line numbers drift, so search for the named function.
 
 ## Verification
 
-- Windows: debug and release build, all 191 test cases pass (the Linux-only cases in
+- Windows: debug and release build, all 204 test cases pass (the Linux-only cases in
   `tests/test_posix.cpp` are compiled out there).
-- Linux: **not yet compiled or run.** The WSL Ubuntu distribution on the development PC stopped
-  answering (every `wsl -d Ubuntu ...` hung, also `--exec /bin/echo`) for the whole session, so
-  the code written for Linux has not met a compiler. Until it has, expect compile errors in
-  code that was never built on Linux before (the whole GUI and parts of the engine). To verify:
+- Linux (November 2026): built and tested on Ubuntu 24.04 (GCC 13, Qt 6.4) in a fresh WSL
+  distribution. Debug and release build with no errors, the engine, the command line and the
+  frontend; all 199 test cases pass in both when run as a normal user (as root, the root restore
+  guard rightly refuses the tests' restores into `/tmp`). Build it with:
 
   ```
   sudo apt install g++ cmake ninja-build pkg-config libzstd-dev libssl-dev libcurl4-openssl-dev \
@@ -19,17 +19,23 @@ it means) or **open**. Line numbers drift, so search for the named function.
   BUILD_DIR=~/vaultik-build ./build.sh debug test
   ```
 
-  then the command line end to end against a temporary repository (init, backup, snapshots,
-  restore, verify, forget/prune) with `VAULTIK_CONFIG_DIR` set to a scratch folder.
+  The command line end to end as a normal user, with `VAULTIK_CONFIG_DIR` in a scratch folder:
+  init, two backups (the second stores only the change), snapshots, restore (contents identical
+  with `diff -r`, modes 750 and 600 and a relative symlink come back), `verify --read-data`,
+  forget with prune, then verify and restore again: all correct. The frontend starts (offscreen)
+  and runs until it is ended.
 
-  Written for Linux after the second review (November 2026) and not yet compiled or run there:
-  `run_command`'s environment and `waitpid` handling, `process_alive`, the home folder from the
-  password database, sealed secrets (`protect_secret`, `secrets/local.key`), the root restore
-  guard (`os::others_can_change`; its refusal as root was never exercised), the CPU cap's duty
-  cycle (only its arithmetic is tested, on Windows too), Manual jobs without timers and the
-  Description escaping, the GUI's socket under `$XDG_RUNTIME_DIR`, `poll` in the browser sign-in,
-  `fsync` of disk image files, the PBKDF2 bound, `sftp_location.cpp` and the CLI install rule. The
-  new cases in `tests/test_posix.cpp` cover the first five and run once Linux builds work.
+  Fixed by this first build: the tests' `random_data` helper clashed with glibc's
+  `struct random_data`; `own_admin_store` had no POSIX definition; `virt.cpp` included `acl.hpp`
+  only on Windows; the theme used Qt 6.5 and 6.6 calls (colour scheme, accent colour), which now
+  fall back on Qt 6.4 (dark when the palette's window is darker than its text; no live switch);
+  the folders a backup puts above its sources (never read, no metadata) were restored with mode
+  000; one test compared Windows paths and one compared nanosecond times exactly.
+
+  Still not exercised on Linux: a restore as root (its refusal is), sealed secrets across two
+  computers, the CPU cap's duty cycle under load, systemd timers, the GUI's tray, drive watcher
+  and continuous backups on a desktop, the browser sign-in, cloud storage, the AppImage and the
+  Flatpak, and a Steam Deck.
 
 ## Metadata and restore
 
