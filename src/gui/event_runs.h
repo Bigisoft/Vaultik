@@ -71,6 +71,9 @@ private:
     };
 
     void changed(const std::string& job_id);
+    // (Re)makes the watches of a job's folders.
+    void watch(Watched& w);
+    void rewatch();
     bool start(const vaultik::jobs::Job& job, const QString& flag, bool sign_out);
     bool running(const std::string& job_id) const;
     void poll();
@@ -81,4 +84,5 @@ private:
     std::vector<Run> runs_;
     QTimer* poll_ = nullptr;
     bool blocking_ = false;  // holding up the end of the session
+    QTimer* rewatch_ = nullptr;
 };

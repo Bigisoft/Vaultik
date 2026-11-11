@@ -56,11 +56,17 @@ public:
         for (std::string& i : ignored_) i = os::fold_case(i);
 #ifdef Q_OS_WIN
         stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (stop_ != nullptr) thread_ = std::thread([this] { watch(); });
+        if (stop_ != nullptr) thread_ = std::thread([this] { run(); });
+        else ended_ = true;
 #else
-        if (::pipe2(stop_, O_CLOEXEC) == 0) thread_ = std::thread([this] { watch(); });
+        if (::pipe2(stop_, O_CLOEXEC) == 0) thread_ = std::thread([this] { run(); });
+        else ended_ = true;
 #endif
     }
+
+    // Whether watching ended on its own (the folder is gone, or its drive or share went away):
+    // nothing is watched any more until it is made again.
+    bool ended() const { return ended_.load(); }
 
     ~FolderWatch() {
 #ifdef Q_OS_WIN
@@ -83,6 +89,11 @@ public:
     FolderWatch& operator=(const FolderWatch&) = delete;
 
 private:
+    void run() {
+        watch();
+        ended_ = true;
+    }
+
     // Whether a change at `path` counts: not in a folder the backup leaves out, nor in the
     // backup's own folder or Vaultik's settings (which every run writes to).
     bool counts(const std::string& path) const {
@@ -208,6 +219,7 @@ private:
     std::vector<std::string> ignored_;
     std::vector<std::string> excludes_;
     std::function<void()> on_change_;
+    std::atomic<bool> ended_{false};
 };
 
 EventRuns::EventRuns(QWidget* window, QObject* parent) : QObject(parent), window_(window) {
@@ -222,6 +234,32 @@ EventRuns::EventRuns(QWidget* window, QObject* parent) : QObject(parent), window
     connect(requests_, &QTimer::timeout, this, &EventRuns::poll_requests);
     requests_->start();
     QTimer::singleShot(std::chrono::minutes(1), this, &EventRuns::poll_requests);
+    // A folder that went away (a USB drive or network share unplugged, the folder renamed) ends
+    // its watch; once a minute such watches are made again, so the folder is watched when it is
+    // back.
+    rewatch_ = new QTimer(this);
+    rewatch_->setInterval(std::chrono::minutes(1));
+    connect(rewatch_, &QTimer::timeout, this, &EventRuns::rewatch);
+    rewatch_->start();
+}
+
+void EventRuns::watch(Watched& w) {
+    const std::string id = w.job.id;
+    std::vector<std::string> ignored = {jobs::config_dir()};
+    if (!is_cloud_location(w.job.repository)) ignored.push_back(os::absolute_path(w.job.repository));
+    QPointer<EventRuns> self(this);
+    w.watches.clear();
+    for (const std::string& source : w.job.sources) {
+        w.watches.push_back(std::make_unique<FolderWatch>(os::absolute_path(source), ignored, w.job.excludes, [self, id] {
+            QMetaObject::invokeMethod(
+                self.data(), [self, id] { if (self) self->changed(id); }, Qt::QueuedConnection);
+        }));
+    }
+}
+
+void EventRuns::rewatch() {
+    for (auto& [id, w] : watched_)
+        if (std::any_of(w.watches.begin(), w.watches.end(), [](const auto& f) { return f->ended(); })) watch(w);
 }
 
 void EventRuns::poll_requests() {
@@ -287,15 +325,7 @@ void EventRuns::set_jobs(const std::vector<jobs::Job>& list) {
             }
             start(it->second.job, QStringLiteral("--on-change"), false);
         });
-        std::vector<std::string> ignored = {jobs::config_dir()};
-        if (!is_cloud_location(job.repository)) ignored.push_back(os::absolute_path(job.repository));
-        QPointer<EventRuns> self(this);
-        for (const std::string& source : job.sources) {
-            w.watches.push_back(std::make_unique<FolderWatch>(os::absolute_path(source), ignored, job.excludes, [self, id] {
-                QMetaObject::invokeMethod(
-                    self.data(), [self, id] { if (self) self->changed(id); }, Qt::QueuedConnection);
-            }));
-        }
+        watch(w);
         keep.emplace(job.id, std::move(w));
     }
     for (auto& [id, w] : watched_) delete w.timer;
