@@ -427,6 +427,9 @@ private:
     }
     bool all_present(const std::vector<Id>& ids) const;
     Id save_virtual(const VirtualDir& dir);
+    // An ExtraSource: its node, named after its place. False (with a warning) when it was skipped.
+    bool scan_extra(const ExtraSource& x, Node& node, const Node* pnode, std::uint64_t time);
+    bool scan_stream(const ExtraSource& x, Node& node, std::uint64_t time);
     void warn(const std::string& message);
     void report(bool force = false);
     void check_cancel();
@@ -483,7 +486,7 @@ void BackupEngine::check_cancel() {
 }
 
 std::vector<BackupEngine::Source> BackupEngine::resolve_sources() {
-    if (options_.paths.empty()) throw Error("nothing to back up: no paths given");
+    if (options_.paths.empty() && options_.extras.empty()) throw Error("nothing to back up: no paths given");
     std::vector<Source> sources;
     for (const std::string& p : options_.paths) {
         Source s;
@@ -1031,6 +1034,67 @@ Id BackupEngine::save_virtual(const VirtualDir& dir) {
     return id;
 }
 
+bool BackupEngine::scan_stream(const ExtraSource& x, Node& node, std::uint64_t time) {
+    std::string shown;
+    for (const std::string& c : x.place) shown += (shown.empty() ? "" : "/") + c;
+    progress_.current = shown;
+    report(true);
+    node.kind = NodeKind::File;
+    node.attributes = 0x20;  // FILE_ATTRIBUTE_ARCHIVE, as a new file has
+    node.mode = 0100644;
+    node.ctime = node.mtime = time;
+    node.size = 0;
+    try {
+        if (!x.open) throw Error("nothing to read");
+        std::unique_ptr<StreamSource> source = x.open();
+        ChunkReader reader(
+            repo_.chunker(), [&source](std::uint8_t* dst, std::size_t max) { return source->read(dst, max); },
+            buffer_);
+        ByteSpan chunk;
+        while (reader.next(chunk)) {
+            check_cancel();
+            Id id;
+            if (repo_.save_blob(BlobType::Data, chunk, id)) stats_.new_bytes += chunk.size();
+            node.content.push_back(id);
+            node.size += chunk.size();
+            stats_.bytes += chunk.size();
+            report();
+        }
+        source->finish();
+    } catch (const Cancelled&) {
+        throw;
+    } catch (const std::exception& e) {
+        warn("skipped " + shown + ": " + e.what());
+        return false;
+    }
+    ++stats_.files;
+    return true;
+}
+
+bool BackupEngine::scan_extra(const ExtraSource& x, Node& node, const Node* pnode, std::uint64_t time) {
+    node.name = x.place.back();
+    if (x.folder.empty()) {
+        if (!scan_stream(x, node, time)) return false;
+        if (pnode == nullptr || pnode->kind != NodeKind::File) ++stats_.files_new;
+        else if (pnode->content != node.content) ++stats_.files_changed;
+        return true;
+    }
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    if (!os::stat(io(x.folder), info, err)) {
+        warn("cannot back up " + x.folder + ": " + os::error_message(err));
+        return false;
+    }
+    const std::string name = node.name;
+    node = node_from_info(info, name);
+    // The change journal only knows the job's own folders.
+    const bool journal = use_journal_;
+    use_journal_ = false;
+    const bool ok = scan_entry(x.folder, info, info.device, node, pnode);
+    use_journal_ = journal;
+    return ok;
+}
+
 BackupResult BackupEngine::run() {
     os::enable_backup_privileges();  // lets an elevated run read files regardless of their ACLs
     const std::vector<Source> sources = resolve_sources();
@@ -1102,6 +1166,42 @@ BackupResult BackupEngine::run() {
 
         VirtualDir* cur = &root;
         for (std::size_t i = 0; i + 1 < s.comps.size(); ++i) cur = &cur->dirs[s.comps[i]];
+        cur->leaves.push_back(std::move(node));
+    }
+    for (const ExtraSource& x : options_.extras) {
+        check_cancel();
+        if (x.place.empty()) continue;
+        // (The folders above it are made only once it is stored: no empty "WSL" for a skipped one.)
+        const VirtualDir* look = &root;
+        for (std::size_t i = 0; look != nullptr && i + 1 < x.place.size(); ++i) {
+            const auto it = look->dirs.find(x.place[i]);
+            look = it == look->dirs.end() ? nullptr : &it->second;
+        }
+        const bool taken = look != nullptr && (look->dirs.contains(x.place.back()) ||
+                                               std::any_of(look->leaves.begin(), look->leaves.end(),
+                                                           [&](const Node& n) { return n.name == x.place.back(); }));
+        if (taken) {
+            warn("skipped " + x.place.back() + ": two items to back up have the same name");
+            continue;
+        }
+        std::optional<Node> pnode;
+        if (parent_root) pnode = lookup(*parent_root, x.place);
+        Node node;
+        if (!scan_extra(x, node, pnode ? &*pnode : nullptr, snap.time)) {
+            // Like a source that could not be read: old versions, which still have it, stay.
+            std::string shown;
+            for (const std::string& c : x.place) shown += (shown.empty() ? "" : "/") + c;
+            missing_sources_.push_back(shown);
+            continue;
+        }
+        if (node.kind == NodeKind::File && x.folder.empty()) {
+            // A stream's times are those of the run: only its content tells whether it changed.
+            if (!pnode || pnode->kind != NodeKind::File || pnode->content != node.content) changed_ = true;
+        } else {
+            note_change(node, pnode ? &*pnode : nullptr);
+        }
+        VirtualDir* cur = &root;
+        for (std::size_t i = 0; i + 1 < x.place.size(); ++i) cur = &cur->dirs[x.place[i]];
         cur->leaves.push_back(std::move(node));
     }
     pool_.reset();  // every file is read: the readers and their buffers go

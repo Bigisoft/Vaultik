@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -20,8 +21,33 @@ struct BackupProgress {
     std::string current;          // file being read
 };
 
+// A stream of bytes a backup stores as one file, e.g. the output of "wsl --export".
+class StreamSource {
+public:
+    virtual ~StreamSource() = default;
+    // Up to `max` bytes; 0 at the end. Throws Error when the stream breaks off.
+    virtual std::size_t read(std::uint8_t* dst, std::size_t max) = 0;
+    // Called after the last read; throws Error when what was read is not complete (the program
+    // that produced it failed), so the file is left out of the version.
+    virtual void finish() {}
+};
+
+// Something a backup stores at a place of its own in the version instead of under its real path
+// (see ops/virt.hpp: WSL distributions as "WSL/<name>.tar", Hyper-V machines as
+// "Hyper-V/<name>/"). Either a stream, stored as a file, or a folder on disk, stored with its
+// content as a folder named `place.back()`.
+struct ExtraSource {
+    std::vector<std::string> place;  // components in the version, e.g. {"WSL", "Ubuntu.tar"}
+    std::string folder;              // a folder to read in place of `place`, or empty for:
+    // Opens the stream; throws Error when it cannot start (the item is then skipped with a warning).
+    std::function<std::unique_ptr<StreamSource>()> open;
+};
+
 struct BackupOptions {
     std::vector<std::string> paths;  // UTF-8 folders or files to back up
+    // Stored next to the paths, at their own places (a stream is always read again: it has no
+    // times to compare with the last version, and deduplication finds what is unchanged).
+    std::vector<ExtraSource> extras;
     // Wildcard patterns (* ?). A pattern without a path separator matches a name; one with a
     // separator matches the full path. Case-insensitive on Windows.
     std::vector<std::string> excludes;
