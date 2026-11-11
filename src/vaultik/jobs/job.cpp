@@ -1043,14 +1043,25 @@ void JobStore::append_history(const std::string& id, const RunRecord& record) co
         }
     }
 
-    os::FileInfo info;
-    os::ErrorCode err = 0;
-    if (os::stat(path, info, err) && info.size > kHistoryTrimBytes) {
-        std::vector<std::string> lines = lines_of(text_of(os::read_file(path)));
-        if (lines.size() > kHistoryKeep) lines.erase(lines.begin(), lines.end() - kHistoryKeep);
-        std::string text;
-        for (const std::string& l : lines) text += l + "\n";
-        os::write_file_atomic(path, bytes_of(text));
+    // Trimming is a rewrite: another run of the job appending its record meanwhile would lose it.
+    // So the file is rewritten only when it still has the size it had when it was read (a record
+    // appended since makes it longer; the next record trims instead). Best effort: the record is
+    // in already.
+    try {
+        os::FileInfo info;
+        os::ErrorCode err = 0;
+        if (os::stat(path, info, err) && info.size > kHistoryTrimBytes) {
+            const std::string old = text_of(os::read_file(path));
+            if (old.size() != info.size) return;
+            std::vector<std::string> lines = lines_of(old);
+            if (lines.size() > kHistoryKeep) lines.erase(lines.begin(), lines.end() - kHistoryKeep);
+            std::string text;
+            for (const std::string& l : lines) text += l + "\n";
+            os::FileInfo now;
+            if (!os::stat(path, now, err) || now.size != info.size) return;
+            os::write_file_atomic(path, bytes_of(text));
+        }
+    } catch (const std::exception&) {
     }
 }
 
