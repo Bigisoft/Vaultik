@@ -14,6 +14,7 @@
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
+class EventRuns;
 class FindPage;
 class QLabel;
 class QListWidget;
@@ -143,6 +144,7 @@ private:
     void watch_connect_runs();
     std::vector<ConnectRun> connect_runs_;
     QTimer* connect_timer_ = nullptr;
+    EventRuns* events_ = nullptr;
 
     // Versions open in File Explorer: one "vaultik mount" process each, closed on request or quit.
     struct Mount {

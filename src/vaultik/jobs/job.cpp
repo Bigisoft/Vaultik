@@ -3,6 +3,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <ctime>
 
@@ -179,6 +180,10 @@ void record_copy_volume(Job& job) {
     record_one(job.second_copy.repository, job.second_copy.volume, job.second_copy.relative);
 }
 
+bool has_system_schedule(const Schedule& s) {
+    return s.kind != Schedule::Kind::Manual || s.on_idle || s.on_lock;
+}
+
 bool in_work_hours(const WorkHours& w, int weekday, int minute) {
     if (!w.enabled || weekday < 0 || weekday > 6 || (w.weekdays & (1u << weekday)) == 0) return false;
     if (w.start_minute <= w.end_minute) return minute >= w.start_minute && minute < w.end_minute;
@@ -307,6 +312,14 @@ void validate(const Job& job) {
     // such a job would then skip what only an administrator can read and still clean up.
     if (job.backup_on_connect && job.run_as_admin)
         throw Error("a job with administrator rights cannot also back up when its drive is connected");
+    // The same for the tray's own triggers: they start runs from the user's session.
+    if (job.continuous && job.run_as_admin)
+        throw Error("a job with administrator rights cannot back up continuously");
+    if (s.on_sign_out && job.run_as_admin)
+        throw Error("a job with administrator rights cannot back up when you sign out");
+    if (s.event_gap_hours < 1 || s.event_gap_hours > 168) throw Error("the time between triggered backups must be 1 to 168 hours");
+    if (job.continuous_minutes < 1 || job.continuous_minutes > 1440)
+        throw Error("continuous backups wait 1 to 1440 minutes after a change");
     const WorkHours& w = job.work_hours;
     if (w.start_minute < 0 || w.start_minute >= 24 * 60 || w.end_minute < 0 || w.end_minute >= 24 * 60)
         throw Error("working hours must be times of the day");
@@ -354,7 +367,11 @@ std::string to_json(const Job& job) {
           {"every_hours", job.schedule.every_hours},
           {"skip_on_battery", job.schedule.skip_on_battery},
           {"wake_computer", job.schedule.wake_computer},
-          {"skip_metered", job.schedule.skip_metered}}},
+          {"skip_metered", job.schedule.skip_metered},
+          {"on_idle", job.schedule.on_idle},
+          {"on_lock", job.schedule.on_lock},
+          {"on_sign_out", job.schedule.on_sign_out},
+          {"event_gap_hours", job.schedule.event_gap_hours}}},
         {"resources",
          {{"cpu", vaultik::to_string(r.cpu)},
           {"io", vaultik::to_string(r.io)},
@@ -374,6 +391,8 @@ std::string to_json(const Job& job) {
           {"max_bytes", job.retention.max_bytes}}},
         {"volume", {{"id", job.repository_volume}, {"path", job.repository_relative}}},
         {"backup_on_connect", job.backup_on_connect},
+        {"continuous", job.continuous},
+        {"continuous_minutes", job.continuous_minutes},
         {"skip_unchanged", job.skip_unchanged},
         {"repair_data", job.repair_data},
         {"before_command", job.before_command},
@@ -430,6 +449,10 @@ Job job_from_json(const std::string& text) {
             job.schedule.skip_on_battery = s.value("skip_on_battery", false);
             job.schedule.wake_computer = s.value("wake_computer", false);
             job.schedule.skip_metered = s.value("skip_metered", false);
+            job.schedule.on_idle = s.value("on_idle", false);
+            job.schedule.on_lock = s.value("on_lock", false);
+            job.schedule.on_sign_out = s.value("on_sign_out", false);
+            job.schedule.event_gap_hours = s.value("event_gap_hours", 4);
         }
         if (j.contains("resources")) {
             const json& r = j.at("resources");
@@ -458,6 +481,9 @@ Job job_from_json(const std::string& text) {
         }
         // Saved by 0.5.0 together with administrator rights, which it no longer allows: off.
         job.backup_on_connect = j.value("backup_on_connect", false) && !job.run_as_admin;
+        job.continuous = j.value("continuous", false) && !job.run_as_admin;
+        job.continuous_minutes = j.value("continuous_minutes", 5);
+        job.schedule.on_sign_out = job.schedule.on_sign_out && !job.run_as_admin;
         job.before_command = j.value("before_command", std::string());
         job.skip_unchanged = j.value("skip_unchanged", false);
         // Jobs from before repair data: on for drives, where bad sectors are the risk; cloud
@@ -507,6 +533,7 @@ std::string to_json(const RunRecord& r) {
     };
     if (r.kind != RunKind::Backup) j["kind"] = to_string(r.kind);
     if (r.on_connect) j["trigger"] = "connect";
+    else if (!r.trigger.empty()) j["trigger"] = r.trigger;
     if (!r.alert.empty()) j["alert"] = r.alert;
     if (!r.hold.empty()) j["hold"] = r.hold;
     if (!r.drive.empty()) j["drive"] = r.drive;
@@ -523,7 +550,9 @@ RunRecord record_from_json(const std::string& text) {
                  : kind == "copy"     ? RunKind::Copy
                  : kind == "restore_test" ? RunKind::RestoreTest
                                       : RunKind::Backup;
-        r.on_connect = j.value("trigger", std::string()) == "connect";
+        r.trigger = j.value("trigger", std::string());
+        r.on_connect = r.trigger == "connect";
+        if (r.on_connect) r.trigger.clear();
         r.alert = j.value("alert", std::string());
         r.hold = j.value("hold", std::string());
         r.drive = j.value("drive", std::string());
@@ -607,7 +636,9 @@ const char* to_string(Schedule::Kind kind) {
     return "manual";
 }
 
-std::string describe(const Schedule& s) {
+namespace {
+
+std::string describe_time(const Schedule& s) {
     char time[16];
     std::snprintf(time, sizeof time, "%02d:%02d", s.hour, s.minute);
     switch (s.kind) {
@@ -635,6 +666,21 @@ std::string describe(const Schedule& s) {
         }
     }
     return "Manual";
+}
+
+}  // namespace
+
+std::string describe(const Schedule& s) {
+    std::vector<std::string> events;
+    if (s.on_idle) events.push_back("when idle");
+    if (s.on_lock) events.push_back("when locked");
+    if (s.on_sign_out) events.push_back("at sign-out");
+    if (events.empty()) return describe_time(s);
+    std::string list;
+    for (std::size_t i = 0; i < events.size(); ++i)
+        list += (i == 0 ? "" : i + 1 == events.size() ? " and " : ", ") + events[i];
+    if (s.kind == Schedule::Kind::Manual) return std::string(1, static_cast<char>(std::toupper(list[0]))) + list.substr(1);
+    return describe_time(s) + ", also " + list;
 }
 
 // ---- JobStore -----------------------------------------------------------------------------

@@ -193,6 +193,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/alerts_dialog.cpp
             src/gui/tray.cpp
             src/gui/drive_watcher.cpp
+            src/gui/event_runs.cpp
             src/gui/overview.cpp
             src/gui/compare_dialog.cpp
             src/gui/hello.cpp

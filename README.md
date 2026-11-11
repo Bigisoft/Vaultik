@@ -399,6 +399,28 @@ connected" (Schedule tab), the running frontend or tray icon starts the job as s
 is plugged in (`run-job <job> --on-connect`, which does nothing when the job just saved a
 version or is already running), then says when the drive can be unplugged.
 
+### Backing up when something happens
+
+Besides a time, the Schedule tab's "Also back up" starts a job:
+
+- **When the computer has been idle for 10 minutes**, or **when you lock it**: a second Task
+  Scheduler task (`\Vaultik\<job>-events`) runs `run-job <job> --on-event`. It works for jobs
+  with administrator rights too.
+- **When you sign out or shut down**: the tray icon asks Windows to wait, with the reason
+  "Vaultik is backing up before Windows signs out", runs the job (`--on-sign-out`) and then lets
+  Windows go on. Windows shows its "apps are preventing sign-out" screen meanwhile, where you can
+  go on without waiting. A shutdown forced by Windows itself (updates, low battery) is not held up.
+- These runs skip a job that was backed up within the last few hours ("but not again within",
+  4 hours by default), so locking the computer ten times a day does not mean ten backups.
+- **Continuously**: the tray icon watches the job's folders and starts a backup a few minutes
+  (5 by default) after the first change since the last one (`--on-change`). Changes in excluded
+  folders, the backup's own folder and Vaultik's settings do not count. With the change journal
+  and "Only save a version when something changed" such runs take seconds.
+
+Sign-out and continuous backups need Vaultik running in the notification area (Settings, Start
+with Windows), and are not offered for jobs with administrator rights: the tray would start them
+without those rights.
+
 ### Locked cloud copies (S3 Object Lock)
 
 For S3-compatible storage, the cloud settings of a job have "Lock uploads for N days" (on the
@@ -693,6 +715,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    - Back up when the drive is plugged in (done): a job whose destination is an external drive
      runs when that drive connects (recognised by its volume ID, not its letter), then says it
      can be unplugged.
+   - Back up when something happens (done): when the computer is idle or locked, at sign-out or
+     shutdown (holding Windows up until the backup is done), and continuously, a few minutes after
+     files change.
    - Ransomware warning (done): when a backup sees many files that look encrypted or were renamed
      with an added extension, it warns, pins the version before it and skips cleanup, so the
      last clean version is never removed automatically.

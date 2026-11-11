@@ -53,6 +53,10 @@ std::vector<RunRecord> combined_history(const JobStore& store, const std::string
 // connected, and it did not save a version in the last 10 minutes (Windows reports one
 // connection several times, and the drive may have been plugged straight back in).
 bool connect_backup_due(const JobStore& store, const Job& job);
+// Whether a backup started by an event (the computer idle or locked, the user signing out) should
+// run: not when the last backup that did not fail finished less than the job's event_gap_hours
+// ago, nor when the destination drive is not connected.
+bool event_backup_due(const JobStore& store, const Job& job);
 
 // Throws Error unless `command` is safe to run with administrator rights from an approved job:
 // no %variables% or ^ escapes (which a user's environment or a later edit could turn into another

@@ -54,6 +54,11 @@ std::string task_name(const std::string& id) {
     return kTaskFolder + id;
 }
 
+// The second task, started by the computer being idle or locked.
+std::string events_task_name(const std::string& id) {
+    return kTaskFolder + id + "-events";
+}
+
 #else
 
 std::string unit_dir() {
@@ -79,6 +84,88 @@ std::string unit_quote(const std::string& s) {
 #endif
 
 }  // namespace
+
+#ifdef _WIN32
+
+namespace {
+
+// A job's task: `triggers` start `vaultik-task run-job <id><args>`. A job without administrator
+// rights runs as the user who registers it, while they are logged on, with the filtered token.
+// One with them runs as the system account (logged on or not): the user's own profile, registry
+// and environment, which any program of theirs can change, play no part. The account it works for
+// is passed on (its admin store); that account may read the task, and only administrators change
+// it.
+std::string task_xml(const Job& job, const std::string& program_dir, const std::string& triggers,
+                     const std::string& extra_settings, const std::string& args, bool start_when_available) {
+    const std::string launcher = os::join(program_dir, "vaultik-task.exe");
+    const std::string sid = job.run_as_admin ? os::current_user_sid() : std::string();
+    const std::string principals =
+        job.run_as_admin
+            ? "  <Principals>\n    <Principal id=\"Author\">\n      <UserId>S-1-5-18</UserId>\n"
+              "      <RunLevel>HighestAvailable</RunLevel>\n    </Principal>\n  </Principals>\n"
+            : "  <Principals>\n    <Principal id=\"Author\">\n      <LogonType>InteractiveToken</LogonType>\n"
+              "      <RunLevel>LeastPrivilege</RunLevel>\n    </Principal>\n  </Principals>\n";
+    const std::string security =
+        job.run_as_admin ? "<SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + xml_escape(sid) +
+                               ")</SecurityDescriptor>"
+                         : std::string();
+    return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
+           "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
+           "  <RegistrationInfo><Description>Vaultik backup job: " +
+           xml_escape(job.name) + "</Description>" + security +
+           "</RegistrationInfo>\n"
+           "  <Triggers>\n" +
+           triggers +
+           "  </Triggers>\n"
+           "  <Settings>\n"
+           "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
+           "    <DisallowStartIfOnBatteries>" +
+           std::string(job.schedule.skip_on_battery ? "true" : "false") +
+           "</DisallowStartIfOnBatteries>\n"
+           "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
+           "    <StartWhenAvailable>" + std::string(start_when_available ? "true" : "false") + "</StartWhenAvailable>\n"
+           "    <WakeToRun>" +
+           std::string(job.schedule.wake_computer && start_when_available ? "true" : "false") +
+           "</WakeToRun>\n" + extra_settings +
+           "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
+           "    <Priority>7</Priority>\n"
+           "    <Enabled>true</Enabled>\n"
+           "  </Settings>\n" +
+           principals +
+           "  <Actions Context=\"Author\">\n"
+           "    <Exec><Command>" +
+           xml_escape(launcher) + "</Command><Arguments>run-job " + xml_escape(job.id) + args +
+           // An administrator job reads only the admin-only copy of itself (see admin_jobs.hpp).
+           (job.run_as_admin ? " --admin --user " + xml_escape(sid) : std::string()) +
+           "</Arguments></Exec>\n"
+           "  </Actions>\n"
+           "</Task>\n";
+}
+
+}  // namespace
+
+std::string events_definition(const Job& job, const std::string& program_dir) {
+    const Schedule& s = job.schedule;
+    if (!s.on_idle && !s.on_lock) return {};
+    std::string triggers;
+    std::string settings;
+    if (s.on_idle) {
+        triggers += "    <IdleTrigger><Enabled>true</Enabled></IdleTrigger>\n";
+        // Idle for 10 minutes; the backup goes on when the user comes back.
+        settings += "    <IdleSettings><Duration>PT10M</Duration><WaitTimeout>PT1H</WaitTimeout>"
+                    "<StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>\n"
+                    "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\n";
+    }
+    if (s.on_lock) {
+        // Only this user locking the computer (an administrator job's task runs as the system
+        // account, so the account is named either way).
+        triggers += "    <SessionStateChangeTrigger><StateChange>SessionLock</StateChange><UserId>" +
+                    xml_escape(os::current_user_sid()) + "</UserId></SessionStateChangeTrigger>\n";
+    }
+    return task_xml(job, program_dir, triggers, settings, " --scheduled --on-event", false);
+}
+
+#endif
 
 std::string schedule_definition(const Job& job, const std::string& program_dir) {
     const Schedule& s = job.schedule;
@@ -109,54 +196,7 @@ std::string schedule_definition(const Job& job, const std::string& program_dir) 
             break;
         }
     }
-    const std::string launcher = os::join(program_dir, "vaultik-task.exe");
-    // A job without administrator rights runs as the user who registers it, while they are logged
-    // on, with the filtered token. One with them runs as the system account (logged on or not):
-    // the user's own profile, registry and environment, which any program of theirs can change,
-    // play no part. The account it works for is passed on (its admin store); that account may read
-    // the task, and only administrators change it.
-    const std::string sid = job.run_as_admin ? os::current_user_sid() : std::string();
-    const std::string principals =
-        job.run_as_admin
-            ? "  <Principals>\n    <Principal id=\"Author\">\n      <UserId>S-1-5-18</UserId>\n"
-              "      <RunLevel>HighestAvailable</RunLevel>\n    </Principal>\n  </Principals>\n"
-            : "  <Principals>\n    <Principal id=\"Author\">\n      <LogonType>InteractiveToken</LogonType>\n"
-              "      <RunLevel>LeastPrivilege</RunLevel>\n    </Principal>\n  </Principals>\n";
-    const std::string security =
-        job.run_as_admin ? "<SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;" + xml_escape(sid) +
-                               ")</SecurityDescriptor>"
-                         : std::string();
-    return "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n"
-           "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\n"
-           "  <RegistrationInfo><Description>Vaultik backup job: " +
-           xml_escape(job.name) + "</Description>" + security +
-           "</RegistrationInfo>\n"
-           "  <Triggers>\n" +
-           trigger +
-           "  </Triggers>\n"
-           "  <Settings>\n"
-           "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\n"
-           "    <DisallowStartIfOnBatteries>" +
-           std::string(job.schedule.skip_on_battery ? "true" : "false") +
-           "</DisallowStartIfOnBatteries>\n"
-           "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\n"
-           "    <StartWhenAvailable>true</StartWhenAvailable>\n"
-           "    <WakeToRun>" +
-           std::string(job.schedule.wake_computer ? "true" : "false") +
-           "</WakeToRun>\n"
-           "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\n"
-           "    <Priority>7</Priority>\n"
-           "    <Enabled>true</Enabled>\n"
-           "  </Settings>\n" +
-           principals +
-           "  <Actions Context=\"Author\">\n"
-           "    <Exec><Command>" +
-           xml_escape(launcher) + "</Command><Arguments>run-job " + xml_escape(job.id) + " --scheduled" +
-           // An administrator job reads only the admin-only copy of itself (see admin_jobs.hpp).
-           (job.run_as_admin ? " --admin --user " + xml_escape(sid) : std::string()) +
-           "</Arguments></Exec>\n"
-           "  </Actions>\n"
-           "</Task>\n";
+    return task_xml(job, program_dir, trigger, std::string(), " --scheduled", true);
 #else
     (void)program_dir;
     switch (s.kind) {
@@ -185,13 +225,16 @@ namespace {
 // Whether the job's current task runs with administrator rights. Changing or deleting such a task
 // needs those rights too.
 bool task_is_elevated(const std::string& job_id) {
-    std::string xml;
-    try {
-        if (os::run_command({"schtasks.exe", "/Query", "/TN", task_name(job_id), "/XML"}, &xml) != 0) return false;
-    } catch (const Error&) {
-        return false;
+    for (const std::string& name : {task_name(job_id), events_task_name(job_id)}) {
+        std::string xml;
+        try {
+            if (os::run_command({"schtasks.exe", "/Query", "/TN", name, "/XML"}, &xml) != 0) continue;
+        } catch (const Error&) {
+            continue;
+        }
+        if (xml.find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos) return true;
     }
-    return xml.find("<RunLevel>HighestAvailable</RunLevel>") != std::string::npos;
+    return false;
 }
 
 // Runs "vaultik admin-job <verb> <id> ..." with administrator approval and turns a failure into an
@@ -217,9 +260,12 @@ void run_admin_step(const std::string& program_dir, const std::string& verb, con
 
 }  // namespace
 
-int create_task(const Job& job, const std::string& program_dir, const std::string& temp_dir, std::string* output) {
+namespace {
+
+// Registers one task from its XML, through a file in `temp_dir`.
+int register_task(const std::string& name, const std::string& definition, const std::string& temp_dir, std::string* output) {
     // schtasks reads task XML as UTF-16 with a byte order mark.
-    const std::wstring xml = widen(schedule_definition(job, program_dir));
+    const std::wstring xml = widen(definition);
     Bytes data = {0xFF, 0xFE};
     for (const wchar_t c : xml) {
         data.push_back(static_cast<std::uint8_t>(c & 0xFF));
@@ -231,7 +277,7 @@ int create_task(const Job& job, const std::string& program_dir, const std::strin
     os::write_file_atomic(tmp, data);
     int code = -1;
     try {
-        code = os::run_command({"schtasks.exe", "/Create", "/TN", task_name(job.id), "/XML", tmp, "/F"}, output);
+        code = os::run_command({"schtasks.exe", "/Create", "/TN", name, "/XML", tmp, "/F"}, output);
     } catch (...) {
         os::remove_file(tmp);
         throw;
@@ -240,16 +286,38 @@ int create_task(const Job& job, const std::string& program_dir, const std::strin
     return code;
 }
 
-void delete_task(const std::string& job_id) {
+void delete_named_task(const std::string& name) {
     std::string ignored;
     try {
-        os::run_command({"schtasks.exe", "/Delete", "/TN", task_name(job_id), "/F"}, &ignored);
+        os::run_command({"schtasks.exe", "/Delete", "/TN", name, "/F"}, &ignored);
     } catch (const Error&) {
     }
 }
 
+}  // namespace
+
+int create_task(const Job& job, const std::string& program_dir, const std::string& temp_dir, std::string* output) {
+    // The time schedule, and a second task for the idle and lock triggers: those runs check
+    // first whether the last backup was recent (--on-event), which scheduled ones must not.
+    int code = 0;
+    if (job.schedule.kind != Schedule::Kind::Manual)
+        code = register_task(task_name(job.id), schedule_definition(job, program_dir), temp_dir, output);
+    else
+        delete_named_task(task_name(job.id));
+    if (code != 0) return code;
+    const std::string events = events_definition(job, program_dir);
+    if (!events.empty()) return register_task(events_task_name(job.id), events, temp_dir, output);
+    delete_named_task(events_task_name(job.id));
+    return 0;
+}
+
+void delete_task(const std::string& job_id) {
+    delete_named_task(task_name(job_id));
+    delete_named_task(events_task_name(job_id));
+}
+
 void apply_schedule(const Job& job, const std::string& program_dir) {
-    if (job.schedule.kind == Schedule::Kind::Manual) {
+    if (!has_system_schedule(job.schedule)) {
         remove_schedule(job.id);
         return;
     }
@@ -288,7 +356,7 @@ void remove_schedule(const std::string& job_id) {
 void apply_schedule(const Job& job, const std::string& program_dir) {
     const std::string dir = unit_dir();
     const std::string base = "vaultik-" + job.id;
-    if (job.schedule.kind == Schedule::Kind::Manual) {
+    if (!has_system_schedule(job.schedule)) {
         remove_schedule(job.id);
         return;
     }

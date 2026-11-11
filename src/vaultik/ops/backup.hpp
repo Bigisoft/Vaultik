@@ -99,6 +99,10 @@ SourceEstimate estimate_sources(const std::vector<std::string>& paths, const std
                                 const std::function<bool()>& cancelled = {},
                                 const std::function<void(const SourceEstimate&)>& progress = {});
 
+// Whether a backup with these exclusions leaves out `path`: the path itself or a folder above it
+// matches one of them (the same rules the backup applies to each folder and file it meets).
+bool path_excluded(const std::vector<std::string>& excludes, const std::string& path);
+
 // Shannon entropy of the bytes, in bits per byte (0-8); encrypted or compressed data is near 8.
 double byte_entropy(ByteSpan data);
 

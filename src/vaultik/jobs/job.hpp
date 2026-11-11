@@ -31,7 +31,17 @@ struct Schedule {
     bool skip_on_battery = false;  // not while the computer runs on battery
     bool wake_computer = false;    // wake it from sleep at the scheduled time
     bool skip_metered = false;     // cloud storage: not over a metered (paid by the byte) connection
+    // Windows: also back up, at most once every event_gap_hours, when the computer has been idle
+    // for a while or the user locks it (both Task Scheduler triggers of a second task), and when
+    // the user signs out or shuts down (the tray holds that up until the backup is done).
+    bool on_idle = false;
+    bool on_lock = false;
+    bool on_sign_out = false;
+    int event_gap_hours = 4;  // 1..168
 };
+
+// Whether the job has anything for the system scheduler to start (a time, or idle and lock).
+bool has_system_schedule(const Schedule& s);
 
 // Health checks run after a scheduled backup when they are due: a weekly check reads a share of
 // the stored data back and compares it with its hashes, a monthly full check reads all of it.
@@ -118,6 +128,10 @@ struct Job {
     std::string repository_relative;  // the folder below the volume's root
     // Windows: also back up as soon as the destination drive is connected (watched by the tray).
     bool backup_on_connect = false;
+    // Windows: back up continuously, `continuous_minutes` after files in the job's folders change
+    // (watched by the tray, so Vaultik must be running).
+    bool continuous = false;
+    int continuous_minutes = 5;  // 1..1440
     // Save a version only when something changed since the last one (a run that finds nothing
     // changed is recorded as a success without a version).
     bool skip_unchanged = false;
@@ -181,6 +195,9 @@ SystemLogEntry system_log_entry(const RunRecord& record, const std::string& job_
 struct RunRecord {
     RunKind kind = RunKind::Backup;
     bool on_connect = false;  // started because the destination drive was connected
+    // What else started it: "event" (the computer idle or locked), "sign-out", "change" (files
+    // changed, for continuous backups); empty for a schedule, by hand or on_connect.
+    std::string trigger;
     std::uint64_t started = 0;   // FILETIME ticks
     std::uint64_t finished = 0;
     RunStatus status = RunStatus::Success;

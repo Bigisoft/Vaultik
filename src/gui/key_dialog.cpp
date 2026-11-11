@@ -257,7 +257,7 @@ void KeyDialog::change_password() {
             continue;
         }
         // Scheduled runs of an administrator job read their own copy, which needs approval to update.
-        if (job.run_as_admin && job.schedule.kind != jobs::Schedule::Kind::Manual) {
+        if (job.run_as_admin && jobs::has_system_schedule(job.schedule)) {
             try {
                 jobs::apply_schedule(job, u8(QDir::toNativeSeparators(QFileInfo(Runner::engine_path()).absolutePath())));
             } catch (const Error&) {

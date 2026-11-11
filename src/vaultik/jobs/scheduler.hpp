@@ -37,4 +37,10 @@ void delete_task(const std::string& job_id);
 // systemd timer's OnCalendar= value on Linux.
 std::string schedule_definition(const Job& job, const std::string& program_dir);
 
+#ifdef _WIN32
+// The second task's XML, started when the computer is idle or the user locks it (empty when the
+// job has neither); exposed for tests.
+std::string events_definition(const Job& job, const std::string& program_dir);
+#endif
+
 }  // namespace vaultik::jobs

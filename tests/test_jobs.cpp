@@ -12,6 +12,7 @@
 #include "vaultik/platform/os.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/jobs/update_check.hpp"
+#include "vaultik/ops/backup.hpp"
 #include "vaultik/util/hex.hpp"
 
 using namespace vaultik;
@@ -490,3 +491,109 @@ TEST_CASE("jobs with administrator rights run as the system account") {
     CHECK(std::string(back.begin(), back.end()) == text);
 }
 #endif
+
+TEST_CASE("backups started by events: settings, tasks and spacing") {
+    Job j = sample();
+    j.id = "docs";
+    CHECK(has_system_schedule(j.schedule));
+    j.schedule.kind = Schedule::Kind::Manual;
+    CHECK_FALSE(has_system_schedule(j.schedule));
+    j.schedule.on_idle = true;
+    j.schedule.on_lock = true;
+    j.schedule.on_sign_out = true;
+    j.schedule.event_gap_hours = 6;
+    j.continuous = true;
+    j.continuous_minutes = 15;
+    CHECK(has_system_schedule(j.schedule));
+    CHECK(describe(j.schedule) == "When idle, when locked and at sign-out");
+    const Job back = job_from_json(to_json(j));
+    CHECK(back.schedule.on_idle);
+    CHECK(back.schedule.on_lock);
+    CHECK(back.schedule.on_sign_out);
+    CHECK(back.schedule.event_gap_hours == 6);
+    CHECK(back.continuous);
+    CHECK(back.continuous_minutes == 15);
+    // Older job files have none of it.
+    const Job old = job_from_json(R"({"version":1,"id":"x","name":"x","repository":"E:/b","sources":["C:/a"]})");
+    CHECK_FALSE(old.schedule.on_idle);
+    CHECK_FALSE(old.continuous);
+    CHECK(old.schedule.event_gap_hours == 4);
+    CHECK(old.continuous_minutes == 5);
+
+    // The tray starts these from the user's session: not for administrator jobs.
+    Job admin = j;
+    admin.run_as_admin = true;
+    CHECK_THROWS_AS(validate(admin), Error);
+    admin.continuous = false;
+    CHECK_THROWS_AS(validate(admin), Error);
+    admin.schedule.on_sign_out = false;
+    CHECK_NOTHROW(validate(admin));
+    Job bad = j;
+    bad.schedule.event_gap_hours = 0;
+    CHECK_THROWS_AS(validate(bad), Error);
+    bad = j;
+    bad.continuous_minutes = 0;
+    CHECK_THROWS_AS(validate(bad), Error);
+
+    RunRecord r;
+    r.trigger = "sign-out";
+    CHECK(record_from_json(to_json(r)).trigger == "sign-out");
+    r.trigger.clear();
+    r.on_connect = true;
+    const RunRecord c = record_from_json(to_json(r));
+    CHECK(c.on_connect);
+    CHECK(c.trigger.empty());
+
+#ifdef _WIN32
+    // Idle and lock: a second task, whose runs skip a recent backup; none without them.
+    const std::string xml = events_definition(j, "C:\\Program Files\\Vaultik");
+    CHECK(xml.find("<IdleTrigger>") != std::string::npos);
+    CHECK(xml.find("<StateChange>SessionLock</StateChange><UserId>" + os::current_user_sid() + "</UserId>") !=
+          std::string::npos);
+    CHECK(xml.find("<Arguments>run-job docs --scheduled --on-event</Arguments>") != std::string::npos);
+    CHECK(xml.find("<StopOnIdleEnd>false</StopOnIdleEnd>") != std::string::npos);
+    CHECK(xml.find("<StartWhenAvailable>false</StartWhenAvailable>") != std::string::npos);
+    CHECK(xml.find("<CalendarTrigger>") == std::string::npos);
+    j.schedule.on_idle = false;
+    const std::string lock = events_definition(j, "C:\\x");
+    CHECK(lock.find("<IdleTrigger>") == std::string::npos);
+    CHECK(lock.find("SessionLock") != std::string::npos);
+    j.schedule.on_lock = false;
+    CHECK(events_definition(j, "C:\\x").empty());
+    // The time schedule's task is unchanged by them.
+    j.schedule.kind = Schedule::Kind::Daily;
+    j.schedule.on_idle = true;
+    CHECK(describe(j.schedule) == "Daily at 21:30, also when idle and at sign-out");
+    CHECK(schedule_definition(j, "C:\\x").find("<IdleTrigger>") == std::string::npos);
+#endif
+
+    // Not again within the gap after a backup that did not fail.
+    TempStore tmp;
+    JobStore store(tmp.dir());
+    Job e = sample();
+    e.repository = tmp.dir();
+    e.schedule.event_gap_hours = 4;
+    store.save(e);
+    CHECK(event_backup_due(store, e));
+    RunRecord done;
+    done.started = os::now() - 2ull * 3600 * 10'000'000;
+    done.finished = os::now() - 1ull * 3600 * 10'000'000;  // an hour ago
+    done.status = RunStatus::Failed;
+    store.append_history(e.id, done);
+    CHECK(event_backup_due(store, e));  // a failed one does not count
+    done.status = RunStatus::Partial;
+    store.append_history(e.id, done);
+    CHECK_FALSE(event_backup_due(store, e));
+    e.schedule.event_gap_hours = 1;
+    CHECK(event_backup_due(store, e));
+}
+
+TEST_CASE("continuous backups ignore changes the backup leaves out") {
+    const std::vector<std::string> ex = {"*.tmp", "node_modules", "C:\\Users\\me\\AppData\\Local\\Temp"};
+    CHECK(vaultik::path_excluded(ex, "C:\\Users\\me\\Documents\\a.tmp"));
+    CHECK(vaultik::path_excluded(ex, "C:\\work\\node_modules\\left-pad\\index.js"));
+    CHECK(vaultik::path_excluded(ex, "c:\\users\\ME\\AppData\\Local\\Temp\\x\\y.txt"));
+    CHECK_FALSE(vaultik::path_excluded(ex, "C:\\Users\\me\\Documents\\report.docx"));
+    CHECK_FALSE(vaultik::path_excluded(ex, "C:\\Users\\me\\AppData\\Local\\Temporary.txt"));
+    CHECK_FALSE(vaultik::path_excluded({}, "C:\\a.tmp"));
+}

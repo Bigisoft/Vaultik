@@ -1205,4 +1205,18 @@ BackupResult run_backup(Repository& repo, const BackupOptions& options) {
     return engine.run();
 }
 
+bool path_excluded(const std::vector<std::string>& excludes, const std::string& path) {
+    if (excludes.empty()) return false;
+    const Excluder excluder(excludes);
+    std::size_t at = 0;
+    while (at < path.size()) {
+        std::size_t next = path.find_first_of("\\/", at);
+        if (next == std::string::npos) next = path.size();
+        if (next > at && excluder.excluded(std::string_view(path).substr(at, next - at), path.substr(0, next)))
+            return true;
+        at = next + 1;
+    }
+    return false;
+}
+
 }  // namespace vaultik

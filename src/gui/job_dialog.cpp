@@ -398,6 +398,20 @@ void JobDialog::update_on_connect() {
                            "it can be unplugged. Vaultik needs to be running, e.g. in the notification area (Settings, "
                            "Start with Windows).")
                       : why);
+    // Sign-out and continuous backups start from the user's session too.
+    if (on_sign_out_ == nullptr) return;
+    const bool admin = admin_ != nullptr && admin_->isChecked();
+    on_sign_out_->setEnabled(!admin);
+    continuous_->setEnabled(!admin);
+    if (admin) {
+        on_sign_out_->setChecked(false);
+        continuous_->setChecked(false);
+    }
+    events_note_->setText(admin ? tr("Not when you sign out, nor continuously, for a job with administrator rights: "
+                                     "those backups would run without them.")
+                                : tr("Signing out and continuous backups need Vaultik running, e.g. in the "
+                                     "notification area (Settings, Start with Windows). Continuous backups do not "
+                                     "count changes in excluded folders."));
 }
 
 QWidget* JobDialog::build_schedule() {
@@ -458,6 +472,30 @@ QWidget* JobDialog::build_schedule() {
     on_connect_note_->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(QString(), on_connect_note_);
     connect(repository_, &QLineEdit::textChanged, this, &JobDialog::update_on_connect);
+
+    // Backups started by something happening rather than a time.
+    on_idle_ = new QCheckBox(tr("When the computer has been idle for 10 minutes"));
+    on_lock_ = new QCheckBox(tr("When I lock the computer"));
+    on_sign_out_ = new QCheckBox(tr("When I sign out or shut down"));
+    on_sign_out_->setToolTip(tr("Windows waits for the backup and says why; you can also go on without waiting."));
+    event_gap_ = spin(1, 168, tr(" h"), QString());
+    form->addRow(tr("Also back up:"), on_idle_);
+    form->addRow(QString(), on_lock_);
+    form->addRow(QString(), on_sign_out_);
+    form->addRow(QString(), row({new QLabel(tr("but not again within")), event_gap_, new QLabel(tr("of the last backup"))}));
+    continuous_ = new QCheckBox(tr("Continuously,"));
+    continuous_minutes_ = spin(1, 1440, tr(" min"), QString());
+    form->addRow(QString(), row({continuous_, continuous_minutes_, new QLabel(tr("after files in the job's folders change"))}));
+    events_note_ = new QLabel;
+    events_note_->setWordWrap(true);
+    events_note_->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(QString(), events_note_);
+    const auto update_events = [this] {
+        event_gap_->setEnabled(on_idle_->isChecked() || on_lock_->isChecked() || on_sign_out_->isChecked());
+        continuous_minutes_->setEnabled(continuous_->isChecked());
+    };
+    for (QCheckBox* box : {on_idle_, on_lock_, on_sign_out_, continuous_}) connect(box, &QCheckBox::toggled, this, update_events);
+    update_events();
 
     // Health checks: after a scheduled or manual backup, when one is due.
     check_weekly_ = new QCheckBox(tr("Once a week, read back"));
@@ -792,6 +830,12 @@ void JobDialog::load(const jobs::Job& job) {
     }
     wake_->setChecked(job.schedule.wake_computer);
     skip_metered_->setChecked(job.schedule.skip_metered);
+    on_idle_->setChecked(job.schedule.on_idle);
+    on_lock_->setChecked(job.schedule.on_lock);
+    on_sign_out_->setChecked(job.schedule.on_sign_out);
+    event_gap_->setValue(job.schedule.event_gap_hours);
+    continuous_->setChecked(job.continuous);
+    continuous_minutes_->setValue(job.continuous_minutes);
     update_schedule_fields();
 
     const ResourcePolicy& r = job.resources;
@@ -895,6 +939,12 @@ jobs::Job JobDialog::collect() const {
     j.repair_data = static_cast<unsigned>(repair_data_->currentData().toInt());
     j.schedule.wake_computer = wake_->isChecked();
     j.schedule.skip_metered = skip_metered_->isChecked();
+    j.schedule.on_idle = on_idle_->isChecked();
+    j.schedule.on_lock = on_lock_->isChecked();
+    j.schedule.on_sign_out = on_sign_out_->isChecked();
+    j.schedule.event_gap_hours = event_gap_->value();
+    j.continuous = continuous_->isChecked();
+    j.continuous_minutes = continuous_minutes_->value();
 
     ResourcePolicy& r = j.resources;
     r.cpu = static_cast<CpuPriority>(cpu_->currentIndex());

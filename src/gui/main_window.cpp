@@ -45,6 +45,7 @@
 #include "common.h"
 #include "compare_dialog.h"
 #include "drive_watcher.h"
+#include "event_runs.h"
 #include "find_page.h"
 #include "hello.h"
 #include "job_card.h"
@@ -352,6 +353,13 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
     // drives, so this one needs its native window even while it stays hidden in the tray.
     (void)winId();
     connect(new DriveWatcher(this), &DriveWatcher::connected, this, &MainWindow::drives_connected);
+    // Continuous backups, and backups when the user signs out or shuts down.
+    events_ = new EventRuns(this, this);
+    connect(events_, &EventRuns::notify, this, [this](const QString& title, const QString& text, bool warning) {
+        if (tray_ != nullptr) tray_->notify(title, text, warning);
+        status_->showMessage(title + "  " + text, 15000);
+    });
+    connect(events_, &EventRuns::run_finished, this, [this] { refresh_sidebar(); });
     // Versions open in Explorer: a button to close them, and they close when Vaultik quits.
     mounts_button_ = new QPushButton;
     mounts_button_->setProperty("role", "flat");
@@ -1034,6 +1042,7 @@ void MainWindow::refresh_icons() {
 
 void MainWindow::reload_jobs(const std::string& select_id) {
     jobs_ = store_.list();
+    if (events_ != nullptr) events_->set_jobs(jobs_);
     const QSignalBlocker block(list_);
     list_->clear();
     int select = jobs_.empty() ? -1 : 0;
@@ -1079,6 +1088,7 @@ void MainWindow::refresh_sidebar() {
     }
     for (std::size_t i = 0; i < now.size(); ++i) fill_card(list_->item(static_cast<int>(i)), now[i]);
     jobs_ = std::move(now);
+    if (events_ != nullptr) events_->set_jobs(jobs_);
     refresh_history();
 }
 
@@ -1326,6 +1336,11 @@ void MainWindow::refresh_overview() {
         d.next_detail = tr("This job has no schedule.");
     }
     if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
+    if (job->schedule.on_idle) d.next_detail += "\n" + tr("Also when the computer is idle.");
+    if (job->schedule.on_lock) d.next_detail += "\n" + tr("Also when you lock the computer.");
+    if (job->schedule.on_sign_out) d.next_detail += "\n" + tr("Also when you sign out or shut down.");
+    if (job->continuous)
+        d.next_detail += "\n" + tr("Also %1 min after files change.").arg(job->continuous_minutes);
 
     // Versions and size, once the repository is open.
     const auto it = repos_.find(job->id);

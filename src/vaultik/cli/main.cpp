@@ -206,6 +206,13 @@ Commands:
                                connected, the drive is there, and it is not
                                already backing up or just finished (used by
                                the tray when a drive is plugged in)
+      --on-event               Run only if the last backup is older than the
+                               job's time between triggered backups (used when
+                               the computer is idle or locked)
+      --on-sign-out            The same, when the user signs out or shuts down
+                               (used by the tray)
+      --on-change              Run only if it is not already backing up (used
+                               by the tray for continuous backups)
   copy <job>                   Copy the job's new versions to its second copy now
                                (run-job does this after each backup), creating it
                                there on first use with the job's password
@@ -290,7 +297,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -953,7 +960,7 @@ int cmd_schedule(const Args& a, bool install) {
     if (a.positional.empty()) throw Error(std::string("usage: vaultik ") + (install ? "schedule" : "unschedule") + " <job>");
     const auto job = jobs::JobStore().find(a.positional[0]);
     if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
-    if (!install || job->schedule.kind == jobs::Schedule::Kind::Manual) {
+    if (!install || !jobs::has_system_schedule(job->schedule)) {
         jobs::remove_schedule(job->id);
         out("Job \"" + job->name + "\" has no system schedule now.\n");
         return kExitOk;
@@ -1890,6 +1897,12 @@ int cmd_run_job(const Args& a) {
     // The job's own resource settings, unless overridden on the command line.
     const bool on_connect = a.has("--on-connect");
     if (on_connect && !jobs::connect_backup_due(store, *job)) return kExitOk;
+    // Started by an event rather than a time: not again soon after a backup.
+    const std::string trigger = a.has("--on-event") ? "event" : a.has("--on-sign-out") ? "sign-out"
+                                : a.has("--on-change")                                 ? "change"
+                                                                                       : std::string();
+    if ((trigger == "event" || trigger == "sign-out") && !jobs::event_backup_due(store, *job)) return kExitOk;
+    if (trigger == "change" && !jobs::drive_connected(*job)) return kExitOk;
 
     const ResourcePolicy policy = resource_policy(a, job->resources);
     apply_resource_policy(policy);
@@ -1898,6 +1911,7 @@ int cmd_run_job(const Args& a) {
 
     jobs::RunRecord record;
     record.on_connect = on_connect;
+    record.trigger = trigger;
     record.started = os::now();
     int code = kExitError;
     std::unique_ptr<Repository> repo;
@@ -1925,7 +1939,7 @@ int cmd_run_job(const Args& a) {
             throw Error("the backup drive is not connected (" + job->repository + ")");
         repo = open_job_repo(a, store, *job);
         const unsigned readers = apply_parallelism(*repo, a, job->repository, policy);
-        if (on_connect && backup_running(*repo, *job)) {
+        if ((on_connect || !trigger.empty()) && backup_running(*repo, *job)) {
             if (!g_json) out("Job \"" + job->name + "\" is already backing up.\n");
             return kExitOk;
         }
@@ -2264,7 +2278,7 @@ int cmd_key(const Args& a) {
             store.set_password(job.id, pw);
             out("Saved job \"" + job.name + "\" uses the new password.\n");
             // Its scheduled runs read the administrator copy, which needs approval to update.
-            if (job.run_as_admin && job.schedule.kind != jobs::Schedule::Kind::Manual) {
+            if (job.run_as_admin && jobs::has_system_schedule(job.schedule)) {
                 jobs::apply_schedule(job, os::parent_of(os::executable_path()));
             }
         } catch (const Error& e) {

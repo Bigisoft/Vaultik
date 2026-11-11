@@ -73,6 +73,13 @@ private:
     QWidget* days_row_ = nullptr;
     QCheckBox* on_connect_ = nullptr;
     QLabel* on_connect_note_ = nullptr;
+    QCheckBox* on_idle_ = nullptr;
+    QCheckBox* on_lock_ = nullptr;
+    QCheckBox* on_sign_out_ = nullptr;
+    QSpinBox* event_gap_ = nullptr;
+    QCheckBox* continuous_ = nullptr;
+    QSpinBox* continuous_minutes_ = nullptr;
+    QLabel* events_note_ = nullptr;
     void update_on_connect();
     // Health checks after scheduled backups.
     QCheckBox* check_weekly_ = nullptr;
