@@ -79,6 +79,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/report.cpp
+    src/vaultik/jobs/forecast.cpp
     src/vaultik/jobs/computers.cpp
     src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/profile_items.cpp
@@ -254,6 +255,7 @@ add_executable(vaultik_tests
     tests/test_end_to_end.cpp
     tests/test_jobs.cpp
     tests/test_report.cpp
+    tests/test_forecast.cpp
     tests/test_prune.cpp
     tests/test_keys.cpp
     tests/test_s3.cpp

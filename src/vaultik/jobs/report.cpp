@@ -1,6 +1,7 @@
 #include "vaultik/jobs/report.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <map>
@@ -91,8 +92,32 @@ const char* kind_name(AttentionItem::Kind k) {
         case AttentionItem::Kind::Ransomware: return "ransomware";
         case AttentionItem::Kind::BackupDrive: return "backup_drive";
         case AttentionItem::Kind::DriveWorse: return "drive_worse";
+        case AttentionItem::Kind::DriveFillsUp: return "drive_fills_up";
     }
     return "other";
+}
+
+// "in about 6 weeks", translated.
+std::string fill_words(double days, const Say& say) {
+    const auto [phrase, n] = fill_time_phrase(days);
+    return say(phrase, {std::to_string(n)});
+}
+
+// The forecast as one value: "in about 6 weeks (grows 1.2 GB a day, 50.0 GB free)".
+std::string forecast_text(const FillForecast& f, const Say& say) {
+    switch (f.state) {
+        case FillForecast::State::NoData: return say("not enough history yet for a forecast");
+        case FillForecast::State::Shrinking: return say("getting smaller");
+        case FillForecast::State::Steady: return say("not filling up");
+        case FillForecast::State::NoSpaceInfo:
+            return say("grows %1 a day; the free space is not known",
+                       {size_text(static_cast<std::uint64_t>(f.growth_per_day))});
+        case FillForecast::State::Fills:
+            return say("fills up %1 (grows %2 a day, %3 free)",
+                       {fill_words(f.days, say), size_text(static_cast<std::uint64_t>(f.growth_per_day)),
+                        size_text(f.free)});
+    }
+    return {};
 }
 
 std::string attention_text(const AttentionItem& a, const Say& say) {
@@ -112,6 +137,9 @@ std::string attention_text(const AttentionItem& a, const Say& say) {
         case AttentionItem::Kind::BackupDrive:
             return say("The backup drive of %1 reported a problem (%2 runs)", {a.subject, n});
         case AttentionItem::Kind::DriveWorse: return say("Drive %1 is getting worse", {a.subject});
+        case AttentionItem::Kind::DriveFillsUp:
+            return say("The backup drive of %1 fills up %2. Keep fewer versions or use a larger drive.",
+                       {a.subject, fill_words(static_cast<double>(a.count), say)});
     }
     return {};
 }
@@ -134,6 +162,7 @@ std::vector<std::pair<std::string, std::string>> job_lines(const MonthlyReport& 
     else if (j.size > 0)
         size = size_text(j.size);
     out.emplace_back(say("Backup size"), size);
+    out.emplace_back(say("Drive space"), forecast_text(j.forecast, say));
     out.emplace_back(say("Health checks"),
                      j.checks == 0 ? none
                                    : say("%1 (%2 fine, %3 found damage, %4 could not run)",
@@ -314,6 +343,13 @@ MonthlyReport build_report(const std::vector<ReportJob>& jobs, const std::vector
         if (j.copies_failed > 0) attend(K::CopyFailed, j.copies_failed);
         if (j.ransomware > 0) attend(K::Ransomware, j.ransomware);
         if (drive_runs > 0) attend(K::BackupDrive, drive_runs);
+        // When the destination fills up, as of the report's end (the free space the newest
+        // backup before then saw).
+        std::vector<RunRecord> until;
+        for (const RunRecord& x : in.history)
+            if (x.finished > 0 && x.finished <= r.as_of) until.push_back(x);
+        j.forecast = forecast_for(until, r.as_of);
+        if (fill_warning(j.forecast)) attend(K::DriveFillsUp, static_cast<std::uint64_t>(std::llround(j.forecast.days)));
         r.jobs.push_back(std::move(j));
     }
 
@@ -442,7 +478,11 @@ std::string to_json(const MonthlyReport& r) {
                         {"copies", j.copies},
                         {"copies_failed", j.copies_failed},
                         {"ransomware", j.ransomware},
-                        {"drive_problems", j.drive_problems}});
+                        {"drive_problems", j.drive_problems},
+                        {"forecast", {{"state", to_string(j.forecast.state)},
+                                      {"growth_per_day", static_cast<std::int64_t>(j.forecast.growth_per_day)},
+                                      {"free", j.forecast.free},
+                                      {"days", j.forecast.days}}}});
     }
     nlohmann::json drives = nlohmann::json::array();
     for (const DriveReport& d : r.drives) drives.push_back({{"model", d.model}, {"changes", d.changes}});

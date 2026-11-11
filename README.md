@@ -674,7 +674,7 @@ copies, what the backup drive reported, and drives whose health got worse. A lis
 says what needs attention: a job that has not saved a version for too long (2 days for an hourly
 schedule, 7 daily, 14 weekly, 31 by hand), a last backup that failed, damage found, checks or
 test restores that could not run, a failed second copy, a ransomware warning, a backup drive that
-reported a problem, or a drive getting worse.
+reported a problem, a drive getting worse, or a backup drive that fills up within 30 days.
 
 At the start of a month, Vaultik in the notification area shows a notification that opens the
 report of the month before; **Monthly report...** in the sidebar (or the tray menu) shows any of
@@ -687,6 +687,26 @@ job's history keeps its newest 2,000 runs, over a month of hourly backups. Which
 belongs to follows the local calendar. A marker file in `reports` in Vaultik's settings folder
 remembers that a month's notification and summary went out, so each goes out once, whichever
 Vaultik process gets there first.
+
+### When the backup drive fills up
+
+Every backup records the stored size of its whole destination and, for a folder destination, the
+space left on its drive (`"backup_size"` and `"free_space"` in the history). From those Vaultik
+works out how fast the backup grows and when the drive is full at that rate: "At this rate the
+drive is full in about 6 weeks (grows 1.2 GiB a day)" on the job's start page, a "Drive space"
+line per job in the monthly report and `vaultik report`. The growth is the median of the growth
+per day between every two days of the last 90 (one size per day), counted from the last big
+cleanup (a drop of more than 10%), so the small drops of the regular cleanup and a single odd day
+do not throw it off, while a backup whose cleanup keeps it the same size shows as not filling up.
+It needs sizes from at least 3 days spread over 3 days or more.
+
+When the drive is full within 30 days, the start page says so, the tray shows a notification
+(once a week), the monthly report lists it under what needs attention, and the backup that first
+sees it warns and sends an alert to the alert channels (with "damage" alerts on). Keep fewer
+versions (the job's Old backups tab) or move the backup to a larger drive. Cloud storage reports
+no free space, so for it Vaultik only shows how fast the backup grows. Several jobs with their own
+backups on one drive each count the drive's whole free space, so with several the drive fills up
+sooner than each one says.
 
 ### Faster backups with the change journal
 
@@ -849,6 +869,8 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    - Monthly report (done): what every job did last month and what needs attention, as a
      notification, a page to save, `vaultik report`, and optionally a summary to the alert
      channels.
+   - Backup drive forecast (done): when the drive fills up at the rate the backup grows, with a
+     warning a month ahead.
    - Locked cloud copies (done): S3 Object Lock (Backblaze B2, Wasabi, Amazon S3) keeps uploaded
      data undeletable for a set time, even with the keys, and `cloud-rollback` brings it back.
    - Archive storage classes (done): a long-term cloud copy keeps its data in S3 Infrequent

@@ -11,6 +11,7 @@
 #include <atomic>
 #include <exception>
 
+#include "vaultik/jobs/forecast.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/platform/os.hpp"
 
@@ -42,6 +43,26 @@ QString format_bytes(std::uint64_t bytes) {
 
 QString count_of(std::uint64_t n, const QString& one, const QString& many) {
     return QLocale().toString(static_cast<qulonglong>(n)) + " " + (n == 1 ? one : many);
+}
+
+QString fill_time_words(double days) {
+    const auto [phrase, n] = vaultik::jobs::fill_time_phrase(days);
+    // The phrases are fixed English texts with their translations in the translation file.
+    return QObject::tr(phrase.c_str()).replace(QStringLiteral("%1"), QLocale().toString(n));
+}
+
+QString fill_forecast_text(const vaultik::jobs::FillForecast& f) {
+    using State = vaultik::jobs::FillForecast::State;
+    const QString growth = format_bytes(static_cast<std::uint64_t>(f.growth_per_day > 0 ? f.growth_per_day : 0));
+    switch (f.state) {
+        case State::Fills:
+            return QObject::tr("At this rate the drive is full %1 (grows %2 a day)").arg(fill_time_words(f.days), growth);
+        case State::NoSpaceInfo: return QObject::tr("The backup grows about %1 a day").arg(growth);
+        case State::Steady: return QObject::tr("The backup is not filling up the drive");
+        case State::NoData:
+        case State::Shrinking: return {};
+    }
+    return {};
 }
 
 QDateTime to_datetime(std::uint64_t filetime) {

@@ -498,6 +498,12 @@ std::string volume_root(const std::string& /*volume*/) {
     return {};
 }
 
+std::optional<DiskSpace> disk_space(const std::string& path) {
+    struct statfs st{};
+    if (statfs(path.c_str(), &st) != 0) return std::nullopt;
+    return DiskSpace{static_cast<std::uint64_t>(st.f_bavail) * st.f_bsize, static_cast<std::uint64_t>(st.f_blocks) * st.f_bsize};
+}
+
 Bytes protect_secret(ByteSpan plain, bool /*machine*/) {
     return Bytes(plain.begin(), plain.end());  // protected by the 0600 file mode
 }

@@ -552,6 +552,7 @@ std::string to_json(const RunRecord& r) {
     if (!r.hold.empty()) j["hold"] = r.hold;
     if (!r.drive.empty()) j["drive"] = r.drive;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
+    if (r.free_space > 0) j["free_space"] = r.free_space;
     return j.dump();
 }
 
@@ -572,6 +573,7 @@ RunRecord record_from_json(const std::string& text) {
         r.hold = j.value("hold", std::string());
         r.drive = j.value("drive", std::string());
         r.backup_size = j.value("backup_size", std::uint64_t{0});
+        r.free_space = j.value("free_space", std::uint64_t{0});
         r.started = j.value("started", std::uint64_t{0});
         r.finished = j.value("finished", std::uint64_t{0});
         r.status = status_from(j.value("status", std::string("failed")));

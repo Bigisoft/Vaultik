@@ -227,6 +227,9 @@ struct RunRecord {
     // A backup: the stored size of the whole destination after it (and after its cleanup), from
     // the repository's index; 0 when not known (older runs, other kinds of runs).
     std::uint64_t backup_size = 0;
+    // A backup to a folder: the space left on the destination's drive after it (for the forecast of
+    // when the drive is full, see forecast.hpp); 0 when not known (cloud storage, older runs).
+    std::uint64_t free_space = 0;
 };
 
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file

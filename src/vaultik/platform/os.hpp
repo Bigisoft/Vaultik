@@ -282,6 +282,13 @@ struct VolumeLocation {
 VolumeLocation volume_of(const std::string& path);
 // The current mount path of a volume named by volume_of ("F:\"), or empty when it is not connected.
 std::string volume_root(const std::string& volume);
+// The space on the drive holding `path` (a local folder or a network share): what this user may
+// still write, and the drive's size. Empty when it cannot be told (not there, not a drive).
+struct DiskSpace {
+    std::uint64_t free = 0;
+    std::uint64_t total = 0;
+};
+std::optional<DiskSpace> disk_space(const std::string& path);
 
 // ---- small files (os_common.cpp, built on File) ----------------------------------------------
 

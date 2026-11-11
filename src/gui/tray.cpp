@@ -9,6 +9,7 @@
 #include "main_window.h"
 #include "theme.h"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/forecast.hpp"
 #include "vaultik/platform/os.hpp"
 
 using namespace vaultik;
@@ -169,6 +170,19 @@ void Tray::check() {
                                    QSystemTrayIcon::Warning, 15000);
             }
         }
+    }
+    // Backup drives that fill up soon at the rate their backups grow; reported once a week.
+    for (const jobs::Job& job : list) {
+        if (!settings.notify_failures) break;
+        QDate& reported = full_reported_[job.id];
+        if (reported.isValid() && reported.daysTo(QDate::currentDate()) < 7) continue;
+        const jobs::FillForecast fill = jobs::forecast_for(jobs::combined_history(store_, job.id, 500), now);
+        if (!jobs::fill_warning(fill)) continue;
+        reported = QDate::currentDate();
+        show_message(tr("The backup drive of %1 is full %2").arg(qs(job.name), fill_time_words(fill.days)),
+                     tr("At the rate the backup grows it needs more space soon. Keep fewer versions or move it to "
+                        "a larger drive."),
+                     QSystemTrayIcon::Warning, 30000);
     }
     first_check_ = false;
     problems.removeDuplicates();

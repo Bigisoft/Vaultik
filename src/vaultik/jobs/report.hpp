@@ -13,6 +13,7 @@
 
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_history.hpp"
+#include "vaultik/jobs/forecast.hpp"
 #include "vaultik/jobs/job.hpp"
 
 namespace vaultik::jobs {
@@ -53,6 +54,7 @@ struct JobReport {
     std::uint64_t copies = 0, copies_failed = 0;  // second copies
     std::uint64_t ransomware = 0;                 // backups that saw signs of ransomware
     std::vector<std::string> drive_problems;      // what the backup drive reported, each once
+    FillForecast forecast;                        // when the destination fills up, as of the report
 };
 
 // A drive that got worse (see drive_trend), as of its last reading in the month.
@@ -63,10 +65,10 @@ struct DriveReport {
 
 struct AttentionItem {
     enum class Kind { NeverSaved, NoRecentVersion, LastFailed, Damage, CheckFailed, TestFailed, CopyFailed,
-                      Ransomware, BackupDrive, DriveWorse };
+                      Ransomware, BackupDrive, DriveWorse, DriveFillsUp };
     Kind kind = Kind::NoRecentVersion;
     std::string subject;  // the job's name, or the drive's model
-    std::uint64_t count = 0;  // days without a version, runs that failed, ...
+    std::uint64_t count = 0;  // days without a version, runs that failed, days until full, ...
 };
 
 struct MonthlyReport {

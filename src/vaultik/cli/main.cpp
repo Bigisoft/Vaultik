@@ -1969,6 +1969,34 @@ void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string
     for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
 }
 
+// When the backup drive newly fills up within jobs::kFillWarnDays (the forecast after this run warns
+// and the one before it did not): a warning, and an alert when alerts are set up. Only on the
+// change, so a drive that stays nearly full is not announced after every run (the start page, the
+// tray and the monthly report keep saying it).
+void space_alert_for(const jobs::JobStore& store, const jobs::Job& job, const jobs::FillForecast& before,
+                     const std::string& settings_dir) {
+    jobs::FillForecast now;
+    try {
+        now = jobs::forecast_for(jobs::combined_history(store, job.id, 500), os::now());
+    } catch (const std::exception&) {
+        return;
+    }
+    if (!jobs::fill_warning(now) || jobs::fill_warning(before)) return;
+    warning("the backup drive " + jobs::describe(now) +
+            "; keep fewer versions (the job's Old backups settings) or use a larger drive");
+    const jobs::AlertSettings s = jobs::load_alerts(settings_dir);
+    if (!s.any() || !s.on_damage) return;
+    jobs::Alert a;
+    a.level = jobs::Alert::Level::Warning;
+    a.event = "space";
+    a.job = job.name;
+    a.title = "The backup drive of " + job.name + " fills up " + jobs::fill_time_text(now.days) + " (" +
+              os::hostname() + ")";
+    a.message = "At the current rate the backup needs more space soon. Keep fewer versions or move it to a larger "
+                "drive. Open Vaultik on " + os::hostname() + " for the details.";
+    for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
+}
+
 // "report [--month YYYY-MM] [--html file] [--json]": the monthly report (see jobs/report.hpp).
 // "report --deliver" sends last month's summary to the alert channels when it is due (the
 // frontend runs it, since scheduled runs may not happen every month).
@@ -2225,6 +2253,8 @@ int cmd_run_job(const Args& a) {
             std::uint64_t stored = 0;
             repo->index().for_each([&stored](const Id&, const BlobLocation& loc) { stored += loc.length; });
             record.backup_size = stored;
+            if (!is_cloud_location(job->repository))
+                if (const auto space = os::disk_space(job->repository)) record.free_space = space->free;
         }
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the backup started
@@ -2240,9 +2270,16 @@ int cmd_run_job(const Args& a) {
         alert_for(*job, record, store.dir());
         throw;
     }
+    // The drive's forecast before this run, to tell when it newly says the drive fills up soon.
+    jobs::FillForecast fill_before;
+    try {
+        fill_before = jobs::forecast_for(jobs::combined_history(store, job->id, 500), os::now());
+    } catch (const std::exception&) {
+    }
     store.append_history(job->id, record);
     run_after(jobs::to_string(record.status));
     alert_for(*job, record, store.dir());
+    space_alert_for(store, *job, fill_before, store.dir());
     // Last month's summary to the alert channels, once, when asked for. Only from the user's own
     // settings: a run with administrator rights uses the admin store's copy of the alerts, and
     // both would send it.

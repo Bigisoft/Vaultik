@@ -61,6 +61,7 @@
 #include "theme.h"
 #include "tray.h"
 #include "versions_view.h"
+#include "vaultik/jobs/forecast.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/report.hpp"
@@ -1417,13 +1418,19 @@ void MainWindow::refresh_overview() {
                          (copy == nullptr ? tr("Second copy: not made yet")
                                           : tr("Second copy: %1, %2").arg(when_text(copy->started), status_text(copy->status).toLower()));
     }
+    std::optional<std::uint64_t> free_now;
     if (!is_cloud_location(job->repository)) {
         const QStorageInfo disk(qs(job->repository));
-        if (disk.isValid() && disk.isReady())
+        if (disk.isValid() && disk.isReady()) {
+            free_now = static_cast<std::uint64_t>(disk.bytesAvailable());
             d.size_detail += (d.size_detail.isEmpty() ? "" : "\n") +
-                             tr("%1 free on %2").arg(format_bytes(static_cast<std::uint64_t>(disk.bytesAvailable())),
-                                                     QDir::toNativeSeparators(disk.rootPath()));
+                             tr("%1 free on %2").arg(format_bytes(*free_now), QDir::toNativeSeparators(disk.rootPath()));
+        }
     }
+    // When the drive fills up at the rate the backup grows.
+    const jobs::FillForecast fill = jobs::forecast_for(records, os::now(), free_now);
+    if (const QString text = fill_forecast_text(fill); !text.isEmpty())
+        d.size_detail += (d.size_detail.isEmpty() ? "" : "\n") + text;
 
     // Health check.
     if (check) {
@@ -1460,6 +1467,10 @@ void MainWindow::refresh_overview() {
         d.warning = tr("The last second copy failed: %1").arg(qs(copy->message));
     } else if (days > 0 && saved > 0 && now > saved && (now - saved) / kDay >= static_cast<std::uint64_t>(days)) {
         d.warning = tr("No version was saved for %1.").arg(count_of((now - saved) / kDay, tr("day"), tr("days")));
+    } else if (jobs::fill_warning(fill)) {
+        d.warning = tr("The backup drive is full %1 at the rate the backup grows. Keep fewer versions (Edit the "
+                       "job, Old backups) or move the backup to a larger drive.")
+                        .arg(fill_time_words(fill.days));
     }
 
     // The drives involved, and their health.

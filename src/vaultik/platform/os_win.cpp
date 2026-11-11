@@ -630,6 +630,12 @@ bool is_pseudo_filesystem(const std::string& /*path*/) {
     return false;
 }
 
+std::optional<DiskSpace> disk_space(const std::string& path) {
+    ULARGE_INTEGER available{}, total{};
+    if (!GetDiskFreeSpaceExW(full_path(widen(path)).c_str(), &available, &total, nullptr)) return std::nullopt;
+    return DiskSpace{available.QuadPart, total.QuadPart};
+}
+
 VolumeLocation volume_of(const std::string& path) {
     VolumeLocation loc;
     const std::wstring full = full_path(widen(path));

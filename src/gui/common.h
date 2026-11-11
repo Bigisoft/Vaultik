@@ -11,6 +11,9 @@ class QWidget;
 
 namespace vaultik {
 struct RetentionPolicy;
+namespace jobs {
+struct FillForecast;
+}
 }
 
 // UTF-8 conversions between Qt and the engine.
@@ -43,6 +46,12 @@ std::uint64_t from_datetime(const QDateTime& dt);
 // Where a snapshot path ("C/Users/me/x.txt") came from on this computer ("C:\Users\me\x.txt"); empty
 // when it has no sensible original location (a whole drive or share).
 QString original_path(const QString& snapshot_path);
+
+// When the backup drive fills up, in words: "At this rate the drive is full in about 6 weeks
+// (grows 1.2 GiB a day)". Empty when there is nothing worth saying (too little history, shrinking).
+QString fill_forecast_text(const vaultik::jobs::FillForecast& forecast);
+// "in about 6 weeks", translated.
+QString fill_time_words(double days);
 
 // The cleanup rules in plain words: "Keeps every version of the last 7 days, then one per week...".
 QString retention_summary(const vaultik::RetentionPolicy& policy);

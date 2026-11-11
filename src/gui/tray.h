@@ -54,4 +54,5 @@ private:
     bool attention_ = false;
     std::map<std::string, std::uint64_t> seen_;      // job id -> start of the newest run already reported
     std::map<std::string, QDate> overdue_reported_;  // job id -> the day it was last reported overdue
+    std::map<std::string, QDate> full_reported_;     // job id -> the day its drive was last reported filling up
 };
