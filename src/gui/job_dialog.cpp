@@ -1237,7 +1237,9 @@ void JobDialog::list_hyperv() {
         return;
     }
     if (!list.available) {
-        hyperv_note_->setText(qs(list.problem) +
+        QString problem = qs(list.problem);
+        if (!problem.isEmpty()) problem[0] = problem[0].toUpper();  // the engine's text starts a sentence here
+        hyperv_note_->setText(problem +
                               (list.problem.find("administrator") != std::string::npos
                                    ? tr(". Start Vaultik as administrator to list them, or add one by name.")
                                    : QString(".")));
