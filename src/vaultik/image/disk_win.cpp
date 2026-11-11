@@ -670,6 +670,8 @@ std::vector<std::unique_ptr<DiskSource>> open_disk_sources(const std::vector<int
             shadow->copy = os::ShadowCopy::create(ntfs);
             for (const std::string& s : shadow->copy->skipped())
                 if (warn) warn("no shadow copy of " + s + "; it is read while in use");
+            for (const std::string& s : shadow->copy->warnings())
+                if (warn) warn(s);
         } catch (const Error& e) {
             if (warn) warn(std::string("the disks are read while in use, without a shadow copy (") + e.what() + ")");
         }

@@ -32,6 +32,9 @@ public:
     // Volumes covered ("C:\"), and ones that could not be (with the reason).
     const std::vector<std::string>& volumes() const { return volumes_; }
     const std::vector<std::string>& skipped() const { return skipped_; }
+    // Applications whose writer failed while the shadow copy was made (their files are in it, but
+    // as after a power cut).
+    const std::vector<std::string>& warnings() const { return warnings_; }
 
 private:
     ShadowCopy() = default;
@@ -42,6 +45,7 @@ private:
     std::vector<std::pair<std::string, std::string>> map_;
     std::vector<std::string> volumes_;
     std::vector<std::string> skipped_;
+    std::vector<std::string> warnings_;
 };
 
 }  // namespace vaultik::os

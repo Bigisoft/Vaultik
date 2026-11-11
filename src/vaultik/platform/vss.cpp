@@ -76,14 +76,21 @@ struct ShadowCopy::Impl {
     IVssBackupComponents* backup = nullptr;
     VSS_ID set{};
     bool have_set = false;
+    bool complete = false;  // the shadow copies were made and are in use
 
     ~Impl() {
         if (backup != nullptr) {
             if (have_set) {
-                IVssAsync* async = nullptr;
-                if (SUCCEEDED(backup->BackupComplete(&async)) && async != nullptr) {
-                    async->Wait();
-                    async->Release();
+                if (complete) {
+                    IVssAsync* async = nullptr;
+                    if (SUCCEEDED(backup->BackupComplete(&async)) && async != nullptr) {
+                        async->Wait();
+                        async->Release();
+                    }
+                } else {
+                    // Stopped after the snapshot set was started (preparing or making it failed):
+                    // the writers are told the backup is off, not that it completed.
+                    backup->AbortBackup();
                 }
                 LONG deleted = 0;
                 VSS_ID failed{};
@@ -172,6 +179,29 @@ std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& p
     check(im.backup->DoSnapshotSet(&async), "creating the shadow copy");
     wait(async, "creating the shadow copy");
 
+    // Writers that failed: their files are in the shadow copy as they were at that moment, but
+    // not prepared (as after a power cut).
+    if (SUCCEEDED(im.backup->GatherWriterStatus(&async)) && async != nullptr) {
+        async->Wait();
+        async->Release();
+        UINT count = 0;
+        if (SUCCEEDED(im.backup->GetWriterStatusCount(&count))) {
+            for (UINT i = 0; i < count; ++i) {
+                VSS_ID instance{}, writer{};
+                BSTR name = nullptr;
+                VSS_WRITER_STATE state = VSS_WS_UNKNOWN;
+                HRESULT failure = S_OK;
+                if (FAILED(im.backup->GetWriterStatus(i, &instance, &writer, &name, &state, &failure))) continue;
+                if (state >= VSS_WS_FAILED_AT_IDENTIFY || FAILED(failure))
+                    sc->warnings_.push_back((name != nullptr ? narrow(std::wstring_view(name, SysStringLen(name))) : std::string("a writer")) +
+                                            " did not prepare its data for the shadow copy (" + hresult_text(failure) +
+                                            "); its files are captured as they would be after a power cut");
+                if (name != nullptr) SysFreeString(name);
+            }
+        }
+        im.backup->FreeWriterStatus();
+    }
+
     for (const auto& [mount, id] : added) {
         VSS_SNAPSHOT_PROP prop{};
         check(im.backup->GetSnapshotProperties(id, &prop), "reading the shadow copy");
@@ -186,6 +216,7 @@ std::unique_ptr<ShadowCopy> ShadowCopy::create(const std::vector<std::string>& p
     // Longest mount point first, so C:\mnt\data\ wins over C:\.
     std::sort(sc->map_.begin(), sc->map_.end(),
               [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
+    im.complete = true;
     return sc;
 }
 

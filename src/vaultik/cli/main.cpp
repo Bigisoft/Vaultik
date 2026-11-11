@@ -838,6 +838,7 @@ std::unique_ptr<os::ShadowCopy> prepare_shadow_copy(VssMode mode, bool pause_sql
     }
     if (!g_json) clear_status();
     for (const std::string& s : sc->skipped()) warning("no shadow copy for " + s + "; read live");
+    for (const std::string& s : sc->warnings()) warning(s);
     if (sc->volumes().empty()) return nullptr;
     if (!g_json) {
         std::string list;
