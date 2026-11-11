@@ -72,6 +72,9 @@ std::string winget_program() {
         // The system account and the service accounts have no winget.
         const std::string sid = os::current_user_sid();
         if (sid == "S-1-5-18" || sid == "S-1-5-19" || sid == "S-1-5-20") return {};
+        // Nor is it run with administrator rights: winget.exe is found in the account's own
+        // folders, which its programs without those rights can change.
+        if (os::process_elevated()) return {};
         std::string local = os::get_env("LOCALAPPDATA");
         if (local.empty()) local = os::user_folder(os::UserFolder::LocalAppData);
         const std::string path = local + "\\Microsoft\\WindowsApps\\winget.exe";

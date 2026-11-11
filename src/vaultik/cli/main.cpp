@@ -3052,7 +3052,10 @@ int cmd_apps_install(const Args& a) {
         chosen.push_back(&*it);
     }
     if (winget_program().empty())
-        throw Error("winget is not available for this account (install App Installer from the Microsoft Store)");
+        throw Error(os::process_elevated()
+                        ? "programs are not installed from a program running with administrator rights: start "
+                          "Vaultik without them (winget asks for approval where a program needs it)"
+                        : "winget is not available for this account (install App Installer from the Microsoft Store)");
 
     const auto start = std::chrono::steady_clock::now();
     std::size_t ok = 0;

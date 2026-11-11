@@ -772,7 +772,10 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
 - The program list knows only what the Windows uninstall list and winget know. Jobs with
   administrator rights run as the system account, which has no winget and its own per-user list:
   their versions list the programs installed for everyone, by name only, so none of them can be
-  installed with winget from there. A program is "missing" when neither its winget package nor
+  installed with winget from there. A backup or Vaultik started with administrator rights in your
+  own account does not run winget either (it is found in folders your programs without those
+  rights can change), so it lists programs by name only, and reinstalling needs Vaultik started
+  without them. A program is "missing" when neither its winget package nor
   its name (without version numbers) is found on this PC.
 - Restores and backups check for links planted in the folders they work on, but a parent folder
   swapped for a link during the run by someone who can write there is not detected. Run elevated

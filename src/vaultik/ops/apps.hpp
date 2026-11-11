@@ -76,8 +76,9 @@ std::vector<InstalledApp> missing_apps(const std::vector<InstalledApp>& stored, 
 // The entries of the Uninstall keys (HKLM in the 64 and 32 bit views, HKCU). Empty on POSIX.
 std::vector<UninstallEntry> read_uninstall_entries();
 
-// winget.exe of the signed-in user, or empty when there is none (or this runs as the system
-// account, which has no winget). Windows only.
+// winget.exe of the signed-in user, or empty when there is none, this runs as the system account
+// (which has no winget) or with administrator rights (winget is found in folders the account's
+// programs without those rights can change, so it is not started then). Windows only.
 std::string winget_program();
 
 // The winget packages installed here, from `winget export`; nothing when winget is missing, fails
