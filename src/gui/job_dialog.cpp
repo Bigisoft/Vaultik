@@ -1211,8 +1211,20 @@ bool JobDialog::prepare_repository(const jobs::Job& job, const std::string& pass
 
 void JobDialog::accept() {
     jobs::Job j = collect();
-    const std::string pw = u8(password_->text());
-    if (pw != u8(password2_->text())) {
+    // Copies of the password are wiped however this ends (the fields keep theirs until the
+    // dialog closes).
+    std::string pw = u8(password_->text());
+    std::string pw2 = u8(password2_->text());
+    std::string effective;
+    struct Wipe {
+        std::string* s[3];
+        ~Wipe() {
+            for (std::string* p : s) secure_wipe(p->data(), p->size());
+        }
+    } wipe{{&pw, &pw2, &effective}};
+    const bool same = pw == pw2;
+    secure_wipe(pw2.data(), pw2.size());
+    if (!same) {
         QMessageBox::warning(this, windowTitle(), tr("The two passwords do not match."));
         return;
     }
@@ -1224,7 +1236,7 @@ void JobDialog::accept() {
     QApplication::setOverrideCursor(Qt::WaitCursor);
     try {
         jobs::validate(j);
-        std::string effective = pw;
+        effective = pw;
         if (effective.empty()) effective = store_.password(j.id);  // editing, password unchanged
         const bool repo_changed = !editing_ || j.repository != job_.repository || !pw.empty();
         if (repo_changed && !prepare_repository(j, effective)) {

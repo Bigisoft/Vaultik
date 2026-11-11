@@ -333,6 +333,12 @@ TEST_CASE("asking another computer to back up") {
     CHECK(left->jobs == std::vector<std::string>{"photos"});
     CHECK_FALSE(after_run(*left, "photos").has_value());
     CHECK(after_run(*left, "music")->jobs == left->jobs);
+    CHECK(request_step(*r, 0) == RequestStep::Take);
+    CHECK(request_step(*r, r->created) == RequestStep::Drop);  // still "pending": put back
+    BackupRequest running = *r;
+    running.state = "running";
+    CHECK(request_step(running, r->created) == RequestStep::Keep);
+    CHECK(request_step(running, r->created + 1) == RequestStep::Drop);
 
     // The view shows it next to the computer it asks.
     bool shown = false;
@@ -349,7 +355,12 @@ TEST_CASE("asking another computer to back up") {
     to_me.created = now;
     to_me.jobs = {"x", "y"};
     write_request(*repo, mine, to_me);
-    CHECK(take_request(*repo, {"x", "z"}, now + 5) == std::vector<std::string>{"x"});
+    const std::string state = u8(tmp.path / "state");
+    fs::create_directories(tmp.path / "state");
+    CHECK(take_request(*repo, {"x", "z"}, {"x", "z"}, now + 5, state) == std::vector<std::string>{"x"});
+    // Taken up: a later look does not run it again.
+    CHECK(take_request(*repo, {"x", "z"}, {"x", "z"}, now + 10, state).empty());
+    CHECK(read_request(*repo, mine).has_value());
     auto taken = read_request(*repo, mine);
     REQUIRE(taken.has_value());
     CHECK(taken->state == "running");
@@ -360,12 +371,39 @@ TEST_CASE("asking another computer to back up") {
     CHECK(read_request(*repo, mine)->jobs == std::vector<std::string>{"y"});
     finish_request(*repo, "y");
     CHECK_FALSE(read_request(*repo, mine).has_value());
-    // One for jobs this computer does not have here, or an expired one, is removed unanswered.
+    // The storage side puts the old, genuine request back: it is not run again, and removed.
     write_request(*repo, mine, to_me);
-    CHECK(take_request(*repo, {"q"}, now).empty());
+    CHECK(take_request(*repo, {"x"}, {"x"}, now + 20, state).empty());
+    CHECK_FALSE(read_request(*repo, mine).has_value());
+    BackupRequest older = to_me;
+    older.created = now - 100;
+    write_request(*repo, mine, older);
+    CHECK(take_request(*repo, {"x"}, {"x"}, now + 20, state).empty());
+    CHECK_FALSE(read_request(*repo, mine).has_value());
+    // A newer one is taken up.
+    BackupRequest newer = to_me;
+    newer.created = now + 50;
+    write_request(*repo, mine, newer);
+    CHECK(take_request(*repo, {"x"}, {"x"}, now + 60, state) == std::vector<std::string>{"x"});
+    remove_request(*repo, mine);
+    // One for a job with administrator rights only (known, not run from here) waits for that
+    // job's own run instead of being removed unanswered.
+    BackupRequest admin = to_me;
+    admin.created = now + 70;
+    admin.jobs = {"a"};
+    write_request(*repo, mine, admin);
+    CHECK(take_request(*repo, {"a", "x"}, {"x"}, now + 80, state).empty());
+    REQUIRE(read_request(*repo, mine).has_value());
+    CHECK(read_request(*repo, mine)->state == "pending");
+    finish_request(*repo, "a");
+    CHECK_FALSE(read_request(*repo, mine).has_value());
+    // One for jobs this computer does not have here, or an expired one, is removed unanswered.
+    to_me.created = now + 100;
+    write_request(*repo, mine, to_me);
+    CHECK(take_request(*repo, {"q"}, {"q"}, now + 100, state).empty());
     CHECK_FALSE(read_request(*repo, mine).has_value());
     write_request(*repo, mine, to_me);
-    CHECK(take_request(*repo, {"x"}, now + kRequestExpiry + 1).empty());
+    CHECK(take_request(*repo, {"x"}, {"x"}, now + 100 + kRequestExpiry + 1, state).empty());
     CHECK_FALSE(read_request(*repo, mine).has_value());
     // Requests are not status notes.
     CHECK(list_statuses(*repo).size() == 2);
@@ -550,6 +588,16 @@ TEST_CASE("computers merge status records with the snapshots") {
     REQUIRE(mine.size() == 3);
     CHECK(mine[2].host == "old-pc");
     CHECK(mine[2].this_computer);
+
+    // A record older than the computer's newest version (put back by the storage side, or not
+    // written) is flagged, and the computer's health is at least Warning.
+    CHECK_FALSE(list[2].record_behind);
+    snaps.push_back(snap("OFFICE", now + 60 * 10000000ull, 300, 1));
+    const std::vector<Computer> behind = merge_computers(files, snaps, now, office.name, "OFFICE");
+    REQUIRE(behind.size() == 4);
+    CHECK(behind[2].record_behind);
+    CHECK(behind[2].health == Health::Warning);
+    CHECK_FALSE(behind[1].record_behind);
 }
 
 TEST_CASE("prune and verify leave status records alone") {

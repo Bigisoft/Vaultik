@@ -332,6 +332,16 @@ void check_admin_command(const std::string& command, const std::string& what) {
 
 namespace {
 
+// A cloud destination's Object Lock: what it uploads cannot be deleted for that long (in
+// compliance mode by nobody, not even the account's owner), which also keeps it billed.
+std::wstring lock_text(int days, bool compliance) {
+    if (days <= 0) return {};
+    return L"    keeping what it uploads locked for " + std::to_wstring(days) + L" days" +
+           (compliance ? L" (compliance mode: nobody can delete it before then)" : L" (governance mode)") + L"\n";
+}
+
+}  // namespace
+
 // A job with administrator rights reads any file (a shadow copy included), writes the backup where
 // the job says, and runs its commands, all as administrator. The job is copied from the user's
 // own job file, which any program running as the user could have changed (the backup password is
@@ -339,9 +349,7 @@ namespace {
 // elevated step shows what the job does and asks, unless the admin copy is exactly the same job
 // with the same cloud keys. A program without administrator rights cannot answer this window. The
 // commands and destinations come first; a job whose description does not fit is refused.
-void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_secrets, const AlertSettings& alerts,
-                 bool same_alerts) {
-    if (approved && same_secrets && same_alerts && to_json(*approved) == to_json(job)) return;
+std::string approval_question(const Job& job, bool changed, bool same_secrets, const AlertSettings& alerts) {
     if (job.sources.size() > 12 || job.excludes.size() > 12)
         throw Error("the job has too many folders or patterns to show in full for approval (at most 12 of each)");
     std::wstring text = L"The backup job \"" + shown(job.name, "the job's name") +
@@ -350,18 +358,30 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
         text += L"Command run before each backup:\n    " + shown(job.before_command, "the command before the backup") + L"\n";
     if (!job.after_command.empty())
         text += L"Command run after each backup:\n    " + shown(job.after_command, "the command after the backup") + L"\n";
-    if (approved && same_secrets) text += L"(Some other setting of the job changed.)\n";
+    if (changed && same_secrets) text += L"(Some other setting of the job changed.)\n";
     if (!same_secrets) text += L"(Its cloud storage keys or sign-ins are new or changed.)\n";
     text += L"Saves the backup to:\n    " + shown(job.repository, "the destination") + L"\n";
     if (!job.cloud_key_id.empty()) text += L"    with the access key " + shown(job.cloud_key_id, "the access key") + L"\n";
     if (!job.cloud_region.empty())
         text += (cloud_kind(job.repository) == CloudKind::Sftp ? L"    trusting the server key " : L"    in the region ") +
                 shown(job.cloud_region, "the server key") + L"\n";
+    text += lock_text(job.cloud_lock_days, job.cloud_lock_compliance);
+    if (!job.cloud_storage_class.empty())
+        text += L"    in the storage class " + shown(job.cloud_storage_class, "the storage class") + L"\n";
     if (!job.second_copy.repository.empty()) {
         text += L"And a second copy to:\n    " + shown(job.second_copy.repository, "the second copy's destination") + L"\n";
-        if (!job.second_copy.cloud_key_id.empty())
-            text += L"    with the access key " + shown(job.second_copy.cloud_key_id, "the access key") + L"\n";
+        const SecondCopy& c = job.second_copy;
+        if (!c.cloud_key_id.empty()) text += L"    with the access key " + shown(c.cloud_key_id, "the access key") + L"\n";
+        if (!c.cloud_region.empty())
+            text += (cloud_kind(c.repository) == CloudKind::Sftp ? L"    trusting the server key " : L"    in the region ") +
+                    shown(c.cloud_region, "the second copy's server key") + L"\n";
+        text += lock_text(c.cloud_lock_days, c.cloud_lock_compliance);
+        if (!c.cloud_storage_class.empty())
+            text += L"    in the storage class " + shown(c.cloud_storage_class, "the storage class") + L"\n";
     }
+    // Old versions it removes after each run (a changed policy can thin out the backup).
+    text += job.retention.empty() ? std::wstring(L"Keeps every version.\n")
+                                  : L"Removes old versions, keeping " + shown(describe(job.retention), "the versions kept") + L".\n";
     if (alerts.any()) {
         text += L"Sends alerts to:\n";
         if (!alerts.ntfy_url.empty()) text += L"    " + shown(alerts.ntfy_url, "the ntfy URL") + L"\n";
@@ -372,12 +392,19 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
     }
     text += L"Backs up:\n";
     for (const std::string& src : job.sources) text += L"    " + shown(src, "a folder to back up") + L"\n";
+    // Whole disks: every partition, the system's included.
+    if (job.image_disks.size() > 12) throw Error("the job has too many disks to show for approval (at most 12)");
+    for (const std::string& d : job.image_disks)
+        text += L"    the whole disk " + shown(d == "system" ? std::string("Windows runs from") : d, "a disk to back up") +
+                L" (every partition)\n";
     // Hyper-V machines are exported (with their disks, so all their data) into a staging folder.
     if (job.hyperv_vms.size() > 12) throw Error("the job has too many virtual machines to show for approval (at most 12)");
     for (const std::string& vm : job.hyperv_vms)
         text += L"    Hyper-V virtual machine " + shown(vm, "a virtual machine's name") + L"\n";
-    if (!job.hyperv_vms.empty() && !job.hyperv_staging.empty())
-        text += L"    exported first into " + shown(job.hyperv_staging, "the export folder") + L"\n";
+    if (!job.hyperv_vms.empty())
+        text += job.hyperv_staging.empty()
+                    ? std::wstring(L"    exported first into Vaultik's folder in ProgramData\n")
+                    : L"    exported first into a new folder in " + shown(job.hyperv_staging, "the export folder") + L"\n";
     if (!job.excludes.empty()) {
         text += L"Skipping:\n";
         for (const std::string& ex : job.excludes) text += L"    " + shown(ex, "a pattern to skip") + L"\n";
@@ -397,6 +424,15 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
     if (lines > 40)
         throw Error("the job's description is too long to show in full for approval; shorten its folders, "
                     "patterns or commands");
+    return narrow(text);
+}
+
+namespace {
+
+void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_secrets, const AlertSettings& alerts,
+                 bool same_alerts) {
+    if (approved && same_secrets && same_alerts && to_json(*approved) == to_json(job)) return;
+    const std::wstring text = widen(approval_question(job, approved.has_value(), same_secrets, alerts));
     const int answer = MessageBoxW(nullptr, text.c_str(), L"Vaultik: a job with administrator rights",
                                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST | MB_SETFOREGROUND);
     if (answer != IDYES)
@@ -409,6 +445,20 @@ void confirm_job(const Job& job, const std::optional<Job>& approved, bool same_s
 #ifndef _WIN32
 void check_admin_command(const std::string&, const std::string&) {}
 #endif
+
+std::string elevated_run_refusal(const Job& job, bool automatic) {
+    if (automatic)
+        return "the job \"" + job.name +
+               "\" was started automatically in a program with administrator rights; such runs only start "
+               "without them (Vaultik starts its own that way)";
+    if (!job.before_command.empty() || !job.after_command.empty())
+        return "the job \"" + job.name +
+               "\" runs commands before or after its backup, and those never run with administrator rights from "
+               "your own settings, which any program running as you can change. Run it without administrator "
+               "rights, or turn on \"Run with administrator rights\" for the job, which shows the commands for "
+               "approval";
+    return {};
+}
 
 namespace {
 

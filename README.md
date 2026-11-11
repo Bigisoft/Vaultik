@@ -445,14 +445,21 @@ the other run's note replaced its own.
 no longer backs up there, after asking; its versions stay. It refuses this computer's own note.
 
 **Ask to back up now** (or `vaultik computers --ask <name or id>`, `--ask-job <job id>` for one
-job) leaves an encrypted request for that computer in the repository. The other computer runs its
-jobs on that repository once (recorded with the trigger "request") when one of them runs anyway,
-or when Vaultik there looks for requests: every 15 minutes for folders, drives and network shares
-and every hour for cloud storage, where each look costs a few billed requests and counts against
-the cloud drives' rate limits (not over a metered connection). A look opens the repository
-without its index and reads one small file. The view shows a request as "asked to back up" until
-the last job ran; a request nobody took up within 7 days is dropped. Requests only name saved jobs
-of that computer: they cannot make it run anything else.
+job) leaves an encrypted request for that computer in the repository. Vaultik on the other
+computer looks for requests every 15 minutes for folders, drives and network shares and every hour
+for cloud storage, where each look costs a few billed requests and counts against the cloud
+drives' rate limits (not over a metered connection); a look opens the repository without its
+index and reads one small file. It then runs the asked jobs on that repository once (recorded
+with the trigger "request"). A job that runs anyway (on its schedule) counts as having answered
+the request for that job; a job with administrator rights is only answered that way, since Vaultik
+does not start those itself. The view shows a request as "asked to back up" until the last job
+ran; a request is dropped 7 days after it was made, whether or not it was taken up. Requests only
+name saved jobs of that computer: they cannot make it run anything else. Whoever can write to
+the storage (a cloud provider, someone with access to the share) cannot make or change a request,
+but could put an old one back; each computer remembers the newest request it took up and ignores
+that one and older ones. They could likewise put back an older status note: a note older than
+that computer's newest version is marked as such ("status record older than its newest version",
+health at least "warning").
 
 ### External drives
 
@@ -670,13 +677,16 @@ are open while it runs, so a plain file backup gets a half-written copy or none 
   administrator rights. To get one back, pick `WSL\<name>.tar` in the restore window and choose
   **Import as new...**: it is installed as a new distribution with `wsl --import <new name>
   <folder> -`, fed from the backup. An existing distribution of that name is replaced only after
-  you confirm it (it is unregistered first, which deletes its disk). The `.tar` can also simply be
-  restored as a file.
+  you confirm it, and only after the whole export was read from the backup and checked (it is
+  unregistered first, which deletes its disk, so a damaged backup must not get that far). The
+  `.tar` can also simply be restored as a file.
 - **Hyper-V machines** (a job with administrator rights): each ticked machine is exported with
   `Export-VM` (a consistent copy, also of a running machine, through a checkpoint Hyper-V takes
-  and merges itself) into an export folder (`ProgramData\Vaultik\hyperv-export` unless set; only
-  administrators can read it, and it needs room for the largest machine), backed up from there as
-  the folder `Hyper-V\<name>` with its configuration and disks, and removed again. The machines'
+  and merges itself) into an export folder (`ProgramData\Vaultik\hyperv-export`, or a folder
+  `Vaultik Hyper-V export` made in the folder you set, which itself is left as it is; only
+  administrators can read the export folder, and it needs room for the largest machine), backed up
+  from there as the folder `Hyper-V\<name>` with its configuration and disks, and removed again.
+  Exports left behind by a run that was killed are removed by the next run. The machines'
   own disk files are left out of the file backup. **List machines** needs Vaultik started as
   administrator; a machine can also be added by name. To get one back, pick `Hyper-V\<name>` and
   choose **Import as new...**: its files are restored into `<folder>\Exported`, then imported
@@ -790,8 +800,8 @@ sooner than each one says.
 
 A backup normally lists every folder and compares every file's size and times with the last
 version, which takes minutes with hundreds of thousands of files even when little changed. Runs
-with administrator rights (a job's scheduled runs as the system account, or Vaultik started as
-administrator) read the NTFS change journal instead, which Windows keeps of every change on a
+with administrator rights (the runs of a job with administrator rights, scheduled or started with
+**Back up now** in Vaultik started as administrator) read the NTFS change journal instead, which Windows keeps of every change on a
 volume: a folder in which nothing was added, removed, renamed or changed since the last backup,
 and which was not changed itself, is taken from that version without being read. A file with
 several names (hard links) changed through one of them also counts as a change in the folders of
@@ -827,7 +837,8 @@ EFI partition, MSR, unknown file systems) are read byte for byte. The data goes 
 deduplicating repository as file backups, so the next image stores only what changed, and
 pruning, health checks, second copies and repair work on images as on any version. An image job
 needs administrator rights (its scheduled runs have them; **Back up now** works when Vaultik
-runs as administrator), and its destination must be on another disk.
+runs as administrator and the job has a schedule, since it then runs the approved copy of the job
+that the schedule runs), and its destination must be on another disk.
 
 ```
 vaultik image disks                                      # the disks, with their numbers
@@ -893,7 +904,23 @@ for a job with administrator rights, as the system account, from the approved co
 admin-only store, so a program running as you cannot change what they are. Since the job file it
 is copied from is yours, and any program running as you could have added a command to it, the
 elevated step that copies the job shows the exact commands and asks before it copies new or
-changed ones; a program without administrator rights cannot answer that window for you.
+changed ones; a program without administrator rights cannot answer that window for you. That
+window shows everything that gives the job its power: the commands, the destinations with their
+keys, server keys, Object Lock and storage class, the second copy, which old versions are
+removed, the folders, the whole disks of an image job and the Hyper-V machines with their export
+folder; a job too large to show in full is refused rather than shown in part.
+
+With "Start Vaultik as administrator" (Settings), Vaultik runs with your full administrator token
+without asking each time. Your job files stay yours, and any program running as you could change
+them, so in that window too nothing they say gets administrator rights without an approval: the
+backups, checks, test restores and repairs of jobs, and the runs it starts by itself (continuous,
+when a drive is connected, at sign-out, asked by another computer), run with your own rights, as
+they would without that setting. A job with administrator rights backs up with them through
+**Back up now** from its approved copy (the one its schedule runs, with checked commands). What
+you start in a window that shows what it does (a restore, a disk image restore, installing
+programs again) keeps the administrator rights. The engine also refuses, whenever it has those
+rights without being an approved administrator job, to start a job by itself or to run a job's
+commands.
 
 ### Running side by side
 
@@ -941,7 +968,8 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
 ## Current limits
 
 - Open and locked files (Outlook data files, databases, files of running programs) are only
-  backed up when Vaultik runs with administrator rights: it then reads from a Volume Shadow Copy,
+  backed up when the backup runs with administrator rights (a job with administrator rights, or
+  `vaultik backup` from an elevated prompt): it then reads from a Volume Shadow Copy,
   a frozen view of each source volume made at the start of the backup. Without those rights, and
   on Linux, files are read live: locked files are skipped with a warning, and a file being
   written during the backup may be captured mid-change. Scheduled jobs get those rights only

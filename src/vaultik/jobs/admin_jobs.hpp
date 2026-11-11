@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/job.hpp"
 
 namespace vaultik::jobs {
@@ -65,6 +66,22 @@ bool event_backup_due(const JobStore& store, const Job& job);
 // command with a fixed environment, in the admin store. No-op on POSIX.
 void check_admin_command(const std::string& command, const std::string& what);
 
+// Why a run of `job` from the user's own job store must not go ahead in a process with
+// administrator rights (that is not the approved copy run with --admin), or empty when it may:
+// any program running as the user can change that store, so neither a run that started
+// automatically (continuous, on connect, on an event, a request from another computer) nor the
+// job's before/after commands may get those rights without the user's approval. The elevated
+// frontend starts such runs with the user's own rights instead (os::run_with_user_rights).
+std::string elevated_run_refusal(const Job& job, bool automatic);
+
+// Windows: the question the elevated step asks (in a window a program without administrator
+// rights cannot answer) before it copies `job` into the admin store, as UTF-8: everything that
+// gives the job its power (commands, destinations and their keys, Object Lock, the second copy,
+// what is removed, folders, whole disks, Hyper-V machines and their export folder, alerts).
+// `changed`: an approved copy exists and differs. Throws Error when it would not fit on screen in
+// full, since what is approved must be exactly what is seen.
+std::string approval_question(const Job& job, bool changed, bool same_secrets, const AlertSettings& alerts);
+
 // Whether the admin store holds the job (so removing it needs administrator rights).
 bool has_admin_copy(const std::string& id);
 
@@ -80,7 +97,10 @@ std::string admin_error_file(const std::string& sid = {});
 
 // "Start Vaultik as administrator" (Windows). An on-demand task "\Vaultik\Vaultik as
 // administrator <SID>" starts vaultik-gui.exe --tray with the account's full token; the app,
-// started normally, runs that task (no approval prompt) and ends, handing over to it. Like an
+// started normally, runs that task (no approval prompt) and ends, handing over to it. That copy
+// starts the runs of jobs from the user's own store with the user's own rights (not with the
+// elevated token: a program running as the user could have changed what they do), and a job with
+// administrator rights from its approved copy (run-job --admin). Like an
 // administrator job, it needs every file of the program folder to be admin-only, since the task
 // would otherwise run whatever an unprivileged program put there.
 std::string elevated_gui_task(const std::string& sid = {});

@@ -109,7 +109,9 @@ struct VirtProgress {
 // `name` installed in `folder` (created when missing; it must hold no ext4.vhdx yet), streaming it
 // from the repository into "wsl --import <name> <folder> -". A distribution of that name must not
 // exist, unless `replace`, which unregisters it first (deleting its disk; the caller asked and the
-// user confirmed). Throws Error (also when cancelled).
+// user confirmed), but only after every piece of the export was read and checked, so a damaged or
+// incomplete backup never costs the existing distribution (progress then counts both passes).
+// Throws Error (also when cancelled).
 void wsl_import(Repository& repo, const Node& file, const std::string& name, const std::string& folder, bool replace,
                 const std::function<void(const VirtProgress&)>& progress = {},
                 const std::function<bool()>& cancelled = {});
@@ -136,17 +138,28 @@ std::vector<HyperVm> parse_hyperv_list(std::string_view json);
 // Names a backup or import accepts for a machine: not empty, at most 100 characters, no control
 // characters and none of * ? [ ] (Get-VM would take them as wildcards and match other machines).
 bool valid_vm_name(std::string_view name);
-// A machine's name as one file name (characters Windows does not allow in names become '_').
+// A machine's name as one file name: characters Windows does not allow in names become '_', and a
+// name changed that way gets "-<8 hex digits>" from the real name, so two machines never share a
+// folder ("a:b" and "a_b"). A name that needs no change stays as it is (so does the result).
 std::string vm_file_name(std::string_view name);
 std::vector<std::string> hyperv_place(const std::string& machine);
 std::string hyperv_snapshot_path(const std::string& machine);
-// The machine name a version path "Hyper-V/<name>" holds; empty for any other.
+// The folder name of a version path "Hyper-V/<folder>" (the machine's name, as vm_file_name made
+// it; the real name is inside the export), used to name an import; empty for any other path.
 std::string machine_of_path(std::string_view snapshot_path);
 
 // Where machines are exported before the backup reads them, by default:
 // <ProgramData>\Vaultik\hyperv-export (only administrators can read it: the disks hold the
 // machine's data).
 std::string default_hyperv_staging();
+
+// Whether a run folder in the export folder was left by a run that ended without removing it
+// (killed, or the computer lost power): its process is gone, or it is older than a week (the
+// process id may have been reused). One from before the process id was in the name
+// ("run-<random>"), once it is a day old.
+// `own_pid` is this process, `alive` tells whether a process runs.
+bool hyperv_run_left_over(const std::string& name, std::chrono::hours age, std::uint32_t own_pid,
+                          const std::function<bool(std::uint32_t)>& alive);
 
 // Exports machine `name` (running or not) with Export-VM into `folder`, a new or empty folder,
 // and returns the folder holding the export (`folder`\<machine>). Throws Error.

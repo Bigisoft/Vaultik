@@ -14,6 +14,7 @@
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/ops/restore.hpp"
@@ -346,6 +347,73 @@ TEST_CASE("a file changed through its other name (a hard link) is read again") {
     bo.refresh_dir = [](const std::string& dir) { return dir.ends_with("\\b"); };
     const BackupResult journaled = run_backup(*repo, bo);
     CHECK(read_text(restored(journaled, "out3") / "b" / "journal.txt") == "JOURNAL, changed through a new name");
+}
+
+TEST_CASE("a program run with the user's own rights runs, writes and returns its exit code") {
+    TempDir tmp;
+    wchar_t system[MAX_PATH];
+    REQUIRE(GetSystemDirectoryW(system, MAX_PATH) > 0);
+    const fs::path cmd = fs::path(system) / L"cmd.exe";
+    const fs::path out = tmp.path / "made.txt";
+    const fs::path groups = tmp.path / "groups.txt";
+    const std::string line = "cmd.exe /d /c \"echo made> \"" + u8(out) + "\" & whoami /groups > \"" + u8(groups) +
+                             "\" & exit 7\"";
+    CHECK(os::run_with_user_rights(u8(cmd), line) == 7);
+    // What it made belongs to the account (it could not have been made with Administrators as owner).
+    CHECK(read_text(out).starts_with("made"));
+    // Never at high integrity, whatever this test runs with.
+    CHECK(read_text(groups).find("High Mandatory Level") == std::string::npos);
+    CHECK_THROWS(os::run_with_user_rights(u8(tmp.path / "missing.exe"), "missing.exe"));
+}
+
+TEST_CASE("an elevated run of a job from the user's settings neither starts on its own nor runs commands") {
+    jobs::Job job;
+    job.name = "Docs";
+    CHECK(jobs::elevated_run_refusal(job, false).empty());
+    CHECK(jobs::elevated_run_refusal(job, true).find("automatically") != std::string::npos);
+    job.before_command = "net user x /add";
+    CHECK(jobs::elevated_run_refusal(job, false).find("commands") != std::string::npos);
+    job.before_command.clear();
+    job.after_command = "C:\\Windows\\System32\\cmd.exe /c exit 0";
+    CHECK(!jobs::elevated_run_refusal(job, false).empty());
+}
+
+TEST_CASE("the approval of a job with administrator rights shows everything that gives it its power") {
+    jobs::Job job;
+    job.name = "Disks";
+    job.repository = "s3:https://s3.example.com/bucket/vaultik";
+    job.cloud_lock_days = 30;
+    job.cloud_lock_compliance = true;
+    job.image_disks = {"0", "system"};
+    job.second_copy.repository = "sftp://backup@nas.example.com/vaultik";
+    job.second_copy.cloud_region = "SHA256:abcdef";
+    job.second_copy.cloud_lock_days = 7;
+    job.retention.last = 1;
+    const jobs::AlertSettings alerts;
+    std::string q = jobs::approval_question(job, false, true, alerts);
+    CHECK(q.find("the whole disk 0 (every partition)") != std::string::npos);
+    CHECK(q.find("the whole disk Windows runs from") != std::string::npos);
+    CHECK(q.find("locked for 30 days (compliance mode") != std::string::npos);
+    CHECK(q.find("locked for 7 days (governance mode)") != std::string::npos);
+    CHECK(q.find("trusting the server key SHA256:abcdef") != std::string::npos);
+    CHECK(q.find("Removes old versions, keeping") != std::string::npos);
+
+    jobs::Job vm;
+    vm.name = "Machines";
+    vm.repository = "D:\\Backups";
+    vm.hyperv_vms = {"Web"};
+    q = jobs::approval_question(vm, false, true, alerts);
+    CHECK(q.find("Hyper-V virtual machine Web") != std::string::npos);
+    CHECK(q.find("exported first into Vaultik's folder in ProgramData") != std::string::npos);
+    CHECK(q.find("Keeps every version.") != std::string::npos);
+    vm.hyperv_staging = "E:\\Exports";
+    CHECK(jobs::approval_question(vm, false, true, alerts).find("exported first into a new folder in E:\\Exports") != std::string::npos);
+
+    // What does not fit on screen is refused rather than cut.
+    job.image_disks.assign(13, "1");
+    CHECK_THROWS(jobs::approval_question(job, false, true, alerts));
+    job.image_disks.assign(12, "gpt-01234567-89ab-cdef-0123-456789abcdef");
+    CHECK_THROWS(jobs::approval_question(job, false, true, alerts));
 }
 
 #endif  // _WIN32

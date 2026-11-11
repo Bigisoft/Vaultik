@@ -136,9 +136,10 @@ Commands:
       --hyperv <machine>       Windows, as administrator: also back up this
                                Hyper-V virtual machine (repeatable), exported with
                                Export-VM into the folder Hyper-V/<machine>
-      --hyperv-staging <dir>   Where machines are exported to first (default:
-                               ProgramData\Vaultik\hyperv-export; needs room for
-                               the largest one; emptied afterwards)
+      --hyperv-staging <dir>   Where machines are exported to first, in a new
+                               folder "Vaultik Hyper-V export" made there
+                               (default: ProgramData\Vaultik\hyperv-export;
+                               needs room for the largest one; emptied afterwards)
   wsl list                     The WSL distributions of this account, whether they
                                run, and their disk files
   wsl import <snapshot> <distro>
@@ -1090,6 +1091,45 @@ struct VirtualMachines {
     }
 };
 
+// The Hyper-V export folder inside a folder the job names: that folder stays the user's (it is
+// never made administrator-only or moved aside, and may be a drive's root); the exports go into
+// this administrator-only folder made in it.
+std::string hyperv_export_root(const std::string& staging) {
+    return staging.empty() ? default_hyperv_staging() : os::join(staging, "Vaultik Hyper-V export");
+}
+
+// The folder of one run's exports: "run-<process id>-<random>", so a later run can tell that the
+// run which made it has ended.
+std::string hyperv_run_folder(const std::string& root) {
+    std::uint8_t rnd[6];
+    random_bytes(rnd);
+    return os::join(root, "run-" + std::to_string(os::process_id()) + "-" + to_hex(rnd));
+}
+
+// Removes what runs that ended without cleaning up left in the export folder (full copies of
+// virtual machines, which only fill the drive).
+void remove_leftover_exports(const std::string& root) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir(std::u8string(root.begin(), root.end()));
+    const auto now = fs::file_time_type::clock::now();
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::u8string n = it->path().filename().u8string();
+        const std::string name(n.begin(), n.end());
+        std::error_code tec;
+        const auto when = fs::last_write_time(it->path(), tec);
+        if (tec) continue;
+        const auto age = std::chrono::duration_cast<std::chrono::hours>(now - when);
+        if (!it->is_directory(tec) || it->is_symlink(tec) ||
+            !hyperv_run_left_over(name, age, os::process_id(), os::process_alive))
+            continue;
+        std::error_code rec;
+        fs::remove_all(it->path(), rec);
+        if (rec) warning("could not remove the exported virtual machines left in " + os::join(root, name) + ": " + rec.message());
+        else if (!g_json) err("Removed exported virtual machines left by an earlier run: " + os::join(root, name) + "\n");
+    }
+}
+
 ExtraSource failed_extra(std::vector<std::string> place, const std::string& why) {
     ExtraSource x;
     x.place = std::move(place);
@@ -1154,12 +1194,12 @@ std::unique_ptr<VirtualMachines> add_virtual_machines(BackupOptions& o, const st
             for (const std::string& m : machines) o.extras.push_back(failed_extra(hyperv_place(m), list.problem));
             return vm;
         }
-        const std::string root = staging.empty() ? default_hyperv_staging() : staging;
+        const std::string root = hyperv_export_root(staging);
+        if (!staging.empty()) os::make_dirs(staging);
         // Only administrators can read the exported disks (they hold all of the machine's data).
         os::make_admin_dir(root);
-        std::uint8_t rnd[6];
-        random_bytes(rnd);
-        vm->staging_run = os::join(root, "run-" + to_hex(rnd));
+        remove_leftover_exports(root);
+        vm->staging_run = hyperv_run_folder(root);
         o.excludes.push_back(root);  // a file backup of the drive does not read the exports twice
         o.excludes.push_back(os::join(root, "*"));
         std::size_t index = 0;
@@ -2409,6 +2449,14 @@ int cmd_run_job(const Args& a) {
 
     // The job's own resource settings, unless overridden on the command line.
     const bool on_connect = a.has("--on-connect");
+    // With administrator rights, a job from the user's own settings (which any program running as
+    // the user can change) neither starts on its own nor runs its commands with them.
+    if (!a.has("--admin") && os::process_elevated()) {
+        const bool automatic = on_connect || a.has("--on-event") || a.has("--on-sign-out") || a.has("--on-change") ||
+                               a.has("--on-request");
+        const std::string refusal = jobs::elevated_run_refusal(*job, automatic);
+        if (!refusal.empty()) throw Error(refusal);
+    }
     if (on_connect && !jobs::connect_backup_due(store, *job)) return kExitOk;
     // Started by an event rather than a time: not again soon after a backup.
     std::string trigger = a.has("--on-event") ? "event" : a.has("--on-sign-out") ? "sign-out"
@@ -3213,7 +3261,11 @@ int cmd_find(const Args& a) {
 int poll_requests(const Args& a) {
     const jobs::JobStore store = job_store(a);
     std::map<std::string, std::vector<jobs::Job>> by_repo;
+    // Every job a repository has here, those with administrator rights too: a request for one of
+    // them is answered by its own run, not removed as unknown.
+    std::map<std::string, std::vector<std::string>> known_by_repo;
     for (const jobs::Job& job : store.list()) {
+        known_by_repo[job.repository].push_back(job.id);
         if (job.run_as_admin || (is_cloud_location(job.repository) && !a.has("--cloud"))) continue;
         if (!jobs::drive_connected(job)) continue;
         by_repo[job.repository].push_back(job);
@@ -3229,7 +3281,8 @@ int poll_requests(const Args& a) {
             secure_wipe(pw.data(), pw.size());
             std::vector<std::string> local;
             for (const jobs::Job& j : list) local.push_back(j.id);
-            for (const std::string& id : jobs::take_request(*repo, local, os::now())) asked.push_back(id);
+            for (const std::string& id : jobs::take_request(*repo, known_by_repo[location], local, os::now(), store.dir()))
+                asked.push_back(id);
         } catch (const std::exception& e) {
             secure_wipe(pw.data(), pw.size());
             failed.push_back(location + ": " + e.what());
@@ -3280,7 +3333,8 @@ int cmd_computers(const Args& a) {
                                 {"latest", time_or_null(c.latest)},
                                 {"latest_bytes", c.latest_bytes},
                                 {"added_bytes", c.added_bytes},
-                                {"record", c.status_name.empty() ? nlohmann::json() : nlohmann::json(c.status_name)}};
+                                {"record", c.status_name.empty() ? nlohmann::json() : nlohmann::json(c.status_name)},
+                                {"record_behind", c.record_behind}};
             if (c.request)
                 j["request"] = {{"from", c.request->from}, {"created", c.request->created},
                                 {"jobs", c.request->jobs}, {"state", c.request->state}, {"started", c.request->started}};
@@ -3315,6 +3369,8 @@ int cmd_computers(const Args& a) {
                            rpad(std::to_string(c.versions), 9) + rpad(c.latest ? format_bytes(c.latest_bytes) : "-", 12);
         if (!c.status) {
             line += c.status_name.empty() ? "  (no status record)" : "  (status record unreadable)";
+        } else if (c.record_behind) {
+            line += "  (status record older than its newest version)";
         }
         out(line + "\n");
         if (c.request)
@@ -4118,6 +4174,32 @@ int wmain(int argc, wchar_t** argv) {
     // Libraries loaded later (delay-loaded ones such as the virtual disk library) only from the
     // system folder, never from the program's folder or the current one.
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    // Started by an elevated Vaultik for work a program running as the user could have chosen (a
+    // job from the user's own settings): before reading anything, run again with an ordinary
+    // user's rights, the same command line, and pass its exit code on. Never with the full rights.
+    {
+        wchar_t flag[4] = {};
+        if (GetEnvironmentVariableW(L"VAULTIK_USER_RIGHTS", flag, 4) == 1 && flag[0] == L'1' &&
+            vaultik::os::process_elevated()) {
+            SetEnvironmentVariableW(L"VAULTIK_USER_RIGHTS", L"0");  // the run itself must not try again
+            try {
+                std::wstring self(MAX_PATH, L'\0');
+                for (;;) {
+                    const DWORD n = GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()));
+                    if (n == 0) throw vaultik::Error("cannot find this program's own file");
+                    if (n < self.size()) {
+                        self.resize(n);
+                        break;
+                    }
+                    self.resize(self.size() * 2);
+                }
+                return vaultik::os::run_with_user_rights(vaultik::narrow(self), vaultik::narrow(GetCommandLineW()));
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "%s\n", e.what());
+                return 1;
+            }
+        }
+    }
     // Arguments arrive as UTF-16; everything inside Vaultik is UTF-8.
     std::vector<std::string> args;
     args.reserve(static_cast<std::size_t>(argc));

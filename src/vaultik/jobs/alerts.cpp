@@ -180,10 +180,7 @@ std::vector<std::string> send_alert(const AlertSettings& s, const Alert& a, cons
     if (!s.webhook_url.empty()) {
         attempt("webhook", [&] {
             check_url(s.webhook_url);
-            const nlohmann::json j = {{"source", "vaultik"},   {"event", a.event},       {"level", level_name(a.level)},
-                                      {"job", a.job},          {"title", a.title},       {"message", a.message},
-                                      {"computer", os::hostname()}, {"time", os::format_time_local(os::now())}};
-            const std::string body = j.dump();
+            const std::string body = webhook_body(a, os::hostname(), os::format_time_local(os::now()));
             http::Request r;
             r.method = "POST";
             r.url = s.webhook_url;
@@ -193,6 +190,15 @@ std::vector<std::string> send_alert(const AlertSettings& s, const Alert& a, cons
         });
     }
     return failed;
+}
+
+std::string webhook_body(const Alert& a, const std::string& computer, const std::string& time) {
+    const nlohmann::json j = {{"source", "vaultik"}, {"event", a.event},  {"level", level_name(a.level)},
+                              {"job", a.job},        {"title", a.title},  {"message", a.message},
+                              {"computer", computer}, {"time", time}};
+    // A message may quote a file name that is not valid UTF-8 (Linux names are bytes): such bytes
+    // become U+FFFD instead of dropping the whole alert.
+    return j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 }  // namespace vaultik::jobs

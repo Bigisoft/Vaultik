@@ -157,6 +157,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     });
 
     runner_ = new Runner(this);
+    runner_->keep_administrator_rights();  // work started and shown in this window
     connect(runner_, &Runner::progress, this, [this](const QJsonObject& ev) {
         if (thaw_running_) {
             status_->setText(tr("Asking for a thaw: part %1...").arg(ev.value("files").toInteger()));

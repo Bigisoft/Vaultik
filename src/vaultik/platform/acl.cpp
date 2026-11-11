@@ -4,6 +4,9 @@
 
 #ifdef _WIN32
 
+#include <algorithm>
+#include <cstring>
+#include <string_view>
 #include <vector>
 
 #include "vaultik/crypto/crypto.hpp"
@@ -189,6 +192,187 @@ bool process_elevated() {
            elevation.TokenIsElevated != 0;
 }
 
+namespace {
+
+// The groups a standard (filtered) token holds for denying access only: administrators and the
+// other groups whose members Windows gives an elevated token.
+bool elevating_group(PSID sid) {
+    for (const WELL_KNOWN_SID_TYPE kind :
+         {WinBuiltinAdministratorsSid, WinBuiltinPowerUsersSid, WinBuiltinAccountOperatorsSid,
+          WinBuiltinSystemOperatorsSid, WinBuiltinPrintOperatorsSid, WinBuiltinBackupOperatorsSid,
+          WinBuiltinNetworkConfigurationOperatorsSid, WinBuiltinCryptoOperatorsSid, WinLocalAccountAndAdministratorSid})
+        if (IsWellKnownSid(sid, kind)) return true;
+    // Domain groups: Domain Admins, Cert Publishers, Schema Admins, Enterprise Admins, Group Policy
+    // Creator Owners, domain controllers.
+    const SID_IDENTIFIER_AUTHORITY nt = SECURITY_NT_AUTHORITY;
+    const SID_IDENTIFIER_AUTHORITY* authority = GetSidIdentifierAuthority(sid);
+    const UCHAR count = *GetSidSubAuthorityCount(sid);
+    if (authority == nullptr || std::memcmp(authority, &nt, sizeof nt) != 0 || count != 5 ||
+        *GetSidSubAuthority(sid, 0) != SECURITY_NT_NON_UNIQUE)
+        return false;
+    const DWORD rid = *GetSidSubAuthority(sid, 4);
+    return rid == 512 || rid == 516 || rid == 517 || rid == 518 || rid == 519 || rid == 520 || rid == 498 || rid == 521;
+}
+
+std::vector<std::uint8_t> token_info(HANDLE token, TOKEN_INFORMATION_CLASS which) {
+    DWORD size = 0;
+    GetTokenInformation(token, which, nullptr, 0, &size);
+    std::vector<std::uint8_t> buf(size == 0 ? 1 : size);
+    if (!GetTokenInformation(token, which, buf.data(), static_cast<DWORD>(buf.size()), &size))
+        throw_last_error("cannot read this program's rights");
+    return buf;
+}
+
+BOOL WINAPI ignore_ctrl(DWORD type) {
+    // Ctrl+C reaches the child too; it decides how to stop, and this process waits for it.
+    return type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ? TRUE : FALSE;
+}
+
+}  // namespace
+
+int run_with_user_rights(const std::string& program, const std::string& command_line) {
+    HANDLE raw = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT, &raw))
+        throw_last_error("cannot read this program's rights");
+    UniqueHandle token(raw);
+
+    // Administrator groups only deny from now on.
+    std::vector<std::uint8_t> groups_buf = token_info(token.get(), TokenGroups);
+    const auto* groups = reinterpret_cast<const TOKEN_GROUPS*>(groups_buf.data());
+    std::vector<SID_AND_ATTRIBUTES> disable;
+    for (DWORD i = 0; i < groups->GroupCount; ++i)
+        if (elevating_group(groups->Groups[i].Sid)) disable.push_back({groups->Groups[i].Sid, 0});
+    // Only the privileges a standard token has.
+    std::vector<std::uint8_t> privs_buf = token_info(token.get(), TokenPrivileges);
+    const auto* privs = reinterpret_cast<const TOKEN_PRIVILEGES*>(privs_buf.data());
+    std::vector<LUID_AND_ATTRIBUTES> remove;
+    for (DWORD i = 0; i < privs->PrivilegeCount; ++i) {
+        wchar_t name[128];
+        DWORD len = 128;
+        LUID luid = privs->Privileges[i].Luid;
+        const bool known = LookupPrivilegeNameW(nullptr, &luid, name, &len) != FALSE;
+        const std::wstring_view n = known ? std::wstring_view(name, len) : std::wstring_view();
+        if (n == SE_CHANGE_NOTIFY_NAME || n == SE_SHUTDOWN_NAME || n == SE_UNDOCK_NAME ||
+            n == SE_INC_WORKING_SET_NAME || n == SE_TIME_ZONE_NAME)
+            continue;
+        remove.push_back({luid, 0});
+    }
+    HANDLE r = nullptr;
+    if (!CreateRestrictedToken(token.get(), 0, static_cast<DWORD>(disable.size()), disable.empty() ? nullptr : disable.data(),
+                               static_cast<DWORD>(remove.size()), remove.empty() ? nullptr : remove.data(), 0, nullptr, &r))
+        throw_last_error("cannot reduce this program's rights");
+    UniqueHandle restricted(r);
+
+    // At most medium integrity, as a program started normally.
+    std::vector<std::uint8_t> label_buf = token_info(restricted.get(), TokenIntegrityLevel);
+    const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(label_buf.data());
+    const UCHAR label_count = *GetSidSubAuthorityCount(label->Label.Sid);
+    if (label_count == 0 || *GetSidSubAuthority(label->Label.Sid, label_count - 1u) > SECURITY_MANDATORY_MEDIUM_RID) {
+        SID_IDENTIFIER_AUTHORITY mandatory = SECURITY_MANDATORY_LABEL_AUTHORITY;
+        PSID medium = nullptr;
+        if (!AllocateAndInitializeSid(&mandatory, 1, SECURITY_MANDATORY_MEDIUM_RID, 0, 0, 0, 0, 0, 0, 0, &medium))
+            throw_last_error("cannot reduce this program's rights");
+        TOKEN_MANDATORY_LABEL lower{};
+        lower.Label.Sid = medium;
+        lower.Label.Attributes = SE_GROUP_INTEGRITY;
+        const BOOL ok = SetTokenInformation(restricted.get(), TokenIntegrityLevel, &lower,
+                                            static_cast<DWORD>(sizeof lower + GetLengthSid(medium)));
+        FreeSid(medium);
+        if (!ok) throw_last_error("cannot reduce this program's rights");
+    }
+    // What it creates belongs to the account (not to Administrators, which it can no longer use),
+    // and its own objects are open to the account and the system only.
+    std::vector<std::uint8_t> user_buf = token_info(restricted.get(), TokenUser);
+    PSID user = reinterpret_cast<const TOKEN_USER*>(user_buf.data())->User.Sid;
+    TOKEN_OWNER owner{user};
+    if (!SetTokenInformation(restricted.get(), TokenOwner, &owner, sizeof owner))
+        throw_last_error("cannot reduce this program's rights");
+    BYTE system_sid[SECURITY_MAX_SID_SIZE];
+    DWORD system_size = sizeof system_sid;
+    if (!CreateWellKnownSid(WinLocalSystemSid, nullptr, system_sid, &system_size))
+        throw_last_error("cannot reduce this program's rights");
+    const DWORD acl_size = static_cast<DWORD>(sizeof(ACL) + 2 * sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(user) +
+                                              GetLengthSid(system_sid));
+    std::vector<std::uint8_t> acl_buf(acl_size);
+    auto* acl = reinterpret_cast<ACL*>(acl_buf.data());
+    if (!InitializeAcl(acl, acl_size, ACL_REVISION) || !AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, user) ||
+        !AddAccessAllowedAce(acl, ACL_REVISION, GENERIC_ALL, system_sid))
+        throw_last_error("cannot reduce this program's rights");
+    TOKEN_DEFAULT_DACL dacl{acl};
+    if (!SetTokenInformation(restricted.get(), TokenDefaultDacl, &dacl, sizeof dacl))
+        throw_last_error("cannot reduce this program's rights");
+    // Never start it with administrator rights after all.
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    if (!GetTokenInformation(restricted.get(), TokenElevation, &elevation, sizeof elevation, &size) ||
+        elevation.TokenIsElevated != 0)
+        throw Error("cannot reduce this program's rights: Windows still counts them as an administrator's");
+
+    // The child is killed with this process (the job closes with it).
+    UniqueHandle job(CreateJobObjectW(nullptr, nullptr));
+    if (!job.valid()) throw_last_error("cannot start the program");
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation, &limits, sizeof limits))
+        throw_last_error("cannot start the program");
+
+    // Only the standard handles are passed on.
+    std::vector<HANDLE> inherit;
+    const HANDLE std_handles[3] = {GetStdHandle(STD_INPUT_HANDLE), GetStdHandle(STD_OUTPUT_HANDLE),
+                                   GetStdHandle(STD_ERROR_HANDLE)};
+    for (const HANDLE h : std_handles) {
+        if (h == nullptr || h == INVALID_HANDLE_VALUE) continue;
+        if (std::find(inherit.begin(), inherit.end(), h) != inherit.end()) continue;
+        if (SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) inherit.push_back(h);
+    }
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof si;
+    std::vector<std::uint8_t> attr_buf;
+    if (!inherit.empty()) {
+        SIZE_T attr_size = 0;
+        InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+        attr_buf.resize(attr_size);
+        si.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+        if (!InitializeProcThreadAttributeList(si.lpAttributeList, 1, 0, &attr_size))
+            throw_last_error("cannot start the program");
+        if (!UpdateProcThreadAttribute(si.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit.data(),
+                                       inherit.size() * sizeof(HANDLE), nullptr, nullptr)) {
+            DeleteProcThreadAttributeList(si.lpAttributeList);
+            throw_last_error("cannot start the program");
+        }
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput = std_handles[0];
+        si.StartupInfo.hStdOutput = std_handles[1];
+        si.StartupInfo.hStdError = std_handles[2];
+    }
+    std::wstring app = widen(program);
+    std::wstring cmd = widen(command_line);
+    PROCESS_INFORMATION pi{};
+    const BOOL started = CreateProcessAsUserW(
+        restricted.get(), app.c_str(), cmd.data(), nullptr, nullptr, inherit.empty() ? FALSE : TRUE,
+        CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | (inherit.empty() ? 0 : EXTENDED_STARTUPINFO_PRESENT), nullptr,
+        nullptr, &si.StartupInfo, &pi);
+    const DWORD start_error = GetLastError();
+    if (si.lpAttributeList != nullptr) DeleteProcThreadAttributeList(si.lpAttributeList);
+    if (!started) {
+        SetLastError(start_error);
+        throw_last_error("cannot start " + program + " without administrator rights");
+    }
+    UniqueHandle process(pi.hProcess);
+    UniqueHandle thread(pi.hThread);
+    if (!AssignProcessToJobObject(job.get(), process.get())) {
+        TerminateProcess(process.get(), 1);
+        throw_last_error("cannot start the program");
+    }
+    SetConsoleCtrlHandler(ignore_ctrl, TRUE);
+    ResumeThread(thread.get());
+    WaitForSingleObject(process.get(), INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(process.get(), &code);
+    return static_cast<int>(code);
+}
+
 std::string program_data_dir() {
     PWSTR path = nullptr;
     const HRESULT hr = SHGetKnownFolderPath(FOLDERID_ProgramData, KF_FLAG_DONT_VERIFY, nullptr, &path);
@@ -226,6 +410,10 @@ std::string current_user_sid() {
 
 bool process_elevated() {
     return false;
+}
+
+int run_with_user_rights(const std::string&, const std::string&) {
+    throw Error("running with reduced rights is only available on Windows");
 }
 
 std::string program_data_dir() {

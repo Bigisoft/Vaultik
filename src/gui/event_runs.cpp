@@ -56,11 +56,17 @@ public:
         for (std::string& i : ignored_) i = os::fold_case(i);
 #ifdef Q_OS_WIN
         stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (stop_ != nullptr) thread_ = std::thread([this] { watch(); });
+        if (stop_ != nullptr) thread_ = std::thread([this] { run(); });
+        else ended_ = true;
 #else
-        if (::pipe2(stop_, O_CLOEXEC) == 0) thread_ = std::thread([this] { watch(); });
+        if (::pipe2(stop_, O_CLOEXEC) == 0) thread_ = std::thread([this] { run(); });
+        else ended_ = true;
 #endif
     }
+
+    // Whether watching ended on its own (the folder is gone, or its drive or share went away):
+    // nothing is watched any more until it is made again.
+    bool ended() const { return ended_.load(); }
 
     ~FolderWatch() {
 #ifdef Q_OS_WIN
@@ -83,6 +89,11 @@ public:
     FolderWatch& operator=(const FolderWatch&) = delete;
 
 private:
+    void run() {
+        watch();
+        ended_ = true;
+    }
+
     // Whether a change at `path` counts: not in a folder the backup leaves out, nor in the
     // backup's own folder or Vaultik's settings (which every run writes to).
     bool counts(const std::string& path) const {
@@ -208,6 +219,7 @@ private:
     std::vector<std::string> ignored_;
     std::vector<std::string> excludes_;
     std::function<void()> on_change_;
+    std::atomic<bool> ended_{false};
 };
 
 EventRuns::EventRuns(QWidget* window, QObject* parent) : QObject(parent), window_(window) {
@@ -222,6 +234,32 @@ EventRuns::EventRuns(QWidget* window, QObject* parent) : QObject(parent), window
     connect(requests_, &QTimer::timeout, this, &EventRuns::poll_requests);
     requests_->start();
     QTimer::singleShot(std::chrono::minutes(1), this, &EventRuns::poll_requests);
+    // A folder that went away (a USB drive or network share unplugged, the folder renamed) ends
+    // its watch; once a minute such watches are made again, so the folder is watched when it is
+    // back.
+    rewatch_ = new QTimer(this);
+    rewatch_->setInterval(std::chrono::minutes(1));
+    connect(rewatch_, &QTimer::timeout, this, &EventRuns::rewatch);
+    rewatch_->start();
+}
+
+void EventRuns::watch(Watched& w) {
+    const std::string id = w.job.id;
+    std::vector<std::string> ignored = {jobs::config_dir()};
+    if (!is_cloud_location(w.job.repository)) ignored.push_back(os::absolute_path(w.job.repository));
+    QPointer<EventRuns> self(this);
+    w.watches.clear();
+    for (const std::string& source : w.job.sources) {
+        w.watches.push_back(std::make_unique<FolderWatch>(os::absolute_path(source), ignored, w.job.excludes, [self, id] {
+            QMetaObject::invokeMethod(
+                self.data(), [self, id] { if (self) self->changed(id); }, Qt::QueuedConnection);
+        }));
+    }
+}
+
+void EventRuns::rewatch() {
+    for (auto& [id, w] : watched_)
+        if (std::any_of(w.watches.begin(), w.watches.end(), [](const auto& f) { return f->ended(); })) watch(w);
 }
 
 void EventRuns::poll_requests() {
@@ -235,6 +273,12 @@ void EventRuns::poll_requests() {
     QStringList args = {QStringLiteral("computers"), QStringLiteral("--poll"), QStringLiteral("--json")};
     if (cloud) args << QStringLiteral("--cloud");
     QProcess* process = request_poll_;
+    // One that cannot start sends no "finished": without this, no look would ever start again.
+    connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError e) {
+        if (e != QProcess::FailedToStart) return;
+        request_poll_ = nullptr;
+        process->deleteLater();
+    });
     connect(process, &QProcess::finished, this, [this, process] {
         request_poll_ = nullptr;
         process->deleteLater();
@@ -251,6 +295,7 @@ void EventRuns::poll_requests() {
             }
         }
     });
+    process->setProcessEnvironment(Runner::engine_environment());
     process->start(Runner::engine_path(), args);
 }
 
@@ -286,15 +331,7 @@ void EventRuns::set_jobs(const std::vector<jobs::Job>& list) {
             }
             start(it->second.job, QStringLiteral("--on-change"), false);
         });
-        std::vector<std::string> ignored = {jobs::config_dir()};
-        if (!is_cloud_location(job.repository)) ignored.push_back(os::absolute_path(job.repository));
-        QPointer<EventRuns> self(this);
-        for (const std::string& source : job.sources) {
-            w.watches.push_back(std::make_unique<FolderWatch>(os::absolute_path(source), ignored, job.excludes, [self, id] {
-                QMetaObject::invokeMethod(
-                    self.data(), [self, id] { if (self) self->changed(id); }, Qt::QueuedConnection);
-            }));
-        }
+        watch(w);
         keep.emplace(job.id, std::move(w));
     }
     for (auto& [id, w] : watched_) delete w.timer;
@@ -322,7 +359,9 @@ bool EventRuns::start(const jobs::Job& job, const QString& flag, bool sign_out) 
     program = QFileInfo(program).dir().filePath(QStringLiteral("vaultik-task.exe"));
 #endif
     qint64 pid = 0;
-    if (!QProcess::startDetached(program, {QStringLiteral("run-job"), qs(job.id), flag}, QString(), &pid)) return false;
+    // With the user's own rights, also in Vaultik started as administrator (see
+    // Runner::engine_environment): nobody approved what the job does.
+    if (!Runner::start_detached(program, {QStringLiteral("run-job"), qs(job.id), flag}, &pid)) return false;
     runs_.push_back({job.id, static_cast<std::uint32_t>(pid), sign_out});
     if (!poll_->isActive()) poll_->start();
     return true;
@@ -345,7 +384,10 @@ void EventRuns::poll() {
         }
     }
 #ifdef Q_OS_WIN
-    if (blocking_ && std::none_of(runs_.begin(), runs_.end(), [](const Run& r) { return r.sign_out; })) {
+    // Never hold Windows up for longer than kMaxHold: a run that hangs must not keep the computer
+    // from restarting (Windows goes on; the run is ended with the session).
+    const bool too_long = blocking_ && std::chrono::steady_clock::now() - blocking_since_ > kMaxHold;
+    if (blocking_ && (too_long || std::none_of(runs_.begin(), runs_.end(), [](const Run& r) { return r.sign_out; }))) {
         blocking_ = false;
         ShutdownBlockReasonDestroy(reinterpret_cast<HWND>(window_->winId()));
         // Still signing out or shutting down (the user did not cancel it): this program closes, so
@@ -379,6 +421,7 @@ bool EventRuns::session_ending(std::intptr_t flags) {
     if (update_backup && !poll_->isActive()) poll_->start();
     if (!started && !update_backup) return false;
     blocking_ = true;
+    blocking_since_ = std::chrono::steady_clock::now();
     const QString reason =
         started ? tr("Vaultik is backing up before Windows signs out. This takes a few minutes at most.")
                 : tr("Vaultik is finishing a backup that started when Windows began installing updates.");

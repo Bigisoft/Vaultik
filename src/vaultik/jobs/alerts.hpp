@@ -44,6 +44,9 @@ struct Alert {
     std::string message;
 };
 
+// The JSON a webhook receives (invalid UTF-8 in the texts is replaced, never refused).
+std::string webhook_body(const Alert& alert, const std::string& computer, const std::string& time);
+
 // Sends the alert to every configured channel. Never throws: returns one line per channel that
 // failed ("Telegram: HTTP 401 ..."), empty when all went through.
 std::vector<std::string> send_alert(const AlertSettings& settings, const Alert& alert,

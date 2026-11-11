@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -83,7 +84,9 @@ std::string first_line(const std::string& text) {
 }
 
 // "wsl --export <name> -", read as a stream. A watchdog stops the export when the backup is
-// cancelled or nothing arrives for a long time, which ends the read that waits for it.
+// cancelled or WSL sends nothing for a long time, which ends the read that waits for it. Only
+// time spent waiting for WSL counts: while the backup itself does not read (a slow upload holds
+// it up), WSL simply waits for room in the pipe.
 class WslExport : public StreamSource {
 public:
     WslExport(const std::string& name, std::function<bool()> cancelled, std::chrono::seconds stall)
@@ -92,7 +95,6 @@ public:
                    {{"WSL_UTF8", "1"}}),
           cancelled_(std::move(cancelled)),
           stall_(stall) {
-        last_data_ = std::chrono::steady_clock::now();
         watchdog_ = std::thread([this] { watch(); });
     }
     ~WslExport() override {
@@ -105,18 +107,27 @@ public:
     }
 
     std::size_t read(std::uint8_t* dst, std::size_t max) override {
-        const std::size_t n = process_.read(dst, max);
+        waiting(true);
+        std::size_t n = 0;
+        try {
+            n = process_.read(dst, max);
+        } catch (...) {
+            waiting(false);
+            throw;
+        }
+        waiting(false);
         const std::lock_guard<std::mutex> g(lock_);
-        last_data_ = std::chrono::steady_clock::now();
         total_ += n;
         return n;
     }
 
     void finish() override {
+        waiting(true);  // for WSL to end
         const int code = process_.wait();
         {
             const std::lock_guard<std::mutex> g(lock_);
             done_ = true;
+            waiting_ = false;
         }
         wake_.notify_all();
         if (stopped_) throw Error(stop_reason_);
@@ -129,13 +140,20 @@ public:
     }
 
 private:
+    // Whether this waits for WSL now (in a read, or for it to end), and since when.
+    void waiting(bool on) {
+        const std::lock_guard<std::mutex> g(lock_);
+        waiting_ = on;
+        if (on) wait_started_ = std::chrono::steady_clock::now();
+    }
+
     void watch() {
         std::unique_lock<std::mutex> g(lock_);
         while (!done_) {
             wake_.wait_for(g, std::chrono::milliseconds(500));
             if (done_) break;
             const bool cancel = cancelled_ && cancelled_();
-            const bool stalled = std::chrono::steady_clock::now() - last_data_ > stall_;
+            const bool stalled = waiting_ && std::chrono::steady_clock::now() - wait_started_ > stall_;
             if (cancel || stalled) {
                 stop_reason_ = cancel ? "cancelled" : "wsl --export stopped sending data and was ended";
                 stopped_ = true;
@@ -151,7 +169,8 @@ private:
     std::chrono::seconds stall_;
     std::mutex lock_;
     std::condition_variable wake_;
-    std::chrono::steady_clock::time_point last_data_;
+    bool waiting_ = false;
+    std::chrono::steady_clock::time_point wait_started_;
     std::uint64_t total_ = 0;
     bool done_ = false;
     std::atomic<bool> stopped_{false};
@@ -458,10 +477,32 @@ void wsl_import(Repository& repo, const Node& file, const std::string& name, con
     const std::vector<WslDistro> installed = wsl_distros();
     const auto existing = std::find_if(installed.begin(), installed.end(),
                                        [&](const WslDistro& d) { return fold(d.name) == fold(name); });
+    VirtProgress p;
+    p.total = file.size;
     if (existing != installed.end()) {
         if (!replace)
             throw Error("a WSL distribution called " + existing->name +
                         " exists already; choose another name (or replace it explicitly)");
+        // Unregistering deletes the distribution's disk at once, and an import that fails later
+        // would leave neither: first make sure every piece of the export is there and intact
+        // (read and checked once; the import reads it again).
+        for (const Id& id : file.content)
+            if (!repo.index().contains(id))
+                throw Error("the backup of this distribution is incomplete (a piece of it is missing), so " +
+                            existing->name + " was left as it is");
+        p.total = 2 * file.size;
+        for (const Id& id : file.content) {
+            if (cancelled && cancelled()) throw Error("cancelled");
+            Bytes chunk;
+            try {
+                chunk = repo.load_blob(BlobType::Data, id);
+            } catch (const std::exception& e) {
+                throw Error("the backup of this distribution cannot be read in full (" + std::string(e.what()) +
+                            "), so " + existing->name + " was left as it is");
+            }
+            p.bytes += chunk.size();
+            if (progress) progress(p);
+        }
         int code = 0;
         const std::string text = run_wsl({"--unregister", existing->name}, &code, std::chrono::minutes(10));
         if (code != 0) throw Error("could not remove the WSL distribution " + existing->name + ": " + first_line(text));
@@ -472,8 +513,6 @@ void wsl_import(Repository& repo, const Node& file, const std::string& name, con
 
     os::PipedProcess wsl({"wsl.exe", "--import", name, target, "-"}, os::PipedProcess::Direction::ToProgram,
                          {{"WSL_UTF8", "1"}});
-    VirtProgress p;
-    p.total = file.size;
     try {
         for (const Id& id : file.content) {
             if (cancelled && cancelled()) throw Error("cancelled");
@@ -516,6 +555,18 @@ std::string vm_file_name(std::string_view name) {
     }
     while (!out.empty() && (out.back() == '.' || out.back() == ' ')) out.back() = '_';  // Windows drops them
     if (out.empty() || out == "." || out == "..") out = "_";
+    if (out != name) {
+        // Changed: another machine may have exactly that name ("a:b" and "a_b"), so the changed
+        // one also gets a mark of its real name. The result needs no change, so this is stable.
+        std::uint32_t h = 2166136261u;  // FNV-1a
+        for (const char c : name) {
+            h ^= static_cast<unsigned char>(c);
+            h *= 16777619u;
+        }
+        char mark[16];
+        std::snprintf(mark, sizeof mark, "-%08x", static_cast<unsigned>(h));
+        out += mark;
+    }
     return out;
 }
 
@@ -602,6 +653,25 @@ HyperVList hyperv_machines() {
 #endif
     return list;
 }
+
+bool hyperv_run_left_over(const std::string& name, std::chrono::hours age, std::uint32_t own_pid,
+                          const std::function<bool(std::uint32_t)>& alive) {
+    if (!name.starts_with("run-")) return false;
+    const std::string rest = name.substr(4);
+    const std::size_t dash = rest.find('-');
+    if (dash == std::string::npos) return age >= std::chrono::hours(24);
+    std::uint32_t pid = 0;
+    const std::string digits = rest.substr(0, dash);
+    if (digits.empty() || digits.size() > 10 || !std::all_of(digits.begin(), digits.end(), [](unsigned char c) {
+            return c >= '0' && c <= '9';
+        }))
+        return false;
+    const unsigned long long n = std::stoull(digits);
+    if (n > 0xFFFFFFFFull) return false;
+    pid = static_cast<std::uint32_t>(n);
+    return age >= std::chrono::hours(24 * 7) || (pid != own_pid && !alive(pid));
+}
+
 
 std::string default_hyperv_staging() {
     return os::join(os::join(os::program_data_dir(), "Vaultik"), "hyperv-export");

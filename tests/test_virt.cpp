@@ -188,9 +188,15 @@ TEST_CASE("Hyper-V machine names, version paths and Get-VM's list") {
     CHECK_FALSE(valid_vm_name(std::string(101, 'v')));
 
     CHECK(vm_file_name("Windows 11 dev") == "Windows 11 dev");
-    CHECK(vm_file_name("a/b:c") == "a_b_c");
-    CHECK(vm_file_name("dots.") == "dots_");
-    CHECK(hyperv_place("a/b") == std::vector<std::string>{"Hyper-V", "a_b"});
+    CHECK(vm_file_name("a/b:c").starts_with("a_b_c-"));
+    CHECK(vm_file_name("a/b:c").size() == 5 + 9);
+    CHECK(vm_file_name("dots.").starts_with("dots_-"));
+    // Two machines never share a folder, and a folder name maps to itself.
+    CHECK(vm_file_name("a:b") != vm_file_name("a_b"));
+    CHECK(vm_file_name("a_b") == "a_b");
+    CHECK(vm_file_name(vm_file_name("a:b")) == vm_file_name("a:b"));
+    CHECK(vm_file_name("x?") != vm_file_name("x*"));
+    CHECK(hyperv_place("a/b") == std::vector<std::string>{"Hyper-V", vm_file_name("a/b")});
     CHECK(hyperv_snapshot_path("Lab") == "Hyper-V/Lab");
     CHECK(machine_of_path("Hyper-V/Lab") == "Lab");
     CHECK(machine_of_path("/Hyper-V/Lab/") == "Lab");
@@ -403,3 +409,21 @@ TEST_CASE("a program's output and input as streams") {
     }
 }
 #endif
+
+TEST_CASE("Hyper-V exports left by a run that ended are recognized") {
+    using std::chrono::hours;
+    const auto alive = [](std::uint32_t pid) { return pid == 4242; };
+    // The run's process is gone, still runs, or is this one.
+    CHECK(hyperv_run_left_over("run-1234-0a1b2c3d4e5f", hours(0), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-4242-0a1b2c3d4e5f", hours(2), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-99-0a1b2c3d4e5f", hours(0), 99, alive));
+    // A process id taken over by another program: after a week anyway.
+    CHECK(hyperv_run_left_over("run-4242-0a1b2c3d4e5f", hours(24 * 7), 99, alive));
+    // Before the process id was in the name: after a day.
+    CHECK_FALSE(hyperv_run_left_over("run-0a1b2c3d4e5f", hours(23), 99, alive));
+    CHECK(hyperv_run_left_over("run-0a1b2c3d4e5f", hours(24), 99, alive));
+    // Anything else in the folder is never touched.
+    CHECK_FALSE(hyperv_run_left_over("Exports", hours(1000), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-x1-abc", hours(1000), 99, alive));
+    CHECK_FALSE(hyperv_run_left_over("run-99999999999-abc", hours(1), 99, alive));
+}

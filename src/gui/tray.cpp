@@ -91,12 +91,20 @@ void Tray::notify(const QString& title, const QString& text, bool warning, std::
     click_ = std::move(on_click);
 }
 
-void Tray::show_message(const QString& title, const QString& text, int kind, int msecs) {
+void Tray::show_message(const QString& title, const QString& text, int kind, int msecs, bool urgent) {
+    if (in_check_ && urgent_shown_) return;  // the ransomware warning stays on screen
     click_ = nullptr;  // a click on this one opens the window
     icon_->showMessage(title, text, static_cast<QSystemTrayIcon::MessageIcon>(kind), msecs);
+    if (in_check_ && urgent) urgent_shown_ = true;
 }
 
 void Tray::check() {
+    in_check_ = true;
+    urgent_shown_ = false;
+    struct EndCheck {
+        bool& on;
+        ~EndCheck() { on = false; }
+    } end_check{in_check_};
     const AppSettings settings = AppSettings::load();
     const std::vector<jobs::Job> list = store_.list();
     const std::uint64_t now = vaultik::os::now();
@@ -130,7 +138,7 @@ void Tray::check() {
             } else if (fresh && !r.alert.empty() && !r.on_connect) {  // (a connected-drive run says it itself)
                 // Always shown: this is the one that must not be missed.
                 show_message(tr("%1: files may be encrypted by ransomware").arg(name),
-                                   qs(r.alert).left(250), QSystemTrayIcon::Critical, 30000);
+                                   qs(r.alert).left(250), QSystemTrayIcon::Critical, 30000, true);
             } else if (fresh && settings.notify_failures && !r.drive.empty() && r.status != jobs::RunStatus::Failed) {
                 // Saved, but the drive it is on says it is failing: the time to act is now.
                 show_message(tr("The backup drive of %1 reports a problem").arg(name),
