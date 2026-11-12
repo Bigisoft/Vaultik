@@ -1,12 +1,14 @@
 #pragma once
 
 // What the operating system says about the health of the physical drives (Windows: the Storage
-// Management API, MSFT_PhysicalDisk; S.M.A.R.T. details where they can be read). Best effort:
-// nothing here throws, and an unknown answer is Status::Unknown.
+// Management API, MSFT_PhysicalDisk; Linux: sysfs. S.M.A.R.T. details where they can be read).
+// Best effort: nothing here throws, and an unknown answer is Status::Unknown.
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace vaultik::os {
@@ -24,7 +26,8 @@ struct SmartAttribute {
 struct DriveHealth {
     enum class Status { Healthy, Warning, Unhealthy, Unknown };
 
-    int disk = -1;         // the system's disk number
+    int disk = -1;         // the system's disk number (Linux: the whole disk's device number)
+    std::string device;    // Linux: the disk's device, "/dev/nvme0n1" (empty on Windows)
     std::string model;     // "WD My Passport 2627"
     std::string serial;    // the serial number, when the system tells it
     std::string bus;       // "USB", "SATA", "NVMe", ...
@@ -42,6 +45,9 @@ struct DriveHealth {
     std::vector<SmartAttribute> smart;
     std::optional<int> smart_health;       // 100 minus the penalties for bad sectors and the like
     std::vector<std::string> smart_issues; // "3 reallocated sectors", ...
+    // Linux: why the health could not be read ("needs root", "a virtual disk"), shown instead of
+    // the Windows advice to run as administrator. Not a problem with the drive.
+    std::string unknown_reason;
 
     // The health as a percentage: for an SSD the part of its rated life left, for any ATA drive
     // whose attributes could be read also lowered by bad sectors (the lower of the two). Unknown
@@ -81,5 +87,17 @@ const char* smart_attribute_name(int id);
 // the first bad sectors cost the most, as they are the first sign; one reallocated sector gives
 // 94%, ten give 79%, a hundred 60%. An attribute at or below its threshold caps it at 10%.
 void apply_smart(DriveHealth& d);
+
+// Fills in from an NVMe drive's SMART / Health Information log (log page 02h, `size` at least 512
+// bytes, little-endian as the drive sends it): the wear (percentage used), the temperature, the
+// power-on hours and the media errors where still unknown, and turns a critical warning into a
+// warning when the drive was called healthy. Returns false when the log is too short.
+bool apply_nvme_log(DriveHealth& d, const std::uint8_t* log, std::size_t size);
+
+// Fills in from the JSON of "smartctl -j -a <device>" (smartmontools 7 or later): the model,
+// serial and size where unknown, the drive's own verdict, an ATA drive's attribute table (then
+// apply_smart) or an NVMe drive's health log (then apply_nvme_log). Returns false when the output
+// holds no health data; `problem` then gets smartctl's own error message, if it gave one.
+bool apply_smartctl_json(DriveHealth& d, std::string_view json, std::string* problem = nullptr);
 
 }  // namespace vaultik::os

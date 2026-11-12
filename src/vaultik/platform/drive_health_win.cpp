@@ -145,7 +145,7 @@ std::string condition_of(const std::vector<std::uint16_t>& states) {
 // An NVMe drive's own health log (SMART / Health Information, log page 2). Unlike the ATA
 // S.M.A.R.T. data, Windows hands it to any user through IOCTL_STORAGE_QUERY_PROPERTY on a
 // handle opened without read or write access. Fills in what WMI left unknown, and turns the
-// drive's critical warnings into a warning when Windows still calls it healthy.
+// drive's critical warnings into a warning when Windows still calls it healthy (apply_nvme_log).
 void nvme_health(DriveHealth& d) {
     const std::wstring device = L"\\\\.\\PhysicalDrive" + std::to_wstring(d.disk);
     const HANDLE h = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -171,32 +171,7 @@ void nvme_health(DriveHealth& d) {
     const STORAGE_PROTOCOL_SPECIFIC_DATA& data = answer->ProtocolSpecificData;
     const std::size_t start = offsetof(STORAGE_PROTOCOL_DATA_DESCRIPTOR, ProtocolSpecificData) + data.ProtocolDataOffset;
     if (data.ProtocolDataLength < kLog || start + kLog > got) return;
-    NVME_HEALTH_INFO_LOG log;
-    std::memcpy(&log, buffer.data() + start, kLog);
-
-    if (!d.wear) d.wear = log.PercentageUsed;
-    const int kelvin = log.Temperature[0] | (log.Temperature[1] << 8);
-    if (!d.temperature && kelvin > 273) d.temperature = kelvin - 273;
-    std::uint8_t critical = 0;
-    std::memcpy(&critical, &log.CriticalWarning, 1);
-    if (critical != 0 && d.status == DriveHealth::Status::Healthy) {
-        d.status = DriveHealth::Status::Warning;
-        // The bits of the critical warning, most serious first (several can be set at once).
-        static constexpr std::pair<std::uint8_t, const char*> kWarnings[] = {
-            {0x04, "Reliability degraded"},
-            {0x08, "Read-only"},
-            {0x01, "Spare space low"},
-            {0x02, "Temperature out of range"},
-        };
-        if (d.condition.empty()) {
-            d.condition = "Critical warning";
-            for (const auto& [bit, text] : kWarnings)
-                if (critical & bit) {
-                    d.condition = text;
-                    break;
-                }
-        }
-    }
+    apply_nvme_log(d, buffer.data() + start, kLog);
 }
 
 // ATA S.M.A.R.T. commands: SMART READ DATA (feature 0xD0) and READ THRESHOLDS (0xD1), each
@@ -450,16 +425,6 @@ std::vector<DriveHealth> all_drives() {
     std::vector<DriveHealth> all = query(L"");
     std::sort(all.begin(), all.end(), [](const DriveHealth& a, const DriveHealth& b) { return a.disk < b.disk; });
     return all;
-}
-
-const char* to_string(DriveHealth::Status status) {
-    switch (status) {
-        case DriveHealth::Status::Healthy: return "healthy";
-        case DriveHealth::Status::Warning: return "warning";
-        case DriveHealth::Status::Unhealthy: return "unhealthy";
-        case DriveHealth::Status::Unknown: break;
-    }
-    return "unknown";
 }
 
 }  // namespace vaultik::os

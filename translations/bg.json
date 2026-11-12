@@ -851,6 +851,7 @@
  "The first backup takes roughly %1 to an external hard disk.": "Първото архивиране отнема около %1 към външен твърд диск.",
  "The first backup takes roughly %1 when uploading at 100 Mbit/s.": "Първото архивиране отнема около %1 при качване със 100 Mbit/s.",
  "The health check found problems: %1": "Проверката откри проблеми: %1",
+ "The health could not be read: %1.": "Състоянието не можа да се прочете: %1.",
  "The import failed: %1": "Импортирането не успя: %1",
  "The job was saved, but its schedule could not be set up:\n%1": "Задачата е запазена, но графикът ѝ не можа да се настрои:\n%1",
  "The last backup failed: %1": "Последното архивиране не успя: %1",

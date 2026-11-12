@@ -28,6 +28,7 @@
 #include <limits>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/platform/mounts_posix.hpp"
 #include "vaultik/util/hex.hpp"
 #include "vaultik/util/resources.hpp"
 
@@ -529,16 +530,10 @@ bool is_pseudo_filesystem(const std::string& path) {
 
 // ---- volumes: the mount table and file system UUIDs ----------------------------------------
 
-namespace {
+// The mount table, also read by drive_health_posix.cpp (see mounts_posix.hpp).
+namespace mounts {
 
-struct Mount {
-    unsigned major = 0;
-    unsigned minor = 0;
-    std::string root;   // the folder of the file system mounted here ("/" unless a bind mount)
-    std::string point;  // where it is mounted
-    std::string type;
-    std::string source;  // "/dev/sda1", or a name such as "tmpfs"
-};
+namespace {
 
 // Undoes the octal escapes of /proc/self/mountinfo ("\040" for a space).
 std::string unescape_mount(std::string_view s) {
@@ -553,6 +548,8 @@ std::string unescape_mount(std::string_view s) {
     }
     return out;
 }
+
+}  // namespace
 
 std::vector<Mount> read_mounts() {
     std::vector<Mount> mounts;
@@ -611,13 +608,20 @@ bool under(const std::string& path, const std::string& folder) {
     return path == folder || (path.size() > folder.size() && path.starts_with(folder) && path[folder.size()] == '/');
 }
 
-// The mount `path` is on: the latest (top-most) mount whose point holds it.
 const Mount* mount_of(const std::vector<Mount>& mounts, const std::string& path) {
     const Mount* best = nullptr;
     for (const Mount& m : mounts)
         if (under(path, m.point) && (best == nullptr || m.point.size() >= best->point.size())) best = &m;
     return best;
 }
+
+}  // namespace mounts
+
+namespace {
+
+using mounts::Mount;
+using mounts::mount_of;
+using mounts::read_mounts;
 
 bool network_type(const std::string& type) {
     return type == "nfs" || type == "nfs4" || type == "cifs" || type == "smb3" || type == "smbfs" ||

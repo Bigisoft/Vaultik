@@ -1508,7 +1508,8 @@ void MainWindow::refresh_overview() {
         QStringList kind;
         if (!h.bus.empty()) kind << qs(h.bus);
         if (!h.media.empty()) kind << qs(h.media);
-        dr.name = (h.model.empty() ? tr("Disk %1").arg(h.disk) : qs(h.model)) + " (" + kind.join(' ') +
+        const QString disk = h.device.empty() ? tr("Disk %1").arg(h.disk) : qs(h.device);
+        dr.name = (h.model.empty() ? disk : qs(h.model)) + " (" + kind.join(' ') +
                   (kind.isEmpty() ? QString() : QStringLiteral(", ")) + format_bytes(h.size) + ")";
         QStringList notes;
         const bool bad = h.status == os::DriveHealth::Status::Warning || h.status == os::DriveHealth::Status::Unhealthy;
@@ -1519,11 +1520,19 @@ void MainWindow::refresh_overview() {
             case os::DriveHealth::Status::Unknown: notes << tr("health unknown"); break;
         }
         dr.health = h.health_percent().value_or(-1);
+#ifdef Q_OS_WIN
         if (dr.health < 0)
             dr.health_unknown = os::process_elevated()
                                     ? tr("This drive does not report what its health could be worked out from.")
                                     : tr("Start Vaultik as administrator (Settings) to see the health of hard disks "
                                          "and SATA SSDs.");
+#else
+        // Linux: the drive itself is asked, which only root may do; the reason says what was missing.
+        if (dr.health < 0)
+            dr.health_unknown = h.unknown_reason.empty()
+                                    ? tr("This drive does not report what its health could be worked out from.")
+                                    : tr("The health could not be read: %1.").arg(qs(h.unknown_reason));
+#endif
         if (!h.condition.empty()) notes << qs(h.condition);
         for (const std::string& issue : h.smart_issues)
             if (issue != h.condition) notes << qs(issue);
