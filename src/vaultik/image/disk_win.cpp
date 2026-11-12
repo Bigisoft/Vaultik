@@ -556,7 +556,11 @@ private:
 class WinAttachedDisk : public AttachedDisk {
 public:
     WinAttachedDisk(UniqueHandle h, int number) : h_(std::move(h)), number_(number) {}
-    ~WinAttachedDisk() override { DetachVirtualDisk(h_.get(), DETACH_VIRTUAL_DISK_FLAG_NONE, 0); }
+    ~WinAttachedDisk() override {
+        // Letters given here are removed again, or Windows would keep them for the disk's volumes.
+        for (const std::wstring& m : added_) DeleteVolumeMountPointW(m.c_str());
+        DetachVirtualDisk(h_.get(), DETACH_VIRTUAL_DISK_FLAG_NONE, 0);
+    }
     int number() const override { return number_; }
     std::vector<std::string> mounts() const override {
         std::vector<std::string> out;
@@ -564,10 +568,12 @@ public:
             if (!v.mount.empty()) out.push_back(v.mount);
         return out;
     }
+    void add_letter(const std::wstring& mount) { added_.push_back(mount); }
 
 private:
     UniqueHandle h_;
     int number_;
+    std::vector<std::wstring> added_;
 };
 
 char free_letter() {
@@ -577,6 +583,23 @@ char free_letter() {
     for (char c = 'R'; c >= 'D'; --c)
         if (!(used & (1u << (c - 'A')))) return c;
     return 0;
+}
+
+// Whether Windows gives new volumes drive letters by itself ("mountvol /N" turns that off, as
+// on many servers).
+bool automount_enabled() {
+    DWORD value = 0;
+    DWORD size = sizeof value;
+    const LSTATUS e = RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\mountmgr", L"NoAutoMount",
+                                   RRF_RT_REG_DWORD, nullptr, &value, &size);
+    return e != ERROR_SUCCESS || value == 0;
+}
+
+// Whether a partition holds files someone would open: not the EFI system partition, the
+// Microsoft reserved partition or a recovery partition (Windows gives those no letter either).
+bool data_partition(const Partition& p, bool gpt) {
+    if (gpt) return p.type != kEfiSystemType && p.type != kMsrType && p.type != kRecoveryType;
+    return p.mbr_type != 0x27 && p.mbr_type != 0xEF;
 }
 
 }  // namespace
@@ -738,8 +761,51 @@ std::unique_ptr<AttachedDisk> attach_vhdx(const std::string& path, bool read_onl
     const std::size_t at = p.find(L"PhysicalDrive");
     const int number = at == std::wstring::npos ? -1 : _wtoi(p.c_str() + at + 13);
     auto disk = std::make_unique<WinAttachedDisk>(std::move(h), number);
-    // Windows mounts the volumes on its own a moment later.
-    for (int i = 0; i < 50 && disk->mounts().empty(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const bool automount = automount_enabled();
+    // The volumes show up a moment later, and with automount Windows gives them letters.
+    auto ready = [&] {
+        const std::vector<DiskVolume> vols = volumes_of(number);
+        if (!automount) return !vols.empty();
+        return std::any_of(vols.begin(), vols.end(), [](const DiskVolume& v) { return !v.mount.empty(); });
+    };
+    for (int i = 0; i < 50 && !ready(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    if (!disk->mounts().empty()) return disk;
+
+    // No letters (automount is off, or Windows did not get to it): give the volumes that hold
+    // files one each.
+    UniqueHandle dh = open_device(disk_path(number), 0);
+    const RawLayout l = dh.valid() ? read_layout(dh.get()) : RawLayout{};
+    const bool gpt = l.ok && l.style == PARTITION_STYLE_GPT;
+    auto wanted = [&](const DiskVolume& v) {
+        if (!v.mount.empty()) return false;
+        const auto part = std::find_if(l.partitions.begin(), l.partitions.end(),
+                                       [&](const Partition& p) { return p.offset == v.offset; });
+        return part == l.partitions.end() || data_partition(*part, gpt);
+    };
+    // With automount off, Windows leaves the volumes of a newly attached disk offline: no file
+    // system is mounted on them until they are brought online.
+    bool brought_online = false;
+    for (const DiskVolume& v : volumes_of(number)) {
+        if (!wanted(v) || !v.filesystem.empty()) continue;
+        UniqueHandle vh = open_device(volume_device(v.name), GENERIC_READ | GENERIC_WRITE);
+        DWORD got = 0;
+        if (vh.valid() && DeviceIoControl(vh.get(), IOCTL_VOLUME_ONLINE, nullptr, 0, nullptr, 0, &got, nullptr))
+            brought_online = true;
+    }
+    auto has_files = [&] {
+        const std::vector<DiskVolume> vols = volumes_of(number);
+        return std::any_of(vols.begin(), vols.end(), [&](const DiskVolume& v) { return wanted(v) && !v.filesystem.empty(); });
+    };
+    for (int i = 0; brought_online && i < 25 && !has_files(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Only volumes with a file system get a letter: one without (unknown, damaged or encrypted)
+    // would make Explorer offer to format it.
+    for (const DiskVolume& v : volumes_of(number)) {
+        if (!wanted(v) || v.filesystem.empty()) continue;
+        const char c = free_letter();
+        if (c == 0) break;
+        const std::wstring m = std::wstring(1, static_cast<wchar_t>(c)) + L":\\";
+        if (SetVolumeMountPointW(m.c_str(), widen(v.name).c_str())) disk->add_letter(m);
+    }
     return disk;
 }
 
