@@ -3154,7 +3154,7 @@ Credential key_credential(const Args& a) {
     // Never taken from the command line, where other programs and the shell history can see it.
     if (a.has("--recovery-key")) {
         std::string key = os::get_env("VAULTIK_RECOVERY_KEY");
-        if (key.empty()) key = read_password("Recovery key: ");
+        if (key.empty()) key = read_password("Recovery key: ", "no console to ask for the recovery key; set VAULTIK_RECOVERY_KEY");
         return {std::move(key), true};
     }
     return {get_password(a, false), false};
@@ -4446,7 +4446,7 @@ int cmd_recovery_kit(const Args& a) {
         out("A new recovery key was made; any older one no longer works.\n");
     } else {
         std::string typed = os::get_env("VAULTIK_RECOVERY_KEY");
-        if (typed.empty()) typed = read_password("Recovery key: ");
+        if (typed.empty()) typed = read_password("Recovery key: ", "no console to ask for the recovery key; set VAULTIK_RECOVERY_KEY");
         Bytes raw;
         try {
             raw = parse_recovery_key(typed);

@@ -115,9 +115,10 @@ void clear_status() {
     g_status_len = 0;
 }
 
-std::string read_password(std::string_view prompt) {
+std::string read_password(std::string_view prompt, std::string_view without_console) {
     if (!::isatty(STDIN_FILENO))
-        throw Error("no terminal to ask for the password; set VAULTIK_PASSWORD or use --password-file");
+        throw Error(without_console.empty() ? std::string("no terminal to ask for the password; set VAULTIK_PASSWORD or use --password-file")
+                                            : std::string(without_console));
     err(prompt);
     struct termios old{};
     ::tcgetattr(STDIN_FILENO, &old);

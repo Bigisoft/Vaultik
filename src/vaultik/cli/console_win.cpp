@@ -74,11 +74,12 @@ void clear_status() {
     g_status_len = 0;
 }
 
-std::string read_password(std::string_view prompt) {
+std::string read_password(std::string_view prompt, std::string_view without_console) {
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
     if (!GetConsoleMode(in, &mode))
-        throw Error("no console to ask for the password; set VAULTIK_PASSWORD or use --password-file");
+        throw Error(without_console.empty() ? std::string("no console to ask for the password; set VAULTIK_PASSWORD or use --password-file")
+                                            : std::string(without_console));
     err(prompt);
     SetConsoleMode(in, (mode & ~ENABLE_ECHO_INPUT) | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
     std::wstring line;

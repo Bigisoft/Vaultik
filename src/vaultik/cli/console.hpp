@@ -20,8 +20,9 @@ void err(std::string_view text);  // stderr, UTF-8
 void status(std::string_view text);
 void clear_status();
 
-// Reads a line from the console without echo. Throws when stdin is not a console.
-std::string read_password(std::string_view prompt);
+// Reads a line from the console without echo. Throws when stdin is not a console, with
+// `without_console` as the message when given (it says where else the secret can come from).
+std::string read_password(std::string_view prompt, std::string_view without_console = {});
 // Reads a line typed at the console (shown as typed). Throws when there is no console and stdin
 // has ended.
 std::string read_line(std::string_view prompt);
