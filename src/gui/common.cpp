@@ -126,6 +126,15 @@ QString original_path(const QString& snapshot_path) {
 #endif
 }
 
+QString exclusion_preset_label(const std::string& id) {
+    if (id == "temp") return QObject::tr("Temporary files");
+    if (id == "caches") return QObject::tr("Browser and app caches");
+    if (id == "dev") return QObject::tr("Developer folders (node_modules, Python caches)");
+    if (id == "clutter") return QObject::tr("Windows clutter (thumbnails, page file)");
+    if (id == "recycle") return QObject::tr("Recycle bin");
+    return qs(id);
+}
+
 QString retention_summary(const vaultik::RetentionPolicy& p) {
     using vaultik::RetentionPolicy;
     QString text;

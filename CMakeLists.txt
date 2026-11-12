@@ -129,6 +129,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/report.cpp
     src/vaultik/jobs/forecast.cpp
+    src/vaultik/jobs/growth.cpp
     src/vaultik/jobs/computers.cpp
     src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/profile_items.cpp
@@ -272,6 +273,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/updates.cpp
             src/gui/alerts_dialog.cpp
             src/gui/report_dialog.cpp
+            src/gui/grew_dialog.cpp
             src/gui/tray.cpp
             src/gui/drive_watcher.cpp
             src/gui/event_runs.cpp

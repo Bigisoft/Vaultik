@@ -15,6 +15,7 @@ class QPushButton;
 // (once opened) its repository.
 struct OverviewData {
     QString warning;  // something needs attention; empty when all is well
+    bool offer_grew = false;  // the warning is about space: offer "What grew"
 
     bool has_backup = false;
     vaultik::jobs::RunStatus backup_status = vaultik::jobs::RunStatus::Success;
@@ -87,6 +88,7 @@ signals:
     void check_requested();
     void test_requested();
     void versions_requested();
+    void grew_requested();
 
 private:
     struct Tile {
@@ -98,6 +100,7 @@ private:
 
     QWidget* warning_ = nullptr;
     QLabel* warning_text_ = nullptr;
+    QPushButton* warning_grew_ = nullptr;
     Tile last_, next_, versions_, health_;
     BackupCalendar* calendar_ = nullptr;
     QWidget* drives_box_ = nullptr;

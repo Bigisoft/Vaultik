@@ -286,6 +286,7 @@ vaultik restore   --job documents latest --target D:\Restore
 vaultik key passwd   -r E:\Backups\vaultik
 vaultik key passwd   -r E:\Backups\vaultik --recovery-key
 vaultik key recovery -r E:\Backups\vaultik
+vaultik grew         --job documents --since 30d
 vaultik apps         --job documents latest --missing
 vaultik apps install --job documents Git.Git 7zip.7zip
 ```
@@ -814,6 +815,23 @@ versions (the job's Old backups tab) or move the backup to a larger drive. Cloud
 no free space, so for it Vaultik only shows how fast the backup grows. Several jobs with their own
 backups on one drive each count the drive's whole free space, so with several the drive fills up
 sooner than each one says.
+
+### What grew
+
+**What grew** (on the job's Overview, and in the banner when the drive fills up) lists the
+folders that added the most new data to the backup over a period (the last 30 days by default,
+or 7 days, 90 days or a year): what each version stored that the versions before it did not
+have yet, at its stored (compressed) size, given to the folder of the file that brought it. A
+folder is shown as specific as it can be while it still holds a share of the growth, so a
+`node_modules` or a download folder shows up as itself. Where one of the ready-made exclusions
+the job does not use leaves a folder out (developer folders, caches, temporary files...), or the
+folder is a well-known one that is rarely worth keeping (Downloads, Temp, build output...), a
+button adds the exclusion to the job; versions saved already keep the folder until they are
+cleaned up. Below the list, each ready-made exclusion the job does not use says how much it
+would have left out. Only the versions' folder listings are read, never the stored file data, so
+it takes about as long as listing the newest version once plus what changed since.
+`vaultik grew -r <repository>` (or `--job <job>` for that job's versions and exclusions) prints
+the same (`--since 30d`, `2w`, `12h` or a date; `--top <n>`; `--json` for scripts).
 
 ### Faster backups with the change journal
 

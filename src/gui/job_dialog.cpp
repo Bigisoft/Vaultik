@@ -404,13 +404,8 @@ QWidget* JobDialog::build_sources() {
     presets->setContentsMargins(0, 0, 0, 0);
     int n = 0;
     for (const jobs::ExclusionPreset& p : jobs::exclusion_presets()) {
-        QString label, tip;
-        if (p.id == "temp") label = tr("Temporary files");
-        else if (p.id == "caches") label = tr("Browser and app caches");
-        else if (p.id == "dev") label = tr("Developer folders (node_modules, Python caches)");
-        else if (p.id == "clutter") label = tr("Windows clutter (thumbnails, page file)");
-        else if (p.id == "recycle") label = tr("Recycle bin");
-        else label = qs(p.id);
+        const QString label = exclusion_preset_label(p.id);
+        QString tip;
         for (const std::string& pattern : p.patterns) tip += (tip.isEmpty() ? "" : "\n") + qs(pattern);
         auto* box = new QCheckBox(label);
         box->setToolTip(tip);

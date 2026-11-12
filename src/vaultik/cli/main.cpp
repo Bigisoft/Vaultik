@@ -60,6 +60,7 @@
 #include "vaultik/jobs/computers.hpp"
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/report.hpp"
+#include "vaultik/jobs/growth.hpp"
 #include "vaultik/jobs/update_check.hpp"
 #include "vaultik/ops/change_journal.hpp"
 #include "vaultik/ops/move_here.hpp"
@@ -330,6 +331,13 @@ Commands:
       --month <YYYY-MM>        The month (default: the month before this one)
       --html <file>            Write it as a web page instead
       --json                   Print it as JSON
+  grew                         Which folders added the most new data to the
+                               backup, with ready-made exclusions that fit
+                               (-r <repository>, or --job <job> for its versions)
+      --since <time>           From when: 30d (the default), 2w, 12h, or a date
+                               (2026-10-01)
+      --top <n>                How many folders at most (default 15)
+      --json                   Print it as JSON
   update-check                 Ask GitHub whether a newer Vaultik was released
                                (only asks; nothing is downloaded)
   test-restore <job>           Restore a few files of the newest version into a
@@ -438,7 +446,7 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--since", "--top"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -4085,6 +4093,86 @@ int cmd_verify(const Args& a) {
     return kExitOk;
 }
 
+// "30d", "2w", "12h" back from now, or a local date ("2026-10-01") or time.
+std::uint64_t parse_since(const std::string& v, std::uint64_t now) {
+    constexpr std::uint64_t kHour = 36'000'000'000ull;
+    if (!v.empty() && (v.back() == 'd' || v.back() == 'w' || v.back() == 'h')) {
+        char* end = nullptr;
+        const double n = std::strtod(v.c_str(), &end);
+        if (end == v.c_str() + v.size() - 1 && n > 0 && n < 100000) {
+            const double unit = v.back() == 'h' ? 1 : v.back() == 'd' ? 24 : 24 * 7;
+            const auto back = static_cast<std::uint64_t>(n * unit * static_cast<double>(kHour));
+            return back < now ? now - back : 0;
+        }
+        throw Error("--since takes 30d, 2w, 12h or a date (YYYY-MM-DD)");
+    }
+    return os::from_unix(parse_local_time(v), 0);
+}
+
+// "grew [-r <repo> | --job <job>] [--since 30d] [--top n] [--json]": which folders added the most new
+// data over a period (jobs/growth.hpp).
+int cmd_grew(const Args& a) {
+    if (!a.positional.empty()) throw Error("usage: vaultik grew -r <repository> | --job <job> [--since 30d] [--top <n>] [--json]");
+    const std::optional<jobs::Job> job = job_arg(a);
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "grew", lock_wait(a));
+    repo->reload_index();
+    const std::uint64_t now = os::now();
+    jobs::GrowthOptions o;
+    o.since = parse_since(a.value("--since").value_or("30d"), now);
+    if (auto v = a.value("--top")) {
+        const int n = std::atoi(v->c_str());
+        if (n < 1 || n > 1000) throw Error("--top takes a number from 1 to 1000");
+        o.top = static_cast<std::size_t>(n);
+    }
+    const std::vector<SnapshotRef> all = load_all_snapshots(*repo);
+    if (job) {
+        o.select = versions_of_job(all, *job);
+        o.excludes = job->excludes;
+    }
+    o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
+    o.on_progress = [](const std::string& msg) {
+        if (!g_json) status("Reading the versions: " + msg);
+    };
+    std::vector<std::pair<Id, Snapshot>> snaps;
+    snaps.reserve(all.size());
+    for (const SnapshotRef& s : all) snaps.emplace_back(s.id, s.snapshot);
+    const jobs::GrowthReport r = jobs::what_grew(*repo, snaps, o);
+    clear_status();
+    if (g_json) {
+        out(jobs::to_json(r) + "\n");
+        return kExitOk;
+    }
+    out("New data stored since " + os::format_time_local(r.since).substr(0, 16) + " (" + std::to_string(r.versions) +
+        " version(s)): " + format_bytes(r.stored) + " in " + std::to_string(r.files) + " file(s)\n");
+    if (r.folders.empty()) {
+        out("Nothing new was stored in that time.\n");
+        return kExitOk;
+    }
+    out("\nFolders that added the most:\n");
+    for (const jobs::FolderGrowth& f : r.folders) {
+        std::string size = format_bytes(f.stored);
+        if (size.size() < 11) size.insert(0, 11 - size.size(), ' ');
+        out("  " + size + "  " + f.path + (f.rest ? " (other files)" : "") + "  (" + std::to_string(f.files) +
+            " file(s))\n");
+        if (f.suggestion) {
+            std::string ex;
+            for (const std::string& p : f.suggestion->patterns) ex += " --exclude \"" + p + "\"";
+            out("               " +
+                (f.suggestion->preset.empty() ? std::string("could be left out:")
+                                              : "the ready-made exclusion \"" + f.suggestion->preset + "\" leaves it out:") +
+                ex + "\n");
+        }
+    }
+    if (!r.presets.empty()) {
+        out(std::string("\nReady-made exclusions") + (job ? " the job does not use" : "") +
+            ", and what they would have left out:\n");
+        for (const jobs::PresetGrowth& p : r.presets)
+            out("  " + p.id + ": " + format_bytes(p.stored) + " in " + std::to_string(p.files) + " file(s)\n");
+    }
+    return kExitOk;
+}
+
 int cmd_stats(const Args& a) {
     auto repo = open_repo(a);
     const Index& index = repo->index();
@@ -4171,6 +4259,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "apps") return cmd_apps(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
+    if (a.command == "grew") return cmd_grew(a);
     if (a.command == "pin") return cmd_pin(a, true);
     if (a.command == "unpin") return cmd_pin(a, false);
     if (a.command == "note") return cmd_note(a);

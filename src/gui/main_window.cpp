@@ -54,6 +54,7 @@
 #include "key_dialog.h"
 #include "overview.h"
 #include "report_dialog.h"
+#include "grew_dialog.h"
 #include "restore_dialog.h"
 #include "image_dialogs.h"
 #include "app_settings.h"
@@ -1053,6 +1054,7 @@ QWidget* MainWindow::build_job_page() {
 
     versions_ = new VersionsView;
     connect(overview_, &OverviewView::versions_requested, this, [this] { tabs_->setCurrentWidget(versions_); });
+    connect(overview_, &OverviewView::grew_requested, this, &MainWindow::show_grew);
     connect(versions_, &VersionsView::restore_requested, this, [this](int i) { open_restore(i); });
     connect(versions_, &VersionsView::pin_requested, this, [this](int i, bool pin) { change_version(i, pin, false); });
     connect(versions_, &VersionsView::note_requested, this, [this](int i) { change_version(i, false, true); });
@@ -1506,8 +1508,10 @@ void MainWindow::refresh_overview() {
         d.warning = tr("No version was saved for %1.").arg(count_of((now - saved) / kDay, tr("day"), tr("days")));
     } else if (jobs::fill_warning(fill)) {
         d.warning = tr("The backup drive is full %1 at the rate the backup grows. Keep fewer versions (Edit the "
-                       "job, Old backups) or move the backup to a larger drive.")
+                       "job, Old backups) or move the backup to a larger drive. What grew shows which folders "
+                       "added the most.")
                         .arg(fill_time_words(fill.days));
+        d.offer_grew = true;
     }
 
     // The drives involved, and their health.
@@ -1908,6 +1912,20 @@ void MainWindow::check_job(bool full) {
     QStringList args{"check-job", qs(job->id)};
     if (full) args << "--full";
     start_run(args, true);
+}
+
+void MainWindow::show_grew() {
+    const jobs::Job* current = current_job();
+    if (!current) return;
+    const auto it = repos_.find(current->id);
+    if (it == repos_.end() || !it->second.repo) {
+        QMessageBox::information(this, tr("What grew"), tr("The backup is not open yet. Try again in a moment."));
+        return;
+    }
+    // Copies: the open backup may be reloaded while the dialog is open.
+    GrewDialog dialog(store_, *current, it->second.repo, it->second.snapshots, this);
+    dialog.exec();
+    if (dialog.job_changed()) reload_jobs(current->id);
 }
 
 void MainWindow::test_restore() {
