@@ -19,6 +19,7 @@
 #include <QVBoxLayout>
 
 #include "common.h"
+#include "kit_print.h"
 #include "runner.h"
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/scheduler.hpp"
@@ -76,6 +77,11 @@ void show_recovery_key(QWidget* parent, const QString& key, const QString& locat
     auto* buttons = new QDialogButtonBox;
     auto* copy = buttons->addButton(QObject::tr("Copy"), QDialogButtonBox::ActionRole);
     auto* save = buttons->addButton(QObject::tr("Save to a file..."), QDialogButtonBox::ActionRole);
+    auto* print = buttons->addButton(QObject::tr("Print recovery kit..."), QDialogButtonBox::ActionRole);
+    print->setToolTip(QObject::tr("A page to print with the recovery key (also as a QR code), where the backup is "
+                                  "and how to restore on a new computer"));
+    QObject::connect(print, &QPushButton::clicked, &dialog,
+                     [&dialog, key, location] { print_recovery_kit(&dialog, key, location); });
     auto* done = buttons->addButton(QObject::tr("I have kept it"), QDialogButtonBox::AcceptRole);
     QObject::connect(copy, &QPushButton::clicked, &dialog, [key] { QApplication::clipboard()->setText(key); });
     QObject::connect(save, &QPushButton::clicked, &dialog, [&dialog, key, location] {
@@ -159,13 +165,21 @@ KeyDialog::KeyDialog(const jobs::JobStore& store, const QString& location, QWidg
 
     auto* recovery = new QPushButton(tr("Make a new recovery key"));
     connect(recovery, &QPushButton::clicked, this, &KeyDialog::make_recovery_key);
+    auto* kit = new QPushButton(tr("Print recovery kit..."));
+    kit->setToolTip(tr("A page to print with the recovery key (also as a QR code), where the backup is and how to "
+                       "restore on a new computer. Unlock with the recovery key above to print one for it."));
+    connect(kit, &QPushButton::clicked, this, &KeyDialog::print_kit);
     auto* rk_box = new QGroupBox(tr("Recovery key"));
     auto* rl = new QVBoxLayout(rk_box);
     auto* rk_note = new QLabel(tr("A new recovery key replaces the old one, which then stops working. Backups "
                                   "made before Vaultik had recovery keys have none until you make one here."));
     rk_note->setWordWrap(true);
     rl->addWidget(rk_note);
-    rl->addWidget(recovery, 0, Qt::AlignLeft);
+    auto* rk_buttons = new QHBoxLayout;
+    rk_buttons->addWidget(recovery);
+    rk_buttons->addWidget(kit);
+    rk_buttons->addStretch();
+    rl->addLayout(rk_buttons);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -282,6 +296,40 @@ void KeyDialog::change_password() {
                             "update them.")
                              .arg(admin_failed.join(", "));
     QMessageBox::information(this, windowTitle(), text);
+}
+
+void KeyDialog::print_kit() {
+    // The recovery key is not stored anywhere: a kit is printed for the one typed in, once it is
+    // known to open the backup.
+    if (!use_recovery_->isChecked()) {
+        QMessageBox::information(this, windowTitle(),
+                                 tr("The recovery key is shown only when it is made. To print a kit for the one you "
+                                    "have, choose \"Recovery key\" above and type it in; or make a new recovery key, "
+                                    "and print the kit from there."));
+        return;
+    }
+    if (!check_location()) return;
+    const QString dir = location_->text().trimmed();
+    Credential credential{u8(secret_->text()), true};
+    std::string key;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    try {
+        Bytes raw = parse_recovery_key(credential.secret);
+        key = format_recovery_key(raw);
+        secure_wipe(raw.data(), raw.size());
+        const std::unique_ptr<Backend> backend = open_location(dir);
+        const MasterKey check = unlock_master_key(*backend, {key, true});
+    } catch (const Error& e) {
+        QApplication::restoreOverrideCursor();
+        wipe(credential.secret);
+        wipe(key);
+        plain_warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        return;
+    }
+    QApplication::restoreOverrideCursor();
+    wipe(credential.secret);
+    print_recovery_kit(this, qs(key), QDir::toNativeSeparators(dir));
+    wipe(key);
 }
 
 void KeyDialog::make_recovery_key() {

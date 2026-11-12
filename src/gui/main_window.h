@@ -80,6 +80,8 @@ private:
     // A health check of the current job now: its weekly share of the data, or all of it.
     void check_job(bool full);
     void test_restore();
+    // Which folders added the most new data (GrewDialog), for the current job.
+    void show_grew();
     void repair_backup();
     void start_run(const QStringList& args, bool check);
     void open_restore(int snapshot_index, const QString& select_path = {});

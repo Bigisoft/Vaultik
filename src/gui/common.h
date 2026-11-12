@@ -63,6 +63,10 @@ QString fill_forecast_text(const vaultik::jobs::FillForecast& forecast);
 // "in about 6 weeks", translated.
 QString fill_time_words(double days);
 
+// The name of a ready-made exclusion (jobs::exclusion_presets) in words: "Developer folders
+// (node_modules, Python caches)".
+QString exclusion_preset_label(const std::string& id);
+
 // The cleanup rules in plain words: "Keeps every version of the last 7 days, then one per week...".
 QString retention_summary(const vaultik::RetentionPolicy& policy);
 

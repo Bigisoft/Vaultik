@@ -60,6 +60,10 @@ struct HealthPolicy {
     // A monthly test restore: a few files restored into a temporary folder and checked (see
     // ops/restore_test.hpp). Off by default; "vaultik test-restore" runs one any time.
     bool restore_test = false;
+    // Each health check also reads a few files on this computer back whose size and times did not
+    // change since the newest version, and compares their content with the stored one (see
+    // ops/rot_check.hpp), to notice data a failing drive changed by itself.
+    bool rot_check = true;
 };
 
 // Lower speed limits while people work: on the given days (bit 0 = Monday) from start_minute to
@@ -266,6 +270,12 @@ struct RunRecord {
     // A backup to a folder: the space left on the destination's drive after it (for the forecast of
     // when the drive is full, see forecast.hpp); 0 when not known (cloud storage, older runs).
     std::uint64_t free_space = 0;
+    // A health check: files on this computer whose content differs from the newest version
+    // although their size and times are the same (silent damage, see ops/rot_check.hpp): how
+    // many, their paths ("; " separated, the first few), and when that version was made.
+    std::uint64_t rot_files = 0;
+    std::string rot;
+    std::uint64_t rot_version = 0;
 };
 
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file

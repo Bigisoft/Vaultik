@@ -517,7 +517,8 @@ std::string to_json(const Job& job) {
          {{"weekly", job.health.weekly},
           {"sample_percent", job.health.sample_percent},
           {"monthly", job.health.monthly},
-          {"restore_test", job.health.restore_test}}},
+          {"restore_test", job.health.restore_test},
+          {"rot_check", job.health.rot_check}}},
     };
     try {
         return j.dump(2) + "\n";
@@ -657,6 +658,7 @@ Job job_from_json(const std::string& text) {
             job.health.sample_percent = h.value("sample_percent", job.health.sample_percent);
             job.health.monthly = h.value("monthly", job.health.monthly);
             job.health.restore_test = h.value("restore_test", job.health.restore_test);
+            job.health.rot_check = h.value("rot_check", job.health.rot_check);
         }
         validate(job);
         return job;
@@ -680,6 +682,11 @@ std::string to_json(const RunRecord& r) {
     if (!r.drive.empty()) j["drive"] = r.drive;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
+    if (r.rot_files > 0) {
+        j["rot_files"] = r.rot_files;
+        j["rot"] = r.rot;
+        j["rot_version"] = r.rot_version;
+    }
     // Messages can quote Linux file names, which need not be UTF-8: replace such bytes rather
     // than lose the record.
     return j.dump(-1, ' ', false, json::error_handler_t::replace);
@@ -703,6 +710,9 @@ RunRecord record_from_json(const std::string& text) {
         r.drive = j.value("drive", std::string());
         r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.free_space = j.value("free_space", std::uint64_t{0});
+        r.rot_files = j.value("rot_files", std::uint64_t{0});
+        r.rot = j.value("rot", std::string());
+        r.rot_version = j.value("rot_version", std::uint64_t{0});
         r.started = j.value("started", std::uint64_t{0});
         r.finished = j.value("finished", std::uint64_t{0});
         r.status = status_from(j.value("status", std::string("failed")));
@@ -1086,7 +1096,8 @@ void log_runs_to_system(bool on) {
 
 // Event ids: 100s a backup, 200s a health check, 300s the second copy, 400s a test restore; the
 // last digit the result (0 success, 1 partial, 2 failed, 3 cancelled), +5 when it succeeded but
-// warns (ransomware signs, old versions kept, the drive's health). Monitoring tools filter by them.
+// warns (ransomware signs, old versions kept, the drive's health, silent damage on this computer).
+// Monitoring tools filter by them.
 // Every account of the computer can read the Application log, so an entry holds only what the run
 // was and how it ended, never its messages (which name files and folders).
 SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name, const std::string& job_id) {
@@ -1100,7 +1111,7 @@ SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name,
         case RunKind::Copy: base = 300; what = "Second copy"; break;
         case RunKind::RestoreTest: base = 400; what = "Test restore"; break;
     }
-    const bool warns = !r.alert.empty() || !r.hold.empty() || !r.drive.empty();
+    const bool warns = !r.alert.empty() || !r.hold.empty() || !r.drive.empty() || r.rot_files > 0;
     std::uint32_t result = 0;
     switch (r.status) {
         case RunStatus::Success: result = warns ? 5 : 0; break;
@@ -1120,7 +1131,10 @@ SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name,
     if (!r.alert.empty()) e.text += "\nWarning: it saw signs of ransomware";
     if (!r.hold.empty()) e.text += "\nWarning: old versions were kept";
     if (!r.drive.empty()) e.text += "\nWarning: the backup drive reports a problem";
-    e.text += "\nThe details are in Vaultik's Activity tab.";
+    if (r.rot_files > 0)
+        e.text += "\nWarning: " + std::to_string(r.rot_files) +
+                  " file(s) on this computer changed without being written to (silent damage, a failing drive?)";
+    e.text +="\nThe details are in Vaultik's Activity tab.";
     return e;
 }
 

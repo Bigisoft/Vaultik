@@ -219,6 +219,17 @@ recovery key (which replaces the old one, and gives older backups one). Saved jo
 backup get the new password. A changed password does not re-encrypt the backup: a copy of the
 backup folder made before the change still opens with the old password.
 
+**Print recovery kit...** (where the recovery key is shown, and in **Password and recovery key**
+for the key you type in) saves one page to print, as a PDF or a web page: the recovery key as
+text and as a QR code, where the backup is and what kind of place that is (a folder on an
+external drive, a network share, S3-compatible storage, a cloud drive...), the computer's name,
+the date, and short steps to restore on a new computer. It never holds the password or a cloud
+storage key. The file is readable by your account only; once the page is printed, delete it.
+`vaultik recovery-kit -r <repository> --out kit.pdf` (or `kit.html`) writes the same from the
+command line, for the recovery key it asks for (or `--new` for a new one); its PDF uses the
+PDF's built-in fonts, so letters outside Western European ones show as `?` there (the web page
+and the frontend's PDF have them all).
+
 ## Packages
 
 `powershell -File tools\package.ps1` builds the release programs and makes, in `dist\`:
@@ -295,6 +306,8 @@ vaultik restore   --job documents latest --target D:\Restore
 vaultik key passwd   -r E:\Backups\vaultik
 vaultik key passwd   -r E:\Backups\vaultik --recovery-key
 vaultik key recovery -r E:\Backups\vaultik
+vaultik recovery-kit -r E:\Backups\vaultik --out kit.pdf
+vaultik grew         --job documents --since 30d
 vaultik apps         --job documents latest --missing
 vaultik apps install --job documents Git.Git 7zip.7zip
 ```
@@ -646,6 +659,18 @@ notification. `check-job <job> [--full]` runs one now; `verify --read-data --rea
 the same on any repository. New cloud jobs skip the monthly full check, since it downloads the
 whole backup.
 
+Each check also looks for silent damage on this computer ("bit rot"): it reads up to 20 files back
+from this PC (at most 256 MB, for at most 2 minutes, within the job's resource limits) whose size,
+modification time and creation time are still as the newest version of this computer stored
+them, and that were last written at least a day before that version. It hashes them the way the
+backup does and compares the result with the stored content. A file whose content changed while
+nothing wrote to it was changed by the drive (or bad memory, or a cable), not by a program: the
+check then warns, names the files, and says that the backup holds the earlier good copy and from
+which version to restore it, on the Overview (a banner), in the Activity tab, as a notification,
+to the alert channels ("damage" alerts) and in the Event Log (a warning, event 205). Files that
+are locked or cannot be read are skipped, and the files are only read, never changed. The check
+can be turned off in the job's Schedule tab.
+
 ### Test restores
 
 A health check proves the stored data reads back; a test restore proves files come back. It
@@ -798,7 +823,8 @@ pack on one core.
 
 Windows notifications only reach someone at the computer. **Settings > Alerts when you are
 away** sets up alerts that the backup sends itself (so Vaultik need not be open), when a backup
-fails or skips files, when a check or test restore finds damage or the backup drive is failing,
+fails or skips files, when a check or test restore finds damage, when a check finds files on the
+computer that changed by themselves, or the backup drive is failing,
 and optionally after every backup:
 
 - **ntfy** (a free push notification app, [ntfy.sh](https://ntfy.sh) or an own server): the topic
@@ -862,6 +888,23 @@ versions (the job's Old backups tab) or move the backup to a larger drive. Cloud
 no free space, so for it Vaultik only shows how fast the backup grows. Several jobs with their own
 backups on one drive each count the drive's whole free space, so with several the drive fills up
 sooner than each one says.
+
+### What grew
+
+**What grew** (on the job's Overview, and in the banner when the drive fills up) lists the
+folders that added the most new data to the backup over a period (the last 30 days by default,
+or 7 days, 90 days or a year): what each version stored that the versions before it did not
+have yet, at its stored (compressed) size, given to the folder of the file that brought it. A
+folder is shown as specific as it can be while it still holds a share of the growth, so a
+`node_modules` or a download folder shows up as itself. Where one of the ready-made exclusions
+the job does not use leaves a folder out (developer folders, caches, temporary files...), or the
+folder is a well-known one that is rarely worth keeping (Downloads, Temp, build output...), a
+button adds the exclusion to the job; versions saved already keep the folder until they are
+cleaned up. Below the list, each ready-made exclusion the job does not use says how much it
+would have left out. Only the versions' folder listings are read, never the stored file data, so
+it takes about as long as listing the newest version once plus what changed since.
+`vaultik grew -r <repository>` (or `--job <job>` for that job's versions and exclusions) prints
+the same (`--since 30d`, `2w`, `12h` or a date; `--top <n>`; `--json` for scripts).
 
 ### Faster backups with the change journal
 
@@ -962,7 +1005,7 @@ Windows Event Log (Application, source `Vaultik`; syslog on Linux), so Event Vie
 tools see failed backups without any alert set up. The event id tells what it was: 100s a backup,
 200s a health check, 300s the second copy, 400s a test restore; the last digit is the result
 (0 success, 1 partial, 2 failed, 3 cancelled, 5 succeeded with a warning: ransomware signs, old
-versions kept, or the drive's health). Failures are errors and warnings are warnings. Every
+versions kept, the drive's health, or files on this computer that changed by themselves). Failures are errors and warnings are warnings. Every
 account of the computer can read that log, so an entry says only which job ran, what kind of
 run it was, how it ended and how many files it saved, never its messages (which name files);
 those stay in the Activity tab. The

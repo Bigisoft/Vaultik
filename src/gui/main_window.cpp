@@ -54,6 +54,7 @@
 #include "key_dialog.h"
 #include "overview.h"
 #include "report_dialog.h"
+#include "grew_dialog.h"
 #include "restore_dialog.h"
 #include "image_dialogs.h"
 #include "app_settings.h"
@@ -214,7 +215,10 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         const QString type = ev.value("event").toString();
         if (type == "check") {
             const bool damage = ev.value("errors").toInteger() > 0;
+            const bool rot = ev.value("rot_files").toInteger() > 0;
             check_result_ = damage ? tr("The health check found problems: %1").arg(ev.value("message").toString())
+                            : rot  ? tr("The health check found files on this PC that changed by themselves: %1")
+                                        .arg(ev.value("message").toString())
                                    : tr("Health check: no problems.");
             log_->appendPlainText(check_result_);
             return;
@@ -1063,6 +1067,7 @@ QWidget* MainWindow::build_job_page() {
 
     versions_ = new VersionsView;
     connect(overview_, &OverviewView::versions_requested, this, [this] { tabs_->setCurrentWidget(versions_); });
+    connect(overview_, &OverviewView::grew_requested, this, &MainWindow::show_grew);
     connect(versions_, &VersionsView::restore_requested, this, [this](int i) { open_restore(i); });
     connect(versions_, &VersionsView::pin_requested, this, [this](int i, bool pin) { change_version(i, pin, false); });
     connect(versions_, &VersionsView::note_requested, this, [this](int i) { change_version(i, false, true); });
@@ -1223,7 +1228,10 @@ void MainWindow::refresh_history() {
             item->setText(6, format_bytes(r.stored_bytes));
         } else {
             // For a check: how much was read back.
-            item->setText(2, jobs::found_damage(r) ? tr("Problems found") : status_text(r.status));
+            item->setText(2, jobs::found_damage(r) ? tr("Problems found")
+                             : r.rot_files > 0     ? tr("Files on this PC changed by themselves")
+                                                   : status_text(r.status));
+            if (r.rot_files > 0 && !jobs::found_damage(r)) item->setIcon(2, status_icon(jobs::RunStatus::Partial));
             item->setText(4, format_bytes(r.bytes));
             item->setToolTip(4, tr("Read back and checked"));
         }
@@ -1246,10 +1254,11 @@ void MainWindow::refresh_history() {
     }
     if (check) {
         const bool damage = jobs::found_damage(*check);
-        if (damage) status_icon_->setPixmap(status_icon(jobs::RunStatus::Failed).pixmap(16, 16));
+        if (damage || check->rot_files > 0) status_icon_->setPixmap(status_icon(jobs::RunStatus::Failed).pixmap(16, 16));
         text += "  ·  " + tr("Checked %1: %2")
                               .arg(when_text(check->started),
                                    damage                                        ? tr("problems found")
+                                   : check->rot_files > 0                        ? tr("files on this PC changed by themselves")
                                    : check->status == jobs::RunStatus::Success ? tr("no problems")
                                                                                  : status_text(check->status).toLower());
     }
@@ -1494,6 +1503,13 @@ void MainWindow::refresh_overview() {
         d.warning = tr("The last health check found damaged or missing data. Check the destination drive, then "
                        "choose Repair the backup (in the ... menu) to keep what is intact, and back up again. %1")
                         .arg(qs(check->message));
+    } else if (check && check->rot_files > 0) {
+        d.warning = tr("The last health check found %1 on this PC whose content changed although nothing wrote to "
+                       "them (their size and dates are the same): %2. A failing drive or bad memory does this. The "
+                       "backup holds the earlier good copy: restore them from the version of %3 (Restore, or "
+                       "right-click a file in it for its versions), then check the drive (Drives below).")
+                        .arg(count_of(check->rot_files, tr("file"), tr("files")), qs(check->rot),
+                             format_time(check->rot_version));
     } else if (test != nullptr && !d.test_ok) {
         d.warning = tr("The last test restore found files that did not come back right: %1. Check the backup "
                        "drive, and back up again soon.").arg(qs(test->message));
@@ -1505,8 +1521,10 @@ void MainWindow::refresh_overview() {
         d.warning = tr("No version was saved for %1.").arg(count_of((now - saved) / kDay, tr("day"), tr("days")));
     } else if (jobs::fill_warning(fill)) {
         d.warning = tr("The backup drive is full %1 at the rate the backup grows. Keep fewer versions (Edit the "
-                       "job, Old backups) or move the backup to a larger drive.")
+                       "job, Old backups) or move the backup to a larger drive. What grew shows which folders "
+                       "added the most.")
                         .arg(fill_time_words(fill.days));
+        d.offer_grew = true;
     }
 
     // The drives involved, and their health.
@@ -1916,6 +1934,20 @@ void MainWindow::check_job(bool full) {
     QStringList args{"check-job", qs(job->id)};
     if (full) args << "--full";
     start_run(args, true);
+}
+
+void MainWindow::show_grew() {
+    const jobs::Job* current = current_job();
+    if (!current) return;
+    const auto it = repos_.find(current->id);
+    if (it == repos_.end() || !it->second.repo) {
+        QMessageBox::information(this, tr("What grew"), tr("The backup is not open yet. Try again in a moment."));
+        return;
+    }
+    // Copies: the open backup may be reloaded while the dialog is open.
+    GrewDialog dialog(store_, *current, it->second.repo, it->second.snapshots, this);
+    dialog.exec();
+    if (dialog.job_changed()) reload_jobs(current->id);
 }
 
 void MainWindow::test_restore() {

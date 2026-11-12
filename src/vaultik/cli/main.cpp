@@ -39,6 +39,7 @@
 #include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/restore_test.hpp"
+#include "vaultik/ops/rot_check.hpp"
 #include "vaultik/ops/thaw.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/keys.hpp"
@@ -60,6 +61,8 @@
 #include "vaultik/jobs/computers.hpp"
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/report.hpp"
+#include "vaultik/jobs/growth.hpp"
+#include "vaultik/jobs/recovery_kit.hpp"
 #include "vaultik/jobs/update_check.hpp"
 #include "vaultik/ops/change_journal.hpp"
 #include "vaultik/ops/move_here.hpp"
@@ -302,6 +305,17 @@ Commands:
                                recovery key stops working)
       --recovery-key           Unlock with the recovery key instead of the password
                                (asked for, or set VAULTIK_RECOVERY_KEY)
+  recovery-kit                 Write a recovery kit to print: one page with the
+                               recovery key (also as a QR code), where the backup
+                               is, this computer's name, the date and the steps to
+                               restore on a new computer; never a password or a
+                               cloud storage key (asks for the recovery key, or
+                               set VAULTIK_RECOVERY_KEY)
+      --out <file>             kit.pdf or kit.html (a PDF from here has Western
+                               European letters only; the page has all of them)
+      --new                    Make a new recovery key for the kit first (asks for
+                               the password, or use --recovery-key; an older
+                               recovery key stops working)
       --all                    Remove every lock (only when no other run is active)
   cloud-rollback               S3 with Object Lock: bring every repository file
                                back as it was at a time, from the bucket's old
@@ -347,7 +361,10 @@ Commands:
                                (run-job does this after each backup), creating it
                                there on first use with the job's password
   check-job <job>              Read the job's share of its stored data back and
-                               check every version now (added to its history)
+                               check every version now (added to its history);
+                               also re-read a few unchanged files on this PC and
+                               compare them with the newest version, to catch
+                               silent damage (unless the job turned it off)
       --full                   Read all of the stored data
   alert-test                   Send a test message to the alert channels set up
                                in Settings (ntfy, Telegram, webhook)
@@ -357,6 +374,13 @@ Commands:
                                what needs attention (plain text)
       --month <YYYY-MM>        The month (default: the month before this one)
       --html <file>            Write it as a web page instead
+      --json                   Print it as JSON
+  grew                         Which folders added the most new data to the
+                               backup, with ready-made exclusions that fit
+                               (-r <repository>, or --job <job> for its versions)
+      --since <time>           From when: 30d (the default), 2w, 12h, or a date
+                               (2026-10-01)
+      --top <n>                How many folders at most (default 15)
       --json                   Print it as JSON
   update-check                 Ask GitHub whether a newer Vaultik was released
                                (only asks; nothing is downloaded)
@@ -470,11 +494,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -814,6 +838,16 @@ std::vector<SnapshotRef> load_all_snapshots(Repository& repo) {
         return x.snapshot.time < y.snapshot.time;
     });
     return all;
+}
+
+// The versions of a saved job: those tagged with it, else (made before jobs tagged their versions)
+// those of this computer.
+std::function<bool(const Snapshot&)> versions_of_job(const std::vector<SnapshotRef>& all, const jobs::Job& job) {
+    const std::string tag = "job:" + job.id;
+    const auto tagged = [tag](const Snapshot& s) { return std::find(s.tags.begin(), s.tags.end(), tag) != s.tags.end(); };
+    const bool any = std::any_of(all.begin(), all.end(), [&](const SnapshotRef& s) { return tagged(s.snapshot); });
+    if (any) return tagged;
+    return [host = os::hostname()](const Snapshot& s) { return s.hostname == host; };
 }
 
 SnapshotRef resolve_snapshot(Repository& repo, const std::string& ref_w) {
@@ -1767,12 +1801,59 @@ int cmd_admin_job(const Args& a) {
 // Fills `record` (kind, times, status, packs read as files, bytes read, problems as errors).
 // Returns kExitOk, or kExitAuth when damage was found; throws on cancel or when the check could
 // not run, after filling the record.
+// The silent damage part of a health check (ops/rot_check.hpp): a few files of the job's newest
+// version made on this computer are read back from this computer and compared with it. Fills the
+// record's rot fields; returns a sentence for its message (empty when nothing was compared).
+std::string rot_check(Repository& repo, const jobs::Job& job, jobs::RunRecord& record, const std::function<bool()>& cancel) {
+    if (!job.health.rot_check || !job.image_disks.empty()) return {};
+    const std::vector<SnapshotRef> all = load_all_snapshots(repo);
+    const auto mine = versions_of_job(all, job);
+    const std::string host = os::hostname();
+    const SnapshotRef* newest = nullptr;
+    for (const SnapshotRef& s : all)  // oldest first
+        if (!s.snapshot.image && s.snapshot.hostname == host && mine(s.snapshot)) newest = &s;
+    if (newest == nullptr) return {};
+    RotCheckOptions o;
+    o.seed = record.started;
+    o.should_cancel = cancel;
+    o.on_progress = [](const std::string& msg) {
+        if (g_json) emit({{"event", "check_progress"}, {"current", "files on this PC: " + msg}});
+        else status("Comparing with the backup: " + msg);
+    };
+    RotCheckResult r;
+    try {
+        r = check_unchanged_files(repo, newest->snapshot, o);
+    } catch (const Cancelled&) {
+        throw;
+    } catch (const std::exception& e) {
+        warning(std::string("could not compare files on this PC with the backup: ") + e.what());
+        return {};
+    }
+    if (r.damaged.empty())
+        return r.checked == 0 ? std::string()
+                              : "compared " + std::to_string(r.checked) +
+                                    " unchanged file(s) on this PC with the backup: no silent changes";
+    const std::string when = os::format_time_local(newest->snapshot.time).substr(0, 16);
+    record.rot_files = r.damaged.size();
+    record.rot_version = newest->snapshot.time;
+    record.rot.clear();
+    for (std::size_t i = 0; i < r.damaged.size(); ++i) {
+        warning(r.damaged[i].path + ": its content differs from the backup of " + when +
+                " although its size and times are the same");
+        if (i < 5) record.rot += (i ? "; " : "") + r.damaged[i].path;
+    }
+    if (r.damaged.size() > 5) record.rot += "; ...";
+    return std::to_string(r.damaged.size()) + " file(s) on this PC changed without being written to (silent damage, "
+           "a failing drive?): " + record.rot + "; the version of " + when + " holds the earlier copy";
+}
+
 int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record) {
     record.kind = kind;
     record.started = os::now();
     const bool full = kind == jobs::RunKind::FullCheck;
     std::vector<std::string> problems;
     VerifyResult r;
+    std::string rot;
     try {
         RepoLock lock(repo, RepoLock::Mode::Shared, "check (job " + job.id + ")");
         repo.reload_index();  // a prune may have finished before the lock was granted
@@ -1795,6 +1876,7 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
                                  : "Health check: reading " + std::to_string(job.health.sample_percent) +
                                        "% of the stored data back...\n"));
         r = run_verify(repo, o);
+        rot = rot_check(repo, job, record, o.should_cancel);
     } catch (const Cancelled&) {
         if (!g_json) clear_status();
         record.finished = os::now();
@@ -1828,6 +1910,7 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     if (r.packs_archived > 0)
         record.message += "; " + std::to_string(r.packs_archived) +
                           " pack(s) in archive storage were only checked to be there (reading them needs a thaw)";
+    if (!rot.empty()) record.message += "; " + rot;
     if (g_json) {
         emit({{"event", "check"},
               {"kind", jobs::to_string(kind)},
@@ -1837,10 +1920,16 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
               {"bytes_read", r.bytes_read},
               {"snapshots", r.snapshots},
               {"errors", r.errors},
+              {"rot_files", record.rot_files},
               {"message", record.message}});
     } else {
         clear_status();
         out(std::string(r.errors > 0 ? "Health check FAILED: " : "Health check: ") + record.message + "\n");
+        if (record.rot_files > 0)
+            out("WARNING: files on this PC changed although nothing wrote to them, which a failing drive does. "
+                "The backup holds the earlier copy: restore them from the version of " +
+                os::format_time_local(record.rot_version).substr(0, 16) + " (vaultik restore --job " + job.id +
+                " <version> --path <file> --target <folder>), then check the drive.\n");
     }
     return r.errors > 0 ? kExitAuth : kExitOk;
 }
@@ -2455,7 +2544,15 @@ void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string
     a.job = job.name;
     const std::string where = " Open Vaultik on " + os::hostname() + " for the details.";
     const bool check = jobs::is_check(r.kind) || r.kind == jobs::RunKind::RestoreTest;
-    if (check) {
+    if (check && s.on_damage && r.rot_files > 0 && !(r.status == jobs::RunStatus::Failed && r.errors > 0)) {
+        // Files on this computer that changed by themselves: the backup is fine, the drive is not.
+        a.level = jobs::Alert::Level::Critical;
+        a.event = "rot";
+        a.title = "Health check of " + job.name + " found files that changed by themselves";
+        a.message = std::to_string(r.rot_files) +
+                    " file(s) on the computer changed although nothing wrote to them, which a failing drive does. "
+                    "The backup holds the earlier copy." + where;
+    } else if (check) {
         // Damage found (not a check that could not run: the backup before it said so).
         if (!s.on_damage || r.status != jobs::RunStatus::Failed || r.errors == 0) return;
         a.level = jobs::Alert::Level::Critical;
@@ -4322,6 +4419,143 @@ int cmd_verify(const Args& a) {
     return kExitOk;
 }
 
+// "recovery-kit -r <repo> --out <file> [--new]": the printable recovery kit (jobs/recovery_kit.hpp)
+// for the backup's recovery key, which is asked for (it is not stored anywhere), or for a new one.
+int cmd_recovery_kit(const Args& a) {
+    const auto target = a.value("--out");
+    if (!target || !a.positional.empty())
+        throw Error("usage: vaultik recovery-kit -r <repository> --out <kit.pdf|kit.html> [--new]");
+    const std::string location = repo_path(a);
+    const auto backend = backend_for(a);
+    std::string key;
+    struct Wipe {
+        std::string& s;
+        ~Wipe() { secure_wipe(s.data(), s.size()); }
+    } wipe_key{key};
+    if (a.has("--new")) {
+        Credential credential = key_credential(a);
+        status("Making a recovery key...");
+        try {
+            key = create_recovery_key(*backend, credential);
+        } catch (...) {
+            secure_wipe(credential.secret.data(), credential.secret.size());
+            throw;
+        }
+        secure_wipe(credential.secret.data(), credential.secret.size());
+        clear_status();
+        out("A new recovery key was made; any older one no longer works.\n");
+    } else {
+        std::string typed = os::get_env("VAULTIK_RECOVERY_KEY");
+        if (typed.empty()) typed = read_password("Recovery key: ");
+        Bytes raw;
+        try {
+            raw = parse_recovery_key(typed);
+        } catch (...) {
+            secure_wipe(typed.data(), typed.size());
+            throw;
+        }
+        secure_wipe(typed.data(), typed.size());
+        key = format_recovery_key(raw);
+        secure_wipe(raw.data(), raw.size());
+        // Only a key that opens this backup goes on paper.
+        status("Checking the recovery key...");
+        { const MasterKey check = unlock_master_key(*backend, {key, true}); }
+        clear_status();
+    }
+    const jobs::RecoveryKit kit = jobs::make_recovery_kit(key, location);
+    const std::string path = os::absolute_path(*target);
+    try {
+        jobs::write_recovery_kit(kit, path);
+    } catch (const std::exception&) {
+        // A new key exists only here now: it must not be lost with the file.
+        if (a.has("--new")) out("Recovery key: " + key + "\nWrite it down: the kit could not be written.\n");
+        throw;
+    }
+    out("Wrote the recovery kit to " + path + ".\n");
+    out("It holds the recovery key: print it, keep the paper apart from this computer, and delete the file.\n");
+    return kExitOk;
+}
+
+// "30d", "2w", "12h" back from now, or a local date ("2026-10-01") or time.
+std::uint64_t parse_since(const std::string& v, std::uint64_t now) {
+    constexpr std::uint64_t kHour = 36'000'000'000ull;
+    if (!v.empty() && (v.back() == 'd' || v.back() == 'w' || v.back() == 'h')) {
+        char* end = nullptr;
+        const double n = std::strtod(v.c_str(), &end);
+        if (end == v.c_str() + v.size() - 1 && n > 0 && n < 100000) {
+            const double unit = v.back() == 'h' ? 1 : v.back() == 'd' ? 24 : 24 * 7;
+            const auto back = static_cast<std::uint64_t>(n * unit * static_cast<double>(kHour));
+            return back < now ? now - back : 0;
+        }
+        throw Error("--since takes 30d, 2w, 12h or a date (YYYY-MM-DD)");
+    }
+    return os::from_unix(parse_local_time(v), 0);
+}
+
+// "grew [-r <repo> | --job <job>] [--since 30d] [--top n] [--json]": which folders added the most new
+// data over a period (jobs/growth.hpp).
+int cmd_grew(const Args& a) {
+    if (!a.positional.empty()) throw Error("usage: vaultik grew -r <repository> | --job <job> [--since 30d] [--top <n>] [--json]");
+    const std::optional<jobs::Job> job = job_arg(a);
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "grew", lock_wait(a));
+    repo->reload_index();
+    const std::uint64_t now = os::now();
+    jobs::GrowthOptions o;
+    o.since = parse_since(a.value("--since").value_or("30d"), now);
+    if (auto v = a.value("--top")) {
+        const int n = std::atoi(v->c_str());
+        if (n < 1 || n > 1000) throw Error("--top takes a number from 1 to 1000");
+        o.top = static_cast<std::size_t>(n);
+    }
+    const std::vector<SnapshotRef> all = load_all_snapshots(*repo);
+    if (job) {
+        o.select = versions_of_job(all, *job);
+        o.excludes = job->excludes;
+    }
+    o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
+    o.on_progress = [](const std::string& msg) {
+        if (!g_json) status("Reading the versions: " + msg);
+    };
+    std::vector<std::pair<Id, Snapshot>> snaps;
+    snaps.reserve(all.size());
+    for (const SnapshotRef& s : all) snaps.emplace_back(s.id, s.snapshot);
+    const jobs::GrowthReport r = jobs::what_grew(*repo, snaps, o);
+    clear_status();
+    if (g_json) {
+        out(jobs::to_json(r) + "\n");
+        return kExitOk;
+    }
+    out("New data stored since " + os::format_time_local(r.since).substr(0, 16) + " (" + std::to_string(r.versions) +
+        " version(s)): " + format_bytes(r.stored) + " in " + std::to_string(r.files) + " file(s)\n");
+    if (r.folders.empty()) {
+        out("Nothing new was stored in that time.\n");
+        return kExitOk;
+    }
+    out("\nFolders that added the most:\n");
+    for (const jobs::FolderGrowth& f : r.folders) {
+        std::string size = format_bytes(f.stored);
+        if (size.size() < 11) size.insert(0, 11 - size.size(), ' ');
+        out("  " + size + "  " + f.path + (f.rest ? " (other files)" : "") + "  (" + std::to_string(f.files) +
+            " file(s))\n");
+        if (f.suggestion) {
+            std::string ex;
+            for (const std::string& p : f.suggestion->patterns) ex += " --exclude \"" + p + "\"";
+            out("               " +
+                (f.suggestion->preset.empty() ? std::string("could be left out:")
+                                              : "the ready-made exclusion \"" + f.suggestion->preset + "\" leaves it out:") +
+                ex + "\n");
+        }
+    }
+    if (!r.presets.empty()) {
+        out(std::string("\nReady-made exclusions") + (job ? " the job does not use" : "") +
+            ", and what they would have left out:\n");
+        for (const jobs::PresetGrowth& p : r.presets)
+            out("  " + p.id + ": " + format_bytes(p.stored) + " in " + std::to_string(p.files) + " file(s)\n");
+    }
+    return kExitOk;
+}
+
 int cmd_stats(const Args& a) {
     auto repo = open_repo(a);
     const Index& index = repo->index();
@@ -4410,6 +4644,8 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "apps") return cmd_apps(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
+    if (a.command == "recovery-kit") return cmd_recovery_kit(a);
+    if (a.command == "grew") return cmd_grew(a);
     if (a.command == "pin") return cmd_pin(a, true);
     if (a.command == "unpin") return cmd_pin(a, false);
     if (a.command == "note") return cmd_note(a);

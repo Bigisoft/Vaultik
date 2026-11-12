@@ -239,6 +239,10 @@ OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
     warning_text_->setTextFormat(Qt::PlainText);
     bl->addWidget(banner_icon, 0, Qt::AlignTop);
     bl->addWidget(warning_text_, 1);
+    warning_grew_ = new QPushButton(tr("What grew..."));
+    warning_grew_->setProperty("role", "action");
+    connect(warning_grew_, &QPushButton::clicked, this, &OverviewView::grew_requested);
+    bl->addWidget(warning_grew_, 0, Qt::AlignTop);
     warning_ = banner;
     layout->addWidget(warning_);
 
@@ -253,8 +257,18 @@ OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
     auto* show_versions = new QPushButton(tr("Show versions"));
     show_versions->setProperty("role", "action");
     connect(show_versions, &QPushButton::clicked, this, &OverviewView::versions_requested);
+    auto* show_grew = new QPushButton(tr("What grew"));
+    show_grew->setProperty("role", "action");
+    show_grew->setToolTip(tr("Which folders added the most new data to the backup lately"));
+    connect(show_grew, &QPushButton::clicked, this, &OverviewView::grew_requested);
+    auto* version_buttons = new QHBoxLayout;
+    version_buttons->setContentsMargins(0, 0, 0, 0);
+    version_buttons->setSpacing(8);
+    version_buttons->addWidget(show_versions);
+    version_buttons->addWidget(show_grew);
+    version_buttons->addStretch(1);
     static_cast<QVBoxLayout*>(f->layout())->addSpacing(8);
-    static_cast<QVBoxLayout*>(f->layout())->addWidget(show_versions, 0, Qt::AlignLeft);
+    static_cast<QVBoxLayout*>(f->layout())->addLayout(version_buttons);
     grid->addWidget(f, 1, 0);
     health_ = make_tile(tr("Health check"), f);
     check_ = new QPushButton(tr("Check now"));
@@ -331,6 +345,7 @@ OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
 void OverviewView::set_data(const OverviewData& d) {
     warning_->setVisible(!d.warning.isEmpty());
     warning_text_->setText(d.warning);
+    warning_grew_->setVisible(d.offer_grew);
 
     if (d.has_backup) {
         last_.value->setText(d.backup_when);

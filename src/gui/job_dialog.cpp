@@ -412,13 +412,8 @@ QWidget* JobDialog::build_sources() {
     presets->setContentsMargins(0, 0, 0, 0);
     int n = 0;
     for (const jobs::ExclusionPreset& p : jobs::exclusion_presets()) {
-        QString label, tip;
-        if (p.id == "temp") label = tr("Temporary files");
-        else if (p.id == "caches") label = tr("Browser and app caches");
-        else if (p.id == "dev") label = tr("Developer folders (node_modules, Python caches)");
-        else if (p.id == "clutter") label = tr("Windows clutter (thumbnails, page file)");
-        else if (p.id == "recycle") label = tr("Recycle bin");
-        else label = qs(p.id);
+        const QString label = exclusion_preset_label(p.id);
+        QString tip;
         for (const std::string& pattern : p.patterns) tip += (tip.isEmpty() ? "" : "\n") + qs(pattern);
         auto* box = new QCheckBox(label);
         box->setToolTip(tip);
@@ -640,6 +635,13 @@ QWidget* JobDialog::build_schedule() {
                                   "folder, checks them, compares them with the unchanged files on this PC and "
                                   "removes them again. Any time: Test a restore on the job's Overview."));
     form->addRow(QString(), check_restore_);
+    check_rot_ = new QCheckBox(tr("With each check, compare a few unchanged files on this PC with the backup"));
+    check_rot_->setToolTip(tr("Reads up to 20 files on this PC (at most 256 MB, 2 minutes) whose size and dates are "
+                              "as the newest version stored them, and compares their content with it. Content that "
+                              "changed although nothing wrote to the file is silent damage, from a failing drive or "
+                              "bad memory: Vaultik then warns and names the files, while the backup still holds "
+                              "the good copy. The files are only read."));
+    form->addRow(QString(), check_rot_);
     auto* check_note = new QLabel(tr("A check runs after a backup when it is due. It reads stored data back and "
                                      "compares it with what was saved, so a failing disk or damaged files are "
                                      "found while the originals still exist. Each week reads a different part. "
@@ -978,6 +980,7 @@ void JobDialog::load(const jobs::Job& job) {
     check_percent_->setEnabled(job.health.weekly);
     check_monthly_->setChecked(job.health.monthly);
     check_restore_->setChecked(job.health.restore_test);
+    check_rot_->setChecked(job.health.rot_check);
     before_command_->setText(qs(job.before_command));
     after_command_->setText(qs(job.after_command));
 
@@ -1176,6 +1179,7 @@ jobs::Job JobDialog::collect() const {
     j.health.sample_percent = check_percent_->value();
     j.health.monthly = check_monthly_->isChecked();
     j.health.restore_test = check_restore_->isChecked();
+    j.health.rot_check = check_rot_->isChecked();
     return j;
 }
 
