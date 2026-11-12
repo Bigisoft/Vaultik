@@ -6,11 +6,11 @@ it means) or **open**. Line numbers drift, so search for the named function.
 
 ## Verification
 
-- Windows: debug and release build, all 204 test cases pass (the Linux-only cases in
+- Windows: debug and release build, all 212 test cases pass (the Linux-only cases in
   `tests/test_posix.cpp` are compiled out there).
 - Linux (November 2026): built and tested on Ubuntu 24.04 (GCC 13, Qt 6.4) in a fresh WSL
   distribution. Debug and release build with no errors, the engine, the command line and the
-  frontend; all 199 test cases pass in both when run as a normal user (as root, the root restore
+  frontend; all 208 test cases pass in both when run as a normal user (as root, the root restore
   guard rightly refuses the tests' restores into `/tmp`). Build it with:
 
   ```
@@ -24,6 +24,13 @@ it means) or **open**. Line numbers drift, so search for the named function.
   with `diff -r`, modes 750 and 600 and a relative symlink come back), `verify --read-data`,
   forget with prune, then verify and restore again: all correct. The frontend starts (offscreen)
   and runs until it is ended.
+
+  With FUSE (fuse3 3.14), as a normal user, debug and release: a backed-up folder mounted with
+  `vaultik mount` matches the source (`diff -r`, and type, mode, size, modification time, owner and
+  link target of every item), writing, creating and deleting are refused, and the mount ends and
+  its folder goes on `fusermount3 -u`, Ctrl+C, SIGTERM and `cancel` with `--json` (the frontend's
+  way, in the default `browse` folder); a killed mount's folder is removed by the next mount.
+  `vaultik drives` lists WSL's virtual disks as unknown with the reason, as a user and as root.
 
   Fixed by this first build: the tests' `random_data` helper clashed with glibc's
   `struct random_data`; `own_admin_store` had no POSIX definition; `virt.cpp` included `acl.hpp`
