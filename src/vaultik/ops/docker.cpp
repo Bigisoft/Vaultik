@@ -64,8 +64,8 @@ std::vector<std::string> lines_of(std::string_view text) {
 }
 
 std::string first_line(std::string_view text) {
-    for (const std::string& line : lines_of(text)) return trim(line);
-    return {};
+    const std::vector<std::string> lines = lines_of(text);
+    return lines.empty() ? std::string() : trim(lines.front());
 }
 
 // "a10" after "a9": numbers in names compare by value, so "PostgreSQL\17" is found before "\9".
