@@ -28,7 +28,8 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q g++ cmake ninja-build pkg-config libzstd-dev libssl-dev \
-            libcurl4-openssl-dev nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev
+            libcurl4-openssl-dev nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev \
+            libfuse3-dev fuse3
       - name: Build and test
         # As the runner's own (not root) account: as root, restores into /tmp are refused on
         # purpose (another account could swap a folder there for a link).

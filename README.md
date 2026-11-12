@@ -31,7 +31,7 @@ where the packages (AppImage, Flatpak) are not tested yet; see
   percentage from S.M.A.R.T. and a warning when a drive gets worse.
 - **Easy to get files back.** A timeline of versions, a search across all of them, the history
   of any file, a preview of pictures and code without restoring, and each version as a folder in
-  File Explorer.
+  File Explorer (or, on Linux, the file manager).
 - **Several PCs in one view.** Computers that back up into the same place (a shared folder, a
   NAS, a cloud bucket) leave an encrypted status note there, so any of them shows how every
   computer's backups are doing.
@@ -77,9 +77,15 @@ compiler (GCC 12+ or Clang 16+), CMake, Ninja and the distribution's development
 Debian or Ubuntu:
 
 ```
-sudo apt install g++ cmake ninja-build pkg-config libzstd-dev libssl-dev libcurl4-openssl-dev     nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev
+sudo apt install g++ cmake ninja-build pkg-config libzstd-dev libssl-dev libcurl4-openssl-dev \
+    nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev libfuse3-dev fuse3
 ./build.sh release test        # BUILD_DIR=~/vaultik-build to build outside the source folder
 ```
+
+`libfuse3-dev` (Fedora: `fuse3-devel`, Arch and SteamOS: `fuse3`) lets `vaultik mount` show a
+version as a folder; without it everything else builds and the command says what to install
+(`-DVAULTIK_FUSE=OFF` leaves it out on purpose). Running a mount needs the `fuse3` package
+(`fusermount3`) and `/dev/fuse`.
 
 BLAKE3 comes from the distribution where it has it (`libblake3-dev`), otherwise CMake downloads
 release 1.5.4 and checks its SHA-256. `./build.sh vcpkg release test` builds with vcpkg instead
@@ -409,6 +415,15 @@ written there reaches the backup. The folder is removed when it is closed (the s
 button, Enter in the command, or quitting Vaultik); one left by a killed process is removed by
 the next mount.
 
+On Linux, "Open as folder" (or `vaultik mount -r <repo> <version> [<folder>]`) mounts the
+version with FUSE 3 and opens it in the file manager. The mount is read-only and only your
+account sees it; files keep their sizes, modification times, modes, owners and symbolic links,
+and their content is read from the backup as programs read it. It ends with Enter or Ctrl+C in
+the command (or SIGTERM, or closing it in Vaultik), and `fusermount3 -u <folder>` ends it from
+outside. If the process is killed, newer `fusermount3` versions unmount it by themselves, and the next
+`vaultik mount` removes whatever is left in `browse`. It needs the `fuse3`
+package (installed on SteamOS); a Flatpak cannot mount, so use the AppImage or a native build.
+
 ### Second copy
 
 A job can name a second copy (General tab): another folder or cloud storage, e.g. a USB drive
@@ -596,6 +611,16 @@ gives 94% and a hundred 60%; an attribute at its threshold caps it at 10%. Reall
 uncorrectable sectors turn the drive's status into a warning, and a drive at 10% or less counts
 as a problem. NVMe drives report their wear to anyone. `vaultik drives` lists every drive, and
 `vaultik drives --smart` each drive's attribute table.
+
+On Linux the drives come from `/sys/block`, and a folder's drives are found through its mount,
+partitions, LVM or encryption (device-mapper), software RAID and loop devices. Vaultik asks the
+drive itself, the same way and with the same percentage as on Windows: an NVMe drive's health log
+(as on the Steam Deck), or a SATA or USB drive's attribute table through ATA pass-through, and
+otherwise `smartctl -j` (smartmontools) where it is installed. Linux lets only root send these
+commands, so as a normal user (and in the frontend) the health shows as unknown with the reason,
+and the temperature where the kernel reports it; `sudo vaultik drives` reads it, and so does a
+job run as root from a system timer. Memory cards (the Steam Deck's microSD slot) and virtual
+disks have no S.M.A.R.T. data.
 
 Vaultik also keeps a record of each drive's health (in `drive-history.jsonl` in its settings
 folder, matched by the drive's serial number): a reading whenever the Overview, `run-job` or
@@ -1078,8 +1103,9 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    decided (docs/LINUX_PORT.md); the cloud code has a libcurl client and the browser sign-in,
    drives are tracked by file system UUID, and the frontend has its Linux parts (single instance,
    autostart, drive watcher, inotify for continuous backups). It builds and passes its tests on
-   Ubuntu 24.04, and the command line works end to end. Still to do: the AppImage on a Steam
-   Deck, FUSE for browsing a version, drive health.
+   Ubuntu 24.04, and the command line works end to end. A version opens as a folder through FUSE,
+   and drive health reads NVMe and SATA drives (as root) with the same percentage as on Windows.
+   Still to do: the AppImage on a Steam Deck.
 9. Disk image backup (done, Windows): whole disks from shadow copies, used space only, in the
    deduplicating repository; restore to a `.vhdx`, onto a disk, or browse an image's drives.
    Still to come: shrinking partitions onto a smaller disk, images of Linux disks.

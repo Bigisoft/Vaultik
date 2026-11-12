@@ -80,6 +80,7 @@
 #endif
 #include "vaultik/util/win.hpp"
 #else
+#include <poll.h>
 #include <unistd.h>
 #endif
 
@@ -188,9 +189,10 @@ Commands:
                                jobs asked for (used by the frontend; --cloud
                                includes cloud storage)
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
-  mount <snapshot>             Windows: show a version as a read-only folder for File
-                               Explorer until Enter is pressed (files are read
-                               from the backup when opened)
+  mount <snapshot> [folder]    Show a version as a read-only folder (Windows:
+                               Projected File System, Linux: FUSE 3) until Enter
+                               or Ctrl+C is pressed (files are read from the
+                               backup when opened)
       --target <folder>        A new or empty folder to use (default: in the
                                settings folder, under browse)
   restore <snapshot>           Restore files
@@ -1872,7 +1874,8 @@ void remove_leftover_mounts() {
 // "mount <snapshot> [--target <folder>]": shows a version as a read-only folder (File Explorer
 // can browse it) until Enter is pressed, or with --json until "cancel" or the caller goes away.
 int cmd_mount(const Args& a) {
-    if (a.positional.size() != 1) throw Error("usage: vaultik mount -r <repo> <snapshot> [--target <folder>]");
+    if (a.positional.empty() || a.positional.size() > 2 || (a.positional.size() == 2 && a.value("--target")))
+        throw Error("usage: vaultik mount -r <repo> <snapshot> [<folder> | --target <folder>]");
     if (!SnapshotMount::available()) throw Error(SnapshotMount::how_to_enable());
     auto repo = open_repo(a);
     // Shared, like a restore: a prune cannot delete data the folder still shows.
@@ -1885,6 +1888,8 @@ int cmd_mount(const Args& a) {
     std::string own_dir;
     if (const auto target = a.value("--target")) {
         folder = *target;
+    } else if (a.positional.size() == 2) {
+        folder = a.positional[1];
     } else {
         std::string label = job_arg(a) ? job_arg(a)->name : std::string("Backup");
         label += " " + os::format_time_local(ref.snapshot.time);
@@ -1901,14 +1906,32 @@ int cmd_mount(const Args& a) {
             emit({{"event", "mounted"}, {"folder", mount.folder()}, {"snapshot", id_hex(ref.id)}});
         } else {
             out("Version " + short_id(ref.id) + " from " + os::format_time_local(ref.snapshot.time) + " is open at\n  " +
-                mount.folder() + "\nIt is read-only. Press Enter to close it.\n");
+                mount.folder() + "\nIt is read-only. Press Enter (or Ctrl+C) to close it.\n");
+#ifdef _WIN32
             std::thread([] {
                 std::string line;
                 std::getline(std::cin, line);
                 g_cancel = true;
             }).detach();
+#endif
         }
-        while (!g_cancel && !g_stdin_closed && !lock.lost()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        // Also ends on Ctrl+C or SIGTERM (stop_requested), and when the folder was unmounted from
+        // outside (Linux: fusermount3 -u).
+        while (!stop_requested() && !g_stdin_closed && !lock.lost() && mount.active()) {
+#ifndef _WIN32
+            // Enter (or the end of the input) is looked for here: a thread left blocked reading
+            // standard input would hold its lock, and the C library's exit waits for that lock.
+            if (!g_json) {
+                struct pollfd p = {STDIN_FILENO, POLLIN, 0};
+                if (::poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+                    char buf[256];
+                    const ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
+                    if (n <= 0 || std::memchr(buf, '\n', static_cast<std::size_t>(n)) != nullptr) break;
+                }
+            }
+#endif
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
     }  // the folder goes here
     if (!own_dir.empty()) {
         std::error_code ec;

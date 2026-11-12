@@ -78,6 +78,9 @@ it means) or **open**. Line numbers drift, so search for the named function.
   the timeout and `cancelled` stop the whole process group (TERM, then KILL after 2 s); the clean
   environment (a fixed PATH plus HOME, USER, LOGNAME, LANG and TZ) and extra variables work for
   both, the working folder for `run_shell`. A failed `waitpid` is an error, never exit code 0.
+- **Fixed** - with `--json`, the watcher for `cancel` reads standard input from the descriptor,
+  not `std::getline`: a thread blocked in `getline` holds glibc's stdin lock and `exit` waits for
+  it, so every `--json` run whose caller kept the pipe open (the frontend) hung after its work.
 - **Fixed** - `process_alive` answers false for an id past the `pid_t` range (it would have
   tested a process group).
 - **Fixed** - `console_posix.cpp`: SIGINT, SIGTERM and SIGHUP set a flag that `stop_requested`
@@ -159,10 +162,47 @@ it means) or **open**. Line numbers drift, so search for the named function.
 - **Decided** - `vss.cpp`, `acl.cpp`, administrator jobs: Windows only. On Linux open files are
   read live; for other users' files run the engine as root from a system timer. The GUI hides "Run
   with administrator rights", "Start Vaultik as administrator" and Windows Hello.
-- **Open** - `mount_posix.cpp`: showing a version as a folder needs FUSE; "Open in Explorer" is
-  hidden on Linux until then (restore and Find a file cover it).
-- **Open** - `drive_health_posix.cpp`: SMART needs root (smartctl) or udisks2 over D-Bus; drive
-  health reads "unknown".
+- **Fixed** - `mount_posix.cpp`: a version is shown as a folder through FUSE 3 (libfuse3's
+  high-level API, served by a loop of our own that polls the session's descriptor and a wake pipe,
+  so the destructor can stop it at any time). Mounted `ro,auto_unmount`, without `allow_other`
+  (only the mounting account sees it), and without `default_permissions` (the stored modes are
+  shown, but the owner can read everything, as in the version). Sizes, modification and change
+  times, modes, owners and symbolic links come from the version; items from Windows get the
+  account's owner and 0755/0644 (0444 when read-only). Devices, pipes and Windows links are left
+  out. File content is read chunk by chunk as the kernel asks (the last 8 chunks are kept), and
+  the kernel caches listings, attributes and content for the whole mount (a version never
+  changes). Writing gives `EROFS`. `vaultik mount` ends on Enter, Ctrl+C, SIGTERM, `cancel` from
+  the frontend, a lost lock, or `fusermount3 -u` from outside (`SnapshotMount::active`). A killed process
+  should be unmounted by `fusermount3` (`auto_unmount`), but fuse3 3.14 (Ubuntu 24.04) does not:
+  its helper, running as root, is refused access to a mount without `allow_other` and gives up.
+  So `remove_leftover` unmounts lazily whatever is still mounted (`fusermount3 -u -z`) before
+  removing a leftover folder in `browse` (never deleting through a mount), which was tested.
+  Standard input is polled in the wait loop rather than read by a thread: a thread blocked in
+  `getline` holds the stdin lock, and glibc's `exit` then waits for it forever.
+  Built only when pkg-config finds `fuse3` (`VAULTIK_FUSE`, on by default); otherwise
+  `how_to_enable` says which package to install. A Flatpak cannot mount (no `fusermount3` in the
+  sandbox); the AppImage and native builds can.
+- **Fixed** - `drive_health_posix.cpp`: the drives are `/sys/block` (without loop, RAM, zram,
+  device-mapper, RAID, optical and network devices and a memory card's boot areas); a folder's
+  drives come from `/proc/self/mountinfo` (shared with `volume_of` through `mounts_posix.hpp`;
+  btrfs through its source device) down through partitions, `slaves/` (LVM, LUKS, RAID) and a
+  loop device's backing file to the whole disks. Model, serial (sysfs, else udev's
+  `ID_SERIAL_SHORT`), size, bus (NVMe, USB, SD, Virtio, SATA, SCSI) and HDD/SSD (`rotational`)
+  come from sysfs. The health comes from the drive: an NVMe drive's SMART / Health log (Get Log
+  Page 02h, `NVME_IOCTL_ADMIN_CMD` on the controller `/dev/nvmeN`), an ATA drive's attribute
+  table and thresholds (SMART READ DATA / READ THRESHOLDS through `SG_IO` and ATA PASS-THROUGH
+  (16)), else `smartctl -j -a`. Devices are opened read-only and only reading commands are sent.
+  The scoring is the Windows one: `apply_smart` for attribute tables, and `apply_nvme_log`
+  (now shared, also used by Windows) for NVMe logs; smartctl's JSON is turned into the same
+  inputs (`apply_smartctl_json`). The kernel lets only root send these commands (CAP_SYS_ADMIN
+  for NVMe, CAP_SYS_RAWIO for ATA pass-through), so for a normal user the health is "unknown"
+  with `unknown_reason` saying it needs root (the frontend shows it in the tooltip, `vaultik
+  drives` on the drive's line); a normal user's refused request does not go on to smartctl,
+  which would be refused too.
+  The temperature comes from hwmon (nvme, drivetemp) for anyone. Memory cards and virtual disks
+  (Hyper-V/WSL, QEMU, VMware, VirtualBox, virtio) are not asked and say so. `disk` is the whole
+  disk's device number and `device` its `/dev` name; `vaultik drives` lists each disk's mount
+  points. Possible later: udisks2 over D-Bus, which reads S.M.A.R.T. as root for everyone.
 - **Decided** - `usn_journal_posix.cpp`: no change journal; every backup scans the folders.
 - **Fixed** - app list (`apps_posix.cpp`): the Flatpak applications (`flatpak list`), which is how
   programs are installed on SteamOS; installing them again is left to the user (no winget).
@@ -184,8 +224,10 @@ it means) or **open**. Line numbers drift, so search for the named function.
   `QSocketNotifier`); new mount points go to the on-connect backups as drive letters do on Windows.
 - **Fixed** - continuous backups: inotify, one watch per folder, new folders added as they
   appear; past `fs.inotify.max_user_watches` the rest is not watched.
-- **Fixed** - "Open in Explorer" is hidden (see FUSE above); other "open folder" actions use
-  `QDesktopServices` (xdg-open).
+- **Fixed** - "Open as folder" (Windows: "Open in Explorer") mounts the version (see FUSE above)
+  and opens it with `QDesktopServices` (xdg-open), as other "open folder" actions do; when FUSE
+  is missing the engine's message says what to install. Drive health that cannot be read shows
+  the engine's reason instead of the Windows advice to run as administrator.
 
 ## Build
 
