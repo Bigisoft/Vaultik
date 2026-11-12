@@ -229,6 +229,11 @@ backup folder made before the change still opens with the old password.
   `Settings` there, so nothing is written to the PC. Passwords are sealed for the Windows account
   that saved them, so on another PC Vaultik asks once for each backup's password.
 
+`pwsh -File tools\msi-sandbox-test.ps1` tests the newest MSI in Windows Sandbox, a throwaway
+Windows, so nothing is installed on your computer: it installs it (add `-OldMsi <older msi>` to
+test an upgrade, `-Wizard` to click through its pages), checks what it set up, backs up and
+restores with it, and uninstalls it. It prints the result and exits with 0 only when all passed.
+
 After each backup to an external drive (USB, FireWire, memory card), Vaultik also keeps
 `<drive>\Vaultik\` with these portable programs and a "How to restore" note, so any Windows PC
 can restore from the drive with nothing installed. It only replaces an older copy.
