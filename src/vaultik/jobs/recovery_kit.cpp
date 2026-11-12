@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
+#include <set>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -9,6 +11,7 @@
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/cloud.hpp"
 #include "vaultik/util/error.hpp"
+#include "vaultik/util/ttf.hpp"
 #include "vaultik/version.hpp"
 
 namespace vaultik::jobs {
@@ -95,20 +98,19 @@ constexpr short kHelvetica[95] = {
     278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556,
     556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584};
 
-// UTF-8 to the PDF's WinAnsi encoding: Latin-1 letters as they are, a few common signs mapped,
-// anything else '?'.
-std::string win_ansi(const std::string& utf8) {
-    std::string out;
+// UTF-8 to characters; a broken sequence becomes '?'.
+std::u32string decode(const std::string& utf8) {
+    std::u32string out;
     for (std::size_t i = 0; i < utf8.size();) {
         const auto c = static_cast<unsigned char>(utf8[i]);
-        unsigned cp = 0;
+        char32_t cp = 0;
         std::size_t len = 1;
         if (c < 0x80) cp = c;
         else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
         else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
         else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
-        else { out += '?'; ++i; continue; }
-        if (i + len > utf8.size()) { out += '?'; break; }
+        else { out += U'?'; ++i; continue; }
+        if (i + len > utf8.size()) { out += U'?'; break; }
         bool ok = true;
         for (std::size_t k = 1; k < len; ++k) {
             const auto d = static_cast<unsigned char>(utf8[i + k]);
@@ -116,53 +118,70 @@ std::string win_ansi(const std::string& utf8) {
             cp = (cp << 6) | (d & 0x3F);
         }
         i += ok ? len : 1;
-        if (!ok) { out += '?'; continue; }
-        if (cp < 0x20) out += ' ';
-        else if (cp < 0x7F || (cp >= 0xA0 && cp <= 0xFF)) out += static_cast<char>(cp);
-        else if (cp == 0x2018 || cp == 0x2019) out += '\'';
-        else if (cp == 0x201C || cp == 0x201D) out += '"';
-        else if (cp == 0x2013 || cp == 0x2014) out += '-';
-        else out += '?';
+        out += ok && cp <= 0x10FFFF ? cp : U'?';
     }
     return out;
 }
 
-double text_width(const std::string& ansi, double size, bool bold) {
-    double w = 0;
-    for (const char ch : ansi) {
-        const auto c = static_cast<unsigned char>(ch);
-        w += c >= 32 && c <= 126 ? kHelvetica[c - 32] : 556;
+// A character in the PDF's WinAnsi encoding (of its built-in fonts), or -1 when it has none.
+int ansi_of(char32_t c) {
+    if (c < 0x20) return ' ';
+    if (c < 0x7F || (c >= 0xA0 && c <= 0xFF)) return static_cast<int>(c);
+    switch (c) {
+    case 0x2018: case 0x2019: return '\'';
+    case 0x201C: case 0x201D: return '"';
+    case 0x2013: case 0x2014: return '-';
+    case 0x20AC: return 0x80;  // euro sign
+    case 0x2026: return 0x85;  // ellipsis
+    case 0x2022: return 0x95;  // bullet
+    default: return -1;
     }
-    return w * size / 1000.0 * (bold ? 1.08 : 1.0);  // bold runs a little wider
 }
 
-// Lines of at most `width` points; a word longer than a line is cut.
-std::vector<std::string> wrap(const std::string& ansi, double size, double width, bool bold) {
-    std::vector<std::string> lines;
-    std::string line;
-    std::size_t at = 0;
-    while (at < ansi.size()) {
-        std::size_t end = ansi.find(' ', at);
-        if (end == std::string::npos) end = ansi.size();
-        std::string word = ansi.substr(at, end - at);
-        at = end + 1;
-        const std::string candidate = line.empty() ? word : line + " " + word;
-        if (text_width(candidate, size, bold) <= width) {
-            line = candidate;
+std::string win_ansi(const std::string& utf8) {
+    std::string out;
+    for (const char32_t c : decode(utf8)) {
+        const int a = ansi_of(c);
+        out += static_cast<char>(a < 0 ? '?' : a);
+    }
+    return out;
+}
+
+// Fonts of this system for the characters the built-in fonts do not have, embedded as subsets
+// (as /F4, /F5 ...).
+struct ExtraFonts {
+    std::vector<ttf::Font> fonts;
+    std::map<char32_t, std::pair<std::size_t, std::uint16_t>> glyphs;  // character: font, glyph
+    std::vector<std::map<std::uint16_t, char32_t>> used;               // per font: glyph, its character
+};
+
+ExtraFonts extra_fonts(const std::u32string& text) {
+    std::set<char32_t> missing;
+    for (const char32_t c : text)
+        if (ansi_of(c) < 0) missing.insert(c);
+    ExtraFonts x;
+    for (const std::string& path : missing.empty() ? std::vector<std::string>{} : ttf::system_font_files()) {
+        if (missing.empty() || x.fonts.size() == 4) break;
+        Bytes data;
+        try {
+            data = os::read_file(path, 48u << 20);
+        } catch (const std::exception&) {
             continue;
         }
-        if (!line.empty()) lines.push_back(line);
-        line.clear();
-        while (text_width(word, size, bold) > width && word.size() > 1) {
-            std::size_t n = word.size();
-            while (n > 1 && text_width(word.substr(0, n), size, bold) > width) --n;
-            lines.push_back(word.substr(0, n));
-            word = word.substr(n);
+        std::optional<ttf::Font> font = ttf::Font::parse(std::move(data));
+        if (!font) continue;
+        std::vector<char32_t> covered;
+        for (const char32_t c : missing)
+            if (font->glyph(c)) covered.push_back(c);
+        if (covered.empty()) continue;
+        for (const char32_t c : covered) {
+            x.glyphs[c] = {x.fonts.size(), font->glyph(c)};
+            missing.erase(c);
         }
-        line = word;
+        x.fonts.push_back(std::move(*font));
+        x.used.emplace_back();
     }
-    if (!line.empty()) lines.push_back(line);
-    return lines;
+    return x;
 }
 
 std::string pdf_string(const std::string& ansi) {
@@ -180,16 +199,22 @@ std::string num(double v) {
     return buf;
 }
 
+std::string hex4(unsigned v) {
+    char buf[8];
+    std::snprintf(buf, sizeof buf, "%04X", v & 0xFFFF);
+    return buf;
+}
+
 class PdfPage {
 public:
-    // font: 1 Helvetica, 2 Helvetica-Bold, 3 Courier-Bold
-    void text(double x, double y, int font, double size, const std::string& ansi) {
-        s_ += "BT /F" + std::to_string(font) + " " + num(size) + " Tf " + num(x) + " " + num(y) + " Td " +
-              pdf_string(ansi) + " Tj ET\n";
-    }
+    explicit PdfPage(ExtraFonts& extra) : x_(extra) {}
+
+    // font: 1 Helvetica, 2 Helvetica-Bold, 3 Courier-Bold. Characters these do not have are drawn
+    // with an extra font (/F4 ...), or as '?'.
+    void text(double x, double y, int font, double size, const std::string& utf8) { text(x, y, font, size, decode(utf8)); }
     // A paragraph from (x, y) down; returns the y below it.
     double paragraph(double x, double y, double width, int font, double size, const std::string& utf8) {
-        for (const std::string& line : wrap(win_ansi(utf8), size, width, font == 2)) {
+        for (const std::u32string& line : wrap(decode(utf8), font, size, width)) {
             text(x, y, font, size, line);
             y -= size * 1.35;
         }
@@ -204,21 +229,159 @@ public:
     const std::string& content() const { return s_; }
 
 private:
+    const std::pair<std::size_t, std::uint16_t>* extra_glyph(char32_t c) const {
+        if (ansi_of(c) >= 0) return nullptr;
+        const auto it = x_.glyphs.find(c);
+        return it == x_.glyphs.end() ? nullptr : &it->second;
+    }
+
+    double width(const std::u32string& s, int font, double size) const {
+        double w = 0;
+        for (const char32_t c : s) {
+            if (const auto* g = extra_glyph(c)) {
+                w += x_.fonts[g->first].advance(g->second);
+                continue;
+            }
+            const int a = ansi_of(c) < 0 ? '?' : ansi_of(c);
+            const double base = font == 3 ? 600 : a >= 32 && a <= 126 ? kHelvetica[a - 32] : 556;
+            w += base * (font == 2 ? 1.08 : 1.0);  // bold runs a little wider
+        }
+        return w * size / 1000.0;
+    }
+
+    // Lines of at most `width` points; a word longer than a line is cut.
+    std::vector<std::u32string> wrap(const std::u32string& s, int font, double size, double width_) const {
+        std::vector<std::u32string> lines;
+        std::u32string line;
+        std::size_t at = 0;
+        while (at < s.size()) {
+            std::size_t end = s.find(U' ', at);
+            if (end == std::u32string::npos) end = s.size();
+            std::u32string word = s.substr(at, end - at);
+            at = end + 1;
+            const std::u32string candidate = line.empty() ? word : line + U" " + word;
+            if (width(candidate, font, size) <= width_) {
+                line = candidate;
+                continue;
+            }
+            if (!line.empty()) lines.push_back(line);
+            line.clear();
+            while (width(word, font, size) > width_ && word.size() > 1) {
+                std::size_t n = word.size();
+                while (n > 1 && width(word.substr(0, n), font, size) > width_) --n;
+                lines.push_back(word.substr(0, n));
+                word = word.substr(n);
+            }
+            line = word;
+        }
+        if (!line.empty()) lines.push_back(line);
+        return lines;
+    }
+
+    void text(double x, double y, int font, double size, const std::u32string& s) {
+        s_ += "BT " + num(x) + " " + num(y) + " Td";
+        int current = 0;
+        std::string run;
+        const auto flush = [&] {
+            if (run.empty()) return;
+            s_ += " /F" + std::to_string(current) + " " + num(size) + " Tf " +
+                  (current > 3 ? "<" + run + ">" : pdf_string(run)) + " Tj";
+            run.clear();
+        };
+        for (const char32_t c : s) {
+            const auto* g = extra_glyph(c);
+            const int f = g ? 4 + static_cast<int>(g->first) : font;
+            if (f != current) {
+                flush();
+                current = f;
+            }
+            if (g) {
+                run += hex4(g->second);  // Identity-H: the glyph number, two bytes
+                x_.used[g->first].emplace(g->second, c);
+            } else {
+                const int a = ansi_of(c);
+                run += static_cast<char>(a < 0 ? '?' : a);
+            }
+        }
+        flush();
+        s_ += " ET\n";
+    }
+
+    ExtraFonts& x_;
     std::string s_;
 };
 
-Bytes pdf_file(const std::string& content, const std::string& title) {
+// The PDF objects of extra font `k` as numbers `first` .. `first` + 4: the font, its CID font, its
+// descriptor, the embedded subset and the map back to characters (for copying text out).
+std::vector<std::string> font_objects(const ExtraFonts& x, std::size_t k, std::size_t first) {
+    const ttf::Font& f = x.fonts[k];
+    const std::map<std::uint16_t, char32_t>& used = x.used[k];
+    const std::string name = std::string("/VLTK") + static_cast<char>('A' + k) + "A+" + f.name();
+    const auto ref = [&](std::size_t i) { return std::to_string(first + i) + " 0 R"; };
+    std::string widths = "[";
+    for (const auto& [glyph, c] : used) widths += " " + std::to_string(glyph) + " [" + std::to_string(f.advance(glyph)) + "]";
+    widths += " ]";
+    std::set<std::uint16_t> glyphs;
+    for (const auto& [glyph, c] : used) glyphs.insert(glyph);
+    const Bytes subset = f.subset(glyphs);
+
+    std::string cmap =
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n"
+        "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n"
+        "/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n"
+        "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n";
+    std::vector<std::pair<std::uint16_t, char32_t>> pairs(used.begin(), used.end());
+    for (std::size_t i = 0; i < pairs.size(); i += 100) {
+        const std::size_t n = std::min<std::size_t>(100, pairs.size() - i);
+        cmap += std::to_string(n) + " beginbfchar\n";
+        for (std::size_t j = i; j < i + n; ++j) {
+            const char32_t c = pairs[j].second;
+            std::string utf16 = c > 0xFFFF ? hex4(0xD800 + ((c - 0x10000) >> 10)) + hex4(0xDC00 + ((c - 0x10000) & 0x3FF))
+                                           : hex4(c);
+            cmap += "<" + hex4(pairs[j].first) + "> <" + utf16 + ">\n";
+        }
+        cmap += "endbfchar\n";
+    }
+    cmap += "endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend";
+
+    return {
+        "<< /Type /Font /Subtype /Type0 /BaseFont " + name + " /Encoding /Identity-H /DescendantFonts [" + ref(1) +
+            "] /ToUnicode " + ref(4) + " >>",
+        "<< /Type /Font /Subtype /CIDFontType2 /BaseFont " + name +
+            " /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor " + ref(2) +
+            " /CIDToGIDMap /Identity /DW 1000 /W " + widths + " >>",
+        "<< /Type /FontDescriptor /FontName " + name + " /Flags 32 /FontBBox [" + std::to_string(f.bbox(0)) + " " +
+            std::to_string(f.bbox(1)) + " " + std::to_string(f.bbox(2)) + " " + std::to_string(f.bbox(3)) +
+            "] /ItalicAngle 0 /Ascent " + std::to_string(f.ascent()) + " /Descent " + std::to_string(f.descent()) +
+            " /CapHeight " + std::to_string(f.ascent()) + " /StemV 80 /FontFile2 " + ref(3) + " >>",
+        "<< /Length " + std::to_string(subset.size()) + " /Length1 " + std::to_string(subset.size()) + " >>\nstream\n" +
+            std::string(subset.begin(), subset.end()) + "\nendstream",
+        "<< /Length " + std::to_string(cmap.size()) + " >>\nstream\n" + cmap + "\nendstream",
+    };
+}
+
+Bytes pdf_file(const std::string& content, const std::string& title, const ExtraFonts& extra) {
+    // 1-7 as below, 8 the document's information, then five objects per extra font that is used.
+    std::string fonts = "/F1 5 0 R /F2 6 0 R /F3 7 0 R";
+    std::vector<std::string> extra_objects;
+    for (std::size_t k = 0; k < extra.fonts.size(); ++k) {
+        if (extra.used[k].empty()) continue;
+        const std::size_t first = 9 + extra_objects.size();
+        fonts += " /F" + std::to_string(4 + k) + " " + std::to_string(first) + " 0 R";
+        for (std::string& o : font_objects(extra, k, first)) extra_objects.push_back(std::move(o));
+    }
     std::vector<std::string> objects = {
         "<< /Type /Catalog /Pages 2 0 R >>",
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R /F2 6 0 R "
-        "/F3 7 0 R >> >> /Contents 4 0 R >>",
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << " + fonts +
+            " >> >> /Contents 4 0 R >>",
         "<< /Length " + std::to_string(content.size()) + " >>\nstream\n" + content + "\nendstream",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>",
         "<< /Title " + pdf_string(win_ansi(title)) + " /Producer (Vaultik) >>",
     };
+    for (std::string& o : extra_objects) objects.push_back(std::move(o));
     std::string out = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
     std::vector<std::size_t> offsets;
     for (std::size_t i = 0; i < objects.size(); ++i) {
@@ -232,8 +395,8 @@ Bytes pdf_file(const std::string& content, const std::string& title) {
         std::snprintf(buf, sizeof buf, "%010zu 00000 n \n", o);
         out += buf;
     }
-    out += "trailer\n<< /Size " + std::to_string(objects.size() + 1) + " /Root 1 0 R /Info " +
-           std::to_string(objects.size()) + " 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+    out += "trailer\n<< /Size " + std::to_string(objects.size() + 1) + " /Root 1 0 R /Info 8 0 R >>\nstartxref\n" +
+           std::to_string(xref) + "\n%%EOF\n";
     return Bytes(out.begin(), out.end());
 }
 
@@ -341,9 +504,13 @@ Bytes render_kit_pdf(const RecoveryKit& kit) {
     const Say say{ReportWords{}};
     const Texts t = texts_of(kit, say);
     constexpr double kLeft = 56, kWidth = 595 - 2 * kLeft;
-    PdfPage p;
+    std::string all = kit.key + kit.location + kit.computer + date_text(kit.made) + t.title + t.warning + t.key_heading +
+                      t.key_note + t.details + t.location + t.kind + t.computer + t.made + t.steps_heading + t.footer;
+    for (const std::string& step : t.steps) all += step;
+    ExtraFonts extra = extra_fonts(decode(all));
+    PdfPage p(extra);
     double y = 842 - 70;
-    p.text(kLeft, y, 2, 22, win_ansi(t.title));
+    p.text(kLeft, y, 2, 22, t.title);
     y -= 26;
     p.color(0.64, 0.15, 0.17);
     y = p.paragraph(kLeft, y, kWidth, 2, 10.5, t.warning);
@@ -360,10 +527,10 @@ Bytes render_kit_pdf(const RecoveryKit& kit) {
             if (code.dark(col, row)) p.rect(qx + (col + 4) * cell, qy + kQr - (row + 5) * cell, cell, cell);
     p.fill();
     y = top - 16;
-    p.text(kLeft, y, 2, 13, win_ansi(t.key_heading));
+    p.text(kLeft, y, 2, 13, t.key_heading);
     y -= 26;
     // Four groups per line.
-    const std::string key = win_ansi(kit.key);
+    const std::string& key = kit.key;
     std::vector<std::string> key_lines;
     std::size_t groups = 0, from = 0;
     for (std::size_t i = 0; i <= key.size(); ++i) {
@@ -381,10 +548,10 @@ Bytes render_kit_pdf(const RecoveryKit& kit) {
     y = p.paragraph(kLeft, y - 4, kWidth - kQr - 20, 1, 9.5, t.key_note);
     y = std::min(y, qy) - 18;
 
-    p.text(kLeft, y, 2, 13, win_ansi(t.details));
+    p.text(kLeft, y, 2, 13, t.details);
     y -= 20;
     const auto row = [&](const std::string& label, const std::string& value) {
-        p.text(kLeft, y, 2, 10.5, win_ansi(label));
+        p.text(kLeft, y, 2, 10.5, label);
         y = p.paragraph(kLeft + 110, y, kWidth - 110, 1, 10.5, value) - 3;
     };
     row(t.location, kit.location);
@@ -393,15 +560,15 @@ Bytes render_kit_pdf(const RecoveryKit& kit) {
     row(t.made, date_text(kit.made));
 
     y -= 10;
-    p.text(kLeft, y, 2, 13, win_ansi(t.steps_heading));
+    p.text(kLeft, y, 2, 13, t.steps_heading);
     y -= 20;
     for (std::size_t i = 0; i < t.steps.size(); ++i) {
         p.text(kLeft, y, 2, 10.5, std::to_string(i + 1) + ".");
         y = p.paragraph(kLeft + 18, y, kWidth - 18, 1, 10.5, t.steps[i]) - 5;
     }
     p.line(kLeft, 52, kLeft + kWidth, 52, 0.5);
-    p.text(kLeft, 40, 1, 8, win_ansi(t.footer + " - " + t.computer + ": " + kit.computer));
-    return pdf_file(p.content(), t.title);
+    p.text(kLeft, 40, 1, 8, t.footer + " - " + t.computer + ": " + kit.computer);
+    return pdf_file(p.content(), t.title, extra);
 }
 
 void write_recovery_kit(const RecoveryKit& kit, const std::string& path) {

@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "vaultik/jobs/recovery_kit.hpp"
 #include "vaultik/util/error.hpp"
+#include "vaultik/platform/os.hpp"
 #include "vaultik/util/qr.hpp"
+#include "vaultik/util/ttf.hpp"
 
 using namespace vaultik;
 
@@ -271,4 +274,81 @@ TEST_CASE("the recovery kit holds the key, the place and the steps, in a page an
     REQUIRE(first != std::string::npos);
     const std::size_t obj1 = std::stoul(pdf.substr(first + 20, 10));
     CHECK(pdf.compare(obj1, 7, "1 0 obj") == 0);
+}
+
+namespace {
+
+// The first font of this system that has `c`, or nullopt.
+std::optional<ttf::Font> system_font_with(char32_t c) {
+    for (const std::string& path : ttf::system_font_files()) {
+        try {
+            if (auto f = ttf::Font::parse(os::read_file(path, 48u << 20)); f && f->glyph(c)) return f;
+        } catch (const std::exception&) {
+        }
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+TEST_CASE("a TrueType subset keeps the glyphs used and reads back as the same font") {
+    CHECK_FALSE(ttf::Font::parse(Bytes{1, 2, 3}));
+    CHECK(ttf::Font::count(Bytes(20, 0)) == 0);
+    const auto font = system_font_with(U'\u0416');  // Cyrillic Zhe
+    if (!font) {
+        MESSAGE("no TrueType font with Cyrillic letters on this system; skipped");
+        return;
+    }
+    const std::uint16_t zhe = font->glyph(U'\u0416'), a = font->glyph(U'A');
+    CHECK(zhe != 0);
+    CHECK(a != 0);
+    CHECK(font->glyph(U'\U0010FFFD') == 0);
+    CHECK(font->advance(zhe) > 0);
+
+    const Bytes sub = font->subset({zhe});
+    const auto back = ttf::Font::parse(sub);
+    REQUIRE(back);
+    CHECK(back->glyph_count() == zhe + 1);  // glyph numbers stay; the ones after are left out
+    CHECK(back->advance(zhe) == font->advance(zhe));
+    CHECK(back->ascent() == font->ascent());
+    // No character map in the subset (a PDF maps glyph numbers itself), so nothing is looked up.
+    CHECK(back->glyph(U'A') == 0);
+    CHECK(sub.size() < 400u * 1024);
+    // The whole subset sums to the magic number, as a font's head table promises.
+    std::uint32_t sum = 0;
+    for (std::size_t i = 0; i < sub.size(); i += 4)
+        sum += (std::uint32_t{sub[i]} << 24) | (std::uint32_t{sub[i + 1]} << 16) | (std::uint32_t{sub[i + 2]} << 8) | sub[i + 3];
+    CHECK(sum == 0xB1B0AFBAu);
+}
+
+TEST_CASE("the recovery kit PDF draws letters beyond Western European ones with a system font") {
+    jobs::RecoveryKit kit;
+    kit.key = "Q7RW-2KMX-9TCF-HB4N-ZP8D-6YVJ-3SAE-WG5L";
+    kit.location = "D:\\\u0410\u0440\u0445\u0438\u0432 (caf\u00e9)";  // "Arkhiv" in Cyrillic
+    kit.kind = "a folder on an external drive (%1 when it was made)";
+    kit.kind_arg = "D:\\";
+    kit.computer = "\u6771\u4eac-PC";  // "Tokyo" in Chinese characters
+    kit.version = "9.9.9";
+    const std::string pdf = bytes_text(jobs::render_kit_pdf(kit));
+    CHECK(pdf.find("caf\xe9") != std::string::npos);  // Latin-1 letters stay in the built-in font
+
+    // Every cross-reference entry points at its object.
+    const std::size_t xref = pdf.find("\nxref\n");
+    REQUIRE(xref != std::string::npos);
+    const std::size_t count = std::stoul(pdf.substr(xref + 8));
+    const std::size_t table = pdf.find("0000000000 65535 f \n", xref) + 20;
+    for (std::size_t i = 1; i < count; ++i) {
+        const std::size_t at = std::stoul(pdf.substr(table + 20 * (i - 1), 10));
+        CHECK(pdf.compare(at, std::to_string(i).size() + 6, std::to_string(i) + " 0 obj") == 0);
+    }
+
+    if (!system_font_with(U'\u0410')) {
+        MESSAGE("no TrueType font with Cyrillic letters on this system; the PDF shows '?'");
+        CHECK(pdf.find("D:\\\\????? (caf") != std::string::npos);
+        return;
+    }
+    CHECK(pdf.find("/FontFile2") != std::string::npos);
+    CHECK(pdf.find("/Encoding /Identity-H") != std::string::npos);
+    CHECK(pdf.find("<0410>") != std::string::npos);  // the copy-out map names the letter
+    if (system_font_with(U'\u6771')) CHECK(pdf.find("<6771>") != std::string::npos);
 }

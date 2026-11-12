@@ -84,6 +84,7 @@ endif()
 add_library(vaultik_core STATIC
     src/vaultik/util/hex.cpp
     src/vaultik/util/qr.cpp
+    src/vaultik/util/ttf.cpp
     src/vaultik/util/resources.cpp
     src/vaultik/crypto/hash.cpp
     src/vaultik/crypto/md5.cpp
