@@ -51,11 +51,18 @@ QString changes_text(const Snapshot& s) {
 
 VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     restore_ = new QPushButton(tr("Restore..."));
+#ifdef Q_OS_WIN
     explore_ = new QPushButton(tr("Open in Explorer"));
-    compare_ = new QPushButton(tr("Compare"));
-    compare_->setToolTip(tr("What changed since the version before this one"));
     explore_->setToolTip(tr("Show this version as a read-only folder in File Explorer; files are read from the "
                             "backup when you open them"));
+#else
+    // Linux: a FUSE mount, opened in the desktop's file manager.
+    explore_ = new QPushButton(tr("Open as folder"));
+    explore_->setToolTip(tr("Show this version as a read-only folder in the file manager; files are read from the "
+                            "backup when you open them"));
+#endif
+    compare_ = new QPushButton(tr("Compare"));
+    compare_->setToolTip(tr("What changed since the version before this one"));
     pin_ = new QPushButton(tr("Pin"));
     note_ = new QPushButton(tr("Note..."));
     delete_ = new QPushButton(tr("Delete"));
@@ -67,11 +74,6 @@ VersionsView::VersionsView(QWidget* parent) : QWidget(parent) {
     actions->setContentsMargins(0, 0, 0, 0);
     actions->addWidget(restore_);
     actions->addWidget(explore_);
-#ifndef Q_OS_WIN
-    // Showing a version as a folder needs the Windows Projected File System (a FUSE version for
-    // Linux is still to come); restore and Find a file cover it there.
-    explore_->hide();
-#endif
     actions->addWidget(compare_);
     actions->addWidget(pin_);
     actions->addWidget(note_);
@@ -277,10 +279,8 @@ void VersionsView::context_menu(const QPoint& pos) {
     QMenu menu(this);
     menu.addAction(icon(QStringLiteral("arrow_counterclockwise_20_regular")), tr("Restore..."), this,
                    [this, i] { emit restore_requested(i); });
-#ifdef Q_OS_WIN
-    menu.addAction(icon(QStringLiteral("folder_open_20_regular")), tr("Open in Explorer"), this,
+    menu.addAction(icon(QStringLiteral("folder_open_20_regular")), explore_->text(), this,
                    [this, i] { emit explore_requested(i); });
-#endif
     QAction* previous = menu.addAction(icon(QStringLiteral("history_20_regular")), tr("Compare with previous version"),
                                        this, [this, i] { emit compare_requested(i, i + 1); });
     previous->setEnabled(i + 1 < static_cast<int>(versions_.size()));

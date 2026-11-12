@@ -355,6 +355,10 @@ const std::string& SnapshotMount::folder() const {
     return impl_->folder;
 }
 
+bool SnapshotMount::active() const {
+    return true;  // a projection root cannot be taken away from outside while it runs
+}
+
 bool SnapshotMount::remove_leftover(const std::string& folder) {
     if (!available()) {
         std::error_code ec;

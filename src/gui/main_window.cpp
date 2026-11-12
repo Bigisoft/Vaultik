@@ -659,7 +659,11 @@ void MainWindow::explore_version(int index) {
     auto* process = new QProcess(this);
     mounts_.push_back({process, job->id, snapshot, QString()});
     update_mounts_button();
+#ifdef Q_OS_WIN
     status_->showMessage(tr("Opening the version in File Explorer..."), 10000);
+#else
+    status_->showMessage(tr("Opening the version as a folder..."), 10000);
+#endif
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, process] {
         while (process->canReadLine()) {
@@ -710,7 +714,11 @@ void MainWindow::explore_version(int index) {
             }
             return;
         }
+#ifdef Q_OS_WIN
         plain_warning(this, tr("Open in Explorer"), error);
+#else
+        plain_warning(this, tr("Open as folder"), error);  // what to install, from the engine
+#endif
     });
     QString program = Runner::engine_path();
     process->setProcessEnvironment(Runner::engine_environment());
@@ -734,8 +742,13 @@ void MainWindow::update_mounts_button() {
     for (const Mount& m : mounts_)
         if (!m.folder.isEmpty()) ++open;
     mounts_button_->setVisible(open > 0);
+#ifdef Q_OS_WIN
     mounts_button_->setText(open == 1 ? tr("1 version open in Explorer: Close")
                                       : tr("%1 versions open in Explorer: Close").arg(open));
+#else
+    mounts_button_->setText(open == 1 ? tr("1 version open as a folder: Close")
+                                      : tr("%1 versions open as folders: Close").arg(open));
+#endif
 }
 
 void MainWindow::show_history_for(const QString& local_path) {
@@ -1508,7 +1521,8 @@ void MainWindow::refresh_overview() {
         QStringList kind;
         if (!h.bus.empty()) kind << qs(h.bus);
         if (!h.media.empty()) kind << qs(h.media);
-        dr.name = (h.model.empty() ? tr("Disk %1").arg(h.disk) : qs(h.model)) + " (" + kind.join(' ') +
+        const QString disk = h.device.empty() ? tr("Disk %1").arg(h.disk) : qs(h.device);
+        dr.name = (h.model.empty() ? disk : qs(h.model)) + " (" + kind.join(' ') +
                   (kind.isEmpty() ? QString() : QStringLiteral(", ")) + format_bytes(h.size) + ")";
         QStringList notes;
         const bool bad = h.status == os::DriveHealth::Status::Warning || h.status == os::DriveHealth::Status::Unhealthy;
@@ -1519,11 +1533,19 @@ void MainWindow::refresh_overview() {
             case os::DriveHealth::Status::Unknown: notes << tr("health unknown"); break;
         }
         dr.health = h.health_percent().value_or(-1);
+#ifdef Q_OS_WIN
         if (dr.health < 0)
             dr.health_unknown = os::process_elevated()
                                     ? tr("This drive does not report what its health could be worked out from.")
                                     : tr("Start Vaultik as administrator (Settings) to see the health of hard disks "
                                          "and SATA SSDs.");
+#else
+        // Linux: the drive itself is asked, which only root may do; the reason says what was missing.
+        if (dr.health < 0)
+            dr.health_unknown = h.unknown_reason.empty()
+                                    ? tr("This drive does not report what its health could be worked out from.")
+                                    : tr("The health could not be read: %1.").arg(qs(h.unknown_reason));
+#endif
         if (!h.condition.empty()) notes << qs(h.condition);
         for (const std::string& issue : h.smart_issues)
             if (issue != h.condition) notes << qs(issue);

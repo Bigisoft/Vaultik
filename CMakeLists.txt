@@ -8,6 +8,7 @@ endif()
 
 option(VAULTIK_BUILD_GUI "Build the Qt 6 frontend (vaultik-gui)" ON)
 option(VAULTIK_BUILD_TESTS "Build the tests (vaultik_tests, needs doctest)" ON)
+option(VAULTIK_FUSE "Linux: browse versions as folders with FUSE 3 when libfuse3 is found" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,9 +19,10 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # Windows: everything from vcpkg (build.cmd). Linux: vcpkg when its toolchain is given (the
 # linux-vcpkg-* presets), otherwise the distribution's packages (build.sh, the linux-* presets):
 #   Debian/Ubuntu: g++ cmake ninja-build pkg-config libzstd-dev libssl-dev libcurl4-openssl-dev
-#                  nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev (and libblake3-dev
-#                  where the distribution has it; otherwise BLAKE3 is downloaded and built)
-#   Arch/SteamOS:  base-devel cmake ninja zstd openssl curl nlohmann-json doctest qt6-base qt6-svg blake3
+#                  nlohmann-json3-dev doctest-dev qt6-base-dev libqt6svg6-dev libfuse3-dev (and
+#                  libblake3-dev where the distribution has it; otherwise BLAKE3 is downloaded and
+#                  built)
+#   Arch/SteamOS:  base-devel cmake ninja zstd openssl curl nlohmann-json doctest qt6-base qt6-svg blake3 fuse3
 if(WIN32)
     find_package(zstd CONFIG REQUIRED)
     find_package(BLAKE3 CONFIG REQUIRED)
@@ -206,6 +208,19 @@ else()
     target_compile_options(vaultik_core PUBLIC -Wall -Wextra -Wpedantic $<$<CONFIG:Release>:-O2>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
                           OpenSSL::Crypto CURL::libcurl Threads::Threads)
+    # Browsing a version as a folder (vaultik mount) uses FUSE 3 when its development files are
+    # there (Debian/Ubuntu: libfuse3-dev, Fedora: fuse3-devel, Arch/SteamOS: fuse3); without them
+    # everything else builds and the command says what to install.
+    if(VAULTIK_FUSE AND PkgConfig_FOUND)
+        pkg_check_modules(VAULTIK_FUSE3 QUIET IMPORTED_TARGET fuse3>=3.2)
+    endif()
+    if(VAULTIK_FUSE3_FOUND)
+        target_compile_definitions(vaultik_core PRIVATE VAULTIK_HAVE_FUSE)
+        target_link_libraries(vaultik_core PRIVATE PkgConfig::VAULTIK_FUSE3)
+        message(STATUS "FUSE 3 ${VAULTIK_FUSE3_VERSION}: vaultik mount shows versions as folders")
+    else()
+        message(STATUS "FUSE 3 (libfuse3) not found: vaultik mount is not available")
+    endif()
 endif()
 
 # ---- command line -----------------------------------------------------------------------------

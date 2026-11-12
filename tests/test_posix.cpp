@@ -4,16 +4,26 @@
 
 #ifndef _WIN32
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <optional>
+#include <random>
 #include <string>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/ops/backup.hpp"
+#include "vaultik/ops/mount.hpp"
+#include "vaultik/platform/drive_health.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/repo/local_backend.hpp"
+#include "vaultik/repo/repository.hpp"
 #include "vaultik/util/hex.hpp"
 
 using namespace vaultik;
@@ -239,6 +249,103 @@ TEST_CASE("POSIX: volume names") {
     CHECK(os::volume_root("uuid:vaultik-no-such-volume").empty());
     CHECK(os::volume_root("uuid:../../etc").empty());
     CHECK(os::volume_root("\\\\?\\Volume{0}\\").empty());
+}
+
+TEST_CASE("POSIX: a version shown as a folder with FUSE") {
+    if (!SnapshotMount::available()) {
+        MESSAGE("FUSE is not available here: " << SnapshotMount::how_to_enable());
+        return;
+    }
+    PosixTemp tmp;
+    const std::string src = os::join(tmp.path, "src");
+    fs::create_directories(src + "/sub/deeper");
+    std::mt19937 rng(7);
+    std::string big(5u << 20, '\0');  // several chunks
+    for (char& c : big) c = static_cast<char>(rng());
+    const auto put = [](const std::string& path, const std::string& data) {
+        std::ofstream f(path, std::ios::binary);
+        f.write(data.data(), static_cast<std::streamsize>(data.size()));
+    };
+    put(src + "/big.bin", big);
+    put(src + "/sub/note.txt", "hello from the backup\n");
+    put(src + "/sub/deeper/empty", "");
+    put(src + "/private.txt", "secret");
+    ::chmod((src + "/private.txt").c_str(), 0600);
+    ::chmod((src + "/sub").c_str(), 0750);
+    REQUIRE(::symlink("sub/note.txt", (src + "/link").c_str()) == 0);
+    struct timespec times[2] = {{1600000000, 0}, {1600000000, 0}};
+    ::utimensat(AT_FDCWD, (src + "/sub/note.txt").c_str(), times, 0);
+
+    const std::string repo_dir = os::join(tmp.path, "repo");
+    {
+        LocalBackend backend(repo_dir, true);
+        InitOptions options;
+        options.kdf_iterations = 1000;
+        Repository::init(backend, "pw", options);
+    }
+    auto repo = Repository::open(std::make_unique<LocalBackend>(repo_dir), "pw");
+    BackupOptions backup;
+    backup.paths = {src};
+    const BackupResult result = run_backup(*repo, backup);
+
+    const std::string folder = os::join(tmp.path, "view");
+    std::optional<SnapshotMount> mount;
+    try {
+        mount.emplace(*repo, result.snapshot, folder);
+    } catch (const Error& e) {
+        MESSAGE("could not mount here (" << e.what() << "); skipped");
+        return;
+    }
+    CHECK(mount->active());
+    // The version keeps the full path of the source below the folder.
+    std::string inside = folder;
+    for (const std::string& part : os::path_components(src)) inside += "/" + part;
+    const auto read = [](const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    };
+    CHECK(read(inside + "/big.bin") == big);
+    CHECK(read(inside + "/sub/note.txt") == "hello from the backup\n");
+    CHECK(read(inside + "/sub/deeper/empty").empty());
+    CHECK(read(inside + "/link") == "hello from the backup\n");
+
+    struct stat st{};
+    REQUIRE(::lstat((inside + "/big.bin").c_str(), &st) == 0);
+    CHECK(static_cast<std::size_t>(st.st_size) == big.size());
+    REQUIRE(::lstat((inside + "/private.txt").c_str(), &st) == 0);
+    CHECK((st.st_mode & 07777) == 0600);
+    CHECK(st.st_uid == ::getuid());
+    REQUIRE(::lstat((inside + "/sub").c_str(), &st) == 0);
+    CHECK(S_ISDIR(st.st_mode));
+    CHECK((st.st_mode & 07777) == 0750);
+    REQUIRE(::lstat((inside + "/sub/note.txt").c_str(), &st) == 0);
+    CHECK(st.st_mtim.tv_sec == 1600000000);
+    REQUIRE(::lstat((inside + "/link").c_str(), &st) == 0);
+    CHECK(S_ISLNK(st.st_mode));
+    char target[64] = {};
+    CHECK(::readlink((inside + "/link").c_str(), target, sizeof target - 1) == 12);
+    CHECK(std::string(target) == "sub/note.txt");
+
+    // Read-only: nothing can be changed, added or removed.
+    CHECK(::open((inside + "/sub/note.txt").c_str(), O_WRONLY) < 0);
+    CHECK(errno == EROFS);
+    CHECK(::open((inside + "/new.txt").c_str(), O_WRONLY | O_CREAT, 0644) < 0);
+    CHECK(::unlink((inside + "/big.bin").c_str()) != 0);
+    CHECK(::lstat((inside + "/missing").c_str(), &st) != 0);
+
+    mount.reset();
+    CHECK_FALSE(fs::exists(folder));  // unmounted and removed
+}
+
+TEST_CASE("POSIX: drive health of a folder never fails") {
+    // Whatever the test machine has (a virtual disk in WSL and CI): an answer or nothing, and an
+    // unknown health always says why.
+    for (const os::DriveHealth& d : os::drive_health(fs::current_path().string())) {
+        CHECK(d.device.starts_with("/dev/"));
+        if (!d.health_percent() && d.status == os::DriveHealth::Status::Unknown) CHECK_FALSE(d.unknown_reason.empty());
+    }
+    CHECK(os::drive_health("/proc").empty());  // no device
+    for (const os::DriveHealth& d : os::all_drives()) CHECK_FALSE(d.device.empty());
 }
 
 #endif

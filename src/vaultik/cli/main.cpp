@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -69,6 +70,10 @@
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
+#ifndef _WIN32
+#include "vaultik/platform/mounts_posix.hpp"
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 
@@ -77,6 +82,7 @@
 #endif
 #include "vaultik/util/win.hpp"
 #else
+#include <poll.h>
 #include <unistd.h>
 #endif
 
@@ -207,9 +213,10 @@ Commands:
                                jobs asked for (used by the frontend; --cloud
                                includes cloud storage)
   ls <snapshot> [path]         List a folder inside a snapshot (-R for recursive)
-  mount <snapshot>             Windows: show a version as a read-only folder for File
-                               Explorer until Enter is pressed (files are read
-                               from the backup when opened)
+  mount <snapshot> [folder]    Show a version as a read-only folder (Windows:
+                               Projected File System, Linux: FUSE 3) until Enter
+                               or Ctrl+C is pressed (files are read from the
+                               backup when opened)
       --target <folder>        A new or empty folder to use (default: in the
                                settings folder, under browse)
   restore <snapshot>           Restore files
@@ -312,8 +319,9 @@ Commands:
       --tier <tier>            Standard (default), Bulk (cheaper, slower) or
                                Expedited (GLACIER only, faster, dearer)
       --status                 Only report, ask for nothing
-  drives                       The health of this computer's drives, as Windows
-                               reports it (details need administrator rights)
+  drives                       The health of this computer's drives, as the
+                               system reports it (details need administrator
+                               rights on Windows, root on Linux)
       --smart                  Also list each drive's S.M.A.R.T. attributes
       --history                Also list each drive's stored health readings
   jobs                         List saved backup jobs (created in vaultik-gui)
@@ -537,11 +545,41 @@ void warning(const std::string& msg) {
     }
 }
 
+// One line of standard input, without its end; false at the end of the input. POSIX: read from
+// the descriptor itself, since a thread blocked in std::getline holds the C library's lock on
+// stdin, and exit() then waits for that lock forever (a --json run whose caller keeps the pipe
+// open would never end).
+bool read_input_line(std::string& line) {
+#ifdef _WIN32
+    return static_cast<bool>(std::getline(std::cin, line));
+#else
+    static std::string pending;
+    for (;;) {
+        const std::size_t end = pending.find('\n');
+        if (end != std::string::npos) {
+            line = pending.substr(0, end);
+            pending.erase(0, end + 1);
+            return true;
+        }
+        char buf[512];
+        const ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            if (pending.empty()) return false;
+            line.swap(pending);
+            pending.clear();
+            return true;
+        }
+        pending.append(buf, static_cast<std::size_t>(n));
+    }
+#endif
+}
+
 // With --json, a line "cancel" on stdin stops the running backup or restore cleanly.
 void start_cancel_watcher() {
     std::thread([] {
         std::string line;
-        while (std::getline(std::cin, line)) {
+        while (read_input_line(line)) {
             while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
             if (line == "cancel") {
                 g_cancel = true;
@@ -1967,7 +2005,8 @@ void remove_leftover_mounts() {
 // "mount <snapshot> [--target <folder>]": shows a version as a read-only folder (File Explorer
 // can browse it) until Enter is pressed, or with --json until "cancel" or the caller goes away.
 int cmd_mount(const Args& a) {
-    if (a.positional.size() != 1) throw Error("usage: vaultik mount -r <repo> <snapshot> [--target <folder>]");
+    if (a.positional.empty() || a.positional.size() > 2 || (a.positional.size() == 2 && a.value("--target")))
+        throw Error("usage: vaultik mount -r <repo> <snapshot> [<folder> | --target <folder>]");
     if (!SnapshotMount::available()) throw Error(SnapshotMount::how_to_enable());
     auto repo = open_repo(a);
     // Shared, like a restore: a prune cannot delete data the folder still shows.
@@ -1980,6 +2019,8 @@ int cmd_mount(const Args& a) {
     std::string own_dir;
     if (const auto target = a.value("--target")) {
         folder = *target;
+    } else if (a.positional.size() == 2) {
+        folder = a.positional[1];
     } else {
         std::string label = job_arg(a) ? job_arg(a)->name : std::string("Backup");
         label += " " + os::format_time_local(ref.snapshot.time);
@@ -1996,14 +2037,32 @@ int cmd_mount(const Args& a) {
             emit({{"event", "mounted"}, {"folder", mount.folder()}, {"snapshot", id_hex(ref.id)}});
         } else {
             out("Version " + short_id(ref.id) + " from " + os::format_time_local(ref.snapshot.time) + " is open at\n  " +
-                mount.folder() + "\nIt is read-only. Press Enter to close it.\n");
+                mount.folder() + "\nIt is read-only. Press Enter (or Ctrl+C) to close it.\n");
+#ifdef _WIN32
             std::thread([] {
                 std::string line;
                 std::getline(std::cin, line);
                 g_cancel = true;
             }).detach();
+#endif
         }
-        while (!g_cancel && !g_stdin_closed && !lock.lost()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        // Also ends on Ctrl+C or SIGTERM (stop_requested), and when the folder was unmounted from
+        // outside (Linux: fusermount3 -u).
+        while (!stop_requested() && !g_stdin_closed && !lock.lost() && mount.active()) {
+#ifndef _WIN32
+            // Enter (or the end of the input) is looked for here: a thread left blocked reading
+            // standard input would hold its lock, and the C library's exit waits for that lock.
+            if (!g_json) {
+                struct pollfd p = {STDIN_FILENO, POLLIN, 0};
+                if (::poll(&p, 1, 0) > 0 && (p.revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+                    char buf[256];
+                    const ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
+                    if (n <= 0 || std::memchr(buf, '\n', static_cast<std::size_t>(n)) != nullptr) break;
+                }
+            }
+#endif
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
     }  // the folder goes here
     if (!own_dir.empty()) {
         std::error_code ec;
@@ -3134,7 +3193,7 @@ std::string drive_problem(const os::DriveHealth& d) {
     return s;
 }
 
-// "drives [--smart]": the health of this computer's drives, as Windows reports it, and with
+// "drives [--smart]": the health of this computer's drives, as the system reports it, and with
 // --smart each ATA drive's attribute table.
 int cmd_drives(const Args& a) {
     const bool smart = a.has("--smart");
@@ -3148,6 +3207,15 @@ int cmd_drives(const Args& a) {
         const std::string root = std::string(1, c) + ":\\";
         if (!os::exists(root)) continue;
         for (const int n : os::disk_numbers(root)) letters[n] += (letters[n].empty() ? "" : " ") + root.substr(0, 2);
+    }
+#else
+    // The mount points of the file systems on each disk (not bind mounts or kernel file systems).
+    for (const os::mounts::Mount& m : os::mounts::read_mounts()) {
+        if (m.root != "/" || !m.source.starts_with("/dev/")) continue;
+        for (const int n : os::disk_numbers(m.point)) {
+            std::string& list = letters[n];
+            if ((" " + list + " ").find(" " + m.point + " ") == std::string::npos) list += (list.empty() ? "" : " ") + m.point;
+        }
     }
 #endif
     if (g_json) {
@@ -3163,6 +3231,8 @@ int cmd_drives(const Args& a) {
             if (d.read_errors_uncorrected) j["read_errors_uncorrected"] = *d.read_errors_uncorrected;
             if (!d.smart_issues.empty()) j["issues"] = d.smart_issues;
             if (!d.serial.empty()) j["serial"] = d.serial;
+            if (!d.device.empty()) j["device"] = d.device;
+            if (!d.unknown_reason.empty()) j["unknown_reason"] = d.unknown_reason;
             if (const auto worse = drive_changes(d); !worse.empty()) j["worse"] = worse;
             if (history) {
                 nlohmann::json readings = nlohmann::json::array();
@@ -3191,12 +3261,12 @@ int cmd_drives(const Args& a) {
         return kExitOk;
     }
     if (drives.empty()) {
-        out("Windows reported no drives (or this system cannot tell).\n");
+        out("The system reported no drives (or cannot tell).\n");
         return kExitOk;
     }
     bool missing = false;
     for (const os::DriveHealth& d : drives) {
-        std::string line = "Disk " + std::to_string(d.disk) + "  " + d.model + "  (" + d.bus +
+        std::string line = (d.device.empty() ? "Disk " + std::to_string(d.disk) : d.device) + "  " + d.model + "  (" + d.bus +
                            (d.media.empty() ? "" : " " + d.media) + ", " + format_bytes(d.size) + ")";
         if (!letters[d.disk].empty()) line += "  " + letters[d.disk];
         line += "\n  " + std::string(os::to_string(d.status));
@@ -3208,6 +3278,7 @@ int cmd_drives(const Args& a) {
             line += ", " + std::to_string(*d.read_errors_uncorrected) + " unrecoverable read errors";
         for (const std::string& issue : d.smart_issues)
             if (issue != d.condition) line += ", " + issue;
+        if (!d.unknown_reason.empty()) line += " (" + d.unknown_reason + ")";
         missing = missing || !d.health_percent() || !d.power_on_hours;
         out(line + "\n");
         for (const std::string& w : drive_changes(d)) out("  Getting worse: " + w + "\n");
@@ -3235,13 +3306,21 @@ int cmd_drives(const Args& a) {
                 out(row);
             }
         } else if (smart && d.bus != "NVMe") {
+#ifdef _WIN32
             out(os::process_elevated() ? "    (the drive or its enclosure did not hand out its S.M.A.R.T. attributes)\n"
                                        : "    (S.M.A.R.T. attributes need administrator rights)\n");
+#else
+            if (d.unknown_reason.empty()) out("    (no S.M.A.R.T. attribute table)\n");
+#endif
         }
     }
+#ifdef _WIN32
     if (missing && !os::process_elevated())
         out("(Run as administrator for the health percentage of hard disks and SATA SSDs, power-on hours\n"
             " and error counts.)\n");
+#else
+    (void)missing;  // the reason is on each drive's line
+#endif
     return kExitOk;
 }
 
