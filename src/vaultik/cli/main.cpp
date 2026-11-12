@@ -62,6 +62,8 @@
 #include "vaultik/jobs/update_check.hpp"
 #include "vaultik/ops/change_journal.hpp"
 #include "vaultik/ops/move_here.hpp"
+#include "vaultik/ops/databases.hpp"
+#include "vaultik/ops/docker.hpp"
 #include "vaultik/ops/virt.hpp"
 #include "vaultik/util/hex.hpp"
 #include "vaultik/platform/acl.hpp"
@@ -142,6 +144,17 @@ Commands:
                                folder "Vaultik Hyper-V export" made there
                                (default: ProgramData\Vaultik\hyperv-export;
                                needs room for the largest one; emptied afterwards)
+      --docker-volume <name>   Also back up this Docker volume (repeatable),
+                               exported with tar in a throwaway container into
+                               the file Docker/<name>.tar
+      --docker-image <image>   The image that container runs (default: busybox,
+                               alpine, debian or ubuntu, or Windows' nanoserver,
+                               when one is on this computer; never downloaded)
+      --database <spec>        Dump this database first with its own tool and back
+                               the dump up as Databases/<name> (repeatable):
+                               kind://[user@][host][:port]/database[?container=
+                               <c>&name=<n>], kind sqlserver, mysql or postgres;
+                               the password from VAULTIK_DB_PASSWORD
   wsl list                     The WSL distributions of this account, whether they
                                run, and their disk files
   wsl import <snapshot> <distro>
@@ -165,6 +178,17 @@ Commands:
       --to <folder>            A new or empty folder for its files (required)
       --name <name>            As for hyperv restore
       --report <file>          Also write the result to this file
+  docker list                  The Docker volumes and the running containers
+                               using them
+  docker restore <snapshot> <volume>
+                               Import the volume exported in that snapshot
+                               (Docker/<volume>.tar) into a NEW volume
+      --name <name>            Its name (required; must not exist)
+      --image <image>          As --docker-image for backup
+  db dump <spec>               Dump a database now, as a backup would (spec as for
+                               backup --database; password from
+                               VAULTIK_DB_PASSWORD), to try its settings
+      --to <folder>            Where the dump goes (required)
   snapshots                    List snapshots
   computers                    Every computer backing up into the repository:
                                how its jobs last ran (each run of a saved job
@@ -434,7 +458,7 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -1109,8 +1133,8 @@ std::string hyperv_run_folder(const std::string& root) {
 }
 
 // Removes what runs that ended without cleaning up left in the export folder (full copies of
-// virtual machines, which only fill the drive).
-void remove_leftover_exports(const std::string& root) {
+// virtual machines or database dumps, which only fill the drive). `what` names them.
+void remove_leftover_exports(const std::string& root, const std::string& what = "exported virtual machines") {
     namespace fs = std::filesystem;
     std::error_code ec;
     const fs::path dir(std::u8string(root.begin(), root.end()));
@@ -1127,8 +1151,8 @@ void remove_leftover_exports(const std::string& root) {
             continue;
         std::error_code rec;
         fs::remove_all(it->path(), rec);
-        if (rec) warning("could not remove the exported virtual machines left in " + os::join(root, name) + ": " + rec.message());
-        else if (!g_json) err("Removed exported virtual machines left by an earlier run: " + os::join(root, name) + "\n");
+        if (rec) warning("could not remove the " + what + " left in " + os::join(root, name) + ": " + rec.message());
+        else if (!g_json) err("Removed " + what + " left by an earlier run: " + os::join(root, name) + "\n");
     }
 }
 
@@ -1231,11 +1255,110 @@ std::unique_ptr<VirtualMachines> add_virtual_machines(BackupOptions& o, const st
     return vm;
 }
 
+// Docker volumes: each chosen one is exported through Docker as the backup reads it. One that
+// cannot be (Docker is not running, no such volume) becomes an item that fails, like a machine.
+void add_docker_volumes(BackupOptions& o, const std::vector<std::string>& volumes, const std::string& image) {
+    if (volumes.empty()) return;
+    const DockerInfo info = docker_info();
+    if (!info.available) {
+        for (const std::string& v : volumes)
+            o.extras.push_back(failed_extra(volume_place(v), info.problem + ", so the Docker volume " + v +
+                                                                 " could not be backed up"));
+        return;
+    }
+    std::vector<DockerVolume> all;
+    std::string helper;
+    try {
+        all = docker_volumes(info);
+        helper = pick_helper_image(docker_images(info), info.os_type, image);
+    } catch (const std::exception& e) {
+        for (const std::string& v : volumes) o.extras.push_back(failed_extra(volume_place(v), e.what()));
+        return;
+    }
+    for (const std::string& name : volumes) {
+        const auto it = std::find_if(all.begin(), all.end(), [&](const DockerVolume& v) { return v.name == name; });
+        if (it == all.end()) {
+            o.extras.push_back(failed_extra(volume_place(name), "there is no Docker volume called " + name));
+            continue;
+        }
+        const std::string in_use = volume_in_use_warning(*it);
+        if (!in_use.empty()) warning(in_use);
+        o.extras.push_back(docker_volume_source(info, name, helper, [] { return stop_requested(); }));
+    }
+}
+
+// The database dumps of one run, in a private folder of the temporary folder, removed when this
+// goes away (after the backup read them).
+struct DatabaseDumps {
+    std::string run;
+    DatabaseDumps() = default;
+    DatabaseDumps(const DatabaseDumps&) = delete;
+    DatabaseDumps& operator=(const DatabaseDumps&) = delete;
+    ~DatabaseDumps() {
+        if (run.empty()) return;
+        std::error_code ec;
+        std::filesystem::remove_all(std::filesystem::path(std::u8string(run.begin(), run.end())), ec);
+        if (ec) warning("could not remove the database dumps in " + run + ": " + ec.message());
+    }
+};
+
+// Dumps each database now, before the backup, and adds the dumps to it. A dump that fails is an
+// item that fails (the run warns and keeps the old versions), like a machine that cannot be
+// exported; the other dumps and the files are still backed up.
+std::unique_ptr<DatabaseDumps> add_database_dumps(BackupOptions& o, const std::vector<DatabaseDump>& dbs,
+                                                  const std::function<std::string(const DatabaseDump&)>& password_of) {
+    auto dumps = std::make_unique<DatabaseDumps>();
+    if (dbs.empty()) return dumps;
+    const std::u8string tmp = std::filesystem::temp_directory_path().u8string();
+    const std::string root = os::join(std::string(tmp.begin(), tmp.end()), "vaultik-databases");
+    os::make_private_dirs(root);
+    remove_leftover_exports(root, "database dumps");
+    dumps->run = hyperv_run_folder(root);
+    os::make_private_dirs(dumps->run);
+    o.excludes.push_back(root);  // a file backup of the temporary folder does not read them twice
+    o.excludes.push_back(os::join(root, "*"));
+    std::size_t index = 0;
+    for (const DatabaseDump& db : dbs) {
+        if (stop_requested()) throw Cancelled();
+        if (!g_json) status("Dumping the database " + db.database + "...");
+        std::string password = password_of(db);
+        try {
+            const std::string file = run_dump(db, password, os::join(dumps->run, std::to_string(++index)),
+                                              [] { return stop_requested(); });
+            o.extras.push_back(file_stream_source(database_place(db), file));
+            if (!g_json) {
+                clear_status();
+                err("Dumped " + describe(db) + "\n");
+            }
+        } catch (const std::exception& e) {
+            secure_wipe(password.data(), password.size());
+            if (stop_requested()) throw Cancelled();
+            if (!g_json) clear_status();
+            o.extras.push_back(failed_extra(database_place(db), "the dump of " + describe(db) + " failed: " + e.what()));
+            continue;
+        }
+        secure_wipe(password.data(), password.size());
+    }
+    return dumps;
+}
+
+// The databases given on the command line (backup --database), with VAULTIK_DB_PASSWORD.
+std::vector<DatabaseDump> database_args(const Args& a) {
+    std::vector<DatabaseDump> dbs;
+    for (const std::string& spec : a.all("--database")) dbs.push_back(parse_database_spec(spec));
+    check_databases(dbs);
+    return dbs;
+}
+
 int cmd_backup(const Args& a) {
     const std::vector<std::string> distros = a.all("--wsl");
     const std::vector<std::string> machines = a.all("--hyperv");
-    if (a.positional.empty() && distros.empty() && machines.empty())
+    const std::vector<std::string> volumes = a.all("--docker-volume");
+    const std::vector<DatabaseDump> databases = database_args(a);
+    if (a.positional.empty() && distros.empty() && machines.empty() && volumes.empty() && databases.empty())
         throw Error("usage: vaultik backup -r <repo> <path>...");
+    for (const std::string& v : volumes)
+        if (!valid_volume_name(v)) throw Error("invalid Docker volume name \"" + v + "\"");
     const WslWhenRunning when = parse_wsl_when_running(a.value("--wsl-running").value_or("skip"));
     for (const std::string& d : distros)
         if (!valid_distro_name(d)) throw Error("invalid WSL distribution name \"" + d + "\"");
@@ -1257,6 +1380,10 @@ int cmd_backup(const Args& a) {
     if (auto p = a.value("--parent")) o.parent = resolve_snapshot(*repo, *p).id;
     if (a.has("--apps")) o.app_list = app_list_in_background();
     const auto machines_guard = add_virtual_machines(o, distros, when, machines, a.value("--hyperv-staging").value_or(""));
+    const auto dumps_guard = add_database_dumps(o, databases, [](const DatabaseDump&) {
+        return os::get_env("VAULTIK_DB_PASSWORD");
+    });
+    add_docker_volumes(o, volumes, a.value("--docker-image").value_or(""));
     jobs::RunRecord record;
     return backup_and_report(*repo, std::move(o), repo_path(a), record, lock, vss_arg(a, kDefaultVss),
                              !a.has("--vss-skip-sql"));
@@ -2577,6 +2704,12 @@ int cmd_run_job(const Args& a) {
         if (!job->wsl_distros.empty() || !job->hyperv_vms.empty())
             machines_guard = add_virtual_machines(o, job->wsl_distros, parse_wsl_when_running(job->wsl_when_running),
                                                   job->hyperv_vms, job->hyperv_staging);
+        // Databases are dumped now into a private folder (removed when the run ends); Docker
+        // volumes are exported as the backup reads them.
+        const auto dumps_guard = add_database_dumps(o, job->databases, [&](const DatabaseDump& db) {
+            return store.database_secret(job->id, db.id);
+        });
+        add_docker_volumes(o, job->docker_volumes, job->docker_image);
         // The job's repair data setting becomes the destination's (every writer then follows it).
         if (repo->parity_percent() != job->repair_data) {
             try {
@@ -3535,6 +3668,104 @@ int cmd_wsl(const Args& a) {
     return kExitOk;
 }
 
+// "docker list" and "docker restore <snapshot> <volume> --name <new> [--image <image>]".
+int cmd_docker(const Args& a) {
+    const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
+    if (sub == "list") {
+        const DockerInfo info = docker_info();
+        std::vector<DockerVolume> volumes;
+        std::string problem = info.problem;
+        if (info.available) {
+            try {
+                volumes = docker_volumes(info);
+            } catch (const std::exception& e) {
+                problem = e.what();
+            }
+        }
+        if (g_json) {
+            for (const DockerVolume& v : volumes)
+                emit({{"event", "volume"}, {"name", v.name}, {"driver", v.driver}, {"running", v.running}});
+            emit({{"event", "done"}, {"status", problem.empty() ? "success" : "failed"}, {"message", problem}});
+            return problem.empty() ? kExitOk : kExitError;
+        }
+        if (!problem.empty()) throw Error(problem);
+        if (volumes.empty()) out("There are no Docker volumes (" + info.os_type + " containers).\n");
+        for (const DockerVolume& v : volumes) {
+            std::string users;
+            for (const std::string& c : v.running) users += (users.empty() ? "" : ", ") + c;
+            out(pad(v.name, 40) + pad(v.driver, 8) + (users.empty() ? "" : "used by " + users) + "\n");
+        }
+        return kExitOk;
+    }
+    if (sub != "restore" || a.positional.size() < 3)
+        throw Error("usage: vaultik docker list | docker restore <snapshot> <volume> --name <new volume> [--image <image>]");
+    const auto name = a.value("--name");
+    if (!name) throw Error("docker restore needs --name <new volume> (an existing volume is never written to)");
+    if (!valid_volume_name(*name)) throw Error("invalid Docker volume name \"" + *name + "\"");
+    auto repo = open_repo(a);
+    RepoLock lock(*repo, RepoLock::Mode::Shared, "docker restore", lock_wait(a));
+    repo->reload_index();
+    const SnapshotRef ref = resolve_snapshot(*repo, a.positional[1]);
+    // The volume's name, or its path in the version ("Docker/data.tar").
+    const std::string from =
+        volume_of_path(a.positional[2]).empty() ? a.positional[2] : volume_of_path(a.positional[2]);
+    Node node;
+    if (!resolve_snapshot_path(*repo, ref.snapshot, volume_snapshot_path(from), node) || node.kind != NodeKind::File)
+        throw Error("snapshot " + short_id(ref.id) + " holds no Docker volume called " + from);
+    const auto start = std::chrono::steady_clock::now();
+    if (!g_json) err("Importing " + volume_snapshot_path(from) + " into the new Docker volume " + *name + "\n");
+    docker_import(
+        *repo, node, *name, a.value("--image").value_or(""),
+        [&](const VirtProgress& p) {
+            if (g_json) {
+                emit({{"event", "progress"}, {"files", 0}, {"bytes", p.bytes}, {"total", p.total}, {"current", *name}});
+                return;
+            }
+            status(format_bytes(p.bytes) + " of " + format_bytes(p.total));
+        },
+        [&lock] { return stop_requested() || lock.lost(); });
+    if (g_json) {
+        emit({{"event", "done"},
+              {"status", "success"},
+              {"files", 1},
+              {"bytes", node.size},
+              {"name", *name},
+              {"seconds", seconds_since(start)}});
+        return kExitOk;
+    }
+    clear_status();
+    out("Imported the Docker volume " + *name + " (" + format_bytes(node.size) + ") in " +
+        format_duration(seconds_since(start)) + "\n");
+    return kExitOk;
+}
+
+// "db dump <spec> --to <folder>": one dump now, as a backup makes it.
+int cmd_db(const Args& a) {
+    const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
+    if (sub != "dump" || a.positional.size() < 2) throw Error("usage: vaultik db dump <spec> --to <folder>");
+    const auto to = a.value("--to");
+    if (!to) throw Error("db dump needs --to <folder>");
+    const DatabaseDump db = parse_database_spec(a.positional[1]);
+    std::string password = os::get_env("VAULTIK_DB_PASSWORD");
+    if (!g_json) status("Dumping " + describe(db) + "...");
+    std::string file;
+    try {
+        file = run_dump(db, password, os::absolute_path(*to), [] { return stop_requested(); });
+    } catch (...) {
+        secure_wipe(password.data(), password.size());
+        if (!g_json) clear_status();
+        throw;
+    }
+    secure_wipe(password.data(), password.size());
+    if (g_json) {
+        emit({{"event", "done"}, {"status", "success"}, {"file", file}});
+        return kExitOk;
+    }
+    clear_status();
+    out("Dumped " + describe(db) + " into " + file + "\n");
+    return kExitOk;
+}
+
 void write_text(const std::string& path, const std::string& text) {
     os::write_file_atomic(path, ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
 }
@@ -4084,6 +4315,8 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "restore") return cmd_restore(a);
     if (a.command == "wsl") return cmd_wsl(a);
     if (a.command == "hyperv") return cmd_hyperv(a);
+    if (a.command == "docker") return cmd_docker(a);
+    if (a.command == "db") return cmd_db(a);
     if (a.command == "verify") return cmd_verify(a);
     if (a.command == "stats") return cmd_stats(a);
     if (a.command == "forget") return cmd_forget(a);

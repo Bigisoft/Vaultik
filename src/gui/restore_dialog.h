@@ -62,6 +62,8 @@ private:
     void import_machine();
     // After a machine's files were restored: imports them, with administrator approval.
     void finish_hyperv_import();
+    // A Docker volume (Docker/<name>.tar) of this version, imported into a new volume.
+    void import_volume(const QString& path, const QString& volume);
 
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;
@@ -86,7 +88,7 @@ private:
     bool thaw_running_ = false;  // the engine runs cloud-thaw, not a restore
     QPushButton* apps_ = nullptr;
     QPushButton* import_ = nullptr;
-    enum class Importing { None, Wsl, HyperV };
+    enum class Importing { None, Wsl, HyperV, Docker };
     Importing importing_ = Importing::None;  // what the engine runs, when not a plain restore
     QString import_name_;
     QString import_folder_;

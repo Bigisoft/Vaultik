@@ -108,6 +108,9 @@ Start `vaultik-gui`, then **New backup job**:
   which SQL Server recovers from when the files are attached again.
 - **Virtual machines:** WSL distributions and Hyper-V virtual machines to back up through their
   own export tools (see "WSL and Hyper-V" below).
+- **Docker and databases:** Docker volumes to back up through Docker, and databases (SQL Server,
+  MySQL or MariaDB, PostgreSQL, also in a Docker container) to dump with their own tools before
+  the backup (see "Docker volumes" and "Database dumps" below).
 - **Schedule:** manually, every few hours, daily, or on selected weekdays. Schedules are kept by
   Task Scheduler (Windows, task folder `\Vaultik`) or a systemd user timer (Linux), so Vaultik does
   not need to stay open; a run missed while the computer was off starts at the next chance.
@@ -705,6 +708,39 @@ From the command line: `vaultik backup ... --wsl <name> [--wsl-running skip|expo
 administrator, `vaultik hyperv restore <version> <machine> --to <folder> [--name <new name>]`
 (or `vaultik hyperv import <restored folder> --to <folder>` for files restored already).
 
+### Docker volumes
+
+Docker keeps a named volume's files inside its own storage (Docker Desktop's virtual disk on
+Windows, `/var/lib/docker` on Linux, which only root can read), so a file backup does not reach
+them. The **Docker volumes** list on the **Docker and databases** tab of a job backs them up
+through Docker instead (**List volumes** asks Docker for them, also which running containers use
+each one; a volume can also be added by name):
+
+- Each ticked volume is mounted read-only into a throwaway container that runs `tar -c` over it,
+  and its output is streamed straight into the backup as the file `Docker\<volume>.tar` of the
+  version (no copy on disk first; deduplication stores only what changed since the last export).
+  The container runs from an image already on this computer (busybox, alpine, debian or ubuntu,
+  or Windows' nanoserver or servercore in Windows containers mode, or the one the job names),
+  without network, and is removed afterwards; Vaultik never downloads an image. With none there,
+  the run says which one to get once (`docker pull busybox`).
+- Containers using the volume keep running and are never stopped, restarted or changed. A
+  database running in one may then be saved half-written, so the run warns about every chosen
+  volume that a running container uses: dump such a database too (see "Database dumps" below),
+  which gives a consistent copy.
+- When Docker is not running (or not installed), or a volume is gone, the run says so plainly and
+  that volume counts as an item that could not be read: the rest is backed up, and old versions,
+  which still have it, are kept.
+- To get one back, pick `Docker\<volume>.tar` in the restore window and choose **Import as
+  new...**: a NEW volume of the name you give is created and the export is unpacked into it by
+  `tar -x` in a throwaway container. An existing volume is never written to: a name that is taken
+  is refused, and when the import fails, the volume it created is removed again. The `.tar` can
+  also simply be restored as a file.
+
+Docker volumes and database dumps run programs of your own account (found on `PATH`), so they are
+for jobs without administrator rights. From the command line: `vaultik backup ... --docker-volume
+<name> [--docker-image <image>]`, `vaultik docker list` and `vaultik docker restore <version>
+<volume> --name <new volume> [--image <image>]`.
+
 ### Repairing a damaged backup
 
 When a check or a restore found damage (a bad sector on the backup drive, a file changed by
@@ -927,6 +963,50 @@ you start in a window that shows what it does (a restore, a disk image restore, 
 programs again) keeps the administrator rights. The engine also refuses, whenever it has those
 rights without being an approved administrator job, to start a job by itself or to run a job's
 commands.
+
+### Database dumps
+
+A database writes to its files all the time, so a copy of them taken while it runs (by a file
+backup, a shadow copy without its writer, or a Docker volume's export) may not open again. The
+**Database dumps before the backup** list on the **Docker and databases** tab has the database
+write a consistent copy of itself first, with its own tool, which is then backed up. It saves
+writing the command for "Before the backup, run" by hand:
+
+- **SQL Server:** `sqlcmd` runs `BACKUP DATABASE ... TO DISK ... WITH COPY_ONLY`. A copy-only
+  backup stands outside the database's own backup chain, so its regular full, differential and
+  log backups go on as before. SQL Server writes the file itself, so the server must be this
+  computer (`.\SQLEXPRESS`, `localhost`; its service, `NT SERVICE\MSSQLSERVER` or
+  `NT SERVICE\MSSQL$<instance>`, is given write access to the dump's folder) or run in a Docker
+  container. An empty user signs in with your Windows account.
+- **MySQL and MariaDB:** `mysqldump --single-transaction` (or `mariadb-dump`), which reads InnoDB
+  tables from one consistent snapshot without locking them, as SQL text.
+- **PostgreSQL:** `pg_dump -Fc`, its compressed custom format, restored with `pg_restore`.
+
+Each dump is backed up as `Databases\<name>.bak`, `.sql` or `.dump` (the name is the database's
+unless the job gives another). For a database in a Docker container, name the container: the
+tool inside it runs through `docker exec` and its output is copied out (SQL Server writes the
+backup inside the container, which is copied out and deleted there). When the tool is not
+installed, the run says which one to install; it is looked for on `PATH` and in the folders its
+installer uses (`C:\Program Files\PostgreSQL\<version>\bin` and the like). **Test** in the
+database's window makes a dump right away into a temporary folder and removes it again.
+
+The password is stored like the job's own (sealed for your account, see "Programs") and never
+put on a command line, where other programs could read it: `sqlcmd` gets it in its
+`SQLCMDPASSWORD` variable, `mysqldump` from an option file and `pg_dump` from a password file
+(each in a private folder, removed right after the dump), and a tool in a container through
+`docker exec -e`, which takes the value from the environment of the `docker` command alone. The
+dumps are made in a private folder in the temporary folder (`vaultik-databases`), read from there
+by the backup and removed when the run ends; dumps left by a run that was killed are removed by
+the next one. A dump that fails is a warning (with the tool's own message) and an item that could
+not be read: the files and the other dumps are still backed up and old versions are kept. Dumps
+are for jobs without administrator rights.
+
+From the command line: `vaultik backup ... --database <spec>` (repeatable), with the password in
+`VAULTIK_DB_PASSWORD`, and `vaultik db dump <spec> --to <folder>` to try the settings. A spec is
+`kind://[user@][host][:port]/database[?container=<name>&name=<name>]`, kind `sqlserver`, `mysql`
+or `postgres`, with `%XX` for characters that would be read otherwise:
+`postgres://app@localhost/shop`, `sqlserver://.\SQLEXPRESS/Sales`,
+`mysql://root@/wordpress?container=wp-db`.
 
 ### Running side by side
 

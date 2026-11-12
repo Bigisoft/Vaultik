@@ -38,6 +38,19 @@ inline constexpr char kHyperVFolder[] = "Hyper-V";
 // WSL_UTF8=1), as UTF-8 without carriage returns or a byte order mark.
 std::string console_text(std::string_view raw);
 
+// A program's standard output as a backup's stream: `argv` runs (with `env` on top of this
+// process's environment) when the stream is opened, and what it prints is the file. `cancelled` is
+// polled while it runs; when it says so, or nothing arrives for `stall`, the program is stopped and
+// the item skipped. finish() throws Error when the program failed or printed less than `min_size`
+// bytes; `what` names it in those messages ("wsl --export").
+std::unique_ptr<StreamSource> program_stream(const std::vector<std::string>& argv,
+                                             const std::vector<std::pair<std::string, std::string>>& env,
+                                             const std::string& what, std::function<bool()> cancelled,
+                                             std::chrono::seconds stall, std::uint64_t min_size);
+
+// A file on disk as a backup's stream, stored at `place` (a database dump, see ops/databases.hpp).
+ExtraSource file_stream_source(std::vector<std::string> place, const std::string& path);
+
 // ---- WSL ------------------------------------------------------------------------------------
 
 struct WslDistro {

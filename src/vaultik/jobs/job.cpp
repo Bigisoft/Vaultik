@@ -10,6 +10,7 @@
 #include <nlohmann/json.hpp>
 
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/ops/docker.hpp"
 #include "vaultik/ops/virt.hpp"
 #include "vaultik/platform/os.hpp"
 
@@ -46,6 +47,20 @@ std::vector<std::string> strings(const json& j, const char* key) {
     if (j.contains(key)) {
         for (const auto& v : j.at(key)) out.push_back(v.get<std::string>());
     }
+    return out;
+}
+
+json databases_json(const std::vector<DatabaseDump>& dbs) {
+    json out = json::array();
+    for (const DatabaseDump& db : dbs)
+        out.push_back({{"id", db.id},
+                       {"kind", to_string(db.kind)},
+                       {"name", db.name},
+                       {"host", db.host},
+                       {"port", db.port},
+                       {"database", db.database},
+                       {"user", db.user},
+                       {"container", db.container}});
     return out;
 }
 
@@ -320,13 +335,16 @@ void validate(const Job& job) {
     }
     for (const std::string& d : job.image_disks) check_text("a disk to back up", d);
     if (!job.image_disks.empty()) {
-        if (!job.sources.empty() || !job.wsl_distros.empty() || !job.hyperv_vms.empty())
-            throw Error("a job backs up either disks or folders and virtual machines, not both");
+        if (!job.sources.empty() || !job.wsl_distros.empty() || !job.hyperv_vms.empty() ||
+            !job.docker_volumes.empty() || !job.databases.empty())
+            throw Error("a job backs up either disks or folders, virtual machines, Docker volumes and databases, not "
+                        "both");
         for (const std::string& d : job.image_disks)
             if (d.empty()) throw Error("pick at least one disk to back up");
         if (!job.run_as_admin)
             throw Error("a disk image backup needs administrator rights: turn on \"Run with administrator rights\"");
-    } else if (job.sources.empty() && job.wsl_distros.empty() && job.hyperv_vms.empty()) {
+    } else if (job.sources.empty() && job.wsl_distros.empty() && job.hyperv_vms.empty() &&
+               job.docker_volumes.empty() && job.databases.empty()) {
         throw Error("the job needs at least one folder or file to back up");
     }
     for (const std::string& s : job.sources)
@@ -347,6 +365,18 @@ void validate(const Job& job) {
     if (!st.empty() && !(st.size() >= 3 && std::isalpha(static_cast<unsigned char>(st[0])) && st[1] == ':' &&
                          (st[2] == '\\' || st[2] == '/')))
         throw Error("the folder for exported virtual machines must be a full path on a local drive");
+    for (const std::string& v : job.docker_volumes)
+        if (!valid_volume_name(v)) throw Error("invalid Docker volume name \"" + v + "\"");
+    check_text("the Docker image", job.docker_image);
+    if (job.docker_image.starts_with("-") || job.docker_image.find_first_of(" 	") != std::string::npos)
+        throw Error("invalid Docker image name \"" + job.docker_image + "\"");
+    for (const DatabaseDump& db : job.databases) {
+        check_text("a database dump's setting", db.name + db.host + db.database + db.user + db.container);
+    }
+    check_databases(job.databases);
+    if ((!job.docker_volumes.empty() || !job.databases.empty()) && job.run_as_admin)
+        throw Error("Docker volumes and database dumps run programs of your own account: back them up in a job without "
+                    "administrator rights");
     const Schedule& s = job.schedule;
     if (s.hour < 0 || s.hour > 23 || s.minute < 0 || s.minute > 59) throw Error("invalid schedule time");
     if (s.kind == Schedule::Kind::Weekly && (s.weekdays & 0x7F) == 0) throw Error("pick at least one weekday");
@@ -462,6 +492,8 @@ std::string to_json(const Job& job) {
         {"record_apps", job.record_apps},
         {"wsl", {{"distros", job.wsl_distros}, {"when_running", job.wsl_when_running}}},
         {"hyperv", {{"machines", job.hyperv_vms}, {"staging", job.hyperv_staging}}},
+        {"docker", {{"volumes", job.docker_volumes}, {"image", job.docker_image}}},
+        {"databases", databases_json(job.databases)},
         {"repair_data", job.repair_data},
         {"before_command", job.before_command},
         {"after_command", job.after_command},
@@ -576,6 +608,24 @@ Job job_from_json(const std::string& text) {
             job.hyperv_vms = strings(h, "machines");
             job.hyperv_staging = h.value("staging", std::string());
         }
+        if (j.contains("docker")) {  // missing in jobs saved before Docker volumes were backed up
+            const json& d = j.at("docker");
+            job.docker_volumes = strings(d, "volumes");
+            job.docker_image = d.value("image", std::string());
+        }
+        if (j.contains("databases") && j.at("databases").is_array())
+            for (const json& d : j.at("databases")) {
+                DatabaseDump db;
+                db.id = d.value("id", std::string());
+                db.kind = parse_database_kind(d.value("kind", std::string("postgres")));
+                db.name = d.value("name", std::string());
+                db.host = d.value("host", std::string());
+                db.port = d.value("port", 0);
+                db.database = d.value("database", std::string());
+                db.user = d.value("user", std::string());
+                db.container = d.value("container", std::string());
+                job.databases.push_back(std::move(db));
+            }
         // Jobs from before repair data: on for drives, where bad sectors are the risk; cloud
         // storage keeps its own copies.
         job.repair_data = std::min(50u, j.value("repair_data", is_cloud_location(job.repository) ? 0u : 5u));
@@ -803,6 +853,30 @@ std::string copy_secret_path(const std::string& dir, const std::string& id) {
     return os::join(os::join(dir, "secrets"), id + ".copycloud");
 }
 
+// The password of a database dump: "<job id>.db-<dump id>".
+std::string database_secret_path(const std::string& dir, const std::string& id, const std::string& db_id) {
+    if (!valid_database_id(db_id)) throw Error("invalid database dump id \"" + db_id + "\"");
+    return os::join(os::join(dir, "secrets"), id + ".db-" + db_id);
+}
+
+// The stored database dump passwords of a job: their dump ids.
+std::vector<std::string> database_secret_ids(const std::string& dir, const std::string& id) {
+    std::vector<std::string> out;
+    const std::string prefix = id + ".db-";
+    try {
+        os::DirReader reader(os::join(dir, "secrets"));
+        std::string name;
+        os::FileInfo info;
+        while (reader.next(name, info))
+            if (info.type == os::EntryType::File && name.starts_with(prefix) &&
+                valid_database_id(name.substr(prefix.size())))
+                out.push_back(name.substr(prefix.size()));
+    } catch (const os::OsError&) {
+        // no secrets folder yet
+    }
+    return out;
+}
+
 void seal_to(const std::string& path, const std::string& secret) {
     // In the admin store the system account reads it (see admin_jobs.hpp).
     Bytes sealed = os::protect_secret(bytes_of(secret), in_admin_store(path));
@@ -898,6 +972,7 @@ void JobStore::remove(const std::string& id) const {
     os::remove_file(secret_path(dir_, id));
     os::remove_file(cloud_secret_path(dir_, id));
     os::remove_file(copy_secret_path(dir_, id));
+    for (const std::string& db : database_secret_ids(dir_, id)) os::remove_file(database_secret_path(dir_, id, db));
     os::remove_file(history_path(dir_, id));
 }
 
@@ -942,6 +1017,30 @@ void JobStore::set_copy_secret(const std::string& id, const std::string& secret)
 std::string JobStore::copy_secret(const std::string& id) const {
     check_id(id);
     return unseal_from(copy_secret_path(dir_, id));
+}
+
+void JobStore::set_database_secret(const std::string& id, const std::string& db_id, const std::string& secret) const {
+    check_id(id);
+    const std::string path = database_secret_path(dir_, id, db_id);
+    if (secret.empty()) {
+        os::remove_file(path);
+        return;
+    }
+    seal_to(path, secret);
+}
+
+std::string JobStore::database_secret(const std::string& id, const std::string& db_id) const {
+    check_id(id);
+    return unseal_from(database_secret_path(dir_, id, db_id));
+}
+
+void JobStore::remove_unused_database_secrets(const Job& job) const {
+    check_id(job.id);
+    for (const std::string& db : database_secret_ids(dir_, job.id)) {
+        const bool used = std::any_of(job.databases.begin(), job.databases.end(),
+                                      [&](const DatabaseDump& d) { return d.id == db; });
+        if (!used) os::remove_file(database_secret_path(dir_, job.id, db));
+    }
 }
 
 CloudCredentials JobStore::copy_credentials(const Job& job) const {

@@ -10,6 +10,7 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QInputDialog>
 #include <QListWidget>
 #include <QJsonObject>
 #include <QLabel>
@@ -31,6 +32,7 @@
 #include "runner.h"
 #include "theme.h"
 #include "vaultik/model/tree.hpp"
+#include "vaultik/ops/docker.hpp"
 #include "vaultik/ops/move_here.hpp"
 #include "vaultik/ops/virt.hpp"
 #include "vaultik/platform/os.hpp"
@@ -110,9 +112,6 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     connect(apps_, &QPushButton::clicked, this, &RestoreDialog::reinstall_programs);
     import_ = buttons->addButton(tr("Import as new..."), QDialogButtonBox::ActionRole);
     connect(import_, &QPushButton::clicked, this, &RestoreDialog::import_machine);
-#ifndef _WIN32
-    import_->hide();
-#endif
     restore_ = buttons->addButton(tr("Restore"), QDialogButtonBox::AcceptRole);
     restore_->setDefault(true);
     connect(restore_, &QPushButton::clicked, this, &RestoreDialog::start_restore);
@@ -184,6 +183,13 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
                                        .arg(import_name_, import_folder_)
                              : result == "cancelled" ? tr("Import cancelled.")
                                                      : tr("The import failed: %1").arg(ev.value("message").toString()));
+            return;
+        }
+        if (importing == Importing::Docker) {
+            status_->setText(result == "success" ? tr("Imported the Docker volume %1.").arg(import_name_)
+                             : result == "cancelled"
+                                 ? tr("Import cancelled; the new volume was removed again.")
+                                 : tr("The import failed: %1").arg(ev.value("message").toString()));
             return;
         }
         if (importing == Importing::HyperV) {
@@ -419,14 +425,21 @@ void RestoreDialog::update_target_state() {
     target_->setEnabled(to_folder_->isChecked());
     browse_->setEnabled(to_folder_->isChecked());
     restore_->setText(path.isEmpty() ? tr("Restore everything") : tr("Restore selected"));
+#ifdef _WIN32
     const bool wsl = !distro_of_path(u8(path)).empty();
     const bool vm = !machine_of_path(u8(path)).empty();
-    import_->setEnabled(wsl || vm);
-    import_->setToolTip(wsl  ? tr("Install this exported WSL distribution as a new distribution")
-                        : vm ? tr("Import this virtual machine into Hyper-V as a new machine (needs administrator "
-                                  "approval)")
-                             : tr("Pick an exported WSL distribution (WSL\\<name>.tar) or a Hyper-V machine "
-                                  "(Hyper-V\\<name>) first"));
+#else
+    const bool wsl = false;
+    const bool vm = false;
+#endif
+    const bool volume = !volume_of_path(u8(path)).empty();
+    import_->setEnabled(wsl || vm || volume);
+    import_->setToolTip(wsl      ? tr("Install this exported WSL distribution as a new distribution")
+                        : vm     ? tr("Import this virtual machine into Hyper-V as a new machine (needs administrator "
+                                      "approval)")
+                        : volume ? tr("Import this Docker volume into a new volume")
+                                 : tr("Pick an exported WSL distribution (WSL\\<name>.tar), a Hyper-V machine "
+                                      "(Hyper-V\\<name>) or a Docker volume (Docker\\<name>.tar) first"));
 }
 
 void RestoreDialog::start_restore() {
@@ -606,6 +619,11 @@ void RestoreDialog::import_machine() {
     if (runner_->running() || snapshots_.empty()) return;
     const SnapshotEntry& snap = snapshots_[static_cast<std::size_t>(snapshot_->currentIndex())];
     const QString path = selected_path();
+    const QString volume = qs(volume_of_path(u8(path)));
+    if (!volume.isEmpty()) {
+        import_volume(path, volume);
+        return;
+    }
     const QString distro = qs(distro_of_path(u8(path)));
     const QString machine = qs(machine_of_path(u8(path)));
     if (distro.isEmpty() && machine.isEmpty()) return;
@@ -691,6 +709,39 @@ void RestoreDialog::import_machine() {
     }
     import_name_ = new_name;
     import_folder_ = target;
+    warnings_ = 0;
+    bar_->show();
+    restore_->setEnabled(false);
+    move_->setEnabled(false);
+    thaw_->setEnabled(false);
+    import_->setEnabled(false);
+    snapshot_->setEnabled(false);
+    status_->setText(tr("Starting..."));
+    runner_->start(args, password_, cloud_);
+}
+
+void RestoreDialog::import_volume(const QString& path, const QString& volume) {
+    const SnapshotEntry& snap = snapshots_[static_cast<std::size_t>(snapshot_->currentIndex())];
+    bool ok = false;
+    const QString new_name =
+        QInputDialog::getText(this, tr("Import Docker volume"),
+                              tr("%1 is imported into a new Docker volume; existing volumes are not changed. The new "
+                                 "volume's name:")
+                                  .arg(path),
+                              QLineEdit::Normal, volume + "-restored", &ok)
+            .trimmed();
+    if (!ok) return;
+    if (!valid_volume_name(u8(new_name))) {
+        QMessageBox::warning(this, windowTitle(),
+                             tr("A Docker volume name starts with a letter or digit and has letters, digits, '_', '.' "
+                                "and '-' only."));
+        return;
+    }
+    const QStringList args = QStringList{"docker", "restore"} << repo_args() << qs(id_hex(snap.id)) << volume
+                                                              << "--name" << new_name;
+    importing_ = Importing::Docker;
+    import_name_ = new_name;
+    import_folder_.clear();
     warnings_ = 0;
     bar_->show();
     restore_->setEnabled(false);

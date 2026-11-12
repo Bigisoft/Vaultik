@@ -34,12 +34,15 @@
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/profile_items.hpp"
 #include "vaultik/jobs/scheduler.hpp"
+#include "vaultik/ops/databases.hpp"
+#include "vaultik/ops/docker.hpp"
 #include "vaultik/ops/virt.hpp"
 #include "vaultik/image/disk.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/config.hpp"
 #include "vaultik/repo/backends.hpp"
 #include "vaultik/repo/repository.hpp"
+#include "vaultik/util/hex.hpp"
 #include "runner.h"
 
 using namespace vaultik;
@@ -98,6 +101,11 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
         if (index == machines_tab && !hyperv_listed_) list_hyperv();
     });
 #endif
+    const int containers_tab = tabs->addTab(scrolled(build_containers()), tr("Docker and databases"));
+    // Asking Docker takes a few seconds (longer when it is not running): only when the tab is opened.
+    connect(tabs, &QTabWidget::currentChanged, this, [this, containers_tab](int index) {
+        if (index == containers_tab && !docker_listed_) list_docker();
+    });
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
     connect(buttons, &QDialogButtonBox::accepted, this, &JobDialog::accept);
@@ -958,6 +966,12 @@ void JobDialog::load(const jobs::Job& job) {
         for (const std::string& n : job.hyperv_vms) add_machine_item(hyperv_list_, qs(n), QString(), true);
         hyperv_staging_->setText(qs(job.hyperv_staging));
     }
+    docker_list_->clear();
+    for (const std::string& v : job.docker_volumes) add_machine_item(docker_list_, qs(v), QString(), true);
+    docker_image_->setText(qs(job.docker_image));
+    databases_ = job.databases;
+    db_passwords_.clear();
+    fill_databases();
     if (on_connect_->isEnabled()) on_connect_->setChecked(job.backup_on_connect);
     check_weekly_->setChecked(job.health.weekly);
     check_percent_->setValue(job.health.sample_percent);
@@ -1098,6 +1112,14 @@ jobs::Job JobDialog::collect() const {
         }
         j.hyperv_staging = u8(QDir::toNativeSeparators(hyperv_staging_->text().trimmed()));
     }
+    j.docker_volumes.clear();
+    for (int i = 0; i < docker_list_->count(); ++i) {
+        const QListWidgetItem* item = docker_list_->item(i);
+        if ((item->flags() & Qt::ItemIsUserCheckable) && item->checkState() == Qt::Checked)
+            j.docker_volumes.push_back(u8(item->data(Qt::UserRole).toString()));
+    }
+    j.docker_image = u8(docker_image_->text().trimmed());
+    j.databases = databases_;
     j.image_disks.clear();
     if (kind_ != nullptr && kind_->currentIndex() == 1) {
         j.sources.clear();
@@ -1253,6 +1275,15 @@ void JobDialog::accept() {
             store_.set_copy_secret(j.id, copy);
             secure_wipe(copy.data(), copy.size());
         }
+        for (const auto& [id, typed] : db_passwords_) {
+            const bool kept = std::any_of(j.databases.begin(), j.databases.end(),
+                                          [&](const DatabaseDump& d) { return d.id == id; });
+            if (!kept) continue;
+            std::string db_pw = u8(typed);
+            store_.set_database_secret(j.id, id, db_pw);
+            secure_wipe(db_pw.data(), db_pw.size());
+        }
+        store_.remove_unused_database_secrets(j);
         const QString dir = QFileInfo(Runner::engine_path()).absolutePath();
         try {
             jobs::apply_schedule(j, u8(QDir::toNativeSeparators(dir)));
@@ -1364,6 +1395,274 @@ QWidget* JobDialog::build_machines() {
     hl->addWidget(hv_note);
     layout->addWidget(hv_box, 1);
     return page;
+}
+
+QWidget* JobDialog::build_containers() {
+    auto* page = new QWidget;
+    auto* layout = new QVBoxLayout(page);
+
+    auto* docker_box = new QGroupBox(tr("Docker volumes"));
+    auto* dl = new QVBoxLayout(docker_box);
+    docker_list_ = new QListWidget;
+    dl->addWidget(docker_list_, 1);
+    docker_note_ = new QLabel;
+    docker_note_->setWordWrap(true);
+    docker_note_->setTextFormat(Qt::PlainText);
+    dl->addWidget(docker_note_);
+    auto* refresh = new QPushButton(tr("List volumes"));
+    connect(refresh, &QPushButton::clicked, this, &JobDialog::list_docker);
+    auto* by_name = new QPushButton(tr("Add by name..."));
+    connect(by_name, &QPushButton::clicked, this, [this] {
+        bool ok = false;
+        const QString name = QInputDialog::getText(this, tr("Docker volume"), tr("The volume's name in Docker:"),
+                                                   QLineEdit::Normal, QString(), &ok)
+                                 .trimmed();
+        if (!ok || name.isEmpty()) return;
+        if (!valid_volume_name(u8(name))) {
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("A Docker volume name starts with a letter or digit and has letters, digits, '_', "
+                                    "'.' and '-' only."));
+            return;
+        }
+        add_machine_item(docker_list_, name, QString(), true);
+    });
+    dl->addWidget(row({refresh, by_name}));
+    docker_image_ = new QLineEdit;
+    docker_image_->setPlaceholderText(tr("Automatic: busybox, alpine, debian or ubuntu (or nanoserver) if present"));
+    auto* image_row = new QFormLayout;
+    image_row->addRow(tr("Image to export with:"), docker_image_);
+    dl->addLayout(image_row);
+    auto* docker_help = new QLabel(tr("Each ticked volume is exported through Docker with tar, in a throwaway container "
+                                      "from an image already on this computer (nothing is downloaded), straight into "
+                                      "the backup as Docker\\<volume>.tar. Containers using it keep running, so a "
+                                      "database in it may be saved half-written: add the database below for a "
+                                      "consistent copy. Restore it with \"Import as new...\" in the restore window, "
+                                      "into a new volume. Not for jobs with administrator rights."));
+    docker_help->setWordWrap(true);
+    docker_help->setForegroundRole(QPalette::PlaceholderText);
+    dl->addWidget(docker_help);
+    layout->addWidget(docker_box, 1);
+
+    auto* db_box = new QGroupBox(tr("Database dumps before the backup"));
+    auto* bl = new QVBoxLayout(db_box);
+    db_list_ = new QListWidget;
+    connect(db_list_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+        edit_database(db_list_->row(item));
+    });
+    bl->addWidget(db_list_, 1);
+    auto* add = new QPushButton(tr("Add..."));
+    connect(add, &QPushButton::clicked, this, [this] { edit_database(-1); });
+    auto* edit = new QPushButton(tr("Edit..."));
+    connect(edit, &QPushButton::clicked, this, [this] {
+        if (db_list_->currentRow() >= 0) edit_database(db_list_->currentRow());
+    });
+    auto* remove = new QPushButton(tr("Remove"));
+    connect(remove, &QPushButton::clicked, this, [this] {
+        const int at = db_list_->currentRow();
+        if (at < 0 || at >= static_cast<int>(databases_.size())) return;
+        db_passwords_.erase(databases_[static_cast<std::size_t>(at)].id);
+        databases_.erase(databases_.begin() + at);
+        fill_databases();
+    });
+    bl->addWidget(row({add, edit, remove}));
+    auto* db_help = new QLabel(tr("Before each backup, every database here writes a consistent copy of itself with its "
+                                  "own tool into a private temporary folder, which is backed up as "
+                                  "Databases\\<name> and removed afterwards: SQL Server with sqlcmd (BACKUP DATABASE "
+                                  "... WITH COPY_ONLY, which leaves its own backups alone), MySQL and MariaDB with "
+                                  "mysqldump --single-transaction, PostgreSQL with pg_dump -Fc. For a database in a "
+                                  "Docker container, the tool inside the container is used. Passwords are stored like "
+                                  "the job's password and never put on a command line. A dump that fails is a warning; "
+                                  "everything else is still backed up. Not for jobs with administrator rights."));
+    db_help->setWordWrap(true);
+    db_help->setForegroundRole(QPalette::PlaceholderText);
+    bl->addWidget(db_help);
+    layout->addWidget(db_box, 1);
+    return page;
+}
+
+void JobDialog::list_docker() {
+    docker_listed_ = true;
+    DockerInfo info;
+    std::vector<DockerVolume> volumes;
+    const QString error = run_busy(this, tr("Asking Docker for its volumes..."), [&](const std::function<bool()>&) {
+        info = docker_info();
+        if (info.available) volumes = docker_volumes(info);
+    });
+    if (!error.isEmpty()) {
+        docker_note_->setText(error);
+        return;
+    }
+    if (!info.available) {
+        QString problem = qs(info.problem);
+        if (!problem.isEmpty()) problem[0] = problem[0].toUpper();
+        docker_note_->setText(problem + tr(". Volumes can still be added by name."));
+        return;
+    }
+    for (const DockerVolume& v : volumes) {
+        QString detail = qs(v.driver);
+        if (!v.running.empty()) {
+            QStringList users;
+            for (const std::string& c : v.running) users << qs(c);
+            detail = tr("used by %1").arg(users.join(", "));
+        }
+        add_machine_item(docker_list_, qs(v.name), detail, false);
+    }
+    docker_note_->setText(volumes.empty() ? tr("Docker has no volumes.")
+                                          : tr("%1 in Docker.").arg(count_of(volumes.size(), tr("volume"), tr("volumes"))));
+}
+
+void JobDialog::fill_databases() {
+    db_list_->clear();
+    for (const DatabaseDump& db : databases_)
+        db_list_->addItem(qs(describe(db)) + "   (" + qs(std::string(kDatabasesFolder) + "\\" + dump_file_name(db)) +
+                          ")");
+}
+
+void JobDialog::edit_database(int index) {
+    const bool adding = index < 0 || index >= static_cast<int>(databases_.size());
+    DatabaseDump db;
+    if (adding) {
+        db.id = new_database_id();
+        db.kind = DatabaseKind::Postgres;
+    } else {
+        db = databases_[static_cast<std::size_t>(index)];
+    }
+    const bool stored = !adding && !job_.id.empty() && !db_passwords_.contains(db.id) &&
+                        !store_.database_secret(job_.id, db.id).empty();
+
+    QDialog ask(this);
+    ask.setWindowTitle(adding ? tr("Add a database") : tr("Edit a database"));
+    ask.resize(560, 360);
+    auto* form = new QFormLayout(&ask);
+    auto* kind = new QComboBox;
+    kind->addItem(tr("SQL Server"), QStringLiteral("sqlserver"));
+    kind->addItem(tr("MySQL or MariaDB"), QStringLiteral("mysql"));
+    kind->addItem(tr("PostgreSQL"), QStringLiteral("postgres"));
+    kind->setCurrentIndex(kind->findData(QString::fromLatin1(to_string(db.kind))));
+    form->addRow(tr("Database:"), kind);
+    auto* container = new QLineEdit(qs(db.container));
+    container->setPlaceholderText(tr("Optional: the Docker container it runs in"));
+    form->addRow(tr("Docker container:"), container);
+    auto* host = new QLineEdit(qs(db.host));
+    form->addRow(tr("Server:"), host);
+    auto* port = new QSpinBox;
+    port->setRange(0, 65535);
+    port->setSpecialValueText(tr("Default"));
+    port->setValue(db.port);
+    form->addRow(tr("Port:"), port);
+    auto* database = new QLineEdit(qs(db.database));
+    form->addRow(tr("Database name:"), database);
+    auto* user = new QLineEdit(qs(db.user));
+    form->addRow(tr("User:"), user);
+    auto* password = new QLineEdit;
+    password->setEchoMode(QLineEdit::Password);
+    if (db_passwords_.contains(db.id)) password->setText(db_passwords_[db.id]);
+    password->setPlaceholderText(stored ? tr("Unchanged (stored)") : tr("None"));
+    form->addRow(tr("Password:"), password);
+    auto* name = new QLineEdit(qs(db.name));
+    name->setPlaceholderText(tr("The database's name"));
+    form->addRow(tr("Saved in the backup as:"), name);
+    auto* note = new QLabel;
+    note->setWordWrap(true);
+    note->setTextFormat(Qt::PlainText);
+    note->setForegroundRole(QPalette::PlaceholderText);
+    form->addRow(note);
+    const auto update_hints = [=] {
+        const bool in_docker = !container->text().trimmed().isEmpty();
+        switch (parse_database_kind(u8(kind->currentData().toString()))) {
+            case DatabaseKind::SqlServer:
+                host->setPlaceholderText(in_docker ? tr("localhost (inside the container)")
+                                                   : tr("This computer, e.g. .\\SQLEXPRESS"));
+                user->setPlaceholderText(in_docker ? tr("Required, e.g. sa") : tr("Empty: your Windows account"));
+                note->setText(tr("sqlcmd runs BACKUP DATABASE ... WITH COPY_ONLY. SQL Server writes the file itself, "
+                                 "so it must run on this computer (its service is given access to the dump folder) "
+                                 "or in a Docker container."));
+                break;
+            case DatabaseKind::MySql:
+                host->setPlaceholderText(in_docker ? tr("Inside the container") : tr("This computer"));
+                user->setPlaceholderText(in_docker ? tr("Empty: root") : tr("Empty: the tool's default"));
+                note->setText(tr("mysqldump (or mariadb-dump) --single-transaction writes the database as SQL text "
+                                 "without locking InnoDB tables."));
+                break;
+            case DatabaseKind::Postgres:
+                host->setPlaceholderText(in_docker ? tr("Inside the container") : tr("This computer"));
+                user->setPlaceholderText(in_docker ? tr("Empty: postgres") : tr("Empty: your account's name"));
+                note->setText(tr("pg_dump -Fc writes the database in PostgreSQL's custom format; restore it with "
+                                 "pg_restore."));
+                break;
+        }
+    };
+    update_hints();
+    connect(kind, &QComboBox::currentIndexChanged, &ask, update_hints);
+    connect(container, &QLineEdit::textChanged, &ask, update_hints);
+
+    const auto collect_db = [&]() {
+        DatabaseDump d = db;
+        d.kind = parse_database_kind(u8(kind->currentData().toString()));
+        d.container = u8(container->text().trimmed());
+        d.host = u8(host->text().trimmed());
+        d.port = port->value();
+        d.database = u8(database->text().trimmed());
+        d.user = u8(user->text().trimmed());
+        d.name = u8(name->text().trimmed());
+        return d;
+    };
+    // The password the dump uses: the one typed, otherwise the stored one.
+    const auto password_of = [&]() -> std::string {
+        if (!password->text().isEmpty()) return u8(password->text());
+        if (db_passwords_.contains(db.id)) return u8(db_passwords_[db.id]);
+        if (stored) return store_.database_secret(job_.id, db.id);
+        return {};
+    };
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    QPushButton* test = buttons->addButton(tr("Test"), QDialogButtonBox::ActionRole);
+    test->setToolTip(tr("Dump the database now into a temporary folder (removed again) to check the settings"));
+    connect(test, &QPushButton::clicked, &ask, [&] {
+        DatabaseDump d;
+        try {
+            d = collect_db();
+            check_database(d);
+        } catch (const Error& e) {
+            plain_warning(&ask, ask.windowTitle(), QString::fromUtf8(e.what()));
+            return;
+        }
+        std::string pw = password_of();
+        std::uint64_t size = 0;
+        std::uint8_t rnd[6];
+        random_bytes(rnd);
+        const std::string dir = os::join(u8(QDir::toNativeSeparators(QDir::tempPath())), "vaultik-dump-test-" + to_hex(rnd));
+        const QString error = run_busy(&ask, tr("Dumping the database..."), [&](const std::function<bool()>& cancelled) {
+            const std::string file = run_dump(d, pw, dir, cancelled);
+            size = QFileInfo(qs(file)).size();
+        });
+        secure_wipe(pw.data(), pw.size());
+        QDir(qs(dir)).removeRecursively();
+        if (!error.isEmpty()) {
+            plain_warning(&ask, ask.windowTitle(), tr("The dump failed: %1").arg(error));
+            return;
+        }
+        QMessageBox::information(&ask, ask.windowTitle(),
+                                 tr("The dump worked (%1). It was removed again.").arg(format_bytes(size)));
+    });
+    connect(buttons, &QDialogButtonBox::accepted, &ask, [&] {
+        try {
+            check_database(collect_db());
+        } catch (const Error& e) {
+            plain_warning(&ask, ask.windowTitle(), QString::fromUtf8(e.what()));
+            return;
+        }
+        ask.accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &ask, &QDialog::reject);
+    form->addRow(buttons);
+    if (ask.exec() != QDialog::Accepted) return;
+
+    const DatabaseDump d = collect_db();
+    if (!password->text().isEmpty()) db_passwords_[d.id] = password->text();
+    if (adding) databases_.push_back(d);
+    else databases_[static_cast<std::size_t>(index)] = d;
+    fill_databases();
 }
 
 void JobDialog::list_hyperv() {
