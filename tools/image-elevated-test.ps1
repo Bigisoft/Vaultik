@@ -69,7 +69,11 @@ function Get-OwnDisk($path) {
 
 function Get-Manifest($root) {
     $m = @{}
-    Get-ChildItem -LiteralPath $root -Recurse -File -Force | Where-Object { $_.FullName -notmatch 'System Volume Information' } | ForEach-Object {
+    # System Volume Information (made by Windows on mounting) cannot be read even elevated: skip it
+    # before recursing, not after.
+    Get-ChildItem -LiteralPath $root -Force | Where-Object { $_.Name -ne 'System Volume Information' } |
+        ForEach-Object { if ($_.PSIsContainer) { Get-ChildItem -LiteralPath $_.FullName -Recurse -File -Force } else { $_ } } |
+        ForEach-Object {
         $rel = $_.FullName.Substring($root.Length)
         $m[$rel] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
     }
@@ -116,6 +120,20 @@ function Get-DataRoot($diskNumber) {
         Start-Sleep -Milliseconds 500
     }
     throw "no data partition with a drive letter on disk $diskNumber"
+}
+
+function Dismount-Own($path) {
+    # Drive letters given by this script are taken away first: Windows keeps a letter it was
+    # given (in MountedDevices) after the disk is gone.
+    $img = Get-DiskImage -ImagePath $path -ErrorAction SilentlyContinue
+    if ($img -and $img.Attached) {
+        $disk = $img | Get-Disk
+        if ($disk.BusType -eq 'File Backed Virtual') {
+            Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Where-Object { $_.DriveLetter -and $_.DriveLetter -ne [char]0 } |
+                ForEach-Object { $_ | Remove-PartitionAccessPath -AccessPath "$($_.DriveLetter):\" -ErrorAction SilentlyContinue }
+        }
+    }
+    Dismount-DiskImage -ImagePath $path | Out-Null
 }
 
 function Run-Vaultik([string[]]$argv) {
@@ -186,7 +204,7 @@ try {
     $r = Run-Vaultik @('verify', '-r', $repo, '--read-data')
     Check ($r.Code -eq 0) 'verify --read-data'
     $r = Run-Vaultik @('snapshots', '-r', $repo)
-    Dismount-DiskImage -ImagePath $vhd1 | Out-Null
+    Dismount-Own $vhd1
 
     # ---- 3. restore to a VHDX -----------------------------------------------------------------
     $r = Run-Vaultik @('image', 'restore', '-r', $repo, 'latest', '--vhdx', $vhd2)
@@ -200,7 +218,7 @@ try {
     Check ($esp2 -and (Get-RawHash $d2.Number $esp2.Offset $esp2.Size) -eq $espHash1) 'EFI partition restored byte for byte'
     $r = & chkdsk.exe ($root2.TrimEnd('\')) 2>&1
     Check ($LASTEXITCODE -eq 0) "chkdsk of the restored NTFS volume (exit $LASTEXITCODE)"
-    Dismount-DiskImage -ImagePath $vhd2 | Out-Null
+    Dismount-Own $vhd2
 
     # ---- 4. restore onto an attached blank disk ----------------------------------------------
     Mount-DiskImage -ImagePath $vhd3 | Out-Null
@@ -215,7 +233,7 @@ try {
     Update-Disk -Number $d3.Number -ErrorAction SilentlyContinue
     $root3 = Get-DataRoot $d3.Number
     Compare-Manifest $manifest (Get-Manifest $root3) 'files on the restored disk match'
-    Dismount-DiskImage -ImagePath $vhd3 | Out-Null
+    Dismount-Own $vhd3
 
     # ---- 5. image mount -----------------------------------------------------------------------
     $mountOut = '' | & $Vaultik image mount -r $repo latest --json --target (Join-Path $Work 'mnt') 2>&1
@@ -238,7 +256,7 @@ catch {
 }
 finally {
     foreach ($v in @($vhd1, $vhd2, $vhd3)) {
-        if (Test-Path $v) { try { Dismount-DiskImage -ImagePath $v -ErrorAction SilentlyContinue | Out-Null } catch {} }
+        if (Test-Path $v) { try { Dismount-Own $v } catch {} }
     }
     # A Windows PE image left mounted by an interrupted ISO build.
     $mounted = & dism.exe /Get-MountedWimInfo 2>$null | Select-String -Pattern 'Mount Dir : (.*vaultik-winpe-.*)'
