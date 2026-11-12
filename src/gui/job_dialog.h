@@ -107,6 +107,7 @@ private:
     QSpinBox* check_percent_ = nullptr;
     QCheckBox* check_monthly_ = nullptr;
     QCheckBox* check_restore_ = nullptr;
+    QCheckBox* check_rot_ = nullptr;
     QCheckBox* skip_battery_ = nullptr;
     QCheckBox* skip_unchanged_ = nullptr;
     QCheckBox* check_every_file_ = nullptr;

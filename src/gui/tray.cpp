@@ -135,6 +135,12 @@ void Tray::check() {
                                        tr("Some backed-up data could not be read back. Open Vaultik to see "
                                           "what is affected, and back up again soon."),
                                        QSystemTrayIcon::Critical, 15000);
+                else if (fresh && settings.notify_failures && r.rot_files > 0)
+                    show_message(tr("Files on this PC changed by themselves (%1)").arg(name),
+                                       tr("%1 changed although nothing wrote to them, which a failing drive does. "
+                                          "The backup holds the earlier copy: open Vaultik to restore them.")
+                                           .arg(count_of(r.rot_files, tr("file"), tr("files"))),
+                                       QSystemTrayIcon::Critical, 30000);
             } else if (fresh && !r.alert.empty() && !r.on_connect) {  // (a connected-drive run says it itself)
                 // Always shown: this is the one that must not be missed.
                 show_message(tr("%1: files may be encrypted by ransomware").arg(name),
@@ -160,7 +166,7 @@ void Tray::check() {
         const jobs::RunRecord* checked = jobs::last_check(records);
         const jobs::RunRecord* copied = jobs::last_copy(records);
         if ((backup && (backup->status == jobs::RunStatus::Failed || !backup->alert.empty())) ||
-            (checked && jobs::found_damage(*checked)) || (copied && copied->status == jobs::RunStatus::Failed))
+            (checked && (jobs::found_damage(*checked) || checked->rot_files > 0)) || (copied && copied->status == jobs::RunStatus::Failed))
             problems << name;
 
         // Too long without a saved version; reported once a day.

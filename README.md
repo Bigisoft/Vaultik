@@ -618,6 +618,18 @@ notification. `check-job <job> [--full]` runs one now; `verify --read-data --rea
 the same on any repository. New cloud jobs skip the monthly full check, since it downloads the
 whole backup.
 
+Each check also looks for silent damage on this computer ("bit rot"): it reads up to 20 files back
+from this PC (at most 256 MB, for at most 2 minutes, within the job's resource limits) whose size,
+modification time and creation time are still as the newest version of this computer stored
+them, and that were last written at least a day before that version. It hashes them the way the
+backup does and compares the result with the stored content. A file whose content changed while
+nothing wrote to it was changed by the drive (or bad memory, or a cable), not by a program: the
+check then warns, names the files, and says that the backup holds the earlier good copy and from
+which version to restore it, on the Overview (a banner), in the Activity tab, as a notification,
+to the alert channels ("damage" alerts) and in the Event Log (a warning, event 205). Files that
+are locked or cannot be read are skipped, and the files are only read, never changed. The check
+can be turned off in the job's Schedule tab.
+
 ### Test restores
 
 A health check proves the stored data reads back; a test restore proves files come back. It
@@ -737,7 +749,8 @@ pack on one core.
 
 Windows notifications only reach someone at the computer. **Settings > Alerts when you are
 away** sets up alerts that the backup sends itself (so Vaultik need not be open), when a backup
-fails or skips files, when a check or test restore finds damage or the backup drive is failing,
+fails or skips files, when a check or test restore finds damage, when a check finds files on the
+computer that changed by themselves, or the backup drive is failing,
 and optionally after every backup:
 
 - **ntfy** (a free push notification app, [ntfy.sh](https://ntfy.sh) or an own server): the topic
@@ -888,7 +901,7 @@ Windows Event Log (Application, source `Vaultik`; syslog on Linux), so Event Vie
 tools see failed backups without any alert set up. The event id tells what it was: 100s a backup,
 200s a health check, 300s the second copy, 400s a test restore; the last digit is the result
 (0 success, 1 partial, 2 failed, 3 cancelled, 5 succeeded with a warning: ransomware signs, old
-versions kept, or the drive's health). Failures are errors and warnings are warnings. Every
+versions kept, the drive's health, or files on this computer that changed by themselves). Failures are errors and warnings are warnings. Every
 account of the computer can read that log, so an entry says only which job ran, what kind of
 run it was, how it ended and how many files it saved, never its messages (which name files);
 those stay in the Activity tab. The

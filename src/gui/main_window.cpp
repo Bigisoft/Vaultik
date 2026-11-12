@@ -214,7 +214,10 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         const QString type = ev.value("event").toString();
         if (type == "check") {
             const bool damage = ev.value("errors").toInteger() > 0;
+            const bool rot = ev.value("rot_files").toInteger() > 0;
             check_result_ = damage ? tr("The health check found problems: %1").arg(ev.value("message").toString())
+                            : rot  ? tr("The health check found files on this PC that changed by themselves: %1")
+                                        .arg(ev.value("message").toString())
                                    : tr("Health check: no problems.");
             log_->appendPlainText(check_result_);
             return;
@@ -1210,7 +1213,10 @@ void MainWindow::refresh_history() {
             item->setText(6, format_bytes(r.stored_bytes));
         } else {
             // For a check: how much was read back.
-            item->setText(2, jobs::found_damage(r) ? tr("Problems found") : status_text(r.status));
+            item->setText(2, jobs::found_damage(r) ? tr("Problems found")
+                             : r.rot_files > 0     ? tr("Files on this PC changed by themselves")
+                                                   : status_text(r.status));
+            if (r.rot_files > 0 && !jobs::found_damage(r)) item->setIcon(2, status_icon(jobs::RunStatus::Partial));
             item->setText(4, format_bytes(r.bytes));
             item->setToolTip(4, tr("Read back and checked"));
         }
@@ -1233,10 +1239,11 @@ void MainWindow::refresh_history() {
     }
     if (check) {
         const bool damage = jobs::found_damage(*check);
-        if (damage) status_icon_->setPixmap(status_icon(jobs::RunStatus::Failed).pixmap(16, 16));
+        if (damage || check->rot_files > 0) status_icon_->setPixmap(status_icon(jobs::RunStatus::Failed).pixmap(16, 16));
         text += "  ·  " + tr("Checked %1: %2")
                               .arg(when_text(check->started),
                                    damage                                        ? tr("problems found")
+                                   : check->rot_files > 0                        ? tr("files on this PC changed by themselves")
                                    : check->status == jobs::RunStatus::Success ? tr("no problems")
                                                                                  : status_text(check->status).toLower());
     }
@@ -1481,6 +1488,13 @@ void MainWindow::refresh_overview() {
         d.warning = tr("The last health check found damaged or missing data. Check the destination drive, then "
                        "choose Repair the backup (in the ... menu) to keep what is intact, and back up again. %1")
                         .arg(qs(check->message));
+    } else if (check && check->rot_files > 0) {
+        d.warning = tr("The last health check found %1 on this PC whose content changed although nothing wrote to "
+                       "them (their size and dates are the same): %2. A failing drive or bad memory does this. The "
+                       "backup holds the earlier good copy: restore them from the version of %3 (Restore, or "
+                       "right-click a file in it for its versions), then check the drive (Drives below).")
+                        .arg(count_of(check->rot_files, tr("file"), tr("files")), qs(check->rot),
+                             format_time(check->rot_version));
     } else if (test != nullptr && !d.test_ok) {
         d.warning = tr("The last test restore found files that did not come back right: %1. Check the backup "
                        "drive, and back up again soon.").arg(qs(test->message));

@@ -38,6 +38,7 @@
 #include "vaultik/ops/repair.hpp"
 #include "vaultik/ops/restore.hpp"
 #include "vaultik/ops/restore_test.hpp"
+#include "vaultik/ops/rot_check.hpp"
 #include "vaultik/ops/thaw.hpp"
 #include "vaultik/ops/verify.hpp"
 #include "vaultik/repo/keys.hpp"
@@ -315,7 +316,10 @@ Commands:
                                (run-job does this after each backup), creating it
                                there on first use with the job's password
   check-job <job>              Read the job's share of its stored data back and
-                               check every version now (added to its history)
+                               check every version now (added to its history);
+                               also re-read a few unchanged files on this PC and
+                               compare them with the newest version, to catch
+                               silent damage (unless the job turned it off)
       --full                   Read all of the stored data
   alert-test                   Send a test message to the alert channels set up
                                in Settings (ntfy, Telegram, webhook)
@@ -748,6 +752,16 @@ std::vector<SnapshotRef> load_all_snapshots(Repository& repo) {
         return x.snapshot.time < y.snapshot.time;
     });
     return all;
+}
+
+// The versions of a saved job: those tagged with it, else (made before jobs tagged their versions)
+// those of this computer.
+std::function<bool(const Snapshot&)> versions_of_job(const std::vector<SnapshotRef>& all, const jobs::Job& job) {
+    const std::string tag = "job:" + job.id;
+    const auto tagged = [tag](const Snapshot& s) { return std::find(s.tags.begin(), s.tags.end(), tag) != s.tags.end(); };
+    const bool any = std::any_of(all.begin(), all.end(), [&](const SnapshotRef& s) { return tagged(s.snapshot); });
+    if (any) return tagged;
+    return [host = os::hostname()](const Snapshot& s) { return s.hostname == host; };
 }
 
 SnapshotRef resolve_snapshot(Repository& repo, const std::string& ref_w) {
@@ -1598,12 +1612,59 @@ int cmd_admin_job(const Args& a) {
 // Fills `record` (kind, times, status, packs read as files, bytes read, problems as errors).
 // Returns kExitOk, or kExitAuth when damage was found; throws on cancel or when the check could
 // not run, after filling the record.
+// The silent damage part of a health check (ops/rot_check.hpp): a few files of the job's newest
+// version made on this computer are read back from this computer and compared with it. Fills the
+// record's rot fields; returns a sentence for its message (empty when nothing was compared).
+std::string rot_check(Repository& repo, const jobs::Job& job, jobs::RunRecord& record, const std::function<bool()>& cancel) {
+    if (!job.health.rot_check || !job.image_disks.empty()) return {};
+    const std::vector<SnapshotRef> all = load_all_snapshots(repo);
+    const auto mine = versions_of_job(all, job);
+    const std::string host = os::hostname();
+    const SnapshotRef* newest = nullptr;
+    for (const SnapshotRef& s : all)  // oldest first
+        if (!s.snapshot.image && s.snapshot.hostname == host && mine(s.snapshot)) newest = &s;
+    if (newest == nullptr) return {};
+    RotCheckOptions o;
+    o.seed = record.started;
+    o.should_cancel = cancel;
+    o.on_progress = [](const std::string& msg) {
+        if (g_json) emit({{"event", "check_progress"}, {"current", "files on this PC: " + msg}});
+        else status("Comparing with the backup: " + msg);
+    };
+    RotCheckResult r;
+    try {
+        r = check_unchanged_files(repo, newest->snapshot, o);
+    } catch (const Cancelled&) {
+        throw;
+    } catch (const std::exception& e) {
+        warning(std::string("could not compare files on this PC with the backup: ") + e.what());
+        return {};
+    }
+    if (r.damaged.empty())
+        return r.checked == 0 ? std::string()
+                              : "compared " + std::to_string(r.checked) +
+                                    " unchanged file(s) on this PC with the backup: no silent changes";
+    const std::string when = os::format_time_local(newest->snapshot.time).substr(0, 16);
+    record.rot_files = r.damaged.size();
+    record.rot_version = newest->snapshot.time;
+    record.rot.clear();
+    for (std::size_t i = 0; i < r.damaged.size(); ++i) {
+        warning(r.damaged[i].path + ": its content differs from the backup of " + when +
+                " although its size and times are the same");
+        if (i < 5) record.rot += (i ? "; " : "") + r.damaged[i].path;
+    }
+    if (r.damaged.size() > 5) record.rot += "; ...";
+    return std::to_string(r.damaged.size()) + " file(s) on this PC changed without being written to (silent damage, "
+           "a failing drive?): " + record.rot + "; the version of " + when + " holds the earlier copy";
+}
+
 int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record) {
     record.kind = kind;
     record.started = os::now();
     const bool full = kind == jobs::RunKind::FullCheck;
     std::vector<std::string> problems;
     VerifyResult r;
+    std::string rot;
     try {
         RepoLock lock(repo, RepoLock::Mode::Shared, "check (job " + job.id + ")");
         repo.reload_index();  // a prune may have finished before the lock was granted
@@ -1626,6 +1687,7 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
                                  : "Health check: reading " + std::to_string(job.health.sample_percent) +
                                        "% of the stored data back...\n"));
         r = run_verify(repo, o);
+        rot = rot_check(repo, job, record, o.should_cancel);
     } catch (const Cancelled&) {
         if (!g_json) clear_status();
         record.finished = os::now();
@@ -1659,6 +1721,7 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     if (r.packs_archived > 0)
         record.message += "; " + std::to_string(r.packs_archived) +
                           " pack(s) in archive storage were only checked to be there (reading them needs a thaw)";
+    if (!rot.empty()) record.message += "; " + rot;
     if (g_json) {
         emit({{"event", "check"},
               {"kind", jobs::to_string(kind)},
@@ -1668,10 +1731,16 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
               {"bytes_read", r.bytes_read},
               {"snapshots", r.snapshots},
               {"errors", r.errors},
+              {"rot_files", record.rot_files},
               {"message", record.message}});
     } else {
         clear_status();
         out(std::string(r.errors > 0 ? "Health check FAILED: " : "Health check: ") + record.message + "\n");
+        if (record.rot_files > 0)
+            out("WARNING: files on this PC changed although nothing wrote to them, which a failing drive does. "
+                "The backup holds the earlier copy: restore them from the version of " +
+                os::format_time_local(record.rot_version).substr(0, 16) + " (vaultik restore --job " + job.id +
+                " <version> --path <file> --target <folder>), then check the drive.\n");
     }
     return r.errors > 0 ? kExitAuth : kExitOk;
 }
@@ -2265,7 +2334,15 @@ void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string
     a.job = job.name;
     const std::string where = " Open Vaultik on " + os::hostname() + " for the details.";
     const bool check = jobs::is_check(r.kind) || r.kind == jobs::RunKind::RestoreTest;
-    if (check) {
+    if (check && s.on_damage && r.rot_files > 0 && !(r.status == jobs::RunStatus::Failed && r.errors > 0)) {
+        // Files on this computer that changed by themselves: the backup is fine, the drive is not.
+        a.level = jobs::Alert::Level::Critical;
+        a.event = "rot";
+        a.title = "Health check of " + job.name + " found files that changed by themselves";
+        a.message = std::to_string(r.rot_files) +
+                    " file(s) on the computer changed although nothing wrote to them, which a failing drive does. "
+                    "The backup holds the earlier copy." + where;
+    } else if (check) {
         // Damage found (not a check that could not run: the backup before it said so).
         if (!s.on_damage || r.status != jobs::RunStatus::Failed || r.errors == 0) return;
         a.level = jobs::Alert::Level::Critical;

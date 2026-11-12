@@ -99,6 +99,7 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/backup.cpp
     src/vaultik/ops/restore.cpp
     src/vaultik/ops/restore_test.cpp
+    src/vaultik/ops/rot_check.cpp
     src/vaultik/ops/history.cpp
     src/vaultik/ops/diff.cpp
     src/vaultik/ops/copy.cpp
@@ -335,6 +336,7 @@ add_executable(vaultik_tests
     tests/test_jobs.cpp
     tests/test_report.cpp
     tests/test_forecast.cpp
+    tests/test_grew_rot.cpp
     tests/test_prune.cpp
     tests/test_keys.cpp
     tests/test_s3.cpp
