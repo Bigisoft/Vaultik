@@ -1,6 +1,7 @@
 #include "vaultik/image/layout.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include <nlohmann/json.hpp>
@@ -87,16 +88,18 @@ const char* method_name(ReadMethod m) {
     return m == ReadMethod::Used ? "used" : "raw";
 }
 
-std::string size_text(std::uint64_t bytes) {
+}  // namespace
+
+std::string size_text(std::uint64_t bytes, bool round_up) {
     char buf[32];
     const double gb = static_cast<double>(bytes) / 1e9;
-    if (gb >= 10) std::snprintf(buf, sizeof buf, "%.0f GB", gb);
-    else if (gb >= 1) std::snprintf(buf, sizeof buf, "%.1f GB", gb);
-    else std::snprintf(buf, sizeof buf, "%.0f MB", static_cast<double>(bytes) / 1e6);
+    // Rounded up to what is shown, for a size that must not be undercut.
+    const auto up = [round_up](double v, double unit) { return round_up ? std::ceil(v * unit) / unit : v; };
+    if (gb >= 10) std::snprintf(buf, sizeof buf, "%.0f GB", up(gb, 1));
+    else if (gb >= 1) std::snprintf(buf, sizeof buf, "%.1f GB", up(gb, 10));
+    else std::snprintf(buf, sizeof buf, "%.0f MB", up(static_cast<double>(bytes) / 1e6, 1));
     return buf;
 }
-
-}  // namespace
 
 Guid parse_guid(std::string_view text) {
     if (text.size() == 38 && text.front() == '{' && text.back() == '}') text = text.substr(1, 36);
@@ -331,6 +334,151 @@ std::string fits(const DiskLayout& layout, std::uint64_t target_size, std::uint3
     if (need > target_size)
         return "the disk is too small: it has " + size_text(target_size) + " and the partitions need " + size_text(need);
     return {};
+}
+
+namespace {
+
+// The bytes after the last partition a layout needs (the backup GPT).
+std::uint64_t tail_bytes(const DiskLayout& layout) {
+    if (layout.style != PartitionStyle::Gpt) return 0;
+    const std::uint64_t ss = layout.sector_size;
+    return (1 + (std::uint64_t{layout.gpt_entries} * 128 + ss - 1) / ss) * ss;
+}
+
+// How much partition `i` can shrink by, in whole steps.
+std::uint64_t shrink_room(const DiskLayout& layout, const std::vector<std::uint64_t>& min_lengths, std::size_t i) {
+    if (i >= min_lengths.size()) return 0;
+    const Partition& p = layout.partitions[i];
+    if (min_lengths[i] >= p.length) return 0;
+    return (p.length - min_lengths[i]) / kShrinkStep * kShrinkStep;
+}
+
+// Why the partitions of a layout cannot be moved at all (logical partitions, overlaps), or "".
+std::string unmovable(const DiskLayout& layout) {
+    std::uint64_t end = 0;
+    for (const Partition& p : layout.partitions) {
+        if (layout.style == PartitionStyle::Mbr && is_container(p.mbr_type))
+            return "partitions of an MBR disk with logical partitions cannot be shrunk";
+        if (p.offset < end) return "the partitions are not in disk order";
+        end = p.offset + p.length;
+    }
+    return {};
+}
+
+}  // namespace
+
+std::uint64_t smallest_disk(const DiskLayout& layout, const std::vector<std::uint64_t>& min_lengths) {
+    std::uint64_t need = used_end(layout) + tail_bytes(layout);
+    if (!unmovable(layout).empty()) return need;
+    for (std::size_t i = 0; i < layout.partitions.size(); ++i) need -= shrink_room(layout, min_lengths, i);
+    return need;
+}
+
+std::string place_partitions(const DiskLayout& layout, std::uint64_t target_size, std::uint32_t sector_size,
+                             const std::vector<std::uint64_t>& min_lengths, std::vector<Placement>& out) {
+    out.clear();
+    for (const Partition& p : layout.partitions) out.push_back({p.offset, p.length});
+    const std::string why = fits(layout, target_size, sector_size);
+    if (why.empty()) return {};
+    if (sector_size != layout.sector_size) return why;
+    const std::uint64_t smallest = smallest_disk(layout, min_lengths);
+    if (smallest > target_size) {
+        const std::uint64_t full = used_end(layout) + tail_bytes(layout);
+        std::string s = "the disk is too small: it has " + size_text(target_size) + " and the image needs " + size_text(full);
+        if (smallest < full) {
+            s += ", or at least " + size_text(smallest, true) + " with its NTFS partitions shrunk to their used space";
+        } else {
+            bool shrinkable = false;
+            for (std::size_t i = 0; i < layout.partitions.size() && i < min_lengths.size(); ++i)
+                shrinkable = shrinkable || min_lengths[i] < layout.partitions[i].length;
+            if (shrinkable && !unmovable(layout).empty()) s += " (" + unmovable(layout) + ")";
+        }
+        return s;
+    }
+    // Shrink from the last partition that can, by whole steps, until the layout fits.
+    std::uint64_t excess = used_end(layout) + tail_bytes(layout) - target_size;
+    std::vector<std::uint64_t> cut(layout.partitions.size(), 0);
+    for (std::size_t i = layout.partitions.size(); i-- > 0 && excess > 0;) {
+        const std::uint64_t want = (excess + kShrinkStep - 1) / kShrinkStep * kShrinkStep;
+        cut[i] = std::min(want, shrink_room(layout, min_lengths, i));
+        excess -= std::min(excess, cut[i]);
+    }
+    if (excess > 0) return "internal error: the partitions could not be placed";
+    std::uint64_t shift = 0;
+    for (std::size_t i = 0; i < layout.partitions.size(); ++i) {
+        const Partition& p = layout.partitions[i];
+        out[i] = {p.offset - shift, p.length - cut[i]};
+        shift += cut[i];
+    }
+    return {};
+}
+
+std::string fits(const DiskLayout& layout, std::uint64_t target_size, std::uint32_t sector_size,
+                 const std::vector<std::uint64_t>& min_lengths) {
+    std::vector<Placement> placed;
+    return place_partitions(layout, target_size, sector_size, min_lengths, placed);
+}
+
+DiskLayout placed_layout(const DiskLayout& layout, const std::vector<Placement>& placed) {
+    DiskLayout l = layout;
+    for (std::size_t i = 0; i < l.partitions.size() && i < placed.size(); ++i) {
+        Partition& p = l.partitions[i];
+        if (placed[i].length < p.length) {
+            // The stored holes beyond the new end are gone with it.
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> holes;
+            for (auto [off, len] : p.holes) {
+                if (off >= placed[i].length) continue;
+                holes.emplace_back(off, std::min(len, placed[i].length - off));
+            }
+            p.holes = std::move(holes);
+        }
+        p.offset = placed[i].offset;
+        p.length = placed[i].length;
+    }
+    return l;
+}
+
+std::uint64_t placed_offset(const DiskLayout& layout, const std::vector<Placement>& placed, std::uint64_t offset) {
+    std::uint64_t shift = 0;
+    for (std::size_t i = 0; i < layout.partitions.size() && i < placed.size(); ++i) {
+        const Partition& p = layout.partitions[i];
+        if (p.offset + p.length <= offset) shift = p.offset - placed[i].offset + (p.length - placed[i].length);
+    }
+    return offset - shift;
+}
+
+void place_mbr_entries(const DiskLayout& layout, const std::vector<Placement>& placed, Bytes& mbr) {
+    if (layout.style != PartitionStyle::Mbr || mbr.size() < 512) return;
+    const std::uint64_t ss = layout.sector_size;
+    // CHS as BIOS tools write it (255 heads, 63 sectors), or the "past 8 GB" marker.
+    auto chs = [](std::uint8_t* e, std::uint64_t lba) {
+        const std::uint64_t c = lba / (255 * 63), h = (lba / 63) % 255, s = lba % 63 + 1;
+        if (c > 1023) {
+            e[0] = 0xFE;
+            e[1] = 0xFF;
+            e[2] = 0xFF;
+            return;
+        }
+        e[0] = static_cast<std::uint8_t>(h);
+        e[1] = static_cast<std::uint8_t>(s | ((c >> 2) & 0xC0));
+        e[2] = static_cast<std::uint8_t>(c & 0xFF);
+    };
+    for (int k = 0; k < 4; ++k) {
+        std::uint8_t* e = mbr.data() + 446 + 16 * k;
+        if (e[4] == 0) continue;
+        const std::uint64_t start = std::uint64_t{e[8]} | (std::uint64_t{e[9]} << 8) | (std::uint64_t{e[10]} << 16) |
+                                    (std::uint64_t{e[11]} << 24);
+        for (std::size_t i = 0; i < layout.partitions.size() && i < placed.size(); ++i) {
+            const Partition& p = layout.partitions[i];
+            if (p.offset != start * ss || placed[i] == Placement{p.offset, p.length}) continue;
+            const std::uint64_t first = placed[i].offset / ss, count = placed[i].length / ss;
+            put_u32(e + 8, static_cast<std::uint32_t>(first));
+            put_u32(e + 12, static_cast<std::uint32_t>(count));
+            chs(e + 1, first);
+            chs(e + 5, first + count - 1);
+            break;
+        }
+    }
 }
 
 std::vector<DiskWrite> partition_tables(const DiskLayout& layout, std::uint64_t target_size) {

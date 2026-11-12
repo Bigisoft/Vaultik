@@ -346,12 +346,16 @@ Disk images (Windows, administrator rights except image disks and --vhdx):
                                every partition and the partition table, NTFS
                                volumes from a shadow copy and only their used
                                space (--vss off: read them while in use)
-  image info <snapshot>        The disks and partitions in a disk image
+  image info <snapshot>        The disks and partitions in a disk image, and the
+                               smallest disk it can be restored onto
   image restore <snapshot>     Restore a disk image
       --vhdx <file>            ... to a new virtual disk file (no administrator
                                rights needed); open it in File Explorer or use it
                                in Hyper-V
-      --size <size>            Its size (default: the size of the disk imaged)
+      --size <size>            Its size (default: the size of the disk imaged).
+                               A disk smaller than the imaged one works when its
+                               NTFS partitions can shrink to fit (see image info);
+                               so does --to-disk onto a smaller disk
       --new-ids                New disk and partition ids, so it can be attached
                                next to the original disk
       --to-disk <number>       ... onto a disk, replacing everything on it. Never

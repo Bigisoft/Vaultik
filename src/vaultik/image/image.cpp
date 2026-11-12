@@ -8,6 +8,7 @@
 #include <future>
 #include <map>
 
+#include "vaultik/image/ntfs.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/platform/os.hpp"
@@ -341,6 +342,116 @@ const Node& child(const Tree& t, const std::string& name, const std::string& wha
     return *n;
 }
 
+// Random reads of a partition as stored in the repository (to read an NTFS volume's metadata).
+class StoredPartition {
+public:
+    StoredPartition(Repository& repo, const Tree& disk, std::size_t index, const Partition& p)
+        : repo_(repo),
+          p_(p),
+          part_(parse_tree(repo.load_blob(BlobType::Tree, child(disk, "p" + std::to_string(index), "a partition").subtree))) {}
+
+    void read(std::uint64_t off, std::uint8_t* dst, std::size_t len) {
+        if (off > p_.length || len > p_.length - off)
+            throw Error("a read past the end of partition " + std::to_string(p_.number));
+        while (len > 0) {
+            const std::uint64_t s = off / kSegmentSize;
+            const Segment& seg = segment(s);
+            const std::uint64_t within = off - s * kSegmentSize;
+            const auto it = std::upper_bound(seg.starts.begin(), seg.starts.end(), within) - 1;
+            const std::size_t k = static_cast<std::size_t>(it - seg.starts.begin());
+            const Bytes& c = chunk(seg.ids[k]);
+            const std::uint64_t in = within - seg.starts[k];
+            if (in >= c.size()) throw Error("a part of partition " + std::to_string(p_.number) + " has the wrong size");
+            const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(len, c.size() - in));
+            std::memcpy(dst, c.data() + in, n);
+            dst += n;
+            off += n;
+            len -= n;
+        }
+    }
+
+private:
+    struct Segment {
+        std::uint64_t number = ~0ull;
+        std::vector<Id> ids;
+        std::vector<std::uint64_t> starts;  // of each chunk, within the segment
+    };
+
+    const Segment& segment(std::uint64_t s) {
+        if (seg_.number == s) return seg_;
+        const std::string what = "part of partition " + std::to_string(p_.number);
+        if (s / kSegmentsPerGroup != group_index_) {
+            group_index_ = s / kSegmentsPerGroup;
+            group_ = parse_tree(repo_.load_blob(BlobType::Tree, child(part_, group_name(group_index_), what).subtree));
+        }
+        const Node& n = child(group_, segment_name(s), what);
+        Segment seg;
+        seg.number = s;
+        seg.ids = n.content;
+        std::uint64_t pos = 0;
+        for (const Id& id : n.content) {
+            const BlobLocation* loc = repo_.index().find(id);
+            if (loc == nullptr) throw Error("data of partition " + std::to_string(p_.number) + " is missing from the backup");
+            seg.starts.push_back(pos);
+            pos += loc->raw_len;
+        }
+        const std::uint64_t end = std::min(p_.length, (s + 1) * kSegmentSize);
+        if (pos != end - s * kSegmentSize || seg.ids.empty()) throw Error("a " + what + " has the wrong size");
+        seg_ = std::move(seg);
+        return seg_;
+    }
+
+    const Bytes& chunk(const Id& id) {
+        for (const auto& [cid, data] : chunks_)
+            if (cid == id) return data;
+        if (chunks_.size() >= 6) chunks_.erase(chunks_.begin());
+        chunks_.emplace_back(id, repo_.load_blob(BlobType::Data, id));
+        return chunks_.back().second;
+    }
+
+    Repository& repo_;
+    const Partition& p_;
+    Tree part_;
+    Tree group_;
+    std::uint64_t group_index_ = ~0ull;
+    Segment seg_;
+    std::vector<std::pair<Id, Bytes>> chunks_;  // the last few read
+};
+
+VolumeReader reader_of(StoredPartition& sp) {
+    return [&sp](std::uint64_t off, std::uint8_t* dst, std::size_t len) { sp.read(off, dst, len); };
+}
+
+// The tree of image disk `index` of a snapshot.
+Tree disk_tree(Repository& repo, const Snapshot& snapshot, std::size_t index) {
+    const Tree root = parse_tree(repo.load_blob(BlobType::Tree, snapshot.tree));
+    return parse_tree(repo.load_blob(BlobType::Tree, child(root, "disk" + std::to_string(index), "the disk").subtree));
+}
+
+std::vector<std::uint64_t> limits_of(Repository& repo, const Tree& disk, const DiskLayout& layout,
+                                     std::vector<std::string>* notes) {
+    std::vector<std::uint64_t> out;
+    for (std::size_t i = 0; i < layout.partitions.size(); ++i) {
+        const Partition& p = layout.partitions[i];
+        out.push_back(p.length);
+        if (p.filesystem != "NTFS" || p.method != ReadMethod::Used || (layout.style == PartitionStyle::Mbr && is_container(p.mbr_type)))
+            continue;
+        if (!p.shadow_copy) {
+            if (notes != nullptr) notes->push_back(describe(p) + ": it was read while in use, so it is not shrunk");
+            continue;
+        }
+        try {
+            StoredPartition sp(repo, disk, i, p);
+            const NtfsFacts f = ntfs_facts(reader_of(sp), p.length);
+            if (f.sector_size != layout.sector_size) throw Error("its sector size differs from the disk's");
+            out.back() = std::min(p.length, ntfs_min_length(f, kShrinkStep, p.windows ? kWindowsReserve : 0));
+        } catch (const Error& e) {
+            if (notes != nullptr) notes->push_back(describe(p) + ": " + e.what());
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 std::string image_path(const DiskLayout& layout) {
@@ -373,21 +484,59 @@ std::vector<DiskLayout> image_disks(Repository& repo, const Snapshot& snapshot) 
     return out;
 }
 
+std::vector<std::uint64_t> shrink_limits(Repository& repo, const Snapshot& snapshot, std::size_t disk,
+                                         std::vector<std::string>* notes) {
+    const std::vector<DiskLayout> disks = image_disks(repo, snapshot);
+    if (disk >= disks.size()) throw Error("the image has no disk " + std::to_string(disk + 1));
+    return limits_of(repo, disk_tree(repo, snapshot, disk), disks[disk], notes);
+}
+
 void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& target,
                        const ImageRestoreOptions& o) {
     std::vector<DiskLayout> disks = image_disks(repo, snapshot);
     if (o.disk >= disks.size()) throw Error("the image has no disk " + std::to_string(o.disk + 1));
     DiskLayout layout = disks[o.disk];
     if (o.new_ids) renew_ids(layout);
-    const std::string why = fits(layout, target.size(), target.sector_size());
+    const Tree disk = disk_tree(repo, snapshot, o.disk);
+
+    // Where the partitions go: as they were, or shrunk to fit a smaller disk.
+    std::vector<Placement> placed;
+    std::string why = place_partitions(layout, target.size(), target.sector_size(), {}, placed);
+    if (!why.empty() && target.sector_size() == layout.sector_size)
+        why = place_partitions(layout, target.size(), target.sector_size(), limits_of(repo, disk, layout, nullptr), placed);
     if (!why.empty()) throw Error(why);
+    const DiskLayout out_layout = placed_layout(layout, placed);
     // The partition tables are made now, so a layout they cannot be made for is refused before
     // the first byte is written; they are written last.
-    std::vector<DiskWrite> tables = partition_tables(layout, target.size());
+    std::vector<DiskWrite> tables = partition_tables(out_layout, target.size());
 
-    const Tree root = parse_tree(repo.load_blob(BlobType::Tree, snapshot.tree));
-    const Tree disk = parse_tree(
-        repo.load_blob(BlobType::Tree, child(root, "disk" + std::to_string(o.disk), "the disk").subtree));
+    // What changes in shrunk and moved NTFS volumes, worked out (and every file record checked)
+    // before the first byte is written.
+    std::vector<VolumePatch> patches(layout.partitions.size());
+    for (std::size_t i = 0; i < layout.partitions.size(); ++i) {
+        const Partition& p = layout.partitions[i];
+        if (placed[i] == Placement{p.offset, p.length}) continue;
+        if (layout.style == PartitionStyle::Mbr && is_container(p.mbr_type)) continue;
+        StoredPartition sp(repo, disk, i, p);
+        const std::uint64_t ss = layout.sector_size;
+        if (placed[i].length < p.length) {
+            try {
+                patches[i] = ntfs_shrink(reader_of(sp), p.length, placed[i].length, p.offset / ss, placed[i].offset / ss);
+            } catch (const Error& e) {
+                throw Error(describe(p) + ": " + e.what());
+            }
+            if (o.on_note) o.on_note(describe(p) + " is shrunk to " + size_text(placed[i].length));
+        } else {
+            patches[i] = ntfs_move(reader_of(sp), p.length, p.offset / ss, placed[i].offset / ss);
+            if (o.on_note) o.on_note(describe(p) + " moves " + size_text(p.offset - placed[i].offset) + " toward the start of the disk");
+        }
+        for (const DiskWrite& w : patches[i].writes)
+            if (w.offset % ss != 0 || w.data.size() % ss != 0 || w.offset + w.data.size() > placed[i].length)
+                throw Error(describe(p) + ": the NTFS volume cannot be shrunk: its sectors do not match the disk's");
+        for (const auto& [off, len] : patches[i].fill)
+            if (off % ss != 0 || len % ss != 0 || off + len > placed[i].length)
+                throw Error(describe(p) + ": the NTFS volume cannot be shrunk: its sectors do not match the disk's");
+    }
 
     ImageProgress progress;
     for (const Partition& p : layout.partitions) progress.total += p.length;
@@ -437,16 +586,22 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
             data.insert(data.end(), part.begin(), part.end());
         }
         if (data.size() != r.length) throw Error("a stored disk region has the wrong size");
-        if (r.offset + r.length > target.size()) continue;  // past the end of a smaller disk: nothing there matters
+        // Down by as much as the partitions before it shrank.
+        const std::uint64_t at = placed_offset(layout, placed, r.offset);
+        if (at + r.length > target.size()) continue;  // past the end of a smaller disk: nothing there matters
         if (r.offset == 0 && layout.style == PartitionStyle::Mbr && data.size() >= 512) {
             // The MBR's disk signature (changed by new_ids).
             for (int b = 0; b < 4; ++b) data[440 + b] = static_cast<std::uint8_t>(layout.signature >> (8 * b));
-            // An MBR disk's table is the stored first sector itself: written again at the end.
-            if (data.size() >= layout.sector_size)
-                tables.push_back({0, Bytes(data.begin(), data.begin() + layout.sector_size)});
+            // An MBR disk's table is the stored first sector itself: written again at the end,
+            // with the entries of shrunk and moved partitions changed.
+            if (data.size() >= layout.sector_size) {
+                Bytes mbr(data.begin(), data.begin() + layout.sector_size);
+                place_mbr_entries(layout, placed, mbr);
+                tables.push_back({0, std::move(mbr)});
+            }
         }
         blank_tables(layout, r.offset, data);
-        out.write(r.offset, data);
+        out.write(at, data);
         progress.done += r.length;
     }
     out.flush();
@@ -464,6 +619,9 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
             parse_tree(repo.load_blob(BlobType::Tree, child(disk, "p" + std::to_string(i), "a partition").subtree));
         const std::uint64_t segments = (p.length + kSegmentSize - 1) / kSegmentSize;
         const bool skip_holes = p.method == ReadMethod::Used;
+        // Where it goes; a shrunk partition gets only its stored bytes up to its new length.
+        const std::uint64_t base = placed[i].offset;
+        const std::uint64_t keep = placed[i].length;
         std::uint64_t pos = 0;  // within the partition
         Tree group;
         std::uint64_t group_index = ~0ull;
@@ -482,21 +640,24 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
                 if (loc == nullptr) throw Error("data of partition " + std::to_string(p.number) + " is missing from the backup");
                 const std::uint32_t len = loc->raw_len;
                 if (pos + len > seg_end) throw Error("a part of partition " + std::to_string(p.number) + " is longer than it should be");
-                if (is_zero_chunk(id, len)) {
+                // Bytes of it to write: none past the end of a shrunk partition (unused space there,
+                // as checked before the restore).
+                const auto n = static_cast<std::uint32_t>(std::min<std::uint64_t>(len, keep - std::min(keep, pos)));
+                if (n > 0 && is_zero_chunk(id, len)) {
                     // Zeros: nothing to write on a new virtual disk, nor in a stored hole of an NTFS
                     // partition (unused space), as long as the gap stays aligned for the disk.
-                    const std::uint64_t at = p.offset + pos;
-                    const bool aligned = at % align == 0 && len % align == 0;
-                    if (aligned && (target.zeroed() || (skip_holes && inside(p.holes, pos, len)))) {
+                    const std::uint64_t at = base + pos;
+                    const bool aligned = at % align == 0 && n % align == 0;
+                    if (aligned && (target.zeroed() || (skip_holes && inside(p.holes, pos, n)))) {
                         pos += len;
                         progress.done += len;
                         report(false);
                         continue;
                     }
-                    out.write(at, Bytes(len, 0));
-                } else {
+                    out.write(at, Bytes(n, 0));
+                } else if (n > 0) {
                     const Bytes data = repo.load_blob(BlobType::Data, id);
-                    out.write(p.offset + pos, data);
+                    out.write(base + pos, ByteSpan(data.data(), n));
                 }
                 pos += len;
                 progress.done += len;
@@ -506,6 +667,15 @@ void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& t
             if (pos != seg_end) throw Error("a part of partition " + std::to_string(p.number) + " is shorter than it should be");
         }
         out.flush();
+        // The changes to a shrunk or moved NTFS volume, over its stored bytes.
+        if (!patches[i].empty()) {
+            const Bytes ff(4u << 20, 0xFF);
+            for (const auto& [off, len] : patches[i].fill)
+                for (std::uint64_t d = 0; d < len; d += ff.size())
+                    out.write(base + off + d, ByteSpan(ff.data(), static_cast<std::size_t>(std::min<std::uint64_t>(ff.size(), len - d))));
+            for (const DiskWrite& w : patches[i].writes) out.write(base + w.offset, w.data);
+            out.flush();
+        }
     }
 
     // The partition tables last: until they are written, the restored disk shows no partitions.

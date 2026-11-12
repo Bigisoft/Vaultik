@@ -85,15 +85,30 @@ ImageBackupResult run_image_backup(Repository& repo, const ImageBackupOptions& o
 // The disks in an image snapshot (throws Error when it is not one).
 std::vector<DiskLayout> image_disks(Repository& repo, const Snapshot& snapshot);
 
+// For each partition of image disk `disk` of the snapshot: the smallest length it can be restored
+// at. An NTFS volume read from a shadow copy can lose the space after its last cluster in use
+// (the volume Windows ran from keeps kWindowsReserve free), in whole MiB; every other partition
+// keeps its length. Reads each such volume's boot sector and bitmap from the repository. `notes`,
+// when given, gets why a volume cannot be shrunk.
+std::vector<std::uint64_t> shrink_limits(Repository& repo, const Snapshot& snapshot, std::size_t disk,
+                                         std::vector<std::string>* notes = nullptr);
+
+// Free space a shrunk Windows volume keeps, so Windows has room to start and run.
+constexpr std::uint64_t kWindowsReserve = 1ull << 30;
+
 struct ImageRestoreOptions {
     std::size_t disk = 0;  // which disk of the snapshot
     // New disk and partition ids, so the copy can be attached next to the original.
     bool new_ids = false;
     std::function<void(const ImageProgress&)> on_progress;
     std::function<bool()> should_cancel;
+    // What the restore changes ("C: Windows (NTFS, 500 GB) shrunk to 120 GB"), before it writes.
+    std::function<void(const std::string&)> on_note;
 };
 
 // Writes the disk to `target`: the stored regions, every partition, then the partition tables.
+// On a target smaller than the image's disk, NTFS volumes are shrunk to fit (place_partitions;
+// ntfs.hpp), everything checked before the first byte is written.
 // Throws Error when the disk does not fit, Cancelled when stopped.
 void run_image_restore(Repository& repo, const Snapshot& snapshot, DiskTarget& target,
                        const ImageRestoreOptions& options);

@@ -140,6 +140,7 @@ add_library(vaultik_core STATIC
     src/vaultik/image/layout.cpp
     src/vaultik/image/extents.cpp
     src/vaultik/image/vhdx.cpp
+    src/vaultik/image/ntfs.cpp
     src/vaultik/image/image.cpp
     src/vaultik/image/disk_common.cpp
     src/vaultik/image/recovery_media.cpp

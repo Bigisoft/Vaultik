@@ -138,9 +138,49 @@ std::string fits(const DiskLayout& layout, std::uint64_t target_size, std::uint3
 // The end of the last partition (the smallest disk the layout fits on, without the backup GPT).
 std::uint64_t used_end(const DiskLayout& layout);
 
+// Where a partition goes on the target disk.
+struct Placement {
+    std::uint64_t offset = 0;
+    std::uint64_t length = 0;
+    bool operator==(const Placement&) const = default;
+};
+
+// Partitions shrink by whole MiB, so the ones after them keep their alignment.
+constexpr std::uint64_t kShrinkStep = 1u << 20;
+
+// Places the partitions on a disk of `target_size` bytes. `min_lengths` has, for each partition,
+// the smallest length it can be restored at (its own length when it cannot be shrunk; an empty
+// vector: none can). When the layout fits as it is, every partition keeps its place and size.
+// Otherwise partitions are shrunk, the last one that can be first, and every partition after a
+// shrunk one moves down by as much (the gaps between partitions stay as they were). Fills `out`
+// (one placement per partition) and returns an empty string, or says why the layout does not fit.
+std::string place_partitions(const DiskLayout& layout, std::uint64_t target_size, std::uint32_t sector_size,
+                             const std::vector<std::uint64_t>& min_lengths, std::vector<Placement>& out);
+
+// fits() for a layout whose partitions can be shrunk to `min_lengths`.
+std::string fits(const DiskLayout& layout, std::uint64_t target_size, std::uint32_t sector_size,
+                 const std::vector<std::uint64_t>& min_lengths);
+
+// The smallest disk the layout can be restored onto with its partitions shrunk to `min_lengths`.
+std::uint64_t smallest_disk(const DiskLayout& layout, const std::vector<std::uint64_t>& min_lengths);
+
+// The layout with its partitions at `placed` (from place_partitions).
+DiskLayout placed_layout(const DiskLayout& layout, const std::vector<Placement>& placed);
+
+// Where a byte of the original disk outside every partition (a stored region) goes when the
+// partitions are placed at `placed`: down by as much as the partitions before it shrank.
+std::uint64_t placed_offset(const DiskLayout& layout, const std::vector<Placement>& placed, std::uint64_t offset);
+
+// The MBR (its first sector, `mbr`) with the entries of moved or shrunk partitions changed to
+// their placements.
+void place_mbr_entries(const DiskLayout& layout, const std::vector<Placement>& placed, Bytes& mbr);
+
 // A copy with new disk and partition GUIDs (GPT) or a new disk signature (MBR), so the restored
 // disk can be attached next to the original without Windows taking it offline for a collision.
 void renew_ids(DiskLayout& layout);
+
+// "120 GB", "1.5 GB", "300 MB" (decimal units); `round_up` rounds up to what is shown.
+std::string size_text(std::uint64_t bytes, bool round_up = false);
 
 // "C: Windows (NTFS, 120 GB)" style one-liners for display.
 std::string describe(const Partition& p);
