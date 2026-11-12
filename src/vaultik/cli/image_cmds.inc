@@ -240,9 +240,18 @@ int cmd_image_info(const Args& a) {
     repo->reload_index();
     const SnapshotRef ref = resolve_snapshot(*repo, a.positional[1]);
     const std::vector<image::DiskLayout> disks = image::image_disks(*repo, ref.snapshot);
+    // How far each disk's partitions can shrink (read from each NTFS volume's bitmap).
+    std::vector<std::vector<std::uint64_t>> limits;
+    std::vector<std::vector<std::string>> notes(disks.size());
+    for (std::size_t i = 0; i < disks.size(); ++i) limits.push_back(image::shrink_limits(*repo, ref.snapshot, i, &notes[i]));
     if (g_json) {
         nlohmann::json list = nlohmann::json::array();
-        for (const image::DiskLayout& l : disks) list.push_back(nlohmann::json::parse(image::to_json(l)));
+        for (std::size_t i = 0; i < disks.size(); ++i) {
+            nlohmann::json d = nlohmann::json::parse(image::to_json(disks[i]));
+            d["smallest_target"] = image::smallest_disk(disks[i], limits[i]);
+            d["min_lengths"] = limits[i];
+            list.push_back(std::move(d));
+        }
         emit({{"event", "image"}, {"snapshot", id_hex(ref.id)}, {"time", ref.snapshot.time}, {"disks", list}});
         return kExitOk;
     }
@@ -251,13 +260,23 @@ int cmd_image_info(const Args& a) {
     for (std::size_t i = 0; i < disks.size(); ++i) {
         const image::DiskLayout& l = disks[i];
         out(std::to_string(i + 1) + ". " + layout_title(l) + (l.system ? ", Windows ran from it" : "") + "\n");
-        for (const image::Partition& p : l.partitions) {
+        for (std::size_t k = 0; k < l.partitions.size(); ++k) {
+            const image::Partition& p = l.partitions[k];
             if (l.style == image::PartitionStyle::Mbr && image::is_container(p.mbr_type)) continue;
             std::string how = p.method == image::ReadMethod::Used
                                   ? format_bytes(p.used_bytes) + " in use" + (p.shadow_copy ? "" : ", read while in use")
                                   : "every byte";
+            if (limits[i][k] < p.length) how += "; can shrink to " + format_bytes(limits[i][k]);
             out("   " + image::describe(p) + ": " + how + "\n");
         }
+        const std::uint64_t full = image::smallest_disk(l, {});
+        const std::uint64_t smallest = image::smallest_disk(l, limits[i]);
+        out("   Restores onto a disk of " + format_bytes(full) + " (" + std::to_string(full) + " bytes) or larger");
+        if (smallest < full)
+            out(", or down to " + format_bytes(smallest) + " (" + std::to_string(smallest) + " bytes) with its NTFS\n"
+                "   partitions shrunk to their used space");
+        out("\n");
+        for (const std::string& n : notes[i]) out("   Not shrunk: " + n + "\n");
     }
     return kExitOk;
 }
@@ -310,6 +329,24 @@ std::optional<image::DiskIdentity> expected_disk(const Args& a) {
     return d;
 }
 
+// Whether image disk `index` (`layout`) fits on a disk of `size` bytes, shrinking its NTFS
+// partitions when it has to: an empty string, or why not.
+std::string restore_fit(Repository& repo, const SnapshotRef& ref, std::size_t index, const image::DiskLayout& layout,
+                        std::uint64_t size, std::uint32_t sector_size) {
+    const std::string why = image::fits(layout, size, sector_size);
+    if (why.empty() || sector_size != layout.sector_size) return why;
+    return image::fits(layout, size, sector_size, image::shrink_limits(repo, ref.snapshot, index));
+}
+
+// Shows what a restore changes (a partition shrunk or moved) before it writes.
+void restore_note(const std::string& note) {
+    if (g_json) emit({{"event", "note"}, {"message", note}});
+    else {
+        clear_status();
+        out(note + "\n");
+    }
+}
+
 // Restores image disk `index` of `ref` onto physical disk `number`, after every check. The repo
 // location protects its own disk. `expected` is the disk the user chose from an earlier listing:
 // the restore stops when the disk at `number` is another one by now (disks come and go, and
@@ -330,13 +367,14 @@ void restore_onto_disk(Repository& repo, const SnapshotRef& ref, std::size_t ind
     const image::DiskIdentity confirmed = expected ? *expected : image::identity_of(*it);
     const std::vector<image::DiskLayout> layouts = image::image_disks(repo, ref.snapshot);
     if (index >= layouts.size()) throw Error("the image has no disk " + std::to_string(index + 1));
-    const std::string fit = image::fits(layouts[index], it->size, it->sector_size);
+    const std::string fit = restore_fit(repo, ref, index, layouts[index], it->size, it->sector_size);
     if (!fit.empty()) throw Error(fit);
     if (a != nullptr) confirm_erase(*a, *it);
 
     image::ImageRestoreOptions o;
     o.disk = index;
     o.should_cancel = [] { return stop_requested(); };
+    o.on_note = restore_note;
     const auto start = std::chrono::steady_clock::now();
     o.on_progress = restore_progress(start);
     // Opened by number, and checked again there to be the disk confirmed.
@@ -384,12 +422,17 @@ int cmd_image_restore(const Args& a) {
     const std::string path = os::absolute_path(*vhdx);
     if (os::exists(path)) throw Error(path + " exists already; give a new file name");
     std::uint64_t size = layout.size;
-    if (auto v = a.value("--size")) size = std::max<std::uint64_t>(parse_size(*v), image::used_end(layout) + (1u << 20));
+    if (auto v = a.value("--size")) size = parse_size(*v);
     size = (size + layout.sector_size - 1) / layout.sector_size * layout.sector_size;
+    // Smaller than the image's partitions: refused before the file is made when they cannot be
+    // shrunk that far.
+    const std::string fit = restore_fit(*repo, ref, index, layout, size, layout.sector_size);
+    if (!fit.empty()) throw Error(fit);
     image::ImageRestoreOptions o;
     o.disk = index;
     o.new_ids = a.has("--new-ids");
     o.should_cancel = [] { return stop_requested(); };
+    o.on_note = restore_note;
     const auto start = std::chrono::steady_clock::now();
     o.on_progress = restore_progress(start);
     if (!g_json) out("Restoring " + layout_title(layout) + " to " + path + "\n");
@@ -718,12 +761,20 @@ void recovery_restore() {
     const std::vector<int> keep = protected_disks(location);
     const std::vector<int> running = image::system_disks();
     const std::vector<image::DiskInfo> targets = image::list_disks();
+    // How far the partitions can shrink, read once when a disk is smaller than the image's.
+    std::optional<std::vector<std::uint64_t>> limits;
     out("\nDisks of this computer:\n");
     for (const image::DiskInfo& d : targets) {
         std::string note;
         const std::string refuse = image::target_refusal(d, running, keep);
+        std::string fit = image::fits(layout, d.size, d.sector_size);
+        if (!fit.empty() && refuse.empty() && d.sector_size == layout.sector_size) {
+            if (!limits) limits = image::shrink_limits(*repo, ref.snapshot, index);
+            fit = image::fits(layout, d.size, d.sector_size, *limits);
+            if (fit.empty()) note = "  (the NTFS partitions are shrunk to fit)";
+        }
         if (!refuse.empty()) note = "  (not possible: " + refuse + ")";
-        else if (!image::fits(layout, d.size, d.sector_size).empty()) note = "  (not possible: " + image::fits(layout, d.size, d.sector_size) + ")";
+        else if (!fit.empty()) note = "  (not possible: " + fit + ")";
         out("  " + image::describe(d) + note + "\n");
         const std::string vols = volumes_text(d);
         if (!vols.empty()) out("      holds " + vols + "\n");

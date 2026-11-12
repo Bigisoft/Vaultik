@@ -901,10 +901,23 @@ Vaultik; the disk's model, size and serial number are shown and you type `ERASE 
 the restore stops, before writing, when the disk at that number is no longer the one shown (its
 size, serial number or partition table id differ). The partition tables are written last: a
 restore that stops halfway leaves a disk without partitions, not one with half-written ones.
-The target needs the same sector size and room for every
-partition (a larger disk is fine; the partitions keep their sizes). Disk and partition ids stay
-the same, so the restored Windows starts as before; `--boot` (or the recovery menu) also runs
-`bcdboot` to write its boot files.
+The target needs the same sector size. A larger disk is fine (the partitions keep their
+sizes). A smaller one works when the NTFS partitions can shrink to fit: the last NTFS partition
+that can is shrunk first (typically the Windows partition), by whole MiB and only as far as
+needed, and the partitions after it (a recovery partition) move down with their content, type,
+GUID and attributes. `image info` shows how far each partition can shrink and the smallest disk
+the image fits on; `--size` of `image restore --vhdx` may be smaller than the imaged disk, and
+the restore window and the recovery menu offer smaller disks when the image fits on them. An NTFS
+volume shrinks only down to just past its last cluster in use (nothing in it is moved), so a
+volume with data near its end cannot shrink much; the volume Windows ran from keeps 1 GiB free;
+volumes read while in use (without a shadow copy) are not shrunk. Before the first byte is
+written, every file record of a volume to shrink is read and checked to have no data past the
+new end; a volume whose bitmap disagrees with its files is refused (run `chkdsk` on it before the
+next image). A shrunk volume gets what `ntfsresize` changes: its size in the boot sector (and the
+backup boot sector in its new last sector), `$Bitmap` and the bad-cluster list cut to the new
+size, an emptied `$LogFile` and the dirty flag, so Windows checks the volume once when it first
+mounts or starts from it. Disk and partition ids stay the same, so the restored Windows starts as
+before; `--boot` (or the recovery menu) also runs `bcdboot` to write its boot files.
 
 The disk Windows runs from is restored from the **recovery drive** (More > **Create recovery
 drive**, or `vaultik recovery-media --usb E:` / `--iso <file>`): Windows PE with Vaultik on a
@@ -1080,8 +1093,16 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
   `/dev`, tmpfs) are skipped.
 - Disk images: basic disks only (not dynamic disks or Storage Spaces); a BitLocker volume is
   stored as its unlocked content and comes back unencrypted (turn BitLocker on again after a
-  restore); partitions are restored at their original size, so the target disk must be at least
-  as large as the end of the last partition and have the same sector size.
+  restore). A smaller target disk works only as far as the NTFS partitions can shrink without
+  moving data: down to just past each volume's last cluster in use (data near the end of a
+  volume keeps it large; defragmenting or Windows' own Shrink Volume before the image helps), and
+  never for volumes read while in use, MBR disks with logical partitions or volumes whose master
+  file table is too fragmented for one file record. FAT and other file systems keep their size.
+  A shrunk Windows volume is checked by Windows once when it first starts. A moved recovery
+  partition keeps its content, but Windows RE may need `reagentc /disable` and `reagentc
+  /enable` in the restored Windows to be found again (its configuration notes where the
+  partition was), and old restore points (shadow copies) of a shrunk volume may be dropped by
+  Windows. The target needs the same sector size.
 - NTFS names that are not valid UTF-16 (unpaired surrogates, very rare) cannot be backed up.
 - The program list knows only what the Windows uninstall list and winget know. Jobs with
   administrator rights run as the system account, which has no winget and its own per-user list:
@@ -1162,7 +1183,8 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
    Deck, FUSE for browsing a version, drive health.
 9. Disk image backup (done, Windows): whole disks from shadow copies, used space only, in the
    deduplicating repository; restore to a `.vhdx`, onto a disk, or browse an image's drives.
-   Still to come: shrinking partitions onto a smaller disk, images of Linux disks.
+   Restores onto a smaller disk shrink NTFS partitions down to their used space (without moving
+   data). Still to come: moving data to shrink further, images of Linux disks.
 10. Bare-metal restore (done, Windows): a recovery USB stick or ISO (Windows PE from the ADK)
     that restores a disk image onto a computer that does not start.
 

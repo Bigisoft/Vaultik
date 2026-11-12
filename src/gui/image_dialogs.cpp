@@ -1,5 +1,6 @@
 #include "image_dialogs.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -25,6 +26,7 @@
 
 #include "common.h"
 #include "runner.h"
+#include "vaultik/image/image.hpp"
 #include "vaultik/image/recovery_media.hpp"
 #include "vaultik/platform/drive_health.hpp"
 #include "vaultik/platform/os.hpp"
@@ -211,8 +213,26 @@ int ImageRestoreDialog::target_disk() const {
     return target_->currentIndex() < 0 ? -1 : target_->currentData().toInt();
 }
 
+const std::vector<std::uint64_t>& ImageRestoreDialog::shrink_limits() {
+    const int disk = disk_->currentIndex();
+    auto it = limits_.find(disk);
+    if (it != limits_.end()) return it->second;
+    std::vector<std::uint64_t> limits;  // none when they cannot be read: then nothing shrinks
+    const int version = version_->currentIndex();
+    if (disk >= 0 && version >= 0 && static_cast<std::size_t>(version) < images_.size()) {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        try {
+            limits = image::shrink_limits(*repo_, images_[static_cast<std::size_t>(version)].snapshot, static_cast<std::size_t>(disk));
+        } catch (const std::exception&) {
+        }
+        QApplication::restoreOverrideCursor();
+    }
+    return limits_.emplace(disk, std::move(limits)).first->second;
+}
+
 void ImageRestoreDialog::show_version(int index) {
     layouts_.clear();
+    limits_.clear();
     disk_->clear();
     parts_->clear();
     if (index < 0 || static_cast<std::size_t>(index) >= images_.size()) return;
@@ -248,9 +268,18 @@ void ImageRestoreDialog::fill_targets() {
     const std::vector<int> running = image::system_disks();
     for (const image::DiskInfo& d : disks_) {
         QString why = qs(image::target_refusal(d, running, keep));
-        if (why.isEmpty() && l != nullptr) why = qs(image::fits(*l, d.size, d.sector_size));
+        bool shrunk = false;
+        if (why.isEmpty() && l != nullptr) {
+            why = qs(image::fits(*l, d.size, d.sector_size));
+            // A smaller disk: fine when the NTFS partitions can shrink that far.
+            if (!why.isEmpty() && d.sector_size == l->sector_size) {
+                why = qs(image::fits(*l, d.size, d.sector_size, shrink_limits()));
+                shrunk = why.isEmpty();
+            }
+        }
         QString text = qs(image::describe(d));
         if (!why.isEmpty()) text += "  -  " + tr("not possible: %1").arg(why);
+        else if (shrunk) text += "  -  " + tr("its NTFS partitions are shrunk to fit");
         target_->addItem(text, d.number);
         if (!why.isEmpty()) {
             // Shown, but cannot be picked.

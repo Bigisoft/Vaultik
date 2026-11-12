@@ -2,6 +2,8 @@
 
 #include <QDialog>
 
+#include <cstdint>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -39,12 +41,15 @@ private:
     void browse_files();
     const vaultik::image::DiskLayout* layout() const;
     int target_disk() const;
+    // How far the partitions of the image disk shown can shrink (read from the backup once).
+    const std::vector<std::uint64_t>& shrink_limits();
 
     vaultik::jobs::Job job_;
     std::shared_ptr<vaultik::Repository> repo_;
     std::vector<SnapshotEntry> images_;
     std::vector<vaultik::image::DiskLayout> layouts_;  // of the version shown
     std::vector<vaultik::image::DiskInfo> disks_;
+    std::map<int, std::vector<std::uint64_t>> limits_;  // by image disk, of the version shown
 
     QComboBox* version_ = nullptr;
     QComboBox* disk_ = nullptr;

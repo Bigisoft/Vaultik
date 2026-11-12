@@ -15,6 +15,9 @@ It touches only virtual disk files it makes in its own work folder:
      second image after a change (must store little), image info and verify.
   3. Detaches it, restores the image to a second VHDX (--vhdx), attaches that and compares every
      file, the raw EFI partition and the GPT disk GUID; chkdsk of the restored volume.
+     Then restores it onto a smaller VHDX (--size, the smallest disk image info gives, so the NTFS
+     volume is shrunk): a size 1 MiB below that must be refused; the files, the EFI partition and
+     chkdsk of the shrunk volume are checked again.
   4. Restores the image onto the blank target attached as a disk with --to-disk (the guarded path
      that writes to a disk): first with a wrong confirmation (must refuse and leave it blank), then
      with the right one; compares the files again.
@@ -48,6 +51,7 @@ New-Item -ItemType Directory -Path $Work | Out-Null
 $vhd1 = Join-Path $Work 'source.vhdx'
 $vhd2 = Join-Path $Work 'restored.vhdx'
 $vhd3 = Join-Path $Work 'target.vhdx'
+$vhd4 = Join-Path $Work 'shrunk.vhdx'
 $repo = Join-Path $Work 'repo'
 $env:VAULTIK_CONFIG_DIR = Join-Path $Work 'config'
 $env:VAULTIK_PASSWORD = 'image test password 1'
@@ -218,7 +222,44 @@ try {
     Check ($esp2 -and (Get-RawHash $d2.Number $esp2.Offset $esp2.Size) -eq $espHash1) 'EFI partition restored byte for byte'
     $r = & chkdsk.exe ($root2.TrimEnd('\')) 2>&1
     Check ($LASTEXITCODE -eq 0) "chkdsk of the restored NTFS volume (exit $LASTEXITCODE)"
+    $dataSize = (Get-Partition -DiskNumber $d2.Number | Where-Object { $_.GptType -eq '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' }).Size
     Dismount-Own $vhd2
+
+    # ---- 3b. restore onto a smaller VHDX: the NTFS volume is shrunk ---------------------------
+    $infoLine = & $Vaultik image info -r $repo latest --json 2>&1 | Where-Object { $_ -match '"event":"image"' } | Select-Object -First 1
+    $info = $infoLine | ConvertFrom-Json
+    $smallest = [long]$info.disks[0].smallest_target
+    $imaged = [long]$info.disks[0].size
+    Write-Host "smallest disk for the image: $smallest bytes (the disk imaged: $imaged)"
+    Check ($smallest -gt 0 -and $smallest -lt $imaged - 100MB) 'image info gives a smallest disk well below the imaged one'
+    $r = Run-Vaultik @('image', 'info', '-r', $repo, 'latest')
+    Check ($r.Output -match 'can shrink to') 'image info says how far the NTFS partition can shrink'
+    $r = Run-Vaultik @('image', 'restore', '-r', $repo, 'latest', '--vhdx', $vhd4, '--size', "$($smallest - 1MB)")
+    Check ($r.Code -ne 0 -and $r.Output -match 'at least' -and -not (Test-Path $vhd4)) 'a size below the smallest is refused, no file left'
+    $r = Run-Vaultik @('image', 'restore', '-r', $repo, 'latest', '--vhdx', $vhd4, '--size', "$smallest")
+    Check ($r.Code -eq 0 -and (Test-Path $vhd4) -and $r.Output -match 'shrunk') 'restore onto the smallest VHDX (NTFS volume shrunk)'
+    Mount-DiskImage -ImagePath $vhd4 | Out-Null
+    $d4 = Get-OwnDisk $vhd4
+    Update-Disk -Number $d4.Number
+    Check ((Get-Disk -Number $d4.Number).Size -eq $smallest) 'the smaller VHDX has the size asked for'
+    $part4 = Get-Partition -DiskNumber $d4.Number | Where-Object { $_.GptType -eq '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}' }
+    Write-Host "data partition: $($part4.Size) bytes (was $dataSize)"
+    Check ($part4 -and $part4.Size -lt $dataSize) 'the data partition is smaller'
+    $root4 = Get-DataRoot $d4.Number
+    $vol4 = Get-Volume -DriveLetter $root4[0]
+    Write-Host "shrunk volume: $($vol4.Size) bytes, $($vol4.SizeRemaining) free, $($vol4.FileSystem)"
+    Check ($vol4.FileSystem -eq 'NTFS' -and $vol4.Size -le $part4.Size) 'Windows mounts the shrunk volume at its new size'
+    Compare-Manifest $manifest (Get-Manifest $root4) 'files in the shrunk volume match'
+    $esp4 = Get-Partition -DiskNumber $d4.Number | Where-Object { $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' }
+    Check ($esp4 -and (Get-RawHash $d4.Number $esp4.Offset $esp4.Size) -eq $espHash1) 'EFI partition restored byte for byte onto the smaller disk'
+    # The restore marks a shrunk volume dirty on purpose (Windows checks it once at its first
+    # mount or start); the read-only chkdsk must still find nothing wrong.
+    & fsutil.exe dirty query ($root4.TrimEnd('\')) 2>&1 | ForEach-Object { Write-Host "  $_" }
+    $r = & chkdsk.exe ($root4.TrimEnd('\')) 2>&1
+    $code4 = $LASTEXITCODE
+    $r | ForEach-Object { Write-Host "  $_" }
+    Check ($code4 -eq 0) "chkdsk of the shrunk NTFS volume (exit $code4)"
+    Dismount-Own $vhd4
 
     # ---- 4. restore onto an attached blank disk ----------------------------------------------
     Mount-DiskImage -ImagePath $vhd3 | Out-Null
@@ -255,7 +296,7 @@ catch {
     Fail "stopped: $($_.Exception.Message) at line $($_.InvocationInfo.ScriptLineNumber)"
 }
 finally {
-    foreach ($v in @($vhd1, $vhd2, $vhd3)) {
+    foreach ($v in @($vhd1, $vhd2, $vhd3, $vhd4)) {
         if (Test-Path $v) { try { Dismount-Own $v } catch {} }
     }
     # A Windows PE image left mounted by an interrupted ISO build.

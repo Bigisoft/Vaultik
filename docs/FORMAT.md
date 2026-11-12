@@ -338,6 +338,22 @@ Until then the disk shows no partitions. Readers reject a layout version other t
 1, sector sizes other than 512 and 4096, partitions or regions outside the disk, and regions
 over 16 MiB.
 
+A restore onto a disk smaller than the layout needs (no format change) places the partitions
+first: NTFS partitions read "used" from a shadow copy can shrink to just past the last cluster
+their volume bitmap (read from the stored `$Bitmap`) marks in use, rounded up to whole MiB, with
+1 GiB more free on the partition marked `windows`. The last partition that can shrink is cut
+first, by whole MiB and only as far as needed; every partition and stored region after a cut
+one moves down by as much. A cut partition gets its stored bytes up to its new length, then the
+changed metadata: the boot sector's total sectors (and hidden sectors when it moved), the backup
+boot sector in the new last sector, `$Bitmap` (size, runs cut to what the new size needs, the
+freed bits cleared, the bits past the last cluster set as the volume had them), the `$Bad`
+stream of `$BadClus` cut to the new size, `$LogFile` filled with 0xFF, the dirty flag in
+`$Volume`, the copy of `$Bitmap`'s sizes in its file name and root index entry (when they were
+current), and the changed records in `$MFTMirr` too when it mirrors them. A partition that only
+moves gets its NTFS boot sectors' hidden sectors changed. MBR entries of cut and moved
+partitions get their new start and length. Every file record in use is checked first; data past
+the new end refuses the restore before anything is written.
+
 ## Locks
 
 Every run that reads or writes snapshot data holds a lock file. The lock id is 32 random bytes;
