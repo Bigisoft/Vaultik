@@ -197,7 +197,8 @@ Settings or quits. Closing the window keeps Vaultik in the notification area, an
 again brings the running one to the front. With Windows' Do Not Disturb on, the notifications
 go quietly to the notification centre.
 
-**Restore from a backup location** in the toolbar opens any Vaultik backup, in a folder or in
+**Restore from another backup...** under the list of jobs (or **Restore from an existing backup...**
+before there is a job) opens any Vaultik backup, in a folder or in
 cloud storage, with its password, without a saved job: the way to get files back on another
 computer. Copy `vaultik-gui.exe`, `vaultik.exe` and `vaultik-task.exe` there (they need nothing
 else), connect the backup drive (or have the cloud storage keys at hand), pick the location and
@@ -213,7 +214,7 @@ or `~/.config/vaultik` (override with `VAULTIK_CONFIG_DIR`).
 **Keep the password safe elsewhere too.** Without it the backups cannot be decrypted, and nobody
 can reset it. What helps is the **recovery key**: a new backup shows one once (8 groups of 4
 characters, with buttons to copy it or save it to a file). Keep it apart from the computer. If
-the password is forgotten, **Password and recovery key** in the toolbar sets a new password with
+the password is forgotten, **Password and recovery key...** under the list of jobs sets a new password with
 the recovery key; the same dialog changes the password with the current one, or makes a new
 recovery key (which replaces the old one, and gives older backups one). Saved jobs that use the
 backup get the new password. A changed password does not re-encrypt the backup: a copy of the
