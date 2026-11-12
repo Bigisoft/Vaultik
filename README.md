@@ -213,13 +213,13 @@ backup folder made before the change still opens with the old password.
 
 `powershell -File tools\package.ps1` builds the release programs and makes, in `dist\`:
 
-- `Vaultik-<version>.msi`: the installer. It shows the license and lets you pick where to
-  install: Vaultik goes into a new folder named `Vaultik` inside the folder you pick
-  (`C:\Program Files` by default, so `C:\Program Files\Vaultik`), adds a Start menu entry and puts
-  `vaultik` on PATH. A newer version replaces an older one in the same place (the choice is
-  remembered), and removing Vaultik also removes its scheduled tasks (jobs, history and backups
-  stay). The installer makes the `Vaultik` folder (never the one you picked) administrator-only,
-  which jobs with administrator rights and "Start Vaultik as administrator" need; outside Program
+- `Vaultik-<version>.msi`: the installer. It shows the license and lets you pick the folder
+  (`C:\Program Files\Vaultik` by default), adds a Start menu entry and puts `vaultik` on PATH. A
+  newer version replaces an older one in the same place (the choice is remembered), and removing
+  Vaultik also removes its scheduled tasks (jobs, history and backups stay). The installer makes
+  the folder administrator-only, which jobs with administrator rights and "Start Vaultik as
+  administrator" need, so it refuses a drive or a folder like Program Files or Windows itself
+  (pick a folder of Vaultik's own); outside Program
   Files those also need every folder above it to be administrator-only (a folder like `D:\Apps`
   usually lets any user change it, so they then refuse to run). The programs load the system
   libraries they need from System32 only, and administrator jobs check every file in the

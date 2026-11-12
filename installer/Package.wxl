@@ -1,7 +1,7 @@
-<!-- Wording of the installer's folder page: the folder picked gets a folder named Vaultik, so it
-     is never a drive or Program Files itself that is made administrator-only. -->
+<!-- Wording of the installer's folder page: the box holds the full path of Vaultik's own folder,
+     which is made administrator-only (so a drive or Program Files itself is refused). -->
 <WixLocalization Culture="en-US" xmlns="http://wixtoolset.org/schemas/v4/wxl">
   <String Id="InstallDirDlgTitle" Value="{\WixUI_Font_Title}Where to install" />
-  <String Id="InstallDirDlgDescription" Value="Vaultik is installed in a new folder named Vaultik inside the folder below." />
-  <String Id="InstallDirDlgFolderLabel" Value="Create the Vaultik folder in:" />
+  <String Id="InstallDirDlgDescription" Value="Vaultik is installed in this folder, which only administrators can change." />
+  <String Id="InstallDirDlgFolderLabel" Value="Install Vaultik in:" />
 </WixLocalization>

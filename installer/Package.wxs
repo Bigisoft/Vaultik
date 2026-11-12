@@ -1,9 +1,10 @@
-<!-- Vaultik's installer: the three programs in a folder named Vaultik inside the folder the user
-     picks (Program Files by default), a Start menu entry, and that folder on PATH so "vaultik"
-     works in any terminal. The Vaultik folder (never the one picked, which may be a drive or
-     Program Files itself) is made administrator-only wherever it is: jobs with administrator
-     rights and "Start Vaultik as administrator" require that. The folder picked is remembered,
-     so a newer version replaces an older one in the same place. -->
+<!-- Vaultik's installer: the three programs in the folder the user picks (C:\Program Files\Vaultik
+     by default, shown in full on the folder page), a Start menu entry, and that folder on PATH so
+     "vaultik" works in any terminal. The folder is made administrator-only wherever it is: jobs
+     with administrator rights and "Start Vaultik as administrator" require that. So it must be a
+     folder of Vaultik's own: a drive, Program Files, Windows or ProgramData itself is refused
+     rather than locked down. The folder is remembered, so a newer version replaces an older one
+     in the same place. -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package Name="Vaultik" Manufacturer="Vaultik" Version="$(var.Version)" Scope="perMachine"
            UpgradeCode="7F3C2B1E-5A4D-4C8E-9B21-6D0E8F4A3C57" Compressed="yes">
@@ -14,25 +15,42 @@
     <Icon Id="VaultikIcon" SourceFile="$(var.IconFile)" />
     <Property Id="ARPPRODUCTICON" Value="VaultikIcon" />
 
-    <!-- The usual pages: welcome, license, where to install (changeable), install. The folder
-         picked is the one that gets a Vaultik folder (see the wording in Package.wxl). -->
-    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLROOT" />
+    <!-- The usual pages: welcome, license, where to install (changeable), install. The box
+         holds the full path of the folder (see the wording in Package.wxl). -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
 
-    <!-- Where an earlier version was installed, so an upgrade goes to the same place. -->
-    <Property Id="INSTALLROOT">
+    <!-- Where an earlier version was installed, so an upgrade goes to the same place: InstallDir
+         is the folder itself; versions up to 0.8.0 kept InstallRoot, the folder that got a Vaultik
+         folder inside it. -->
+    <Property Id="PREVIOUSDIR">
+      <RegistrySearch Id="PreviousDir" Root="HKLM" Key="Software\Vaultik" Name="InstallDir" Type="directory" />
+    </Property>
+    <Property Id="PREVIOUSROOT">
       <RegistrySearch Id="PreviousRoot" Root="HKLM" Key="Software\Vaultik" Name="InstallRoot" Type="directory" />
     </Property>
+    <SetProperty Id="INSTALLFOLDER" Action="InstallFolderFromRoot" Value="[PREVIOUSROOT]Vaultik\" After="AppSearch"
+                 Sequence="both" Condition="PREVIOUSROOT AND NOT PREVIOUSDIR" />
+    <SetProperty Id="INSTALLFOLDER" Action="InstallFolderFromDir" Value="[PREVIOUSDIR]" After="InstallFolderFromRoot"
+                 Sequence="both" Condition="PREVIOUSDIR" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLROOT" Name=".">
-        <Directory Id="INSTALLFOLDER" Name="Vaultik" />
-      </Directory>
+      <Directory Id="INSTALLFOLDER" Name="Vaultik" />
     </StandardDirectory>
     <Component Id="RememberRoot" Directory="INSTALLFOLDER" Guid="6C3D8E15-2A4B-4F70-9D2E-81B5C7A40F26">
-      <RegistryValue Root="HKLM" Key="Software\Vaultik" Name="InstallRoot" Type="string" Value="[INSTALLROOT]"
+      <RegistryValue Root="HKLM" Key="Software\Vaultik" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]"
                      KeyPath="yes" />
     </Component>
+
+    <!-- The folder is made administrator-only, so it must be Vaultik's own: never a drive or a
+         folder Windows needs others to write to. Checked after the folder page, before anything
+         is written; also for a silent install with INSTALLFOLDER on the command line. In five parts:
+         a condition holds at most 255 characters. -->
+    <CustomAction Id="RefuseDrive1" Error="Vaultik cannot be installed directly in [INSTALLFOLDER]: that folder would be made administrator-only. Choose a folder of its own, such as [ProgramFiles64Folder]Vaultik." />
+    <CustomAction Id="RefuseDrive2" Error="Vaultik cannot be installed directly in [INSTALLFOLDER]: that folder would be made administrator-only. Choose a folder of its own, such as [ProgramFiles64Folder]Vaultik." />
+    <CustomAction Id="RefuseDrive3" Error="Vaultik cannot be installed directly in [INSTALLFOLDER]: that folder would be made administrator-only. Choose a folder of its own, such as [ProgramFiles64Folder]Vaultik." />
+    <CustomAction Id="RefuseSystem1" Error="Vaultik cannot be installed directly in [INSTALLFOLDER]: that folder would be made administrator-only. Choose a folder of its own, such as [ProgramFiles64Folder]Vaultik." />
+    <CustomAction Id="RefuseSystem2" Error="Vaultik cannot be installed directly in [INSTALLFOLDER]: that folder would be made administrator-only. Choose a folder of its own, such as [ProgramFiles64Folder]Vaultik." />
     <StandardDirectory Id="ProgramMenuFolder">
       <!-- For all users; a machine-wide value marks it installed. -->
       <Component Id="StartMenuShortcut" Guid="9B4E1C27-6F03-4A8D-B5E2-7C19D0A36F84">
@@ -100,6 +118,11 @@
     <CustomAction Id="RemoveScheduledTasks" FileRef="VaultikTaskExe" ExeCommand="uninstall-cleanup"
                   Execute="deferred" Impersonate="no" Return="ignore" />
     <InstallExecuteSequence>
+      <Custom Action="RefuseDrive1" After="CostFinalize" Condition="NOT REMOVE AND (INSTALLFOLDER~=&quot;A:\&quot; OR INSTALLFOLDER~=&quot;B:\&quot; OR INSTALLFOLDER~=&quot;C:\&quot; OR INSTALLFOLDER~=&quot;D:\&quot; OR INSTALLFOLDER~=&quot;E:\&quot; OR INSTALLFOLDER~=&quot;F:\&quot; OR INSTALLFOLDER~=&quot;G:\&quot; OR INSTALLFOLDER~=&quot;H:\&quot; OR INSTALLFOLDER~=&quot;I:\&quot;)" />
+      <Custom Action="RefuseDrive2" After="CostFinalize" Condition="NOT REMOVE AND (INSTALLFOLDER~=&quot;J:\&quot; OR INSTALLFOLDER~=&quot;K:\&quot; OR INSTALLFOLDER~=&quot;L:\&quot; OR INSTALLFOLDER~=&quot;M:\&quot; OR INSTALLFOLDER~=&quot;N:\&quot; OR INSTALLFOLDER~=&quot;O:\&quot; OR INSTALLFOLDER~=&quot;P:\&quot; OR INSTALLFOLDER~=&quot;Q:\&quot; OR INSTALLFOLDER~=&quot;R:\&quot;)" />
+      <Custom Action="RefuseDrive3" After="CostFinalize" Condition="NOT REMOVE AND (INSTALLFOLDER~=&quot;S:\&quot; OR INSTALLFOLDER~=&quot;T:\&quot; OR INSTALLFOLDER~=&quot;U:\&quot; OR INSTALLFOLDER~=&quot;V:\&quot; OR INSTALLFOLDER~=&quot;W:\&quot; OR INSTALLFOLDER~=&quot;X:\&quot; OR INSTALLFOLDER~=&quot;Y:\&quot; OR INSTALLFOLDER~=&quot;Z:\&quot;)" />
+      <Custom Action="RefuseSystem1" After="CostFinalize" Condition="NOT REMOVE AND (INSTALLFOLDER~=ProgramFiles64Folder OR INSTALLFOLDER~=ProgramFilesFolder OR INSTALLFOLDER~=CommonFiles64Folder OR INSTALLFOLDER~=CommonFilesFolder)" />
+      <Custom Action="RefuseSystem2" After="CostFinalize" Condition="NOT REMOVE AND (INSTALLFOLDER~=WindowsFolder OR INSTALLFOLDER~=System64Folder OR INSTALLFOLDER~=SystemFolder OR INSTALLFOLDER~=CommonAppDataFolder)" />
       <Custom Action="RemoveScheduledTasks" Before="RemoveFiles"
               Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
