@@ -26,6 +26,8 @@ public:
 private:
     void change_password();
     void make_recovery_key();
+    // Prints the recovery kit for the recovery key typed in (see kit_print.h).
+    void print_kit();
     bool check_location();
     // The storage at `location`, with cloud keys from the cloud dialog or a saved job.
     std::unique_ptr<vaultik::Backend> open_location(const QString& location) const;

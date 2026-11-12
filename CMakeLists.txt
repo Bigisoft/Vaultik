@@ -81,6 +81,7 @@ endif()
 
 add_library(vaultik_core STATIC
     src/vaultik/util/hex.cpp
+    src/vaultik/util/qr.cpp
     src/vaultik/util/resources.cpp
     src/vaultik/crypto/hash.cpp
     src/vaultik/crypto/md5.cpp
@@ -130,6 +131,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/report.cpp
     src/vaultik/jobs/forecast.cpp
     src/vaultik/jobs/growth.cpp
+    src/vaultik/jobs/recovery_kit.cpp
     src/vaultik/jobs/computers.cpp
     src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/profile_items.cpp
@@ -274,6 +276,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/alerts_dialog.cpp
             src/gui/report_dialog.cpp
             src/gui/grew_dialog.cpp
+            src/gui/kit_print.cpp
             src/gui/tray.cpp
             src/gui/drive_watcher.cpp
             src/gui/event_runs.cpp
@@ -338,6 +341,7 @@ add_executable(vaultik_tests
     tests/test_jobs.cpp
     tests/test_report.cpp
     tests/test_forecast.cpp
+    tests/test_kit.cpp
     tests/test_grew_rot.cpp
     tests/test_prune.cpp
     tests/test_keys.cpp

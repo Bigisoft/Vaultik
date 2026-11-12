@@ -61,6 +61,7 @@
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/report.hpp"
 #include "vaultik/jobs/growth.hpp"
+#include "vaultik/jobs/recovery_kit.hpp"
 #include "vaultik/jobs/update_check.hpp"
 #include "vaultik/ops/change_journal.hpp"
 #include "vaultik/ops/move_here.hpp"
@@ -273,6 +274,17 @@ Commands:
                                recovery key stops working)
       --recovery-key           Unlock with the recovery key instead of the password
                                (asked for, or set VAULTIK_RECOVERY_KEY)
+  recovery-kit                 Write a recovery kit to print: one page with the
+                               recovery key (also as a QR code), where the backup
+                               is, this computer's name, the date and the steps to
+                               restore on a new computer; never a password or a
+                               cloud storage key (asks for the recovery key, or
+                               set VAULTIK_RECOVERY_KEY)
+      --out <file>             kit.pdf or kit.html (a PDF from here has Western
+                               European letters only; the page has all of them)
+      --new                    Make a new recovery key for the kit first (asks for
+                               the password, or use --recovery-key; an older
+                               recovery key stops working)
       --all                    Remove every lock (only when no other run is active)
   cloud-rollback               S3 with Object Lock: bring every repository file
                                back as it was at a time, from the bucket's old
@@ -446,11 +458,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--since", "--top"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -4093,6 +4105,63 @@ int cmd_verify(const Args& a) {
     return kExitOk;
 }
 
+// "recovery-kit -r <repo> --out <file> [--new]": the printable recovery kit (jobs/recovery_kit.hpp)
+// for the backup's recovery key, which is asked for (it is not stored anywhere), or for a new one.
+int cmd_recovery_kit(const Args& a) {
+    const auto target = a.value("--out");
+    if (!target || !a.positional.empty())
+        throw Error("usage: vaultik recovery-kit -r <repository> --out <kit.pdf|kit.html> [--new]");
+    const std::string location = repo_path(a);
+    const auto backend = backend_for(a);
+    std::string key;
+    struct Wipe {
+        std::string& s;
+        ~Wipe() { secure_wipe(s.data(), s.size()); }
+    } wipe_key{key};
+    if (a.has("--new")) {
+        Credential credential = key_credential(a);
+        status("Making a recovery key...");
+        try {
+            key = create_recovery_key(*backend, credential);
+        } catch (...) {
+            secure_wipe(credential.secret.data(), credential.secret.size());
+            throw;
+        }
+        secure_wipe(credential.secret.data(), credential.secret.size());
+        clear_status();
+        out("A new recovery key was made; any older one no longer works.\n");
+    } else {
+        std::string typed = os::get_env("VAULTIK_RECOVERY_KEY");
+        if (typed.empty()) typed = read_password("Recovery key: ");
+        Bytes raw;
+        try {
+            raw = parse_recovery_key(typed);
+        } catch (...) {
+            secure_wipe(typed.data(), typed.size());
+            throw;
+        }
+        secure_wipe(typed.data(), typed.size());
+        key = format_recovery_key(raw);
+        secure_wipe(raw.data(), raw.size());
+        // Only a key that opens this backup goes on paper.
+        status("Checking the recovery key...");
+        { const MasterKey check = unlock_master_key(*backend, {key, true}); }
+        clear_status();
+    }
+    const jobs::RecoveryKit kit = jobs::make_recovery_kit(key, location);
+    const std::string path = os::absolute_path(*target);
+    try {
+        jobs::write_recovery_kit(kit, path);
+    } catch (const std::exception&) {
+        // A new key exists only here now: it must not be lost with the file.
+        if (a.has("--new")) out("Recovery key: " + key + "\nWrite it down: the kit could not be written.\n");
+        throw;
+    }
+    out("Wrote the recovery kit to " + path + ".\n");
+    out("It holds the recovery key: print it, keep the paper apart from this computer, and delete the file.\n");
+    return kExitOk;
+}
+
 // "30d", "2w", "12h" back from now, or a local date ("2026-10-01") or time.
 std::uint64_t parse_since(const std::string& v, std::uint64_t now) {
     constexpr std::uint64_t kHour = 36'000'000'000ull;
@@ -4259,6 +4328,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "apps") return cmd_apps(a);
     if (a.command == "unlock") return cmd_unlock(a);
     if (a.command == "key") return cmd_key(a);
+    if (a.command == "recovery-kit") return cmd_recovery_kit(a);
     if (a.command == "grew") return cmd_grew(a);
     if (a.command == "pin") return cmd_pin(a, true);
     if (a.command == "unpin") return cmd_pin(a, false);

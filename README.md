@@ -210,6 +210,17 @@ recovery key (which replaces the old one, and gives older backups one). Saved jo
 backup get the new password. A changed password does not re-encrypt the backup: a copy of the
 backup folder made before the change still opens with the old password.
 
+**Print recovery kit...** (where the recovery key is shown, and in **Password and recovery key**
+for the key you type in) saves one page to print, as a PDF or a web page: the recovery key as
+text and as a QR code, where the backup is and what kind of place that is (a folder on an
+external drive, a network share, S3-compatible storage, a cloud drive...), the computer's name,
+the date, and short steps to restore on a new computer. It never holds the password or a cloud
+storage key. The file is readable by your account only; once the page is printed, delete it.
+`vaultik recovery-kit -r <repository> --out kit.pdf` (or `kit.html`) writes the same from the
+command line, for the recovery key it asks for (or `--new` for a new one); its PDF uses the
+PDF's built-in fonts, so letters outside Western European ones show as `?` there (the web page
+and the frontend's PDF have them all).
+
 ## Packages
 
 `powershell -File tools\package.ps1` builds the release programs and makes, in `dist\`:
@@ -286,6 +297,7 @@ vaultik restore   --job documents latest --target D:\Restore
 vaultik key passwd   -r E:\Backups\vaultik
 vaultik key passwd   -r E:\Backups\vaultik --recovery-key
 vaultik key recovery -r E:\Backups\vaultik
+vaultik recovery-kit -r E:\Backups\vaultik --out kit.pdf
 vaultik grew         --job documents --since 30d
 vaultik apps         --job documents latest --missing
 vaultik apps install --job documents Git.Git 7zip.7zip

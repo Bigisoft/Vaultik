@@ -40,6 +40,8 @@ def decode(text: str) -> str:
 # The monthly report's fixed phrases (src/vaultik/jobs/report.cpp), which the frontend translates.
 SAY = re.compile(r'\bsay\(\s*((?:' + LITERAL + r'\s*)+)[,)]')
 MONTHS = re.compile(r'kMonthNames\[\]\s*=\s*\{([^}]*)\}')
+# The recovery kit's phrases (src/vaultik/jobs/recovery_kit.cpp), the same way.
+KIT = re.compile(r'\b(?:say|phrase)\(\s*((?:' + LITERAL + r'\s*)+)[,)]')
 
 
 def texts() -> list[str]:
@@ -53,6 +55,9 @@ def texts() -> list[str]:
         found.add("".join(decode(p) for p in PIECE.findall(m.group(1))))
     for m in MONTHS.finditer(report):
         found.update(decode(p) for p in PIECE.findall(m.group(1)))
+    kit = (ROOT / "src" / "vaultik" / "jobs" / "recovery_kit.cpp").read_text(encoding="utf-8")
+    for m in KIT.finditer(kit):
+        found.add("".join(decode(p) for p in PIECE.findall(m.group(1))))
     return sorted(found)
 
 
