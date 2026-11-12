@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -514,11 +515,41 @@ void warning(const std::string& msg) {
     }
 }
 
+// One line of standard input, without its end; false at the end of the input. POSIX: read from
+// the descriptor itself, since a thread blocked in std::getline holds the C library's lock on
+// stdin, and exit() then waits for that lock forever (a --json run whose caller keeps the pipe
+// open would never end).
+bool read_input_line(std::string& line) {
+#ifdef _WIN32
+    return static_cast<bool>(std::getline(std::cin, line));
+#else
+    static std::string pending;
+    for (;;) {
+        const std::size_t end = pending.find('\n');
+        if (end != std::string::npos) {
+            line = pending.substr(0, end);
+            pending.erase(0, end + 1);
+            return true;
+        }
+        char buf[512];
+        const ssize_t n = ::read(STDIN_FILENO, buf, sizeof buf);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            if (pending.empty()) return false;
+            line.swap(pending);
+            pending.clear();
+            return true;
+        }
+        pending.append(buf, static_cast<std::size_t>(n));
+    }
+#endif
+}
+
 // With --json, a line "cancel" on stdin stops the running backup or restore cleanly.
 void start_cancel_watcher() {
     std::thread([] {
         std::string line;
-        while (std::getline(std::cin, line)) {
+        while (read_input_line(line)) {
             while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
             if (line == "cancel") {
                 g_cancel = true;
