@@ -83,21 +83,24 @@ std::string first_line(const std::string& text) {
     return nl == std::string::npos ? t : trim(t.substr(0, nl));
 }
 
-// "wsl --export <name> -", read as a stream. A watchdog stops the export when the backup is
-// cancelled or WSL sends nothing for a long time, which ends the read that waits for it. Only
-// time spent waiting for WSL counts: while the backup itself does not read (a slow upload holds
-// it up), WSL simply waits for room in the pipe.
-class WslExport : public StreamSource {
+// A program's output read as a stream ("wsl --export <name> -", a Docker volume's tar). A
+// watchdog stops the program when the backup is cancelled or it sends nothing for a long time,
+// which ends the read that waits for it. Only time spent waiting for the program counts: while the
+// backup itself does not read (a slow upload holds it up), the program simply waits for room in
+// the pipe.
+class ProgramExport : public StreamSource {
 public:
-    WslExport(const std::string& name, std::function<bool()> cancelled, std::chrono::seconds stall)
-        : name_(name),
-          process_(std::vector<std::string>{"wsl.exe", "--export", name, "-"}, os::PipedProcess::Direction::FromProgram,
-                   {{"WSL_UTF8", "1"}}),
+    ProgramExport(const std::vector<std::string>& argv, const std::vector<std::pair<std::string, std::string>>& env,
+                  std::string what, std::function<bool()> cancelled, std::chrono::seconds stall,
+                  std::uint64_t min_size)
+        : what_(std::move(what)),
+          process_(argv, os::PipedProcess::Direction::FromProgram, env),
           cancelled_(std::move(cancelled)),
-          stall_(stall) {
+          stall_(stall),
+          min_size_(min_size) {
         watchdog_ = std::thread([this] { watch(); });
     }
-    ~WslExport() override {
+    ~ProgramExport() override {
         {
             const std::lock_guard<std::mutex> g(lock_);
             done_ = true;
@@ -122,7 +125,7 @@ public:
     }
 
     void finish() override {
-        waiting(true);  // for WSL to end
+        waiting(true);  // for the program to end
         const int code = process_.wait();
         {
             const std::lock_guard<std::mutex> g(lock_);
@@ -133,14 +136,13 @@ public:
         if (stopped_) throw Error(stop_reason_);
         if (code != 0) {
             const std::string why = first_line(console_text(process_.messages()));
-            throw Error("wsl --export failed (exit code " + std::to_string(code) + ")" + (why.empty() ? "" : ": " + why));
+            throw Error(what_ + " failed (exit code " + std::to_string(code) + ")" + (why.empty() ? "" : ": " + why));
         }
-        // A tar file ends with at least two empty 512-byte blocks; anything shorter is not one.
-        if (total_ < 1024) throw Error("wsl --export gave no data");
+        if (total_ < min_size_) throw Error(what_ + " gave no data");
     }
 
 private:
-    // Whether this waits for WSL now (in a read, or for it to end), and since when.
+    // Whether this waits for the program now (in a read, or for it to end), and since when.
     void waiting(bool on) {
         const std::lock_guard<std::mutex> g(lock_);
         waiting_ = on;
@@ -155,7 +157,7 @@ private:
             const bool cancel = cancelled_ && cancelled_();
             const bool stalled = waiting_ && std::chrono::steady_clock::now() - wait_started_ > stall_;
             if (cancel || stalled) {
-                stop_reason_ = cancel ? "cancelled" : "wsl --export stopped sending data and was ended";
+                stop_reason_ = cancel ? "cancelled" : what_ + " stopped sending data and was ended";
                 stopped_ = true;
                 process_.stop();
                 break;
@@ -163,10 +165,11 @@ private:
         }
     }
 
-    std::string name_;
+    std::string what_;
     os::PipedProcess process_;
     std::function<bool()> cancelled_;
     std::chrono::seconds stall_;
+    std::uint64_t min_size_;
     std::mutex lock_;
     std::condition_variable wake_;
     bool waiting_ = false;
@@ -307,6 +310,37 @@ std::string console_text(std::string_view raw) {
     for (const char c : text)
         if (c != '\r' && c != '\0') out.push_back(c);
     return out;
+}
+
+std::unique_ptr<StreamSource> program_stream(const std::vector<std::string>& argv,
+                                             const std::vector<std::pair<std::string, std::string>>& env,
+                                             const std::string& what, std::function<bool()> cancelled,
+                                             std::chrono::seconds stall, std::uint64_t min_size) {
+    return std::make_unique<ProgramExport>(argv, env, what, std::move(cancelled), stall, min_size);
+}
+
+namespace {
+
+class FileStream : public StreamSource {
+public:
+    explicit FileStream(const std::string& path) {
+        os::ErrorCode err = 0;
+        file_ = os::File::open_read(path, err);
+        if (!file_.valid()) throw os::OsError("cannot open " + path, err);
+    }
+    std::size_t read(std::uint8_t* dst, std::size_t max) override { return file_.read(dst, max); }
+
+private:
+    os::File file_;
+};
+
+}  // namespace
+
+ExtraSource file_stream_source(std::vector<std::string> place, const std::string& path) {
+    ExtraSource x;
+    x.place = std::move(place);
+    x.open = [path]() -> std::unique_ptr<StreamSource> { return std::make_unique<FileStream>(path); };
+    return x;
 }
 
 // ---- WSL ------------------------------------------------------------------------------------
@@ -451,7 +485,9 @@ ExtraSource wsl_export_source(const std::string& name, std::function<bool()> can
     x.place = wsl_place(name);
     x.open = [name, cancelled = std::move(cancelled), stall]() -> std::unique_ptr<StreamSource> {
         if (!valid_distro_name(name)) throw Error("invalid WSL distribution name \"" + name + "\"");
-        return std::make_unique<WslExport>(name, cancelled, stall);
+        // A tar file ends with at least two empty 512-byte blocks; anything shorter is not one.
+        return program_stream({"wsl.exe", "--export", name, "-"}, {{"WSL_UTF8", "1"}}, "wsl --export", cancelled,
+                              stall, 1024);
     };
     return x;
 }

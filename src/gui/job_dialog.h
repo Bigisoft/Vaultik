@@ -2,6 +2,8 @@
 
 #include <QDialog>
 
+#include <map>
+
 #include "cloud_dialog.h"
 #include "vaultik/jobs/job.hpp"
 
@@ -39,6 +41,7 @@ private:
     QWidget* build_resources();
     QWidget* build_retention();
     QWidget* build_machines();
+    QWidget* build_containers();
     void load(const vaultik::jobs::Job& job);
     vaultik::jobs::Job collect() const;
     void apply_preset(int index);
@@ -82,6 +85,21 @@ private:
     // Asks Hyper-V for its machines (once, when the tab is first shown, or again on request).
     void list_hyperv();
     void add_machine_item(QListWidget* list, const QString& name, const QString& detail, bool checked);
+
+    // Docker volumes (checkable items) and database dumps.
+    QListWidget* docker_list_ = nullptr;
+    QLabel* docker_note_ = nullptr;
+    QLineEdit* docker_image_ = nullptr;
+    bool docker_listed_ = false;
+    // Asks Docker for its volumes (once, when the tab is first shown, or again on request).
+    void list_docker();
+    QListWidget* db_list_ = nullptr;
+    std::vector<vaultik::DatabaseDump> databases_;
+    // Passwords typed for dumps, by dump id, stored when the job is saved (empty: remove it).
+    std::map<std::string, QString> db_passwords_;
+    void fill_databases();
+    // Adds a dump (index -1) or edits one.
+    void edit_database(int index);
 
     QComboBox* schedule_kind_ = nullptr;
     QTimeEdit* time_ = nullptr;

@@ -6,6 +6,7 @@
 //   jobs/<id>.json        the job definition
 //   secrets/<id>.key      the repository password (DPAPI-encrypted on Windows, mode 0600 elsewhere)
 //   secrets/<id>.cloud    the cloud storage secret key, sealed the same way
+//   secrets/<id>.db-<n>   the password of the job's database dump <n>, sealed the same way
 //   history/<id>.jsonl    one line per run, newest last
 
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "vaultik/ops/databases.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/repo/s3_backend.hpp"
 #include "vaultik/util/resources.hpp"
@@ -165,6 +167,16 @@ struct Job {
     // and removed from there after the backup.
     std::vector<std::string> hyperv_vms;
     std::string hyperv_staging;
+    // Docker volumes to back up through Docker (see ops/docker.hpp), each as the file
+    // Docker/<name>.tar of a version, and the image whose tar exports them (empty: one already on
+    // this computer, see pick_helper_image).
+    std::vector<std::string> docker_volumes;
+    std::string docker_image;
+    // Databases dumped with their own tools before the backup (see ops/databases.hpp), each as the
+    // file Databases/<name>.<ext> of a version. Their passwords are stored like the job's
+    // (JobStore::set_database_secret). Docker volumes and database dumps run programs found on
+    // PATH as the user, so a job with administrator rights cannot have them.
+    std::vector<DatabaseDump> databases;
     // Repair data written with each pack, in percent of its size (0: none; see
     // Repository::set_parity_percent). A backup sets the destination's setting to this.
     unsigned repair_data = 5;
@@ -322,6 +334,12 @@ public:
     void set_copy_secret(const std::string& id, const std::string& secret) const;
     std::string copy_secret(const std::string& id) const;
     CloudCredentials copy_credentials(const Job& job) const;
+    // The password of the job's database dump `db_id` (secrets/<id>.db-<db_id>); an empty one
+    // removes it. Empty when none is stored.
+    void set_database_secret(const std::string& id, const std::string& db_id, const std::string& secret) const;
+    std::string database_secret(const std::string& id, const std::string& db_id) const;
+    // Removes the stored passwords of database dumps the job no longer has.
+    void remove_unused_database_secrets(const Job& job) const;
     std::string cloud_secret(const std::string& id) const;
     // The job's cloud storage keys (empty for a folder destination).
     CloudCredentials cloud_credentials(const Job& job) const;

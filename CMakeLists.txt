@@ -135,6 +135,8 @@ add_library(vaultik_core STATIC
     src/vaultik/ops/apps.cpp
     src/vaultik/ops/change_journal.cpp
     src/vaultik/ops/virt.cpp
+    src/vaultik/ops/docker.cpp
+    src/vaultik/ops/databases.cpp
     src/vaultik/jobs/admin_jobs.cpp
     src/vaultik/jobs/scheduler.cpp
     src/vaultik/image/layout.cpp
@@ -345,6 +347,7 @@ add_executable(vaultik_tests
     tests/test_apps.cpp
     tests/test_computers.cpp
     tests/test_virt.cpp
+    tests/test_containers.cpp
     tests/test_image.cpp
     tests/test_posix.cpp
 )

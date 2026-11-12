@@ -463,6 +463,11 @@ std::string elevated_run_refusal(const Job& job, bool automatic) {
                "your own settings, which any program running as you can change. Run it without administrator "
                "rights, or turn on \"Run with administrator rights\" for the job, which shows the commands for "
                "approval";
+    if (!job.docker_volumes.empty() || !job.databases.empty())
+        return "the job \"" + job.name +
+               "\" backs up Docker volumes or dumps databases with programs of your own account, and those never run "
+               "with administrator rights from your own settings, which any program running as you can change. Run "
+               "it without administrator rights";
     return {};
 }
 
