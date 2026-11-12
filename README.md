@@ -1,8 +1,9 @@
 # Vaultik
 
 Lightweight, deduplicating, compressed and encrypted backups for Windows, written in C++20, with a
-Qt 6 frontend. Linux support (SteamOS on the Steam Deck first) is written but not yet built or
-tested; see [docs/LINUX_PORT.md](docs/LINUX_PORT.md) for its status.
+Qt 6 frontend. It also builds and passes its tests on Linux (SteamOS on the Steam Deck first),
+where the packages (AppImage, Flatpak) are not tested yet; see
+[docs/LINUX_PORT.md](docs/LINUX_PORT.md) for its status.
 
 - **Small and idle-free.** The engine is one static ~1 MB executable: no service, no kernel driver.
   Scheduled backups are started by the system scheduler, run, and exit. Peak RAM stays around
