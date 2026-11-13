@@ -1132,9 +1132,81 @@ void check_online(HANDLE h, int number) {
                     "Management first (right-click the disk, Online), then try again. Nothing was written");
 }
 
+// A volume opened to be locked (by its volume id, so the handle stays that volume whatever its
+// letter), for lock_volumes. After a forced dismount, the handle that dismounted it no longer
+// reaches a mounted file system, and the next open mounts it again; programs that look at every
+// volume as soon as it is mounted (a virus scanner, the search indexer) may open it again at
+// once, so a failed lock forces it off once more and locks it through a new handle right away.
+class WinVolumeLock : public VolumeLock {
+public:
+    WinVolumeLock(std::wstring device, std::string name, DWORD flags = 0)
+        : device_(std::move(device)), name_(std::move(name)), flags_(flags) {
+        h_ = open_device(device_, GENERIC_READ | GENERIC_WRITE, flags_);
+        if (!h_.valid()) throw_last_error("opening " + name_);
+    }
+    std::string name() const override { return name_; }
+    std::string why() const override { return why_; }
+    bool lock() override {
+        if (try_lock()) return true;
+        if (!forced_) return false;
+        for (int i = 0; i < 3; ++i) {
+            // The handle that dismounted it keeps the old, dismounted volume: let go of it first,
+            // so the next open mounts the volume again.
+            dismount();
+            h_.reset();
+            h_ = open_device(device_, GENERIC_READ | GENERIC_WRITE, flags_);
+            if (!h_.valid()) {
+                note("opening it again", GetLastError());
+                continue;
+            }
+            if (try_lock()) return true;
+        }
+        return false;
+    }
+    void force_dismount() override {
+        // Without the lock: Windows takes the volume away from every program that has it open.
+        dismount();
+        forced_ = true;
+    }
+    // The locked handle, kept open for as long as the volume must stay locked.
+    UniqueHandle take() { return std::move(h_); }
+
+private:
+    bool try_lock() {
+        DWORD got = 0;
+        if (h_.valid() && DeviceIoControl(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr)) return true;
+        note("locking it", h_.valid() ? GetLastError() : ERROR_INVALID_HANDLE);
+        return false;
+    }
+    // The Windows errors of the attempts, each once ("Windows error 5 locking it, ...").
+    void note(const char* what, DWORD e) {
+        const std::string one = "Windows error " + std::to_string(e) + " " + what;
+        if (why_.find(one) == std::string::npos) why_ += (why_.empty() ? "" : ", ") + one;
+    }
+    void dismount() {
+        DWORD got = 0;
+        if (h_.valid()) DeviceIoControl(h_.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+    }
+
+    std::wstring device_;
+    std::string name_;
+    DWORD flags_;
+    UniqueHandle h_;
+    bool forced_ = false;
+    std::string why_;
+};
+
+// How the user knows volume `v`: its drive letter ("F:"), its folder, or its volume id.
+std::string volume_title(const DiskVolume& v) {
+    if (v.mount.size() >= 2 && v.mount.size() <= 3 && v.mount[1] == ':') return upper(v.mount.substr(0, 2));
+    return v.mount.empty() ? v.name : v.mount;
+}
+
 // Disk `d` opened for writing, checked to be the disk the user chose, with every volume on it
-// locked and dismounted (the handles in `locks`).
-UniqueHandle open_locked_disk(const DiskInfo& d, const DiskIdentity& expected, std::vector<UniqueHandle>& locks) {
+// locked and dismounted (the handles in `locks`). A volume another program uses stops it with
+// VolumesInUse, unless `force` (see lock_volumes).
+UniqueHandle open_locked_disk(const DiskInfo& d, const DiskIdentity& expected, std::vector<UniqueHandle>& locks,
+                              bool force = false) {
     UniqueHandle disk = open_device(disk_path(d.number), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
     if (!disk.valid()) throw_last_error("opening disk " + std::to_string(d.number) + " for writing");
     DiskInfo now;
@@ -1143,14 +1215,20 @@ UniqueHandle open_locked_disk(const DiskInfo& d, const DiskIdentity& expected, s
     if (!other.empty()) throw Error(other + "; nothing was written");
     if (now.dynamic) throw Error("disk " + std::to_string(d.number) + " is a dynamic disk or part of a Storage Spaces pool; nothing was written");
     check_online(disk.get(), d.number);
+    std::vector<std::unique_ptr<WinVolumeLock>> volumes;
+    std::vector<VolumeLock*> to_lock;
     for (const DiskVolume& v : volumes_of(d.number)) {
         if (v.spans) throw Error("disk " + std::to_string(d.number) + " holds a part of a volume over several disks; nothing was written");
-        UniqueHandle h = open_device(volume_device(v.name), GENERIC_READ | GENERIC_WRITE);
-        if (!h.valid()) throw_last_error("opening " + (v.mount.empty() ? v.name : v.mount));
+        // Checked again here, so nothing the running Windows needs is ever forced closed.
+        const std::string use = windows_use_of(v);
+        if (!use.empty()) throw Error("disk " + std::to_string(d.number) + " cannot be erased: " + use + "; nothing was written");
+        volumes.push_back(std::make_unique<WinVolumeLock>(volume_device(v.name), volume_title(v)));
+        to_lock.push_back(volumes.back().get());
+    }
+    lock_volumes(to_lock, force);
+    for (auto& v : volumes) {
+        UniqueHandle h = v->take();
         DWORD got = 0;
-        if (!DeviceIoControl(h.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr))
-            throw Error((v.mount.empty() ? std::string("a volume of the disk") : v.mount) +
-                        " is in use; close every program using it and try again");
         DeviceIoControl(h.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
         locks.push_back(std::move(h));
     }
@@ -1195,10 +1273,10 @@ std::unique_ptr<WipeDevice> open_wipe_file(const std::string& path) {
 }
 
 std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& chosen, const DiskIdentity& expected,
-                                           const std::vector<int>& protected_disks) {
+                                           const std::vector<int>& protected_disks, bool force_dismount) {
     const DiskInfo d = recheck(chosen, expected, protected_disks);
     std::vector<UniqueHandle> locks;
-    UniqueHandle disk = open_locked_disk(d, expected, locks);
+    UniqueHandle disk = open_locked_disk(d, expected, locks, force_dismount);
     return std::make_unique<WinWipeDevice>(std::move(disk), std::move(locks), d.size, d.sector_size,
                                            "disk " + std::to_string(d.number), true);
 }
@@ -1220,7 +1298,7 @@ std::string windows_use_of(const DiskVolume& v) {
     return {};
 }
 
-VolumeTarget find_wipe_volume(const std::string& given) {
+VolumeTarget find_wipe_volume(const std::string& given, bool) {
     std::string name = upper(given);
     while (name.size() > 2 && (name.back() == '\\' || name.back() == '/')) name.pop_back();
     if (name.size() == 1) name += ":";
@@ -1270,15 +1348,15 @@ VolumeTarget find_wipe_volume(const std::string& given) {
     return t;
 }
 
-std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& given, const DiskIdentity& expected) {
+std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& given, const DiskIdentity& expected,
+                                             bool force_dismount) {
     if (!os::process_elevated()) throw Error("erasing a volume needs administrator rights");
     // As the letter is now (another drive may have it by now), then on the opened volume.
     const VolumeTarget v = find_wipe_volume(given.name);
     std::string other = volume_mismatch(v, expected);
     if (!other.empty()) throw Error(other + "; nothing was written");
     // Opened by its volume id, so the handle is that volume whatever letter it has.
-    UniqueHandle h = open_device(widen(v.device), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
-    if (!h.valid()) throw_last_error("opening " + v.name + " for writing");
+    WinVolumeLock volume(widen(v.device), v.name, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
     // The serial number through the volume's own path, just before the lock: a handle to the
     // volume device itself is not a handle to a file, so GetVolumeInformationByHandleW may not
     // answer for it below.
@@ -1291,9 +1369,10 @@ std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& given, const Di
             serial_before = text;
         }
     }
+    // Another program using it stops here (VolumesInUse), unless it is to be forced closed.
+    lock_volumes({&volume}, force_dismount);
+    UniqueHandle h = volume.take();
     DWORD got = 0;
-    if (!DeviceIoControl(h.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr))
-        throw Error(v.name + " is in use; close every program using it (and File Explorer windows on it) and try again");
     // Locked: nothing can change it any more. Its file system's serial number, read while it is
     // still mounted (on this handle where Windows answers: by handle, or NTFS's own volume data,
     // whose low 32 bits are the serial number shown; otherwise the one read just before the

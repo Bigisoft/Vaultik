@@ -104,6 +104,7 @@ constexpr int kExitAuth = 2;
 constexpr int kExitPartial = 3;  // finished, but some files could not be read or written
 constexpr int kExitCancelled = 4;
 constexpr int kExitLocked = 5;  // another run holds a conflicting repository lock
+constexpr int kExitInUse = 6;   // disk tools: a volume is in use by another program (--force-dismount forces it)
 
 // In pieces (the ")" R"(" joins below): Visual Studio 2022 refuses a single string literal over
 // 16 KB (error C2026); adjacent literals are joined into one string.
@@ -474,6 +475,12 @@ Disk tools (administrator rights on Windows, root on Linux, except disk list and
       --size <size>            Partitions of these sizes instead (repeatable; "rest"
                                as the last one takes what is left)
       --confirm <text>         The confirmation, given beforehand
+      --force-dismount         When another program has files open on the disk
+                               (Linux: a partition is mounted), take it away from
+                               that program first (as format /X does; Linux:
+                               umount) instead of stopping; it loses access to
+                               them and unsaved changes there are lost. The checks
+                               and the confirmation stay the same
   disk wipe <disk>             Erase a whole disk so its data cannot be read back,
                                then leave it without a partition table (the same
                                guards and confirmation as disk init)
@@ -485,6 +492,7 @@ Disk tools (administrator rights on Windows, root on Linux, except disk list and
       --method <m>             zeros (one pass, default), random (one pass), or
                                dod3 (random, random, zeros, as DoD 5220.22-M)
       --verify                 Read the last pass back and compare it
+      --force-dismount         As for disk init: force a disk or volume in use closed
   disk wipe-free <folder>      Overwrite the free space of the drive holding the
                                folder (or X:), so deleted files cannot be brought
                                back; files on it are not touched
@@ -553,7 +561,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands", "--force-dismount"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -4905,6 +4913,18 @@ int run_guarded(const std::vector<std::string>& args) {
         return fail("failed", e.what(), kExitAuth);
     } catch (const vaultik::LockedError& e) {
         return fail("failed", e.what(), kExitLocked);
+    } catch (const vaultik::image::VolumesInUse& e) {
+        // A frontend asks whether to force it closed (and runs the job again with
+        // --force-dismount); at a console, the option is named.
+        if (g_json) {
+            emit({{"event", "in_use"}, {"volumes", e.volumes}, {"message", e.what()}});
+            emit({{"event", "done"}, {"status", "in_use"}, {"volumes", e.volumes}, {"message", e.what()}});
+        }
+        err(std::string("error: ") + e.what() + "\n");
+        if (!g_json)
+            err("Give --force-dismount to force it closed: programs with files open there lose access to them, and "
+                "unsaved changes to those files are lost.\n");
+        return kExitInUse;
     } catch (const vaultik::ArchivedError& e) {
         // The frontend offers a thaw on "archived".
         if (g_json) emit({{"event", "done"}, {"status", "failed"}, {"archived", true}, {"message", e.what()}});
@@ -4926,7 +4946,9 @@ int run_main(const std::vector<std::string>& args) {
     const int code = run_guarded(args);
     // A window of its own (a restore started with administrator rights from the frontend) stays
     // open until the result is read.
-    if (std::find(args.begin(), args.end(), "--pause") != args.end()) {
+    // Not when a disk tool found a volume in use: the frontend that started it asks right away
+    // whether to force it closed.
+    if (code != kExitInUse && std::find(args.begin(), args.end(), "--pause") != args.end()) {
         err("\nPress Enter to close this window.");
         std::string line;
         std::getline(std::cin, line);

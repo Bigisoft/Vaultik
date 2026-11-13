@@ -73,6 +73,9 @@ int cmd_disk_list(const Args&) {
             j["path"] = d.path;
             j["media"] = d.media;
             j["refusal"] = image::tool_refusal(d, running, keep);
+#ifndef _WIN32
+            j["in_use"] = image::mounted_volumes(d);  // mounted: unmounted with --force-dismount
+#endif
             j["erase_text"] = image::erase_text(d);
             list.push_back(j);
         }
@@ -96,17 +99,22 @@ int cmd_disk_list(const Args&) {
 }
 
 // The disk named on the command line, checked: it may be erased, and (with --expect-*) it is the
-// disk the caller showed the user.
+// disk the caller showed the user. Linux: a mounted partition on it is in use (VolumesInUse),
+// unless --force-dismount unmounts it later, once the confirmation was typed.
 const image::DiskInfo& tool_target(const Args& a, const std::vector<image::DiskInfo>& disks, const std::string& arg,
                                    image::DiskIdentity& confirmed) {
     const image::DiskInfo& d = image::find_tool_disk(disks, arg);
-    const std::string why = image::tool_refusal(d, image::system_disks(), image::protected_tool_disks());
+    const std::string why = image::tool_refusal(d, image::system_disks(), image::protected_tool_disks(), true);
     if (!why.empty()) throw Error(tool_disk_title(d) + " cannot be erased: " + why);
     const auto expected = expected_disk(a);
     if (expected) {
         const std::string other = image::identity_mismatch(d, *expected);
         if (!other.empty()) throw Error(other + "; nothing was written");
     }
+#ifndef _WIN32
+    const std::vector<std::string> busy = image::mounted_volumes(d);
+    if (!busy.empty() && !a.has("--force-dismount")) throw image::VolumesInUse(busy);
+#endif
     confirmed = expected ? *expected : image::identity_of(d);
     return d;
 }
@@ -152,6 +160,7 @@ int cmd_disk_init(const Args& a) {
     what += " " + (o.filesystem.empty() ? std::string(kDefaultFs) : o.filesystem);
     confirm_typed(a, image::erase_text(d), what);
 
+    o.force_dismount = a.has("--force-dismount");
     o.on_step = [](const std::string& s) {
         if (g_json) emit({{"event", "step"}, {"message", s}});
         else {
@@ -188,7 +197,7 @@ int cmd_disk_wipe(const Args& a) {
     const auto volume = a.value("--volume");
     if ((a.positional.size() < 2) == !volume.has_value() || (a.positional.size() >= 2 && volume))
         throw Error("usage: vaultik disk wipe <disk> | --volume <X:> [--method zeros|random|dod3] [--verify] "
-                    "[--expect-size <bytes> --expect-serial <s> --expect-id <id>]");
+                    "[--expect-size <bytes> --expect-serial <s> --expect-id <id>] [--force-dismount]");
     image::WipeOptions o;
     if (auto m = a.value("--method")) {
         const auto parsed = image::parse_wipe_method(*m);
@@ -196,6 +205,7 @@ int cmd_disk_wipe(const Args& a) {
         o.method = *parsed;
     }
     o.verify = a.has("--verify");
+    const bool force = a.has("--force-dismount");
     o.should_cancel = [] { return stop_requested(); };
     o.on_progress = wipe_progress();
 #ifdef _WIN32
@@ -208,7 +218,7 @@ int cmd_disk_wipe(const Args& a) {
     std::string erased;
     try {
         if (volume) {
-            const image::VolumeTarget v = image::find_wipe_volume(*volume);
+            const image::VolumeTarget v = image::find_wipe_volume(*volume, true);
             // With --expect-*: the drive the caller showed the user (a letter or /dev/sdb1 may
             // belong to another drive by now), checked again on the opened drive.
             const auto expected = expected_disk(a);
@@ -217,11 +227,13 @@ int cmd_disk_wipe(const Args& a) {
                 if (!other.empty()) throw Error(other + "; nothing was written");
             }
             const image::DiskIdentity confirmed = expected ? *expected : image::volume_identity(v);
+            // Linux: mounted is in use; --force-dismount unmounts it once the confirmation was typed.
+            if (!v.mount.empty() && !force) throw image::VolumesInUse({v.mount});
             std::string what = "Everything on " + v.name + " is overwritten (" + method + ") and cannot be brought back:\n  " +
                                v.name + (v.label.empty() ? "" : " " + v.label) +
                                (v.filesystem.empty() ? "" : ", " + v.filesystem) + ", " + format_bytes(v.size);
             confirm_typed(a, image::erase_volume_text(v.name), what);
-            auto dev = image::open_wipe_volume(v, confirmed);
+            auto dev = image::open_wipe_volume(v, confirmed, force);
             r = image::wipe_device(*dev, o);
             erased = v.name;
         } else {
@@ -239,7 +251,7 @@ int cmd_disk_wipe(const Args& a) {
             confirm_typed(a, image::erase_text(d), what);
             o.clear_partition_table = true;
             {
-                auto dev = image::open_wipe_disk(d, confirmed, image::protected_tool_disks());
+                auto dev = image::open_wipe_disk(d, confirmed, image::protected_tool_disks(), force);
                 r = image::wipe_device(*dev, o);
                 dev->forget_partition_table();
             }

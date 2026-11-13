@@ -387,17 +387,45 @@ std::unique_ptr<WipeDevice> open_wipe_file(const std::string& path) {
 
 namespace {
 
-// Disk `chosen` opened exclusively, checked again (it may be erased, it is `expected`) both by
-// its path and on the opened device: its device number, serial number and size.
-std::unique_ptr<FdDevice> open_checked_disk(const DiskInfo& chosen, const DiskIdentity& expected,
-                                            const std::vector<int>& protected_disks) {
+// Unmounts mount point `point` (umount, never lazily: a file system still in use stays mounted
+// and says so). False with `why` set when it stays mounted.
+bool unmount(const std::string& point, std::string& why) {
+    std::string output;
+    const int code = os::run_command({need_tool("umount", "util-linux"), point}, &output);
+    why = trim(output);
+    return code == 0;
+}
+
+// Disk `number` as listed now; Error when it is not connected any more.
+DiskInfo disk_now(int number, const std::string& path) {
     const std::vector<DiskInfo> disks = list_tool_disks();
-    auto it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == chosen.number; });
-    if (it == disks.end()) throw Error(chosen.path + " is not connected any more");
-    const std::string why = tool_refusal(*it, {}, protected_disks);
-    if (!why.empty()) throw Error(it->path + " cannot be erased: " + why);
-    const std::string other = identity_mismatch(*it, expected);
+    auto it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+    if (it == disks.end()) throw Error(path + " is not connected any more");
+    return *it;
+}
+
+// Disk `chosen` opened exclusively, checked again (it may be erased, it is `expected`) both by
+// its path and on the opened device: its device number, serial number and size. A mounted
+// volume on it stops it with VolumesInUse, or with `force` is unmounted first (after every other
+// check passed), and the disk is then checked again from the start.
+std::unique_ptr<FdDevice> open_checked_disk(const DiskInfo& chosen, const DiskIdentity& expected,
+                                            const std::vector<int>& protected_disks, bool force = false) {
+    DiskInfo now = disk_now(chosen.number, chosen.path);
+    const std::string why = tool_refusal(now, {}, protected_disks, true);
+    if (!why.empty()) throw Error(now.path + " cannot be erased: " + why);
+    const std::string other = identity_mismatch(now, expected);
     if (!other.empty()) throw Error(other + "; nothing was written");
+    const std::vector<std::string> busy = mounted_volumes(now);
+    if (!busy.empty()) {
+        if (!force) throw VolumesInUse(busy);
+        unmount_volumes([&] { return mounted_volumes(disk_now(chosen.number, chosen.path)); }, unmount);
+        now = disk_now(chosen.number, chosen.path);
+        const std::string still = tool_refusal(now, {}, protected_disks);
+        if (!still.empty()) throw Error(now.path + " cannot be erased: " + still);
+        const std::string changed = identity_mismatch(now, expected);
+        if (!changed.empty()) throw Error(changed + "; nothing was written");
+    }
+    const DiskInfo* it = &now;
     auto dev = open_block_device(it->path);
     dev_t rdev = 0;
     const std::string sys = sys_of_fd(dev->fd(), rdev);
@@ -410,11 +438,11 @@ std::unique_ptr<FdDevice> open_checked_disk(const DiskInfo& chosen, const DiskId
 }  // namespace
 
 std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& chosen, const DiskIdentity& expected,
-                                           const std::vector<int>& protected_disks) {
-    return open_checked_disk(chosen, expected, protected_disks);
+                                           const std::vector<int>& protected_disks, bool force_dismount) {
+    return open_checked_disk(chosen, expected, protected_disks, force_dismount);
 }
 
-VolumeTarget find_wipe_volume(const std::string& given) {
+VolumeTarget find_wipe_volume(const std::string& given, bool mounted_ok) {
     const std::string name = given.starts_with("/dev/") ? given : "/dev/" + given;
     const std::vector<int> keep = protected_tool_disks();
     for (const DiskInfo& d : list_tool_disks()) {
@@ -422,7 +450,8 @@ VolumeTarget find_wipe_volume(const std::string& given) {
             if (v.name != name || v.offset == 0) continue;
             if (v.filesystem == "swap") throw Error(name + " is in use as swap");
             if (v.filesystem == "holder") throw Error(name + " is in use (LVM, RAID or encryption)");
-            if (!v.mount.empty()) throw Error(name + " is mounted on " + v.mount + "; unmount it first");
+            if (!v.mount.empty() && !mounted_ok)
+                throw Error(name + " is mounted on " + v.mount + "; unmount it first (or give --force-dismount)");
             if (std::find(keep.begin(), keep.end(), d.number) != keep.end())
                 throw Error(name + " is on a disk the system or Vaultik runs from");
             VolumeTarget t;
@@ -434,17 +463,32 @@ VolumeTarget find_wipe_volume(const std::string& given) {
             t.disk = d.number;
             t.id = partition_id(real_path("/sys/class/block/" + name.substr(5)));
             t.serial = d.serial;
+            t.mount = v.mount;
             return t;
         }
     }
     throw Error(given + " is not a partition of a disk of this computer (see vaultik disk list)");
 }
 
-std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v, const DiskIdentity& expected) {
+std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v, const DiskIdentity& expected,
+                                             bool force_dismount) {
     // As found now (it may be another partition than the one shown by now), then the opened one.
-    const VolumeTarget now = find_wipe_volume(v.name);
+    // Mounted: in use, or (forced) unmounted once every other check passed, then found again.
+    VolumeTarget now = find_wipe_volume(v.name, true);
     std::string other = volume_mismatch(now, expected);
     if (!other.empty()) throw Error(other + "; nothing was written");
+    if (!now.mount.empty()) {
+        if (!force_dismount) throw VolumesInUse({now.mount});
+        unmount_volumes(
+            [&] {
+                const VolumeTarget again = find_wipe_volume(v.name, true);
+                return again.mount.empty() ? std::vector<std::string>{} : std::vector<std::string>{again.mount};
+            },
+            unmount);
+        now = find_wipe_volume(v.name);
+        other = volume_mismatch(now, expected);
+        if (!other.empty()) throw Error(other + "; nothing was written");
+    }
     auto dev = open_block_device(now.device);
     dev_t rdev = 0;
     const std::string psys = sys_of_fd(dev->fd(), rdev);
@@ -488,7 +532,7 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
     // for another while it is open). sfdisk writes the new table through this very open
     // device (/proc/<pid>/fd/<n>), not by its name, which may belong to another disk by now.
     const DiskInfo& d = chosen;
-    auto dev = open_checked_disk(chosen, expected, protected_disks);
+    auto dev = open_checked_disk(chosen, expected, protected_disks, o.force_dismount);
     const std::uint64_t size = dev->size();
     const std::uint32_t sector = dev->block_size();
     dev_t rdev = 0;

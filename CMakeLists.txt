@@ -388,7 +388,10 @@ target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)
 # Windows starts in the process (and that are still running at exit) leave nothing the debug leak
 # check would report.
 target_compile_definitions(vaultik_tests PRIVATE DOCTEST_CONFIG_NO_MULTITHREADING
-    VAULTIK_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data")
+    VAULTIK_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
+    # The command-line program, for the tests of its disk tool options.
+    VAULTIK_TEST_CLI="$<TARGET_FILE:vaultik>")
+add_dependencies(vaultik_tests vaultik)
 add_test(NAME vaultik_tests COMMAND vaultik_tests)
 endif()
 

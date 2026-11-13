@@ -431,7 +431,8 @@ On Windows, `backup` reads from a Volume Shadow Copy when it runs as administrat
 a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses this.
 
 Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished but some files
-were skipped (see warnings), `4` cancelled, `5` repository in use by another run.
+were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
+tools) a drive is in use by another program (see [Drives in use](#drives-in-use)).
 
 ### Old snapshots and space
 
@@ -1073,7 +1074,9 @@ starts Windows from (the EFI system partition, or the "System Reserved" partitio
 computer, even when it is on another disk than Windows), the one Vaultik runs from, a disk with
 a page, swap or hibernation file, a dynamic disk, a Storage Spaces disk or a disk holding part of
 a volume over several disks, a disk Windows keeps offline or read-only (bring it online in Disk
-Management first), or (Linux) one that is mounted, used as swap or by LVM, RAID or encryption.
+Management first), or (Linux) one used as swap or by LVM, RAID or encryption. A drive some
+program is using (or, on Linux, a mounted one) can be forced closed (see
+[Drives in use](#drives-in-use)).
 When Vaultik cannot tell which disks Windows runs and starts from, it offers none. A disk from
 another computer that holds its own Windows can be erased. As for a disk image restore, the
 disk's model, size and serial number are shown and you type `ERASE DISK <number>` (Linux:
@@ -1103,7 +1106,7 @@ sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
 - **One drive (volume):** only that partition (`ERASE E:`, Linux `ERASE sdb1`); never the one
   Windows or Vaultik runs from, nor one with a page or hibernation file, nor an EFI system,
   reserved, recovery or active partition, nor a volume on a dynamic disk or over several disks.
-  It is locked and dismounted first, so close the programs using it. The drive is checked again
+  It is locked and dismounted first (see [Drives in use](#drives-in-use)). The drive is checked again
   just before it is written to, to be the one listed (Windows: its volume id, size and serial
   number; Linux: its partition id, where it starts, its size and the disk's serial number), so a
   USB stick swapped for another one in the meantime is not erased.
@@ -1127,6 +1130,33 @@ disk or drive is another one by then.
 vaultik disk wipe 2 --method dod3 --verify
 vaultik disk wipe --volume E: --confirm "ERASE E:"
 vaultik disk wipe-free D:
+```
+
+#### Drives in use
+
+Erasing a disk or drive and setting up a new disk first lock every drive on it (Windows), so
+nothing else writes to it meanwhile. That fails while a program has a file or folder open there:
+File Explorer, Windows Search, a virus scanner or backup software. Vaultik then stops before
+writing anything, names the drives (`F: is in use by another program`) and ends with exit code
+`6` (with `--json`: an `in_use` event and a `done` event with status `in_use`, both listing the
+`volumes`). The Vaultik window then asks whether to force the drive closed; with **Force close
+and erase** (or **Force close and set up**) it runs the same job again, with the same checks
+and without asking for the confirmation again, and the drive is taken away from the programs
+using it, as `format /X` does: they lose access to their open files there, and unsaved changes to
+those files are lost. From the command line, `--force-dismount` does that: each drive that
+cannot be locked is dismounted by force (`FSCTL_DISMOUNT_VOLUME`) and locked again, and stays
+locked until the job ends, so Windows cannot mount it again meanwhile; when even then it cannot
+be locked, the job stops with an error and nothing is written. On Linux a mounted partition is
+in use: `--force-dismount` unmounts it first with `umount` (never a lazy unmount), and a file
+system still busy stays mounted and stops the job, naming its mount point; a swap partition in
+use is still refused. On Linux the Vaultik window asks before it shows the `sudo` command, and
+adds `--force-dismount` to it only when you agree. Every other check (the disk the system,
+Windows or Vaultik runs from, page files, pools, the drive shown, the typed confirmation) comes
+first and is as strict as without the option; nothing is forced without it.
+
+```
+vaultik disk wipe --volume F: --confirm "ERASE F:" --force-dismount
+sudo vaultik disk init /dev/sdb --force-dismount
 ```
 
 **Solid-state drives (SSD, NVMe, memory cards):** overwriting reaches every block the computer can

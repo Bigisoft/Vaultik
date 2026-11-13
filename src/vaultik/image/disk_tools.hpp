@@ -17,6 +17,12 @@
 //     partition table or volume id are checked again on the opened device just before writing);
 // and only after the user typed the confirmation shown.
 //
+// A volume some program has open (Windows: it cannot be locked; Linux: it is mounted) stops the
+// tool with VolumesInUse, unless the caller asked to force it closed (--force-dismount): then
+// Windows dismounts it anyway, which takes it away from the programs using it (as format /X
+// does), and Linux unmounts it (never lazily). That happens only after every check above passed
+// and the user typed the confirmation.
+//
 // Windows: through the raw disk (\\.\PhysicalDriveN) with its volumes locked and dismounted
 // first; the new partition table is written with IOCTL_DISK_CREATE_DISK and
 // IOCTL_DISK_SET_DRIVE_LAYOUT_EX, the file system with format.com. Linux: through the block
@@ -24,6 +30,7 @@
 // administrator rights (root on Linux).
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -37,6 +44,49 @@
 namespace vaultik::image {
 
 // ---- the disks the tools may work on --------------------------------------------------------
+
+// Volumes another program uses, so the disk or volume cannot be written to: Windows cannot lock
+// them, or (Linux) they are mounted. `volumes` names each one ("F:", "/media/usb"). Nothing was
+// written when this is thrown; the same job with force_dismount takes them away from those
+// programs first.
+class VolumesInUse : public Error {
+public:
+    explicit VolumesInUse(std::vector<std::string> names);
+    std::vector<std::string> volumes;
+};
+
+// One volume of a disk or volume about to be written to, to lock (Windows: FSCTL_LOCK_VOLUME,
+// which fails while any other program has a file or the volume open). Fakes in tests.
+class VolumeLock {
+public:
+    virtual ~VolumeLock() = default;
+    virtual std::string name() const = 0;  // as the user knows it ("F:")
+    // Takes the lock; false while another program has the volume open.
+    virtual bool lock() = 0;
+    // Dismounts the volume although programs have it open (FSCTL_DISMOUNT_VOLUME without the
+    // lock): their open files and handles stop working, so the lock can be taken next.
+    virtual void force_dismount() = 0;
+    // Why the last lock failed, for the error message (empty when not known).
+    virtual std::string why() const { return {}; }
+};
+struct LockRetry {
+    int tries = 10;  // lock attempts after a forced dismount
+    std::chrono::milliseconds wait{300};  // between them
+};
+// Locks every volume. Every one is tried first; when some cannot be locked: without `force`,
+// throws VolumesInUse naming each of them (and nothing is forced); with `force`, dismounts each
+// of those by force and takes its lock again (retried `retry.tries` times), and throws Error
+// when one still cannot be locked. Locks already taken stay with the VolumeLock objects.
+void lock_volumes(const std::vector<VolumeLock*>& volumes, bool force, const LockRetry& retry = {});
+
+// Linux: the volumes of `d` that are mounted (not swap, LVM, RAID or encrypted ones, which
+// stay refused), named by their mount point.
+std::vector<std::string> mounted_volumes(const DiskInfo& d);
+// Linux, with --force-dismount: unmounts whatever `mounted()` lists (mount points) through
+// `unmount` (umount, never lazily; false with `why` set when it fails), until nothing is
+// listed. Throws Error naming the mount point that stays in use; nothing was written then.
+void unmount_volumes(const std::function<std::vector<std::string>()>& mounted,
+                     const std::function<bool(const std::string& point, std::string& why)>& unmount);
 
 // Every disk of this computer, as list_disks() shows them on Windows. Linux: the block devices of
 // /sys/block that are disks (also loop devices with a file attached), numbered by their device
@@ -52,7 +102,10 @@ std::vector<int> protected_tool_disks();
 // the partition the firmware starts it from, one holding a page file, swap file or hibernation
 // file; Linux: one mounted anywhere, used as swap or by LVM, RAID or encryption). Empty when it
 // may be erased.
-std::string tool_refusal(const DiskInfo& d, const std::vector<int>& running_from, const std::vector<int>& protected_disks);
+// With `mounted_ok` (Linux), a mounted volume is no reason: it is unmounted with
+// --force-dismount (see mounted_volumes).
+std::string tool_refusal(const DiskInfo& d, const std::vector<int>& running_from, const std::vector<int>& protected_disks,
+                         bool mounted_ok = false);
 
 // Why a volume in partition `p` (of a GPT disk when `gpt`) must not be erased on its own: it is
 // the EFI system partition, the Microsoft reserved partition, a recovery partition, one the
@@ -151,9 +204,10 @@ std::unique_ptr<WipeDevice> open_wipe_file(const std::string& path);
 
 // Opens disk `d` for erasing (administrator rights): checks again that it may be erased and that
 // it is still the disk the user chose (`expected`), then locks and dismounts its volumes (Linux:
-// opens it exclusively). Throws Error.
+// opens it exclusively). Throws VolumesInUse when a volume is in use, unless `force_dismount`
+// (then it is dismounted or unmounted by force first), and Error for anything else.
 std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& d, const DiskIdentity& expected,
-                                           const std::vector<int>& protected_disks);
+                                           const std::vector<int>& protected_disks, bool force_dismount = false);
 
 // A volume to erase: "E:" or "E:\" on Windows, a partition's device ("/dev/sdb1") on Linux.
 struct VolumeTarget {
@@ -170,19 +224,23 @@ struct VolumeTarget {
     // was swapped.
     std::string id;
     std::string serial;
+    std::string mount;  // Linux: where it is mounted now (only found with mounted_ok)
 };
 // The volume, or Error when it must not be erased: the one the system runs or starts from,
 // Vaultik's, one with a page or swap file, an EFI system, reserved, recovery or active
 // partition, one on a dynamic disk or over several disks, or (Linux) one that is mounted or in
-// use.
-VolumeTarget find_wipe_volume(const std::string& name);
+// use. With `mounted_ok` (Linux), a mounted one is found (with VolumeTarget::mount set), to be
+// unmounted with --force-dismount.
+VolumeTarget find_wipe_volume(const std::string& name, bool mounted_ok = false);
 // What the user saw of the volume, to pass along (--expect-size, --expect-serial, --expect-id).
 DiskIdentity volume_identity(const VolumeTarget& v);
 // Why `now` is not the volume `expected` describes; empty when it is.
 std::string volume_mismatch(const VolumeTarget& now, const DiskIdentity& expected);
 // Opens the volume for erasing (administrator rights): refuses when it is not `expected`, then
-// locks it and checks again on the opened device that it is. Throws Error.
-std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v, const DiskIdentity& expected);
+// locks it and checks again on the opened device that it is. Throws VolumesInUse when another
+// program uses it, unless `force_dismount` (as for open_wipe_disk), and Error otherwise.
+std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v, const DiskIdentity& expected,
+                                             bool force_dismount = false);
 
 // ---- wiping free space ------------------------------------------------------------------------
 
@@ -254,6 +312,7 @@ struct NewDiskOptions {
     std::string mount;        // Linux: mount the first partition here (empty: not mounted)
     std::vector<std::uint64_t> sizes;  // empty: one partition over the whole disk
     std::function<void(const std::string&)> on_step;  // what it does now, for the progress
+    bool force_dismount = false;  // take volumes in use away from the programs using them (see open_wipe_disk)
 };
 
 // Checks the options before anything is written: the file system exists on this system, the
@@ -266,7 +325,8 @@ struct NewDiskResult {
 };
 // Sets up disk `d` (administrator rights): checks it may be erased and is still `expected`, then
 // removes what is on it, writes a new partition table with the planned partitions, formats them
-// and gives the first one its letter (Windows) or mounts it (Linux). Throws Error.
+// and gives the first one its letter (Windows) or mounts it (Linux). Throws VolumesInUse (see
+// NewDiskOptions::force_dismount) or Error.
 NewDiskResult init_disk(const DiskInfo& d, const DiskIdentity& expected, const std::vector<int>& protected_disks,
                      const NewDiskOptions& options);
 
