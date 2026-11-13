@@ -37,6 +37,8 @@ struct DiskInfo {
     bool removable = false;
     bool system = false;  // Windows runs from it
     int partitions = 0;
+    std::string path;    // the device: "\\.\PhysicalDrive2", "/dev/sdb"
+    std::string media;   // "SSD", "HDD", or empty when the drive does not say
     std::vector<DiskVolume> volumes;
 };
 

@@ -34,6 +34,8 @@ where the packages (AppImage, Flatpak) are not tested yet; see
 - **Easy to get files back.** A timeline of versions, a search across all of them, the history
   of any file, a preview of pictures and code without restoring, and each version as a folder in
   File Explorer (or, on Linux, the file manager).
+- **Disk tools.** Set up a new disk (partition table, file system, drive letter) and erase a
+  disk, a drive or a drive's free space so the data cannot be brought back (drive cleanser).
 - **Several PCs in one view.** Computers that back up into the same place (a shared folder, a
   NAS, a cloud bucket) leave an encrypted status note there, so any of them shows how every
   computer's backups are doing.
@@ -322,6 +324,10 @@ vaultik recovery-kit -r E:\Backups\vaultik --out kit.pdf
 vaultik grew         --job documents --since 30d
 vaultik apps         --job documents latest --missing
 vaultik apps install --job documents Git.Git 7zip.7zip
+vaultik disk list
+vaultik disk init    2 --label Backups
+vaultik disk wipe    2 --method dod3 --verify
+vaultik disk wipe-free D:
 ```
 
 The repository can be any folder: an internal disk, a USB drive or a network share
@@ -1011,6 +1017,66 @@ computer opens a menu: it finds backups on the connected drives (or a network sh
 the password, lists the disk images and the disks, and after the typed confirmation restores
 and makes the disk start. Vaultik is one program with no other files, so the same drive works
 for every computer.
+
+### Setting up a new disk
+
+**Set up a new disk...** (Tools in the sidebar, or More next to **Create recovery drive...**)
+prepares a new, blank or unwanted disk for use, like a disk manager's "add new disk": it removes
+what is on it, writes a new partition table (GPT, the default, or MBR for older computers, up to
+2 TiB), makes one partition over the whole disk, formats it (NTFS or exFAT on Windows; ext4, NTFS
+or exFAT on Linux) with the name given, and gives it a drive letter (Windows) or mounts it on
+request (Linux). On a GPT disk Windows gets its usual 16 MiB reserved partition first. The
+disk Windows (or Linux) runs from and the one Vaultik runs from are never offered, nor a disk
+with a volume holding Windows, a page, swap or hibernation file, or (Linux) one that is mounted,
+used as swap or by LVM, RAID or encryption. As for a disk image restore, the disk's model, size
+and serial number are shown and you type `ERASE DISK <number>` (Linux: `ERASE DISK sdb`); the
+disk is checked again, before anything is written, to be the one shown. It needs administrator
+rights and runs in a window of its own (on Linux the window shows the `sudo` command to run in a
+terminal). Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
+`IOCTL_DISK_SET_DRIVE_LAYOUT_EX` after locking and dismounting the disk's volumes, and formats
+with `format.com`; Linux uses `wipefs`, `sfdisk` and `mkfs.ext4` (`mkfs.ntfs`, `mkfs.exfat`).
+
+```
+vaultik disk list
+vaultik disk init 2 --label Backups                       # GPT, NTFS, a free letter
+vaultik disk init 2 --mbr --fs exfat --label CAMERA --letter K
+vaultik disk init 2 --size 200G --size rest               # two partitions
+sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
+```
+
+### Drive cleanser
+
+**Drive cleanser...** (next to **Set up a new disk...**) erases so the data cannot be read back:
+
+- **A whole disk:** every byte of it, then its partition table goes too, so Windows shows it as
+  not initialised (Linux: no partitions). The same guards and typed `ERASE DISK <number>` as
+  above.
+- **One drive (volume):** only that partition (`ERASE E:`, Linux `ERASE sdb1`); never the one
+  Windows or Vaultik runs from, nor one with a page or hibernation file. It is locked and
+  dismounted first, so close the programs using it.
+- **Only the free space of a drive:** a temporary file fills the free space and is deleted again,
+  so files deleted earlier cannot be brought back. The files on the drive are not touched, it
+  needs no administrator rights, and it shows its progress and can be stopped in the window.
+
+The methods are one pass of zeros (the default, enough for today's drives), one pass of random
+data, and three passes (random, random, zeros, like DoD 5220.22-M); **Read the last pass back**
+checks that the drive kept what was written. The window that erases shows the pass, the speed and
+the time left; Ctrl+C there stops it (what was written stays overwritten). From the command
+line `--confirm` gives the confirmation beforehand, for scripts.
+
+```
+vaultik disk wipe 2 --method dod3 --verify
+vaultik disk wipe --volume E: --confirm "ERASE E:"
+vaultik disk wipe-free D:
+```
+
+**Solid-state drives (SSD, NVMe, memory cards):** overwriting reaches every block the computer can
+see, but not the spare blocks the drive keeps for itself (for wear levelling and bad blocks),
+which may still hold old data. Vaultik does not send the drive's own secure erase command (NVMe
+Format with Secure Erase, ATA SECURE ERASE): done wrong it can leave a drive locked or unusable,
+and many computers block it. Use the drive maker's tool or the computer's firmware setup for that,
+or keep the data on an encrypted drive (BitLocker, LUKS) from the start. Wiping free space does
+not reach small files NTFS keeps inside its file table, nor the slack at the end of files.
 
 ### Event Log
 

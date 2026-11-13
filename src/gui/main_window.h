@@ -19,6 +19,7 @@ class FindPage;
 class QAction;
 class QLabel;
 class QListWidget;
+class QMenu;
 class QListWidgetItem;
 class QPlainTextEdit;
 class QProgressBar;
@@ -79,6 +80,8 @@ private:
     void delete_job();
     // Pauses or resumes the selected job's schedule (saved like an edit of the job).
     void set_job_paused(bool paused);
+    // "Set up a new disk..." and "Drive cleanser..." in `menu`.
+    void add_disk_tools(QMenu* menu);
     void run_job();
     // A health check of the current job now: its weekly share of the data, or all of it.
     void check_job(bool full);
@@ -128,7 +131,8 @@ private:
     QPushButton* run_ = nullptr;
     QPushButton* restore_ = nullptr;
     QToolButton* more_ = nullptr;
-    QAction* pause_job_ = nullptr;  // "Pause schedule" or "Resume schedule" in the More menu
+    QAction* pause_job_ = nullptr;
+    QToolButton* tools_ = nullptr;  // the sidebar's Tools menu  // "Pause schedule" or "Resume schedule" in the More menu
     QWidget* progress_box_ = nullptr;
     QLabel* running_label_ = nullptr;
     QPushButton* pause_ = nullptr;

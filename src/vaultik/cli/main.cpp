@@ -32,6 +32,7 @@
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/image/disk.hpp"
+#include "vaultik/image/disk_tools.hpp"
 #include "vaultik/image/recovery_media.hpp"
 #include "vaultik/ops/apps.hpp"
 #include "vaultik/ops/backup.hpp"
@@ -440,6 +441,35 @@ Disk images (Windows, administrator rights except image disks and --vhdx):
                                ERASE <drive>, or give --confirm)
   recovery                     The restore menu the recovery drive starts with
 
+Disk tools (administrator rights on Windows, root on Linux, except disk list and wipe-free):
+  disk list                    The disks, with what keeps one from being erased
+  disk init <disk>             Set up a blank or unwanted disk for use: a new
+                               partition table, one partition over the whole disk,
+                               formatted, with a drive letter. Never the disk the
+                               system or Vaultik runs from, nor one with a system,
+                               boot or page file volume; asks you to type
+                               ERASE DISK <number> (Linux: ERASE DISK sdb)
+      --gpt, --mbr             The partition table (default GPT)
+      --fs <type>              ntfs (Windows default), exfat, or ext4 (Linux default)
+      --label <name>           The volume's name
+      --letter <X>             Windows: its drive letter (default: a free one)
+      --mount <folder>         Linux: mount it there
+      --size <size>            Partitions of these sizes instead (repeatable; "rest"
+                               as the last one takes what is left)
+      --confirm <text>         The confirmation, given beforehand
+  disk wipe <disk>             Erase a whole disk so its data cannot be read back,
+                               then leave it without a partition table (the same
+                               guards and confirmation as disk init)
+      --volume <X:>            ... only this volume instead (Linux: /dev/sdb1);
+                               asks you to type ERASE X:
+      --method <m>             zeros (one pass, default), random (one pass), or
+                               dod3 (random, random, zeros, as DoD 5220.22-M)
+      --verify                 Read the last pass back and compare it
+  disk wipe-free <folder>      Overwrite the free space of the drive holding the
+                               folder (or X:), so deleted files cannot be brought
+                               back; files on it are not touched
+      --method <m>             As for disk wipe
+
 <snapshot> is an ID prefix (at least 4 characters) or "latest".
 
 Resource use (any command):
@@ -499,11 +529,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--method", "--volume", "--jobs"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -2755,6 +2785,7 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
 }
 
 #include "vaultik/cli/image_cmds.inc"
+#include "vaultik/cli/disk_cmds.inc"
 
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
@@ -4690,6 +4721,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "estimate") return cmd_estimate(a);
     if (a.command == "find") return cmd_find(a);
     if (a.command == "image") return cmd_image(a);
+    if (a.command == "disk") return cmd_disk(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }
 

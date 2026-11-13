@@ -152,6 +152,7 @@ add_library(vaultik_core STATIC
     src/vaultik/image/ntfs.cpp
     src/vaultik/image/image.cpp
     src/vaultik/image/disk_common.cpp
+    src/vaultik/image/disk_tools.cpp
     src/vaultik/image/recovery_media.cpp
 )
 target_include_directories(vaultik_core PUBLIC src)
@@ -208,6 +209,7 @@ else()
         src/vaultik/platform/drive_health_posix.cpp
         src/vaultik/platform/usn_journal_posix.cpp
         src/vaultik/image/disk_posix.cpp
+        src/vaultik/image/disk_tools_posix.cpp
     )
     target_compile_definitions(vaultik_core PUBLIC _GNU_SOURCE _FILE_OFFSET_BITS=64)
     target_compile_options(vaultik_core PUBLIC -Wall -Wextra -Wpedantic $<$<CONFIG:Release>:-O2>)
@@ -279,6 +281,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/job_dialog.cpp
             src/gui/restore_dialog.cpp
             src/gui/image_dialogs.cpp
+            src/gui/disk_tools_dialogs.cpp
             src/gui/apps_dialog.cpp
             src/gui/key_dialog.cpp
             src/gui/cloud_dialog.cpp
@@ -374,6 +377,7 @@ add_executable(vaultik_tests
     tests/test_virt.cpp
     tests/test_containers.cpp
     tests/test_image.cpp
+    tests/test_disk_tools.cpp
     tests/test_posix.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)

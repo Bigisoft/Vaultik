@@ -6,13 +6,17 @@
 #include <cstring>
 #include <thread>
 
+#include "vaultik/crypto/crypto.hpp"
 #include "vaultik/image/disk.hpp"
+#include "vaultik/image/disk_tools.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/vss.hpp"
 #include "vaultik/util/win.hpp"
 #include "vaultik/util/win_handle.hpp"
 
+#include <objbase.h>
 #include <winioctl.h>
 #include <virtdisk.h>
 
@@ -420,6 +424,13 @@ bool probe_disk(HANDLE h, int n, DiskInfo& d) {
     if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &al, sizeof al, &got, nullptr) &&
         got >= sizeof al && al.BytesPerPhysicalSector != 0)
         d.physical_sector_size = al.BytesPerPhysicalSector;
+    // A drive without a seek penalty is a solid-state one.
+    q.PropertyId = StorageDeviceSeekPenaltyProperty;
+    DEVICE_SEEK_PENALTY_DESCRIPTOR seek{};
+    if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &seek, sizeof seek, &got, nullptr) &&
+        got >= sizeof seek)
+        d.media = seek.IncursSeekPenalty ? "HDD" : "SSD";
+    d.path = narrow(disk_path(n));
 
     const RawLayout l = read_layout(h);
     if (l.style == PARTITION_STYLE_GPT) {
@@ -877,6 +888,342 @@ std::string repair_boot(int number) {
     if (code != 0) throw Error("bcdboot failed (exit code " + std::to_string(code) + "): " + output);
     return "Boot files written from " + win_root + "Windows to the " +
            (uefi ? std::string("EFI system partition") : std::string("active partition")) + ".";
+}
+
+
+// ---- disk tools (disk_tools.hpp) -------------------------------------------------------------
+
+namespace {
+
+// A disk or volume opened for writing, with its volumes locked and dismounted until it is
+// closed. Unbuffered: every write goes through an aligned buffer.
+class WinWipeDevice : public WipeDevice {
+public:
+    WinWipeDevice(UniqueHandle h, std::vector<UniqueHandle> locks, std::uint64_t size, std::uint32_t sector, std::string what)
+        : h_(std::move(h)), locks_(std::move(locks)), size_(size), sector_(sector), what_(std::move(what)), buf_(4u << 20) {}
+    std::uint64_t size() const override { return size_; }
+    std::uint32_t block_size() const override { return sector_; }
+    void write_at(std::uint64_t offset, ByteSpan data) override {
+        std::size_t done = 0;
+        while (done < data.size()) {
+            const std::size_t n = std::min(buf_.size(), data.size() - done);
+            std::memcpy(buf_.data(), data.data() + done, n);
+            OVERLAPPED ov{};
+            const std::uint64_t at = offset + done;
+            ov.Offset = static_cast<DWORD>(at);
+            ov.OffsetHigh = static_cast<DWORD>(at >> 32);
+            DWORD put = 0;
+            if (!WriteFile(h_.get(), buf_.data(), static_cast<DWORD>(n), &put, &ov) || put != n)
+                throw_last_error("writing " + what_ + " at byte " + std::to_string(at));
+            done += n;
+        }
+    }
+    void read_at(std::uint64_t offset, std::uint8_t* dst, std::size_t length) override {
+        vaultik::image::read_at(h_.get(), offset, dst, length, buf_, what_);
+    }
+    void flush() override {
+        if (!FlushFileBuffers(h_.get())) throw_last_error("writing " + what_);
+    }
+
+private:
+    UniqueHandle h_;
+    std::vector<UniqueHandle> locks_;
+    std::uint64_t size_;
+    std::uint32_t sector_;
+    std::string what_;
+    AlignedBuffer buf_;
+};
+
+class WinFillFile : public FillFile {
+public:
+    explicit WinFillFile(UniqueHandle h) : h_(std::move(h)) {}
+    FillResult write_at(std::uint64_t offset, ByteSpan data) override {
+        OVERLAPPED ov{};
+        ov.Offset = static_cast<DWORD>(offset);
+        ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+        DWORD put = 0;
+        if (WriteFile(h_.get(), data.data(), static_cast<DWORD>(data.size()), &put, &ov) && put == data.size())
+            return FillResult::Written;
+        const DWORD e = GetLastError();
+        if (e == ERROR_FILE_TOO_LARGE) return FillResult::TooLarge;
+        if (e == ERROR_DISK_FULL || e == ERROR_HANDLE_DISK_FULL || put != 0) return FillResult::Full;
+        throw_win32("writing the free space", e);
+    }
+    void flush() override {
+        if (!FlushFileBuffers(h_.get()) && GetLastError() != ERROR_DISK_FULL) throw_last_error("writing the free space");
+    }
+
+private:
+    UniqueHandle h_;
+};
+
+// Brings a disk online and writable when Windows keeps it offline or read-only (the SAN policy
+// of servers does that to new disks).
+void make_writable(HANDLE h) {
+    GET_DISK_ATTRIBUTES attrs{};
+    DWORD got = 0;
+    if (!DeviceIoControl(h, IOCTL_DISK_GET_DISK_ATTRIBUTES, nullptr, 0, &attrs, sizeof attrs, &got, nullptr)) return;
+    const DWORDLONG bad = attrs.Attributes & (DISK_ATTRIBUTE_OFFLINE | DISK_ATTRIBUTE_READ_ONLY);
+    if (bad == 0) return;
+    SET_DISK_ATTRIBUTES set{};
+    set.Version = sizeof set;
+    set.Persist = TRUE;
+    set.Attributes = 0;
+    set.AttributesMask = bad;
+    DeviceIoControl(h, IOCTL_DISK_SET_DISK_ATTRIBUTES, &set, sizeof set, nullptr, 0, &got, nullptr);
+    DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
+}
+
+// Disk `d` opened for writing, checked to be the disk the user chose, with every volume on it
+// locked and dismounted (the handles in `locks`).
+UniqueHandle open_locked_disk(const DiskInfo& d, const DiskIdentity& expected, std::vector<UniqueHandle>& locks) {
+    UniqueHandle disk = open_device(disk_path(d.number), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
+    if (!disk.valid()) throw_last_error("opening disk " + std::to_string(d.number) + " for writing");
+    DiskInfo now;
+    if (!probe_disk(disk.get(), d.number, now)) throw Error("disk " + std::to_string(d.number) + " has no medium");
+    const std::string other = identity_mismatch(now, expected);
+    if (!other.empty()) throw Error(other + "; nothing was written");
+    for (const DiskVolume& v : volumes_of(d.number)) {
+        UniqueHandle h = open_device(volume_device(v.name), GENERIC_READ | GENERIC_WRITE);
+        if (!h.valid()) throw_last_error("opening " + (v.mount.empty() ? v.name : v.mount));
+        DWORD got = 0;
+        if (!DeviceIoControl(h.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr))
+            throw Error((v.mount.empty() ? std::string("a volume of the disk") : v.mount) +
+                        " is in use; close every program using it and try again");
+        DeviceIoControl(h.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+        locks.push_back(std::move(h));
+    }
+    make_writable(disk.get());
+    return disk;
+}
+
+// The disk at d.number now, checked again: it may be erased and is still the one chosen.
+DiskInfo recheck(const DiskInfo& d, const DiskIdentity& expected, const std::vector<int>& protected_disks) {
+    if (!os::process_elevated()) throw Error("writing to a disk needs administrator rights");
+    const std::vector<DiskInfo> disks = list_disks();
+    auto it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& x) { return x.number == d.number; });
+    if (it == disks.end()) throw Error("disk " + std::to_string(d.number) + " is not connected any more");
+    const std::string why = tool_refusal(*it, system_disks(), protected_disks);
+    if (!why.empty()) throw Error("disk " + std::to_string(d.number) + " cannot be erased: " + why);
+    const std::string other = identity_mismatch(*it, expected);
+    if (!other.empty()) throw Error(other + "; nothing was written");
+    return *it;
+}
+
+std::string drive_of(const std::string& path) {
+    return path.size() >= 2 && path[1] == ':' ? upper(path.substr(0, 2)) : std::string();
+}
+
+}  // namespace
+
+std::vector<DiskInfo> list_tool_disks() {
+    return list_disks();
+}
+
+std::vector<int> protected_tool_disks() {
+    return os::disk_numbers(os::executable_path());
+}
+
+std::unique_ptr<WipeDevice> open_wipe_file(const std::string& path) {
+    UniqueHandle h(CreateFileW(long_path(full_path(widen(path))).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr));
+    if (!h.valid()) throw_last_error("opening " + path);
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(h.get(), &size)) throw_last_error("reading the size of " + path);
+    const auto bytes = static_cast<std::uint64_t>(size.QuadPart);
+    return std::make_unique<WinWipeDevice>(std::move(h), std::vector<UniqueHandle>{}, bytes, bytes % 512 == 0 ? 512 : 1, path);
+}
+
+std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& chosen, const DiskIdentity& expected,
+                                           const std::vector<int>& protected_disks) {
+    const DiskInfo d = recheck(chosen, expected, protected_disks);
+    std::vector<UniqueHandle> locks;
+    UniqueHandle disk = open_locked_disk(d, expected, locks);
+    return std::make_unique<WinWipeDevice>(std::move(disk), std::move(locks), d.size, d.sector_size,
+                                           "disk " + std::to_string(d.number));
+}
+
+VolumeTarget find_wipe_volume(const std::string& given) {
+    std::string name = upper(given);
+    while (name.size() > 2 && (name.back() == '\\' || name.back() == '/')) name.pop_back();
+    if (name.size() == 1) name += ":";
+    if (name.size() != 2 || name[1] != ':' || name[0] < 'A' || name[0] > 'Z')
+        throw Error("give the volume as a drive letter, such as E:");
+    const std::wstring root = widen(name + "\\");
+    wchar_t volume[MAX_PATH + 1] = {};
+    if (!GetVolumeNameForVolumeMountPointW(root.c_str(), volume, MAX_PATH)) throw Error(name + " is not a drive of this computer");
+    const UINT type = GetDriveTypeW(root.c_str());
+    if (type == DRIVE_REMOTE || type == DRIVE_CDROM) throw Error(name + " is not a drive of this computer");
+    if (drive_of(windows_root()) == name) throw Error("Windows is running from " + name);
+    if (drive_of(os::executable_path()) == name) throw Error("Vaultik is running from " + name);
+    for (const char* file : {"pagefile.sys", "swapfile.sys", "hiberfil.sys"})
+        if (os::exists(name + "\\" + file)) throw Error(name + " holds the Windows page or hibernation file");
+    for (const VolumeOnDisk& v : all_volumes()) {
+        if (upper(v.v.name) != upper(narrow(volume))) continue;
+        VolumeTarget t;
+        t.name = name;
+        t.device = narrow(volume_device(v.v.name));
+        t.size = v.v.length;
+        t.filesystem = v.v.filesystem;
+        t.label = v.v.label;
+        t.disk = v.disk;
+        return t;
+    }
+    throw Error(name + " spans several disks or is not on a disk of this computer");
+}
+
+std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v) {
+    if (!os::process_elevated()) throw Error("erasing a volume needs administrator rights");
+    UniqueHandle h = open_device(widen(v.device), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
+    if (!h.valid()) throw_last_error("opening " + v.name + " for writing");
+    DWORD got = 0;
+    if (!DeviceIoControl(h.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr))
+        throw Error(v.name + " is in use; close every program using it (and File Explorer windows on it) and try again");
+    DeviceIoControl(h.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+    // Its last sectors too, past the end of the file system.
+    DeviceIoControl(h.get(), FSCTL_ALLOW_EXTENDED_DASD_IO, nullptr, 0, nullptr, 0, &got, nullptr);
+    GET_LENGTH_INFORMATION len{};
+    if (!DeviceIoControl(h.get(), IOCTL_DISK_GET_LENGTH_INFO, nullptr, 0, &len, sizeof len, &got, nullptr))
+        throw_last_error("reading the size of " + v.name);
+    std::uint32_t sector = 512;
+    const Bytes geo = ioctl(h.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, 1024);
+    if (geo.size() >= sizeof(DISK_GEOMETRY)) {
+        const auto* g = reinterpret_cast<const DISK_GEOMETRY_EX*>(geo.data());
+        if (g->Geometry.BytesPerSector != 0) sector = g->Geometry.BytesPerSector;
+    }
+    const auto size = static_cast<std::uint64_t>(len.Length.QuadPart) / sector * sector;
+    return std::make_unique<WinWipeDevice>(std::move(h), std::vector<UniqueHandle>{}, size, sector, v.name);
+}
+
+void disk_erased(const DiskInfo& d) {
+    UniqueHandle h = open_device(disk_path(d.number), GENERIC_READ | GENERIC_WRITE);
+    if (!h.valid()) return;
+    DWORD got = 0;
+    DeviceIoControl(h.get(), IOCTL_DISK_DELETE_DRIVE_LAYOUT, nullptr, 0, nullptr, 0, &got, nullptr);
+    DeviceIoControl(h.get(), IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
+}
+
+std::unique_ptr<FillFile> create_fill_file(const std::string& path) {
+    UniqueHandle h(CreateFileW(long_path(full_path(widen(path))).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+    if (!h.valid()) throw_last_error("creating " + path);
+    return std::make_unique<WinFillFile>(std::move(h));
+}
+
+NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, const std::vector<int>& protected_disks,
+                     const NewDiskOptions& o) {
+    check_init_options(o);
+    const std::string fs = o.filesystem.empty() ? std::string("ntfs") : o.filesystem;
+    const bool gpt = o.style == TableStyle::Gpt;
+    const auto step = [&](const std::string& s) {
+        if (o.on_step) o.on_step(s);
+    };
+    const DiskInfo d = recheck(chosen, expected, protected_disks);
+    const std::vector<NewPartition> parts = plan_partitions(d.size, d.sector_size, o.style, o.sizes, gpt);
+    const std::string disk_name = "disk " + std::to_string(d.number);
+    {
+        std::vector<UniqueHandle> locks;
+        UniqueHandle disk = open_locked_disk(d, expected, locks);
+        HANDLE h = disk.get();
+        DWORD got = 0;
+        step("Removing the partitions of " + disk_name);
+        DeviceIoControl(h, IOCTL_DISK_DELETE_DRIVE_LAYOUT, nullptr, 0, nullptr, 0, &got, nullptr);
+        DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
+
+        step(std::string("Writing a new ") + (gpt ? "GPT" : "MBR") + " partition table");
+        CREATE_DISK cd{};
+        GUID disk_id{};
+        std::uint32_t signature = 0;
+        if (gpt) {
+            if (FAILED(CoCreateGuid(&disk_id))) throw Error("cannot make a disk id");
+            cd.PartitionStyle = PARTITION_STYLE_GPT;
+            cd.Gpt.DiskId = disk_id;
+            cd.Gpt.MaxPartitionCount = 128;
+        } else {
+            while (signature == 0) random_bytes(std::span(reinterpret_cast<std::uint8_t*>(&signature), sizeof signature));
+            cd.PartitionStyle = PARTITION_STYLE_MBR;
+            cd.Mbr.Signature = signature;
+        }
+        if (!DeviceIoControl(h, IOCTL_DISK_CREATE_DISK, &cd, sizeof cd, nullptr, 0, &got, nullptr))
+            throw_last_error("writing a new partition table on " + disk_name);
+        DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
+
+        // The new layout: the table Windows just wrote (for GPT its usable area), with the partitions.
+        const DWORD count = gpt ? static_cast<DWORD>(parts.size()) : 4;
+        Bytes buf(offsetof(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) + count * sizeof(PARTITION_INFORMATION_EX));
+        auto* dl = reinterpret_cast<DRIVE_LAYOUT_INFORMATION_EX*>(buf.data());
+        if (gpt) {
+            const Bytes now = ioctl(h, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, nullptr, 0, 16384);
+            if (now.size() < offsetof(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry))
+                throw_last_error("reading the new partition table of " + disk_name);
+            dl->Gpt = reinterpret_cast<const DRIVE_LAYOUT_INFORMATION_EX*>(now.data())->Gpt;
+        } else {
+            dl->Mbr.Signature = signature;
+        }
+        dl->PartitionStyle = gpt ? PARTITION_STYLE_GPT : PARTITION_STYLE_MBR;
+        dl->PartitionCount = count;
+        for (DWORD i = 0; i < count; ++i) {
+            PARTITION_INFORMATION_EX& pe = dl->PartitionEntry[i];
+            pe.PartitionStyle = dl->PartitionStyle;
+            pe.RewritePartition = TRUE;
+            if (i >= parts.size()) continue;  // an unused MBR entry
+            const NewPartition& p = parts[i];
+            pe.StartingOffset.QuadPart = static_cast<LONGLONG>(p.offset);
+            pe.PartitionLength.QuadPart = static_cast<LONGLONG>(p.length);
+            pe.PartitionNumber = i + 1;
+            if (gpt) {
+                pe.Gpt.PartitionType = to_guid(std::string(p.reserved ? kMsrType : kBasicDataType));
+                if (FAILED(CoCreateGuid(&pe.Gpt.PartitionId))) throw Error("cannot make a partition id");
+                pe.Gpt.Attributes = 0;
+                const wchar_t* label = p.reserved ? L"Microsoft reserved partition" : L"Basic data partition";
+                wcsncpy_s(pe.Gpt.Name, label, _TRUNCATE);
+            } else {
+                pe.Mbr.PartitionType = PARTITION_IFS;
+                pe.Mbr.BootIndicator = FALSE;
+                pe.Mbr.RecognizedPartition = TRUE;
+                pe.Mbr.HiddenSectors = static_cast<DWORD>(p.offset / d.sector_size);
+            }
+        }
+        if (!DeviceIoControl(h, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, buf.data(), static_cast<DWORD>(buf.size()), nullptr, 0, &got,
+                             nullptr))
+            throw_last_error("writing the partitions of " + disk_name);
+        DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
+        if (!FlushFileBuffers(h)) throw_last_error("writing " + disk_name);
+    }  // the old volumes' locks go here
+
+    NewDiskResult r;
+    bool first = true;
+    for (const NewPartition& p : parts) {
+        if (p.reserved) continue;
+        // The volume Windows makes for the partition, a moment later.
+        std::optional<DiskVolume> vol;
+        for (int i = 0; i < 100 && !vol; ++i) {
+            for (const DiskVolume& v : volumes_of(d.number))
+                if (v.offset == p.offset) vol = v;
+            if (!vol) std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        if (!vol) throw Error("Windows did not make a volume for the new partition of " + disk_name);
+        char letter = first && o.letter != 0 ? static_cast<char>(std::toupper(static_cast<unsigned char>(o.letter))) : 0;
+        if (letter == 0 && !vol->mount.empty() && vol->mount.size() <= 3) letter = vol->mount[0];
+        if (letter == 0) letter = free_letter();
+        if (letter == 0) throw Error("no drive letter is free for the new partition");
+        const std::string root = std::string(1, letter) + ":\\";
+        if (upper(vol->mount) != upper(root)) {
+            if (!vol->mount.empty()) DeleteVolumeMountPointW(widen(vol->mount).c_str());
+            if (!SetVolumeMountPointW(widen(root).c_str(), widen(vol->name).c_str()))
+                throw_last_error("giving the new partition the letter " + root.substr(0, 2));
+        }
+        step("Formatting " + root.substr(0, 2) + " as " + (fs == "ntfs" ? std::string("NTFS") : std::string("exFAT")));
+        const std::string label = o.label.empty() ? std::string("New Volume") : o.label;
+        std::string output;
+        const int code = os::run_command({"format.com", root.substr(0, 2), fs == "ntfs" ? "/FS:NTFS" : "/FS:exFAT", "/Q",
+                                          "/V:" + label, "/Y"},
+                                         &output);
+        if (code != 0) throw Error("format.com failed on " + root.substr(0, 2) + " (exit code " + std::to_string(code) + "): " + trim(output));
+        r.volumes.push_back(root);
+        first = false;
+    }
+    return r;
 }
 
 }  // namespace vaultik::image

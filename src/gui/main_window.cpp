@@ -56,6 +56,7 @@
 #include "report_dialog.h"
 #include "grew_dialog.h"
 #include "restore_dialog.h"
+#include "disk_tools_dialogs.h"
 #include "image_dialogs.h"
 #include "app_settings.h"
 #include "runner.h"
@@ -914,6 +915,22 @@ QWidget* MainWindow::build_sidebar() {
     connect(computers_, &QPushButton::clicked, this, &MainWindow::show_computers);
     l->addWidget(computers_);
 
+    // Tools that do not belong to one job.
+    tools_ = new QToolButton;
+    tools_->setText(tr("Tools"));
+    tools_->setProperty("role", "flat");
+    tools_->setPopupMode(QToolButton::InstantPopup);
+    tools_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    auto* tools = new QMenu(tools_);  // owned by the button
+    tools->setToolTipsVisible(true);
+    tools->addAction(tr("Create recovery drive..."), this, [this] {
+        RecoveryDriveDialog dialog(jobs_, this);
+        dialog.exec();
+    });
+    add_disk_tools(tools);
+    tools_->setMenu(tools);
+    l->addWidget(tools_);
+
     settings_ = new QPushButton(tr("Settings..."));
     settings_->setProperty("role", "flat");
     settings_->setToolTip(tr("Notifications, and starting Vaultik in the notification area"));
@@ -1018,6 +1035,7 @@ QWidget* MainWindow::build_job_page() {
         RecoveryDriveDialog dialog(jobs_, this);
         dialog.exec();
     })->setToolTip(tr("A USB stick or ISO file that starts a computer and restores a disk image onto it"));
+    add_disk_tools(menu);
     menu->addAction(tr("Refresh"), this, [this] {
         repos_.clear();
         reload_jobs(current_job() ? current_job()->id : std::string());
@@ -1909,6 +1927,17 @@ void MainWindow::edit_job() {
         repos_.erase(dialog.job().id);
         reload_jobs(dialog.job().id);
     }
+}
+
+void MainWindow::add_disk_tools(QMenu* menu) {
+    menu->addAction(tr("Set up a new disk..."), this, [this] {
+        NewDiskDialog dialog(this);
+        dialog.exec();
+    })->setToolTip(tr("Partition and format a new or unwanted disk, and give it a drive letter"));
+    menu->addAction(tr("Drive cleanser..."), this, [this] {
+        DriveCleanserDialog dialog(this);
+        dialog.exec();
+    })->setToolTip(tr("Erase a disk, a drive or a drive's free space so the data cannot be brought back"));
 }
 
 void MainWindow::set_job_paused(bool paused) {
