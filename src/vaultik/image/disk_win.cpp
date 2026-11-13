@@ -1150,13 +1150,15 @@ public:
         if (try_lock()) return true;
         if (!forced_) return false;
         for (int i = 0; i < 3; ++i) {
+            // The handle that dismounted it keeps the old, dismounted volume: let go of it first,
+            // so the next open mounts the volume again.
             dismount();
-            UniqueHandle again = open_device(device_, GENERIC_READ | GENERIC_WRITE, flags_);
-            if (!again.valid()) {
-                why_ = "Windows error " + std::to_string(GetLastError()) + " opening it again";
+            h_.reset();
+            h_ = open_device(device_, GENERIC_READ | GENERIC_WRITE, flags_);
+            if (!h_.valid()) {
+                note("opening it again", GetLastError());
                 continue;
             }
-            h_ = std::move(again);
             if (try_lock()) return true;
         }
         return false;
@@ -1173,8 +1175,13 @@ private:
     bool try_lock() {
         DWORD got = 0;
         if (h_.valid() && DeviceIoControl(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr)) return true;
-        why_ = "Windows error " + std::to_string(GetLastError()) + " locking it";
+        note("locking it", h_.valid() ? GetLastError() : ERROR_INVALID_HANDLE);
         return false;
+    }
+    // The Windows errors of the attempts, each once ("Windows error 5 locking it, ...").
+    void note(const char* what, DWORD e) {
+        const std::string one = "Windows error " + std::to_string(e) + " " + what;
+        if (why_.find(one) == std::string::npos) why_ += (why_.empty() ? "" : ", ") + one;
     }
     void dismount() {
         DWORD got = 0;
