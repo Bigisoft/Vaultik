@@ -95,13 +95,8 @@ void show_recovery_key(QWidget* parent, const QString& key, const QString& locat
                                                           QDir::homePath() + "/Vaultik recovery key.txt",
                                                           QObject::tr("Text files (*.txt)"));
         if (path.isEmpty()) return;
-        QFile f(path);
         const QByteArray text = QObject::tr("Vaultik recovery key for the backup in %1\n%2\n").arg(location, key).toUtf8();
-        // Readable by the user only when it is created (on Windows a file in the user's folders is
-        // private already).
-        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text,
-                    QFileDevice::ReadOwner | QFileDevice::WriteOwner) ||
-            f.write(text) != text.size())
+        if (!save_private_file(path, [&](QIODevice& f) { return f.write(text) == text.size(); }, true))
             QMessageBox::warning(&dialog, dialog.windowTitle(), QObject::tr("Cannot write %1.").arg(path));
     });
     QObject::connect(done, &QPushButton::clicked, &dialog, &QDialog::accept);

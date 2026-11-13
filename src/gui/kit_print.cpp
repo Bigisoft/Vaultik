@@ -74,23 +74,14 @@ void print_recovery_kit(QWidget* parent, const QString& key, const QString& loca
         plain_warning(parent, title, QString::fromUtf8(e.what()));
         return;
     }
-    bool ok = false;
-    {
-        QFile f(path);
-        // Readable by the user only when it is created (on Windows a file in the user's folders is
-        // private already).
-        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
-            if (as_web) {
-                const QByteArray html = QByteArray::fromStdString(jobs::render_kit_html(kit, translated));
-                ok = f.write(html) == html.size();
-            } else {
-                write_pdf(f, kit);
-                ok = f.error() == QFileDevice::NoError && f.size() > 0;
-            }
-            f.close();
-            ok = ok && f.error() == QFileDevice::NoError;
+    const bool ok = save_private_file(path, [&](QIODevice& f) {
+        if (as_web) {
+            const QByteArray html = QByteArray::fromStdString(jobs::render_kit_html(kit, translated));
+            return f.write(html) == html.size();
         }
-    }
+        write_pdf(f, kit);
+        return f.size() > 0;
+    });
     secure_wipe(kit.key.data(), kit.key.size());
     if (!ok) {
         plain_warning(parent, title, QObject::tr("Cannot write %1.").arg(QDir::toNativeSeparators(path)));
