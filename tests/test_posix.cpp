@@ -161,6 +161,75 @@ TEST_CASE("POSIX: run_command clean environment and extra variables") {
     ::unsetenv("VAULTIK_TEST_LEAK");
 }
 
+TEST_CASE("POSIX: a program's output and input as streams") {
+    std::string text;
+    for (int i = 0; i < 20000; ++i) text += "line " + std::to_string(i) + " of the streamed output\n";
+    PosixTemp tmp;
+    const std::string in = os::join(tmp.path, "in.txt");
+    { std::ofstream(in, std::ios::binary) << text; }
+
+    SUBCASE("reading a program's output, with extra variables on top of this process's") {
+        ::setenv("VAULTIK_TEST_KEPT", "kept", 1);
+        os::PipedProcess p({"sh", "-c", "printf '%s|%s|' \"$VAULTIK_TEST_VAR\" \"$VAULTIK_TEST_KEPT\"; cat \"$1\"", "sh", in},
+                           os::PipedProcess::Direction::FromProgram, {{"VAULTIK_TEST_VAR", "a b"}});
+        std::string got;
+        std::uint8_t buf[100000];
+        while (const std::size_t n = p.read(buf, sizeof buf)) got.append(reinterpret_cast<const char*>(buf), n);
+        CHECK(p.wait() == 0);
+        CHECK(got == "a b|kept|" + text);
+        CHECK(p.messages().empty());
+        ::unsetenv("VAULTIK_TEST_KEPT");
+    }
+    SUBCASE("writing a program's input") {
+        // cat prints what it reads: its output is kept as messages (the first 64 KiB).
+        os::PipedProcess p({"cat"}, os::PipedProcess::Direction::ToProgram);
+        const std::string small = text.substr(0, 30000);
+        p.write(ByteSpan(reinterpret_cast<const std::uint8_t*>(small.data()), small.size()));
+        CHECK(p.wait() == 0);
+        CHECK(p.messages() == small);
+
+        // All of a large stream reaches the program.
+        const std::string out = os::join(tmp.path, "out.txt");
+        os::PipedProcess copy({"sh", "-c", "cat > \"$1\"", "sh", out}, os::PipedProcess::Direction::ToProgram);
+        for (int i = 0; i < 20; ++i) copy.write(ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+        CHECK(copy.wait() == 0);
+        CHECK(fs::file_size(out) == 20 * text.size());
+    }
+    SUBCASE("a program that stops reading gives an error, not SIGPIPE") {
+        os::PipedProcess p({"sh", "-c", "exit 4"}, os::PipedProcess::Direction::ToProgram);
+        // (Written until the program has ended and its end of the pipe is closed.)
+        bool failed = false;
+        for (int i = 0; i < 200 && !failed; ++i) {
+            try {
+                p.write(ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+            } catch (const os::OsError&) {
+                failed = true;
+            }
+        }
+        CHECK(failed);
+        CHECK(p.wait() == 4);
+    }
+    SUBCASE("exit codes, messages, programs that cannot start, and stopping") {
+        os::PipedProcess fails({"sh", "-c", "echo oops >&2; exit 3"}, os::PipedProcess::Direction::FromProgram);
+        std::uint8_t buf[16];
+        CHECK(fails.read(buf, sizeof buf) == 0);
+        CHECK(fails.wait() == 3);
+        CHECK(fails.wait() == 3);
+        CHECK(fails.messages().find("oops") != std::string::npos);
+
+        CHECK_THROWS_AS(os::PipedProcess({"/nonexistent/vaultik-no-such-program"}, os::PipedProcess::Direction::FromProgram),
+                        os::OsError);
+
+        // stop() ends the program and what it started; so does the object going away.
+        const auto start = std::chrono::steady_clock::now();
+        os::PipedProcess slow({"sh", "-c", "sleep 30 & sleep 30"}, os::PipedProcess::Direction::FromProgram);
+        slow.stop();
+        CHECK(slow.wait() != 0);
+        { os::PipedProcess dropped({"sh", "-c", "sleep 30 & sleep 30"}, os::PipedProcess::Direction::ToProgram); }
+        CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
+    }
+}
+
 TEST_CASE("POSIX: process ids past the pid_t range are not alive") {
     CHECK(os::process_alive(os::process_id()));
     CHECK_FALSE(os::process_alive(0xFFFFFFFFu));
