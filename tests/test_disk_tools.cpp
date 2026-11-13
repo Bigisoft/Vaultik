@@ -447,6 +447,161 @@ TEST_CASE("new disk: options are checked before anything is written") {
 #endif
 }
 
+// ---- volumes in use (--force-dismount) ---------------------------------------------------------
+
+namespace {
+
+// A volume to lock: free, used by a program (until forced closed), or used by a program that
+// opens it again at once (it stays in use).
+class FakeLock : public VolumeLock {
+public:
+    FakeLock(std::string n, bool in_use, bool reopened = false) : name_(std::move(n)), in_use_(in_use), reopened_(reopened) {}
+    std::string name() const override { return name_; }
+    bool lock() override {
+        ++attempts;
+        locked = !in_use_ || (forced > 0 && !reopened_);
+        return locked;
+    }
+    void force_dismount() override { ++forced; }
+    int attempts = 0;
+    int forced = 0;
+    bool locked = false;
+
+private:
+    std::string name_;
+    bool in_use_;
+    bool reopened_;
+};
+
+// The vaultik program with `args`; its exit code, with what it printed in `output`.
+int run_cli(const std::vector<std::string>& args, std::string& output) {
+    std::vector<std::string> argv{VAULTIK_TEST_CLI};
+    argv.insert(argv.end(), args.begin(), args.end());
+    output.clear();
+    return os::run_command(argv, &output);
+}
+
+}  // namespace
+
+TEST_CASE("drive cleanser and new disk: a volume in use is forced closed only when asked") {
+    const LockRetry quick{3, std::chrono::milliseconds(0)};
+    SUBCASE("nothing in use: all locked, nothing forced") {
+        FakeLock e("E:", false), f("F:", false);
+        lock_volumes({&e, &f}, false, quick);
+        CHECK((e.locked && f.locked));
+        CHECK(e.forced + f.forced == 0);
+    }
+    SUBCASE("without the option: every volume in use is named, none is forced") {
+        FakeLock e("E:", true), f("F:", false), g("G:", true);
+        try {
+            lock_volumes({&e, &f, &g}, false, quick);
+            FAIL("no VolumesInUse");
+        } catch (const VolumesInUse& x) {
+            CHECK(x.volumes == std::vector<std::string>{"E:", "G:"});
+            CHECK(std::string(x.what()).find("E:, G: are in use") != std::string::npos);
+        }
+        CHECK(e.forced + f.forced + g.forced == 0);
+        CHECK(e.attempts == 1);
+        CHECK(g.attempts == 1);
+    }
+    SUBCASE("with the option: only the volumes in use are forced, then locked") {
+        FakeLock e("E:", true), f("F:", false);
+        lock_volumes({&e, &f}, true, quick);
+        CHECK(e.forced == 1);
+        CHECK(f.forced == 0);
+        CHECK((e.locked && f.locked));
+    }
+    SUBCASE("still in use after it was forced: an error (not the in-use question again), after the retries") {
+        FakeLock e("E:", true, true);
+        try {
+            lock_volumes({&e}, true, quick);
+            FAIL("no error");
+        } catch (const VolumesInUse&) {
+            FAIL("asked again");
+        } catch (const Error& x) {
+            CHECK(std::string(x.what()).find("E: is still in use") != std::string::npos);
+        }
+        CHECK(e.forced == 1);
+        CHECK(e.attempts == 1 + quick.tries);
+    }
+}
+
+TEST_CASE("drive cleanser and new disk: mounted volumes and unmounting them (Linux, faked)") {
+    DiskInfo d;
+    d.number = 3;
+    d.size = 64 * kMiB;
+    d.path = "/dev/sdc";
+    DiskVolume a;
+    a.name = "/dev/sdc1";
+    a.mount = "/media/usb";
+    DiskVolume swap;
+    swap.name = "/dev/sdc2";
+    swap.filesystem = "swap";
+    DiskVolume plain;
+    plain.name = "/dev/sdc3";
+    d.volumes = {a, swap, plain};
+    CHECK(mounted_volumes(d) == std::vector<std::string>{"/media/usb"});
+#ifndef _WIN32
+    // Mounted: refused, unless it is to be unmounted with --force-dismount. Swap stays refused.
+    d.volumes = {a};
+    CHECK(tool_refusal(d, {}, {}).find("--force-dismount") != std::string::npos);
+    CHECK(tool_refusal(d, {}, {}, true).empty());
+    d.volumes = {a, swap};
+    CHECK(tool_refusal(d, {}, {}, true).find("swap") != std::string::npos);
+    // The disk the system runs from is refused before anything could be unmounted.
+    d.volumes = {a};
+    CHECK_FALSE(tool_refusal(d, {3}, {}, true).empty());
+    CHECK_FALSE(tool_refusal(d, {}, {3}, true).empty());
+#endif
+
+    std::vector<std::string> mounted{"/media/usb", "/media/usb2"};
+    std::vector<std::string> unmounted;
+    const auto list = [&] { return mounted; };
+    const auto ok = [&](const std::string& p, std::string&) {
+        unmounted.push_back(p);
+        mounted.erase(std::find(mounted.begin(), mounted.end(), p));
+        return true;
+    };
+    unmount_volumes(list, ok);
+    CHECK(mounted.empty());
+    CHECK(unmounted.size() == 2);
+
+    unmounted.clear();
+    unmount_volumes(list, ok);  // nothing mounted: nothing unmounted
+    CHECK(unmounted.empty());
+
+    mounted = {"/media/busy"};
+    try {
+        unmount_volumes(list, [](const std::string&, std::string& why) {
+            why = "target is busy";
+            return false;
+        });
+        FAIL("no error");
+    } catch (const Error& x) {
+        CHECK(std::string(x.what()).find("/media/busy is still in use") != std::string::npos);
+        CHECK(std::string(x.what()).find("target is busy") != std::string::npos);
+    }
+    // An unmount that reports success but leaves it mounted does not go round forever.
+    CHECK_THROWS_AS(unmount_volumes(list, [](const std::string&, std::string&) { return true; }), Error);
+}
+
+TEST_CASE("disk tools: the --force-dismount option of the command-line program") {
+    std::string output;
+    CHECK(run_cli({"--help"}, output) == 0);
+    CHECK(output.find("--force-dismount") != std::string::npos);
+    // A flag: it takes no value.
+    CHECK(run_cli({"disk", "wipe", "99999", "--force-dismount=yes"}, output) != 0);
+    CHECK(output.find("unknown option") != std::string::npos);
+    // Known to both disk wipe and disk init; the disk does not exist (or no rights): stops there.
+    for (const std::string sub : {"wipe", "init"}) {
+        CAPTURE(sub);
+        CAPTURE(output);
+        CHECK(run_cli({"disk", sub, "99999", "--force-dismount", "--confirm", "ERASE DISK 99999"}, output) == 1);
+        CHECK(output.find("unknown option") == std::string::npos);
+        CHECK(output.find("error:") != std::string::npos);
+    }
+}
+
 // ---- on a real (virtual) disk, only where it is safe ---------------------------------------------
 
 #ifdef _WIN32
@@ -509,21 +664,70 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
     wrong.serial = vol.serial == "00000001" ? "00000002" : "00000001";
     CHECK_THROWS_AS(open_wipe_volume(vol, wrong), Error);
     CHECK(os::exists(os::join(root, "note.txt")));
+
+    // A file on the drive held open (as another program would): the drive is in use. Without
+    // --force-dismount it is refused, named, and nothing is written; with it, it is erased.
+    const std::string letter = root.substr(0, 2);
     {
-        auto dev = open_wipe_volume(vol, volume_identity(vol));
-        WipeOptions w;
-        CHECK(wipe_device(*dev, w).bytes == dev->size());
+        auto held = std::make_unique<std::ifstream>(fs::path(std::u8string(root.begin(), root.end())) / "note.txt", std::ios::binary);
+        REQUIRE(held->is_open());
+        try {
+            open_wipe_volume(vol, volume_identity(vol));
+            FAIL("the drive in use was opened for writing");
+        } catch (const VolumesInUse& e) {
+            CHECK(e.volumes == std::vector<std::string>{letter});
+        }
+        CHECK(read_all(os::join(root, "note.txt")) == Bytes{'x'});
+        const DiskIdentity id = volume_identity(vol);
+        const std::vector<std::string> args{"disk", "wipe", "--volume", letter, "--confirm", erase_volume_text(letter),
+                                            "--expect-size", std::to_string(id.size), "--expect-serial", id.serial,
+                                            "--expect-id", id.id, "--json"};
+        std::string output;
+        CHECK(run_cli(args, output) == 6);
+        CAPTURE(output);
+        CHECK(output.find("\"event\":\"in_use\"") != std::string::npos);
+        CHECK(output.find("\"status\":\"in_use\"") != std::string::npos);
+        CHECK(output.find(letter) != std::string::npos);
+        CHECK(read_all(os::join(root, "note.txt")) == Bytes{'x'});
+        std::vector<std::string> forced = args;
+        forced.push_back("--force-dismount");
+        CHECK(run_cli(forced, output) == 0);
+        CHECK(output.find("\"status\":\"success\"") != std::string::npos);
+        held.reset();  // its handle stopped working when the drive was forced closed
     }
 
-    // The whole disk, checked, then without a partition table.
+    // The whole disk, set up again, with a file on it held open: refused without the option,
+    // then forced closed, erased, checked, and left without a partition table.
+    disks = list_tool_disks();
+    it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+    REQUIRE(it != disks.end());
+    const NewDiskResult again = init_disk(*it, identity_of(*it), keep, o);
+    REQUIRE(again.volumes.size() == 1);
+    const std::string root2 = again.volumes[0];
+    os::write_file_atomic(os::join(root2, "note.txt"), ByteSpan(reinterpret_cast<const std::uint8_t*>("y"), 1));
+    disks = list_tool_disks();
+    it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+    REQUIRE(it != disks.end());
     const DiskInfo now = *it;
     {
-        auto dev = open_wipe_disk(now, identity_of(now), keep);
+        auto held = std::make_unique<std::ifstream>(fs::path(std::u8string(root2.begin(), root2.end())) / "note.txt", std::ios::binary);
+        REQUIRE(held->is_open());
+        try {
+            open_wipe_disk(now, identity_of(now), keep);
+            FAIL("the disk in use was opened for writing");
+        } catch (const VolumesInUse& e) {
+            CHECK(e.volumes == std::vector<std::string>{root2.substr(0, 2)});
+        }
+        NewDiskOptions not_forced = o;
+        CHECK_THROWS_AS(init_disk(now, identity_of(now), keep, not_forced), VolumesInUse);
+        CHECK(read_all(os::join(root2, "note.txt")) == Bytes{'y'});
+        auto dev = open_wipe_disk(now, identity_of(now), keep, true);
         WipeOptions w;
         w.verify = true;
         w.clear_partition_table = true;
         CHECK(wipe_device(*dev, w).verified);
         dev->forget_partition_table();
+        held.reset();
     }
     disks = list_tool_disks();
     it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
@@ -577,6 +781,42 @@ TEST_CASE("disk tools on a loop device (Linux, root, VAULTIK_TEST_VIRTUAL_DISKS=
     REQUIRE(it != disks.end());
     CHECK(it->partitions == 1);
     const DiskInfo now = *it;
+    // Mounted, with a file open on it: in use. Without --force-dismount nothing is unmounted;
+    // with it, a file system still busy stays mounted (never a lazy unmount) and stops it; once
+    // the file is closed it is unmounted and erased.
+    const std::string mnt = t.file("mnt");
+    fs::create_directories(fs::path(std::u8string(mnt.begin(), mnt.end())));
+    REQUIRE(os::run_command({"/bin/mount", dev + "p1", mnt}, &output) == 0);
+    struct Unmount {
+        std::string mnt;
+        ~Unmount() {
+            std::string ignored;
+            os::run_command({"/bin/umount", mnt}, &ignored);
+        }
+    } unmount_at_end{mnt};
+    disks = list_tool_disks();
+    it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.path == dev; });
+    REQUIRE(it != disks.end());
+    CHECK(mounted_volumes(*it) == std::vector<std::string>{mnt});
+    const DiskInfo mounted = *it;
+    {
+        std::ofstream held(fs::path(std::u8string(mnt.begin(), mnt.end())) / "open.txt");
+        REQUIRE(held.is_open());
+        CHECK_THROWS_AS(open_wipe_disk(mounted, identity_of(mounted), keep), VolumesInUse);
+        try {
+            open_wipe_disk(mounted, identity_of(mounted), keep, true);
+            FAIL("a busy file system was unmounted");
+        } catch (const VolumesInUse&) {
+            FAIL("asked again");
+        } catch (const Error& e) {
+            CHECK(std::string(e.what()).find(mnt) != std::string::npos);
+        }
+        CHECK(os::exists(os::join(mnt, "open.txt")));
+    }
+    {
+        auto w = open_wipe_disk(mounted, identity_of(mounted), keep, true);
+        CHECK_FALSE(os::exists(os::join(mnt, "open.txt")));
+    }
     {
         auto w = open_wipe_disk(now, identity_of(now), keep);
         WipeOptions wo;
