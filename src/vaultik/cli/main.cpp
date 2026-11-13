@@ -493,6 +493,8 @@ Disk tools (administrator rights on Windows, root on Linux, except disk list and
                                dod3 (random, random, zeros, as DoD 5220.22-M)
       --verify                 Read the last pass back and compare it
       --force-dismount         As for disk init: force a disk or volume in use closed
+      --in-use-file <file>     disk init and disk wipe: when a drive is in use, also
+                               write the drives in use there, one per line
   disk wipe-free <folder>      Overwrite the free space of the drive holding the
                                folder (or X:), so deleted files cannot be brought
                                back; files on it are not touched
@@ -557,7 +559,7 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--method", "--volume", "--jobs"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--method", "--volume", "--jobs", "--in-use-file"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -4895,6 +4897,16 @@ int run(const std::vector<std::string>& argv) {
 
 namespace {
 
+// The value of option `key` in the raw arguments ("--key value" or "--key=value"); empty when
+// it is not there.
+std::string raw_value(const std::vector<std::string>& args, const std::string& key) {
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == key && i + 1 < args.size()) return args[i + 1];
+        if (args[i].starts_with(key + "=")) return args[i].substr(key.size() + 1);
+    }
+    return {};
+}
+
 // Reports a fatal error on stderr and, with --json, as a final "done" event on stdout.
 int fail(const char* status, const std::string& message, int code) {
     using namespace vaultik::cli;
@@ -4916,6 +4928,18 @@ int run_guarded(const std::vector<std::string>& args) {
     } catch (const vaultik::image::VolumesInUse& e) {
         // A frontend asks whether to force it closed (and runs the job again with
         // --force-dismount); at a console, the option is named.
+        // With --in-use-file (the frontend that ran this with administrator rights in a window
+        // of its own, which reads no output): the volumes in use, one per line, so it can name them.
+        const std::string in_use_file = raw_value(args, "--in-use-file");
+        if (!in_use_file.empty()) {
+            std::string text;
+            for (const std::string& v : e.volumes) text += v + "\n";
+            try {
+                vaultik::os::write_file_atomic(in_use_file, vaultik::ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+            } catch (const std::exception& x) {
+                err(std::string("warning: cannot write ") + in_use_file + ": " + x.what() + "\n");
+            }
+        }
         if (g_json) {
             emit({{"event", "in_use"}, {"volumes", e.volumes}, {"message", e.what()}});
             emit({{"event", "done"}, {"status", "in_use"}, {"volumes", e.volumes}, {"message", e.what()}});

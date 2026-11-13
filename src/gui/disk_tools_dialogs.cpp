@@ -6,6 +6,7 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -17,6 +18,7 @@
 #include <QPushButton>
 #include <QRadioButton>
 #include <QStandardItemModel>
+#include <QTemporaryDir>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -130,7 +132,8 @@ int run_disk_engine(QWidget* parent, const QString& busy, const QStringList& arg
 constexpr int kEngineInUse = 6;
 
 // The drives of disk `d` a program may be using, as the user knows them. Windows: its drive
-// letters (or the disk itself), any of which may be the one in use; Linux: the mounted ones.
+// letters (or the disk itself), any of which may be the one in use (named when the engine did
+// not say which ones are); Linux: the mounted ones.
 QStringList drives_of(const image::DiskInfo& d) {
     QStringList out;
 #ifdef _WIN32
@@ -166,15 +169,30 @@ bool ask_force_close(QWidget* parent, const QStringList& drives, const QString& 
 // Runs the engine (run_disk_engine) for a job that writes to a disk or drive. When a drive is in
 // use by another program, asks whether to force it closed and, if the user agrees, runs the same
 // job (the same identity checks and confirmation, nothing typed again) with --force-dismount.
-// Windows: the engine finds out when it locks the drives (`drives` are the ones that may be in
-// use); Linux: `drives` are mounted, so the question comes before the command is shown. Returns
-// kEngineInUse when the user did not agree.
+// Windows: the engine finds out when it locks the drives and writes the ones in use to a file
+// (--in-use-file), as its window shows no output here; the question names those, or `drives`
+// (the ones that may be in use) when it named none. Linux: `drives` are mounted, so the
+// question comes before the command is shown. Returns kEngineInUse when the user did not agree.
 int run_disk_engine_forcing(QWidget* parent, const QString& busy, QStringList args, const QStringList& drives,
                             const QString& yes, QString& error) {
 #ifdef _WIN32
-    const int code = run_disk_engine(parent, busy, args, error);
+    QStringList in_use;
+    int code = -1;
+    {
+        QTemporaryDir dir;
+        QStringList first = args;
+        const QString file = dir.isValid() ? QDir::toNativeSeparators(dir.filePath(QStringLiteral("in-use.txt"))) : QString();
+        if (!file.isEmpty()) first << "--in-use-file" << file;
+        code = run_disk_engine(parent, busy, first, error);
+        if (code == kEngineInUse && error.isEmpty() && !file.isEmpty()) {
+            QFile f(file);
+            if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+                for (const QString& line : QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts))
+                    if (!line.trimmed().isEmpty()) in_use << line.trimmed();
+        }
+    }
     if (code != kEngineInUse || !error.isEmpty()) return code;
-    if (!ask_force_close(parent, drives, yes)) return kEngineInUse;
+    if (!ask_force_close(parent, in_use.isEmpty() ? drives : in_use, yes)) return kEngineInUse;
 #else
     if (!drives.isEmpty() && !ask_force_close(parent, drives, yes)) return kEngineInUse;
     if (drives.isEmpty()) return run_disk_engine(parent, busy, args, error);

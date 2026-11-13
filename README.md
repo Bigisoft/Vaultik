@@ -1139,17 +1139,23 @@ nothing else writes to it meanwhile. That fails while a program has a file or fo
 File Explorer, Windows Search, a virus scanner or backup software. Vaultik then stops before
 writing anything, names the drives (`F: is in use by another program`) and ends with exit code
 `6` (with `--json`: an `in_use` event and a `done` event with status `in_use`, both listing the
-`volumes`). The Vaultik window then asks whether to force the drive closed; with **Force close
+`volumes`; with `--in-use-file <file>`, the drives in use are also written to that file, one
+per line). The Vaultik window then asks whether to force the drives in use closed, naming
+them; with **Force close
 and erase** (or **Force close and set up**) it runs the same job again, with the same checks
 and without asking for the confirmation again, and the drive is taken away from the programs
 using it, as `format /X` does: they lose access to their open files there, and unsaved changes to
 those files are lost. From the command line, `--force-dismount` does that: each drive that
-cannot be locked is dismounted by force (`FSCTL_DISMOUNT_VOLUME`) and locked again, and stays
-locked until the job ends, so Windows cannot mount it again meanwhile; when even then it cannot
-be locked, the job stops with an error and nothing is written. On Linux a mounted partition is
-in use: `--force-dismount` unmounts it first with `umount` (never a lazy unmount), and a file
-system still busy stays mounted and stops the job, naming its mount point; a swap partition in
-use is still refused. On Linux the Vaultik window asks before it shows the `sudo` command, and
+cannot be locked is dismounted by force (`FSCTL_DISMOUNT_VOLUME`), opened again and locked
+through that new handle (never through the one that dismounted it), and stays locked until the
+job ends, so Windows cannot mount it again meanwhile; when even then it cannot be locked, the
+job stops with an error and nothing is written. A drive that cannot be locked for another
+reason than a program using it is not offered to be forced: the job stops with that error. On
+Linux a mounted partition is in use: `--force-dismount` unmounts it first with `umount` (never a
+lazy unmount), and a file system still busy stays mounted and stops the job, naming its mount
+point. When another drive is mounted over it at the same folder, nothing is unmounted and the
+job stops, naming that drive. A swap partition in use, and a member of a btrfs file system over
+several drives, are still refused. On Linux the Vaultik window asks before it shows the `sudo` command, and
 adds `--force-dismount` to it only when you agree. Every other check (the disk the system,
 Windows or Vaultik runs from, page files, pools, the drive shown, the typed confirmation) comes
 first and is as strict as without the option; nothing is forced without it.

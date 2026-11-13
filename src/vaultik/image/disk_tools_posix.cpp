@@ -146,6 +146,18 @@ std::optional<DiskVolume> use_of(const std::string& sys, const std::string& name
     return std::nullopt;
 }
 
+// Whether the file system on block device `name` ("sdb1") lies on more than this one device: a
+// btrfs file system over several drives, whose devices /sys/fs/btrfs/<uuid>/devices lists (by
+// their kernel names) while it is mounted. Only that one member would be erased, and the file
+// system on the others would be broken.
+bool multi_device_fs(const std::string& name) {
+    for (const std::string& fs : entries("/sys/fs/btrfs")) {
+        const std::vector<std::string> members = entries("/sys/fs/btrfs/" + fs + "/devices");
+        if (members.size() > 1 && std::find(members.begin(), members.end(), name) != members.end()) return true;
+    }
+    return false;
+}
+
 std::string find_tool(const std::string& name) {
     std::vector<std::string> dirs = {"/usr/sbin", "/sbin", "/usr/bin", "/bin", "/usr/local/sbin"};
     const std::string path = os::get_env("PATH");
@@ -342,7 +354,15 @@ std::vector<DiskInfo> list_tool_disks() {
             d.style = "RAW";
         }
         // The whole disk may itself hold a file system or be in use.
-        if (auto use = use_of(sys, name, mounts, swaps)) d.volumes.push_back(*use);
+        if (auto use = use_of(sys, name, mounts, swaps)) {
+            use->spans = multi_device_fs(name);
+            d.volumes.push_back(*use);
+        } else if (multi_device_fs(name)) {
+            DiskVolume v;
+            v.name = "/dev/" + name;
+            v.spans = true;
+            d.volumes.push_back(v);
+        }
         for (const std::string& part : entries(sys)) {
             const std::string psys = os::join(sys, part);
             if (!os::exists(os::join(psys, "partition"))) continue;
@@ -357,6 +377,7 @@ std::vector<DiskInfo> list_tool_disks() {
                 v.mount = use->mount;
                 if (use->filesystem == "swap" || use->filesystem == "holder" || v.filesystem.empty()) v.filesystem = use->filesystem;
             }
+            v.spans = multi_device_fs(part);
             d.volumes.push_back(v);
         }
         d.system = std::find(root.begin(), root.end(), d.number) != root.end();
@@ -385,11 +406,53 @@ std::unique_ptr<WipeDevice> open_wipe_file(const std::string& path) {
     return std::make_unique<FdDevice>(fd, size, size % 512 == 0 ? 512 : 1, path);
 }
 
+std::string other_mount_on(const std::vector<os::mounts::Mount>& mounts, const std::string& point,
+                           const std::vector<std::pair<unsigned, unsigned>>& devices) {
+    const os::mounts::Mount* top = nullptr;
+    for (const os::mounts::Mount& m : mounts)
+        if (m.point == point) top = &m;  // listed later: mounted over the ones before
+    if (top == nullptr) return {};
+    if (std::find(devices.begin(), devices.end(), std::make_pair(top->major, top->minor)) != devices.end()) return {};
+    return (top->source.empty() ? top->type : top->source) + " (" + std::to_string(top->major) + ":" +
+           std::to_string(top->minor) + ")";
+}
+
 namespace {
 
+// The device numbers of disk `path` ("/dev/sdb") and of each of its partitions.
+std::vector<std::pair<unsigned, unsigned>> disk_devices(const std::string& path) {
+    std::vector<std::pair<unsigned, unsigned>> out;
+    const std::string sys = real_path("/sys/block/" + (path.starts_with("/dev/") ? path.substr(5) : path));
+    if (sys.empty()) return out;
+    unsigned major = 0, minor = 0;
+    if (dev_numbers(sys, major, minor)) out.emplace_back(major, minor);
+    for (const std::string& part : entries(sys)) {
+        const std::string psys = os::join(sys, part);
+        if (os::exists(os::join(psys, "partition")) && dev_numbers(psys, major, minor)) out.emplace_back(major, minor);
+    }
+    return out;
+}
+
+// The device number of block device `device` ("/dev/sdb1"); none when it is not one.
+std::vector<std::pair<unsigned, unsigned>> device_numbers(const std::string& device) {
+    struct stat st{};
+    if (::stat(device.c_str(), &st) != 0 || !S_ISBLK(st.st_mode)) return {};
+    return {{::major(st.st_rdev), ::minor(st.st_rdev)}};
+}
+
 // Unmounts mount point `point` (umount, never lazily: a file system still in use stays mounted
-// and says so). False with `why` set when it stays mounted.
-bool unmount(const std::string& point, std::string& why) {
+// and says so), when what is mounted on top there is one of `devices` (the drive being erased):
+// umount takes the top-most file system at that folder, which may be another drive mounted over
+// it, and that one is never unmounted (Error). False with `why` set when it stays mounted.
+bool unmount(const std::string& point, const std::vector<std::pair<unsigned, unsigned>>& devices, std::string& why) {
+    const std::vector<os::mounts::Mount> mounts = os::mounts::read_mounts();
+    if (std::none_of(mounts.begin(), mounts.end(), [&](const os::mounts::Mount& m) { return m.point == point; }))
+        return true;  // not mounted there any more (listed again next)
+    const std::string other = other_mount_on(mounts, point, devices);
+    if (!other.empty())
+        throw Error("another drive, " + other + ", is mounted over " + point +
+                    ", so unmounting " + point + " would unmount that drive instead; unmount it first and try again. "
+                    "Nothing was written");
     std::string output;
     const int code = os::run_command({need_tool("umount", "util-linux"), point}, &output);
     why = trim(output);
@@ -418,7 +481,10 @@ std::unique_ptr<FdDevice> open_checked_disk(const DiskInfo& chosen, const DiskId
     const std::vector<std::string> busy = mounted_volumes(now);
     if (!busy.empty()) {
         if (!force) throw VolumesInUse(busy);
-        unmount_volumes([&] { return mounted_volumes(disk_now(chosen.number, chosen.path)); }, unmount);
+        const std::vector<std::pair<unsigned, unsigned>> own = disk_devices(now.path);
+        if (own.empty()) throw Error(now.path + " is not connected any more; nothing was written");
+        unmount_volumes([&] { return mounted_volumes(disk_now(chosen.number, chosen.path)); },
+                        [&](const std::string& point, std::string& why) { return unmount(point, own, why); });
         now = disk_now(chosen.number, chosen.path);
         const std::string still = tool_refusal(now, {}, protected_disks);
         if (!still.empty()) throw Error(now.path + " cannot be erased: " + still);
@@ -450,6 +516,9 @@ VolumeTarget find_wipe_volume(const std::string& given, bool mounted_ok) {
             if (v.name != name || v.offset == 0) continue;
             if (v.filesystem == "swap") throw Error(name + " is in use as swap");
             if (v.filesystem == "holder") throw Error(name + " is in use (LVM, RAID or encryption)");
+            if (v.spans)
+                throw Error(name + " is part of a file system that lies on several drives (btrfs); remove it from "
+                            "that file system first");
             if (!v.mount.empty() && !mounted_ok)
                 throw Error(name + " is mounted on " + v.mount + "; unmount it first (or give --force-dismount)");
             if (std::find(keep.begin(), keep.end(), d.number) != keep.end())
@@ -479,12 +548,14 @@ std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v, const DiskId
     if (!other.empty()) throw Error(other + "; nothing was written");
     if (!now.mount.empty()) {
         if (!force_dismount) throw VolumesInUse({now.mount});
+        const std::vector<std::pair<unsigned, unsigned>> own = device_numbers(now.device);
+        if (own.empty()) throw Error(now.device + " is not a disk any more; nothing was written");
         unmount_volumes(
             [&] {
                 const VolumeTarget again = find_wipe_volume(v.name, true);
                 return again.mount.empty() ? std::vector<std::string>{} : std::vector<std::string>{again.mount};
             },
-            unmount);
+            [&](const std::string& point, std::string& why) { return unmount(point, own, why); });
         now = find_wipe_volume(v.name);
         other = volume_mismatch(now, expected);
         if (!other.empty()) throw Error(other + "; nothing was written");

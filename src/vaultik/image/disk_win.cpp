@@ -1134,9 +1134,12 @@ void check_online(HANDLE h, int number) {
 
 // A volume opened to be locked (by its volume id, so the handle stays that volume whatever its
 // letter), for lock_volumes. After a forced dismount, the handle that dismounted it no longer
-// reaches a mounted file system, and the next open mounts it again; programs that look at every
-// volume as soon as it is mounted (a virus scanner, the search indexer) may open it again at
-// once, so a failed lock forces it off once more and locks it through a new handle right away.
+// reaches a mounted file system, and the next open mounts it again. That handle is never locked:
+// some file systems (FAT, exFAT) may grant a lock on the dismounted instance, which would not
+// keep Windows from mounting the volume again. So every lock after a forced dismount goes
+// through a new handle opened by the volume id. Programs that look at every volume as soon as
+// it is mounted (a virus scanner, the search indexer) may open it again at once, so a failed
+// lock forces it off once more and locks it through another new handle right away.
 class WinVolumeLock : public VolumeLock {
 public:
     WinVolumeLock(std::wstring device, std::string name, DWORD flags = 0)
@@ -1147,12 +1150,21 @@ public:
     std::string name() const override { return name_; }
     std::string why() const override { return why_; }
     bool lock() override {
-        if (try_lock()) return true;
-        if (!forced_) return false;
+        if (!forced_) {
+            if (try_lock()) return true;
+            // In use: another program has it open (FSCTL_LOCK_VOLUME fails with access denied
+            // then). Any other failure is not that, and forcing would not help: said as it is.
+            if (last_error_ != ERROR_ACCESS_DENIED && last_error_ != ERROR_SHARING_VIOLATION &&
+                last_error_ != ERROR_LOCK_VIOLATION)
+                throw Error(name_ + " cannot be locked for writing (Windows error " + std::to_string(last_error_) +
+                            "); nothing was written");
+            return false;
+        }
         for (int i = 0; i < 3; ++i) {
             // The handle that dismounted it keeps the old, dismounted volume: let go of it first,
-            // so the next open mounts the volume again.
-            dismount();
+            // so the next open mounts the volume again, and lock only that new handle. After a
+            // failed lock, the new handle forces off whoever opened the volume again meanwhile.
+            if (i > 0) dismount();
             h_.reset();
             h_ = open_device(device_, GENERIC_READ | GENERIC_WRITE, flags_);
             if (!h_.valid()) {
@@ -1175,7 +1187,8 @@ private:
     bool try_lock() {
         DWORD got = 0;
         if (h_.valid() && DeviceIoControl(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr)) return true;
-        note("locking it", h_.valid() ? GetLastError() : ERROR_INVALID_HANDLE);
+        last_error_ = h_.valid() ? GetLastError() : ERROR_INVALID_HANDLE;
+        note("locking it", last_error_);
         return false;
     }
     // The Windows errors of the attempts, each once ("Windows error 5 locking it, ...").
@@ -1193,6 +1206,7 @@ private:
     DWORD flags_;
     UniqueHandle h_;
     bool forced_ = false;
+    DWORD last_error_ = 0;  // of the last lock attempt
     std::string why_;
 };
 
@@ -1437,7 +1451,7 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
     std::string new_id;  // the id of the new partition table, to know the disk again below
     {
         std::vector<UniqueHandle> locks;
-        UniqueHandle disk = open_locked_disk(d, expected, locks);
+        UniqueHandle disk = open_locked_disk(d, expected, locks, o.force_dismount);
         HANDLE h = disk.get();
         DWORD got = 0;
         step("Removing the partitions of " + disk_name);
