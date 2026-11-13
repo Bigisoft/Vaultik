@@ -427,6 +427,16 @@ TEST_CASE("POSIX: a version shown as a folder with FUSE") {
 
     mount.reset();
     CHECK_FALSE(fs::exists(folder));  // unmounted and removed
+
+    // An empty folder that was there before stays when the version is closed.
+    const std::string mine = os::join(tmp.path, "my folder");
+    fs::create_directories(mine);
+    mount.emplace(*repo, result.snapshot, mine);
+    CHECK(mount->active());
+    CHECK(read(mine + inside.substr(folder.size()) + "/sub/note.txt") == "hello from the backup\n");
+    mount.reset();
+    CHECK(fs::is_directory(mine));
+    CHECK(fs::is_empty(mine));
 }
 
 TEST_CASE("POSIX: drive health of a folder never fails") {
