@@ -694,7 +694,10 @@ bool file_there(const std::wstring& path) {
         return true;
     }
     const DWORD e = GetLastError();
-    return e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND && e != ERROR_NO_MORE_FILES;
+    // A volume without a file system Windows knows (erased, or never formatted) holds no files:
+    // Windows cannot page or hibernate to it either.
+    return e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND && e != ERROR_NO_MORE_FILES &&
+           e != ERROR_UNRECOGNIZED_VOLUME;
 }
 
 // The drive letters of the page files Windows uses now ("\??\C:\pagefile.sys" in the registry).
