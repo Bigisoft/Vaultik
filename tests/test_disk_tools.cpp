@@ -1,9 +1,14 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
+#include <thread>
+#include <utility>
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/image/disk_tools.hpp"
@@ -167,12 +172,200 @@ TEST_CASE("drive cleanser: the verification notices data the drive did not keep,
     dev.flip_at = 5 * kMiB + 17;
     CHECK_THROWS_WITH_AS(wipe_device(dev, o), doctest::Contains("byte 5242897"), Error);
 
-    MemoryDevice other(static_cast<std::size_t>(6 * kMiB));
+    MemoryDevice other(3 * kWipeChunk);
     WipeOptions c;
     int polls = 0;
     c.should_cancel = [&] { return ++polls > 1; };
     CHECK_THROWS_AS(wipe_device(other, c), Cancelled);
-    CHECK(other.writes == 4 * kMiB);  // one block, then it stopped
+    CHECK(other.writes <= kWipeChunk);  // at most the one block started, then it stopped
+}
+
+namespace {
+
+// A device written from several threads at once, as a disk is. It keeps what was written (unless
+// `keep` is false), every write's offset and length, how many writes ran at the same time and
+// how many started after `stopped` was set (by the device when a write failed, or by the test
+// when it cancelled). It can fail the write that covers `fail_at`, return a corrupted sector at
+// `corrupt_at`, and make every write take `delay` (cut short by cancel()).
+class ParallelDevice : public WipeDevice {
+public:
+    explicit ParallelDevice(std::uint64_t size, bool keep = true) : size_(size), data(keep ? size : 0, 0xAB) {}
+    std::uint64_t size() const override { return size_; }
+    std::uint32_t block_size() const override { return 512; }
+    bool parallel_io() const override { return true; }
+    void write_at(std::uint64_t offset, ByteSpan d) override {
+        std::unique_lock<std::mutex> lock(m);
+        ++active;
+        max_active = std::max(max_active, active);
+        if (stopped) ++late_starts;
+        writes.emplace_back(offset, d.size());
+        struct Leave {
+            ParallelDevice& dev;
+            ~Leave() { --dev.active; }
+        } leave{*this};
+        if (delay.count() > 0) {
+            cv.wait_for(lock, delay, [&] { return cancelled; });
+            if (cancelled) throw Error("writing the test device at byte " + std::to_string(offset) + ": cancelled");
+        }
+        if (fail_at >= offset && fail_at < offset + d.size()) {
+            stopped = true;
+            throw Error("writing the test device at byte " + std::to_string(offset) + ": a broken sector");
+        }
+        lock.unlock();
+        if (!data.empty()) std::memcpy(data.data() + offset, d.data(), d.size());
+        std::this_thread::sleep_for(std::chrono::microseconds(200));  // long enough for others to start meanwhile
+        lock.lock();
+        written += d.size();
+    }
+    void read_at(std::uint64_t offset, std::uint8_t* dst, std::size_t length) override {
+        std::memcpy(dst, data.data() + offset, length);
+        for (std::uint64_t at = corrupt_at; at < corrupt_at + 512; ++at)
+            if (at >= offset && at < offset + length) dst[at - offset] ^= 0xFF;
+    }
+    void flush() override {
+        std::lock_guard<std::mutex> lock(m);
+        ++flushes;
+    }
+    void cancel() override {
+        std::lock_guard<std::mutex> lock(m);
+        cancelled = true;
+        cv.notify_all();
+    }
+
+    std::uint64_t size_;
+    Bytes data;
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<std::pair<std::uint64_t, std::size_t>> writes;
+    std::uint64_t written = 0;  // bytes of the writes that completed
+    int active = 0;
+    int max_active = 0;
+    int late_starts = 0;
+    int flushes = 0;
+    bool stopped = false;
+    bool cancelled = false;
+    std::uint64_t fail_at = ~0ull;
+    std::uint64_t corrupt_at = ~0ull;
+    std::chrono::milliseconds delay{0};
+};
+
+}  // namespace
+
+TEST_CASE("drive cleanser: several writes at once put the pattern on every byte, the last part too") {
+    // Not a whole number of writes: the last one is shorter.
+    const std::uint64_t size = 5 * kWipeChunk + 3 * 512;
+    const std::uint64_t chunks = 6;
+
+    SUBCASE("three passes, verified: every write once per pass, at its place, and zeros everywhere") {
+        ParallelDevice dev(size);
+        WipeOptions o;
+        o.method = WipeMethod::Dod3;
+        o.verify = true;
+        bool counted_ahead = false;
+        o.on_progress = [&](const WipeProgress& p) {
+            std::lock_guard<std::mutex> lock(dev.m);
+            // Only bytes whose write completed (the device counts them before the erase does).
+            if (!p.verifying && p.pass == 1 && p.done > dev.written) counted_ahead = true;
+        };
+        const WipeResult r = wipe_device(dev, o);
+        CHECK(r.verified);
+        CHECK(r.bytes == 3 * size);
+        CHECK_FALSE(counted_ahead);
+        CHECK(dev.max_active > 1);
+        CHECK(dev.max_active <= static_cast<int>(kWipeInFlight));
+        CHECK(dev.flushes == 3);
+        std::vector<std::pair<std::uint64_t, std::size_t>> writes = dev.writes;
+        std::sort(writes.begin(), writes.end());
+        REQUIRE(writes.size() == 3 * chunks);
+        for (std::uint64_t k = 0; k < chunks; ++k) {
+            const std::uint64_t at = k * kWipeChunk;
+            const std::size_t length = static_cast<std::size_t>(std::min<std::uint64_t>(kWipeChunk, size - at));
+            for (int pass = 0; pass < 3; ++pass) {
+                CAPTURE(k);
+                CHECK(writes[k * 3 + pass] == std::make_pair(at, length));
+            }
+        }
+        CHECK(writes.back().second == 3 * 512);
+        CHECK(all_zero(dev.data.data(), dev.data.size()));
+    }
+    SUBCASE("random, verified: no sector keeps its old bytes or is left zero") {
+        ParallelDevice dev(size);
+        WipeOptions o;
+        o.method = WipeMethod::Random;
+        o.verify = true;
+        CHECK(wipe_device(dev, o).verified);  // read back in full and compared with the stream
+        CHECK(dev.max_active > 1);
+        bool old = false;
+        bool zero = false;
+        for (std::uint64_t at = 0; at < size; at += 512) {
+            const std::uint8_t* s = dev.data.data() + at;
+            old = old || std::all_of(s, s + 512, [](std::uint8_t b) { return b == 0xAB; });
+            zero = zero || all_zero(s, 512);
+        }
+        CHECK_FALSE(old);
+        CHECK_FALSE(zero);
+    }
+}
+
+TEST_CASE("drive cleanser: a failed write stops the erase, and its place is told") {
+    ParallelDevice dev(64 * kWipeChunk, false);
+    const std::uint64_t bad = 10 * kWipeChunk + 4096;
+    dev.fail_at = bad;
+    WipeOptions o;
+    o.method = WipeMethod::Random;
+    o.verify = true;
+    CHECK_THROWS_WITH_AS(wipe_device(dev, o), doctest::Contains(("at byte " + std::to_string(10 * kWipeChunk)).c_str()), Error);
+    // No write was started after it but those already on their way, none reached the end of the
+    // drive, and the pass was not taken as done.
+    CHECK(dev.late_starts < static_cast<int>(kWipeInFlight));
+    std::uint64_t last = 0;
+    for (const auto& [at, length] : dev.writes) last = std::max(last, at);
+    CHECK(last < bad + (kWipeInFlight + 2) * kWipeChunk);
+    CHECK(dev.writes.size() < 20);
+    CHECK(dev.flushes == 0);
+    CHECK(dev.active == 0);
+}
+
+TEST_CASE("drive cleanser: a cancel stops at once, cutting short the writes still running") {
+    ParallelDevice dev(256 * kWipeChunk, false);
+    dev.delay = std::chrono::milliseconds(2000);  // a very slow drive: only a cancel ends a write early
+    WipeOptions o;
+    std::chrono::steady_clock::time_point asked{};
+    o.should_cancel = [&] {
+        std::lock_guard<std::mutex> lock(dev.m);
+        if (dev.writes.size() < kWipeInFlight) return false;  // every thread has a write running
+        if (!dev.stopped) asked = std::chrono::steady_clock::now();
+        dev.stopped = true;
+        return true;
+    };
+    CHECK_THROWS_AS(wipe_device(dev, o), Cancelled);
+    const auto took = std::chrono::steady_clock::now() - asked;
+    CHECK(took < std::chrono::milliseconds(1500));  // not the 2 seconds the writes would take
+    std::lock_guard<std::mutex> lock(dev.m);
+    CHECK(dev.cancelled);
+    CHECK(dev.active == 0);  // nothing runs any more when it returns
+    CHECK(dev.written == 0);
+    CHECK(dev.late_starts == 0);
+    CHECK(dev.writes.size() == kWipeInFlight);
+    CHECK(dev.flushes == 0);
+}
+
+TEST_CASE("drive cleanser: the verification reading several parts at once finds one bad sector") {
+    const std::uint64_t size = 4 * kWipeChunk + 512;
+    for (const WipeMethod method : {WipeMethod::Zeros, WipeMethod::Random}) {
+        ParallelDevice dev(size);
+        dev.corrupt_at = 2 * kWipeChunk + 3 * 4096;
+        WipeOptions o;
+        o.method = method;
+        o.verify = true;
+        CAPTURE(to_string(method));
+        CHECK_THROWS_WITH_AS(wipe_device(dev, o), doctest::Contains(("at byte " + std::to_string(dev.corrupt_at)).c_str()), Error);
+    }
+    ParallelDevice last(size);
+    last.corrupt_at = size - 512;  // the last sector, in the short last part
+    WipeOptions o;
+    o.verify = true;
+    CHECK_THROWS_WITH_AS(wipe_device(last, o), doctest::Contains(("at byte " + std::to_string(size - 512)).c_str()), Error);
 }
 
 TEST_CASE("drive cleanser: wiping free space leaves the files and removes its own") {
@@ -976,3 +1169,86 @@ TEST_CASE("disk tools on a loop device (Linux, root, VAULTIK_TEST_VIRTUAL_DISKS=
     CHECK(all_zero(start.data() + start.size() - kMiB, kMiB));
 }
 #endif
+
+namespace {
+
+// A device that throws away what is written to it (and reads back zeros): how fast the erase
+// itself goes when the drive is never what holds it back.
+class DiscardDevice : public WipeDevice {
+public:
+    explicit DiscardDevice(std::uint64_t size) : size_(size) {}
+    std::uint64_t size() const override { return size_; }
+    std::uint32_t block_size() const override { return 512; }
+    void write_at(std::uint64_t, ByteSpan) override {}
+    void read_at(std::uint64_t, std::uint8_t* dst, std::size_t length) override { std::memset(dst, 0, length); }
+    void flush() override {}
+
+private:
+    std::uint64_t size_;
+};
+
+double mib_per_second(std::uint64_t bytes, double seconds) {
+    return seconds > 0 ? static_cast<double>(bytes) / static_cast<double>(kMiB) / seconds : 0;
+}
+
+// Erases `dev` with zeros, then random data, then zeros read back, and logs the speed of each.
+void measure_wipe(WipeDevice& dev, const std::string& what) {
+    const std::uint64_t size = dev.size();
+    WipeOptions zeros;
+    const WipeResult z = wipe_device(dev, zeros);
+    WipeOptions random;
+    random.method = WipeMethod::Random;
+    const WipeResult r = wipe_device(dev, random);
+    WipeOptions verified;
+    verified.verify = true;
+    const WipeResult v = wipe_device(dev, verified);
+    CHECK(v.verified);
+    const double verify_seconds = v.seconds - z.seconds;
+    MESSAGE("throughput, " << what << " (" << size / kMiB << " MiB): zeros " << static_cast<int>(mib_per_second(size, z.seconds))
+                           << " MiB/s, random " << static_cast<int>(mib_per_second(size, r.seconds)) << " MiB/s, verify about "
+                           << static_cast<int>(mib_per_second(size, verify_seconds > 0 ? verify_seconds : 0)) << " MiB/s");
+}
+
+}  // namespace
+
+TEST_CASE("drive cleanser: throughput (measured and logged, not checked)") {
+    {
+        DiscardDevice nowhere(1024 * kMiB);
+        WipeOptions o;
+        o.method = WipeMethod::Random;
+        const WipeResult r = wipe_device(nowhere, o);
+        MESSAGE("throughput, random data to a device that discards it (the generator's limit): "
+                << static_cast<int>(mib_per_second(nowhere.size(), r.seconds)) << " MiB/s");
+    }
+    {
+        TempDir t;
+        const std::string path = fake_disk(t, 512 * kMiB);
+        auto dev = open_wipe_file(path);
+        measure_wipe(*dev, "a file");
+    }
+#ifdef _WIN32
+    // A virtual disk of its own, attached and erased as a whole disk (the path a USB drive takes).
+    if (os::get_env("VAULTIK_TEST_VIRTUAL_DISKS") != "1" || !os::process_elevated()) return;
+    TempDir t;
+    const std::string path = t.file("speed.vhdx");
+    const std::uint64_t size = 1024 * kMiB;
+    {
+        auto file = create_random_file(path);
+        VhdxWriter w(*file, size);
+        w.finish();
+    }
+    auto attached = attach_vhdx(path, false);
+    const int number = attached->number();
+    REQUIRE(number >= 0);
+    const std::vector<DiskInfo> disks = list_tool_disks();
+    auto it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+    REQUIRE(it != disks.end());
+    REQUIRE(it->size == size);
+    REQUIRE(it->style == "RAW");
+    {
+        auto dev = open_wipe_disk(*it, identity_of(*it), protected_tool_disks());
+        measure_wipe(*dev, "a virtual disk");
+    }
+    attached.reset();
+#endif
+}

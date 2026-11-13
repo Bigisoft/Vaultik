@@ -6,7 +6,13 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
+#include <exception>
+#include <mutex>
+#include <new>
 #include <thread>
 
 #include "vaultik/crypto/crypto.hpp"
@@ -19,7 +25,7 @@ namespace vaultik::image {
 namespace {
 
 constexpr std::uint64_t kMiB = 1ull << 20;
-constexpr std::size_t kChunk = 4u << 20;  // bytes per write
+constexpr std::size_t kChunk = 4u << 20;  // bytes per write of the free space fill
 
 std::string squeeze_upper(const std::string& s) {
     std::string out;
@@ -84,6 +90,194 @@ public:
 private:
     bool started_ = false;
     std::chrono::steady_clock::time_point last_;
+};
+
+// The speed the time left is worked out from: over about the last half minute (exponentially
+// smoothed), not since the start, so the estimate follows a hard drive that slows down towards
+// its inner tracks instead of creeping up all the way. The average since the start until then.
+class Speed {
+public:
+    // Bytes per second after `bytes` in `seconds`; 0 while too early to tell.
+    double update(double seconds, std::uint64_t bytes) {
+        if (seconds <= 0.2) return 0;
+        if (!started_) {
+            started_ = true;
+            smooth_ = static_cast<double>(bytes) / seconds;
+        } else if (seconds - last_seconds_ >= 0.25) {
+            const double dt = seconds - last_seconds_;
+            const double now = static_cast<double>(bytes - last_bytes_) / dt;
+            smooth_ += (1 - std::exp(-dt / kSmoothing)) * (now - smooth_);
+        } else {
+            return seconds < kWindow ? static_cast<double>(bytes) / seconds : smooth_;
+        }
+        last_seconds_ = seconds;
+        last_bytes_ = bytes;
+        return seconds < kWindow ? static_cast<double>(bytes) / seconds : smooth_;
+    }
+
+private:
+    static constexpr double kWindow = 30;     // seconds of the average since the start
+    static constexpr double kSmoothing = 20;  // seconds: the weight of a speed seen halves in about 14
+    bool started_ = false;
+    double smooth_ = 0;
+    double last_seconds_ = 0;
+    std::uint64_t last_bytes_ = 0;
+};
+
+// Memory for the erase's reads and writes, aligned to a page: unbuffered Windows I/O
+// (FILE_FLAG_NO_BUFFERING) needs whole sectors at an address aligned to the sector size, and a
+// page is aligned for every drive.
+class PageBuffer {
+public:
+    static constexpr std::size_t kAlign = 4096;
+    explicit PageBuffer(std::size_t size)
+        : p_(static_cast<std::uint8_t*>(::operator new(std::max<std::size_t>(size, 1), std::align_val_t{kAlign}))),
+          size_(size) {}
+    ~PageBuffer() { ::operator delete(p_, std::align_val_t{kAlign}); }
+    PageBuffer(const PageBuffer&) = delete;
+    PageBuffer& operator=(const PageBuffer&) = delete;
+    std::uint8_t* data() const { return p_; }
+    std::size_t size() const { return size_; }
+
+private:
+    std::uint8_t* p_;
+    std::size_t size_;
+};
+
+// The writes (or reads) of one pass, several at once. Each runs on a thread of its own, which
+// waits for it there (Windows: for its overlapped I/O), so the drive has the next ones queued
+// when one completes, and the data of later ones is made on the calling thread meanwhile. A slot
+// is a buffer and the one write or read on it; the calling thread hands slots out in order.
+class InFlight {
+public:
+    InFlight(WipeDevice& device, bool reading, std::size_t chunk, unsigned threads) : device_(device), reading_(reading) {
+        // The ones in flight, and two more the calling thread fills meanwhile.
+        slots_.resize(threads + 2);
+        for (Slot& s : slots_) s.buf = std::make_unique<PageBuffer>(chunk);
+        try {
+            for (unsigned i = 0; i < threads; ++i) workers_.emplace_back([this] { work(); });
+        } catch (...) {
+            halt();
+            throw;
+        }
+    }
+    ~InFlight() { halt(); }
+    InFlight(const InFlight&) = delete;
+    InFlight& operator=(const InFlight&) = delete;
+
+    std::size_t slots() const { return slots_.size(); }
+    std::uint8_t* buffer(std::size_t slot) const { return slots_[slot].buf->data(); }
+    // Bytes whose write or read completed.
+    std::uint64_t completed() const { return completed_.load(); }
+
+    // Starts the write (from the slot's buffer) or read (into it) of `length` bytes at `offset`.
+    void start(std::size_t slot, std::uint64_t offset, std::size_t length) {
+        std::lock_guard<std::mutex> lock(m_);
+        Slot& s = slots_[slot];
+        s.offset = offset;
+        s.length = length;
+        s.busy = true;
+        queue_.push_back(slot);
+        cv_.notify_all();
+    }
+    // Waits until nothing runs on `slot` (all: on any slot), calling `idle` (which may throw
+    // Cancelled) about ten times a second meanwhile. Throws the error of a write or read that
+    // failed, on any slot.
+    void wait(std::size_t slot, const std::function<void()>& idle) {
+        wait_until([&] { return !slots_[slot].busy; }, idle);
+    }
+    void wait_all(const std::function<void()>& idle) {
+        wait_until([&] { return std::none_of(slots_.begin(), slots_.end(), [](const Slot& s) { return s.busy; }); }, idle);
+    }
+
+    // Stops: nothing more is started, what runs is cut short through the device, and it returns
+    // once nothing runs any more (no buffer is in use then) and the threads ended.
+    void halt() noexcept {
+        std::unique_lock<std::mutex> lock(m_);
+        stop_ = true;
+        for (const std::size_t i : queue_) slots_[i].busy = false;
+        queue_.clear();
+        const auto running = [&] { return std::any_of(slots_.begin(), slots_.end(), [](const Slot& s) { return s.busy; }); };
+        if (running()) {
+            lock.unlock();
+            try {
+                device_.cancel();
+            } catch (...) {
+                // it ends by itself then
+            }
+            lock.lock();
+            cv_.wait(lock, [&] { return !running(); });
+        }
+        quit_ = true;
+        cv_.notify_all();
+        lock.unlock();
+        for (std::thread& t : workers_) t.join();
+        workers_.clear();
+    }
+
+private:
+    struct Slot {
+        std::unique_ptr<PageBuffer> buf;
+        std::uint64_t offset = 0;
+        std::size_t length = 0;
+        bool busy = false;  // queued or running
+    };
+
+    template <class Done>
+    void wait_until(Done done, const std::function<void()>& idle) {
+        std::unique_lock<std::mutex> lock(m_);
+        for (;;) {
+            if (error_) std::rethrow_exception(error_);
+            if (done()) return;
+            if (!cv_.wait_for(lock, std::chrono::milliseconds(100), [&] { return error_ || done(); })) {
+                lock.unlock();
+                idle();
+                lock.lock();
+            }
+        }
+    }
+
+    void work() {
+        std::unique_lock<std::mutex> lock(m_);
+        for (;;) {
+            cv_.wait(lock, [&] { return quit_ || (!stop_ && !queue_.empty()); });
+            if (quit_) return;
+            Slot& s = slots_[queue_.front()];
+            queue_.pop_front();
+            lock.unlock();
+            std::exception_ptr failed;
+            try {
+                if (reading_) device_.read_at(s.offset, s.buf->data(), s.length);
+                else device_.write_at(s.offset, ByteSpan(s.buf->data(), s.length));
+            } catch (...) {
+                failed = std::current_exception();
+            }
+            lock.lock();
+            s.busy = false;
+            if (!failed) {
+                completed_ += s.length;
+            } else if (!stop_) {
+                // The first failure stops the pass: nothing queued is started any more.
+                error_ = failed;
+                stop_ = true;
+                for (const std::size_t i : queue_) slots_[i].busy = false;
+                queue_.clear();
+            }
+            cv_.notify_all();
+        }
+    }
+
+    WipeDevice& device_;
+    const bool reading_;
+    std::vector<Slot> slots_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::deque<std::size_t> queue_;  // slots to start, in order
+    bool stop_ = false;
+    bool quit_ = false;
+    std::exception_ptr error_;
+    std::atomic<std::uint64_t> completed_{0};
+    std::vector<std::thread> workers_;
 };
 
 std::size_t utf16_units(const std::string& s) {
@@ -316,24 +510,33 @@ WipeResult wipe_device(WipeDevice& device, const WipeOptions& o) {
     const std::uint32_t block = std::max<std::uint32_t>(1, device.block_size());
     if (size == 0) throw Error("there is nothing to erase (the size is 0)");
     if (size % block != 0) throw Error("the size is not a whole number of sectors");
-    const std::size_t chunk = std::max<std::size_t>(block, kChunk / block * block);
+    const std::size_t chunk = std::max<std::size_t>(block, kWipeChunk / block * block);
+    const std::uint64_t chunks = (size + chunk - 1) / chunk;
+    // Several writes at once keep the drive busy: while one completes, the next ones are already
+    // queued at the drive (an external hard drive otherwise idles between two writes, each of
+    // which waits until the drive has it), and the random data of later ones is made meanwhile.
+    // kWipeInFlight writes of kWipeChunk bytes (48 MiB in flight): more or larger ones measured
+    // no faster (on a file and on a virtual disk) but take more memory, and a cancel waits for
+    // what is in flight, which stays short even on a slow USB 2 drive (about a second).
+    const unsigned threads = device.parallel_io() ? kWipeInFlight : 1;
     const std::vector<bool> passes = wipe_passes(o.method);
     const std::uint64_t job = size * passes.size() + (o.verify ? size : 0);
 
-    Bytes buf(chunk);
-    Bytes back(o.verify ? chunk : 0);
     std::uint8_t seed[32] = {};
     const auto start = std::chrono::steady_clock::now();
-    std::uint64_t job_done = 0;
+    std::uint64_t job_done = 0;  // before the pass that runs
+    std::uint64_t pass_done = 0;
     Ticker ticker;
+    Speed speed;
     WipeProgress p;
     p.passes = static_cast<int>(passes.size());
     p.total = size;
     const auto report = [&](bool last) {
         if (!o.on_progress || !ticker.due(last)) return;
-        const double secs = seconds_since(start);
-        p.bytes_per_second = secs > 0.2 ? static_cast<double>(job_done) / secs : 0;
-        p.seconds_left = p.bytes_per_second > 0 ? static_cast<double>(job - job_done) / p.bytes_per_second : -1;
+        p.done = pass_done;
+        const std::uint64_t all = job_done + pass_done;
+        p.bytes_per_second = speed.update(seconds_since(start), all);
+        p.seconds_left = p.bytes_per_second > 0 ? static_cast<double>(job - all) / p.bytes_per_second : -1;
         o.on_progress(p);
     };
     const auto cancelled = [&] { return o.should_cancel && o.should_cancel(); };
@@ -343,55 +546,84 @@ WipeResult wipe_device(WipeDevice& device, const WipeOptions& o) {
         const bool random = passes[i];
         if (random) random_bytes(seed);
         PatternStream stream(seed);
-        if (!random) std::fill(buf.begin(), buf.end(), std::uint8_t{0});
         p.pass = static_cast<int>(i) + 1;
         p.verifying = false;
-        p.done = 0;
-        for (std::uint64_t at = 0; at < size;) {
-            if (cancelled()) throw Cancelled();
-            const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, size - at));
-            if (random) stream.fill(buf.data(), n);
-            device.write_at(at, ByteSpan(buf.data(), n));
-            at += n;
-            p.done = at;
-            job_done += n;
-            result.bytes += n;
-            report(at == size);
+        pass_done = 0;
+        {
+            InFlight io(device, false, chunk, threads);
+            const auto idle = [&] {
+                if (cancelled()) throw Cancelled();
+                pass_done = io.completed();
+                report(false);
+            };
+            for (std::uint64_t k = 0; k < chunks; ++k) {
+                if (cancelled()) throw Cancelled();
+                const std::size_t slot = static_cast<std::size_t>(k % io.slots());
+                io.wait(slot, idle);  // its last write completed
+                const std::uint64_t at = k * chunk;
+                const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, size - at));
+                std::uint8_t* buf = io.buffer(slot);
+                if (random) stream.fill(buf, n);
+                else if (k < io.slots()) std::memset(buf, 0, n);  // each buffer once
+                io.start(slot, at, n);
+                pass_done = io.completed();
+                report(false);
+            }
+            io.wait_all(idle);
+            pass_done = io.completed();
         }
+        result.bytes += pass_done;
         device.flush();
+        report(true);
+        job_done += size;
     }
     if (o.verify) {
-        // The last pass again, compared with what the device returns.
+        // The last pass again, compared with what the device returns. Reads of the chunks after
+        // the one compared run meanwhile.
         const bool random = passes.back();
         PatternStream stream(seed);
-        if (!random) std::fill(buf.begin(), buf.end(), std::uint8_t{0});
+        PageBuffer want(chunk);
+        if (!random) std::memset(want.data(), 0, chunk);
         p.verifying = true;
-        p.done = 0;
-        for (std::uint64_t at = 0; at < size;) {
+        pass_done = 0;
+        InFlight io(device, true, chunk, threads);
+        const auto idle = [&] {
             if (cancelled()) throw Cancelled();
+            report(false);
+        };
+        std::uint64_t reading = 0;  // chunks whose read was started
+        for (std::uint64_t k = 0; k < chunks; ++k) {
+            if (cancelled()) throw Cancelled();
+            for (; reading < chunks && reading < k + io.slots(); ++reading) {
+                const std::uint64_t at = reading * chunk;
+                io.start(static_cast<std::size_t>(reading % io.slots()), at,
+                         static_cast<std::size_t>(std::min<std::uint64_t>(chunk, size - at)));
+            }
+            const std::uint64_t at = k * chunk;
             const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(chunk, size - at));
-            if (random) stream.fill(buf.data(), n);
-            device.read_at(at, back.data(), n);
-            if (std::memcmp(buf.data(), back.data(), n) != 0) {
-                std::size_t k = 0;
-                while (k < n && buf[k] == back[k]) ++k;
-                throw Error("the verification found other data than was written at byte " + std::to_string(at + k) +
+            if (random) stream.fill(want.data(), n);
+            const std::size_t slot = static_cast<std::size_t>(k % io.slots());
+            io.wait(slot, idle);
+            const std::uint8_t* back = io.buffer(slot);
+            if (std::memcmp(want.data(), back, n) != 0) {
+                std::size_t d = 0;
+                while (d < n && want.data()[d] == back[d]) ++d;
+                throw Error("the verification found other data than was written at byte " + std::to_string(at + d) +
                             "; the drive may be failing or did not write everything");
             }
-            at += n;
-            p.done = at;
-            job_done += n;
-            report(at == size);
+            pass_done = at + n;
+            report(k + 1 == chunks);
         }
         result.verified = true;
     }
     secure_wipe(seed, sizeof seed);
     if (o.clear_partition_table && passes.back()) {
         // No partition table left at either end (GPT keeps a copy in the last sectors).
-        std::fill(buf.begin(), buf.end(), std::uint8_t{0});
         const std::uint64_t edge = std::min<std::uint64_t>(size, kMiB / block * block == 0 ? block : kMiB / block * block);
-        device.write_at(0, ByteSpan(buf.data(), static_cast<std::size_t>(edge)));
-        device.write_at(size - edge, ByteSpan(buf.data(), static_cast<std::size_t>(edge)));
+        PageBuffer zeros(static_cast<std::size_t>(edge));
+        std::memset(zeros.data(), 0, zeros.size());
+        device.write_at(0, ByteSpan(zeros.data(), zeros.size()));
+        device.write_at(size - edge, ByteSpan(zeros.data(), zeros.size()));
         device.flush();
     }
     result.seconds = seconds_since(start);
@@ -468,13 +700,13 @@ std::uint64_t wipe_free_space(const std::string& folder, const FreeSpaceOptions&
     std::vector<Piece> pieces;
     std::uint64_t written = 0;
     Ticker ticker;
+    Speed speed;
     FreeSpaceProgress p;
     p.total = (o.limit != 0 ? std::min(free, o.limit) : free) * passes.size();
     const auto report = [&] {
         if (!o.on_progress || !ticker.due(false)) return;
-        const double secs = seconds_since(start);
         p.done = std::min(written, p.total);
-        p.bytes_per_second = secs > 0.2 ? static_cast<double>(written) / secs : 0;
+        p.bytes_per_second = speed.update(seconds_since(start), written);
         p.seconds_left = p.bytes_per_second > 0 && p.total > p.done
                              ? static_cast<double>(p.total - p.done) / p.bytes_per_second
                              : -1;

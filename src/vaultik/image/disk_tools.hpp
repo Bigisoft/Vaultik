@@ -188,6 +188,14 @@ public:
     virtual void read_at(std::uint64_t offset, std::uint8_t* dst, std::size_t length) = 0;
     // Everything written is on the device.
     virtual void flush() = 0;
+    // Whether several writes (or reads) may run at once, each from a thread of its own, at
+    // other offsets. Disks, volumes and files say yes; a device that does not gets one write
+    // after another (still on a thread of its own, while the next one is made ready).
+    virtual bool parallel_io() const { return false; }
+    // Called from another thread when the erase stops (cancelled, or a write failed) while
+    // writes or reads still run: makes them end as soon as it can (Windows: CancelIoEx), each
+    // then failing or completing. Nothing for devices whose writes cannot be cut short.
+    virtual void cancel() {}
     // A whole disk, after it was erased: tells the system it has no partitions any more
     // (Windows: it shows as not initialised; Linux: the kernel reads the empty table), through
     // the device opened and checked here, not by opening the disk again. Nothing for others.
@@ -214,6 +222,14 @@ struct WipeResult {
 // key each pass), so its verification regenerates it instead of keeping it. Throws Error when a
 // write fails or the verification finds a difference, Cancelled when stopped (the device is then
 // partly overwritten).
+// Writes are kWipeChunk bytes, up to kWipeInFlight of them at once (on a device with
+// parallel_io), while the data of the next ones is made on the calling thread; the verification
+// reads the same way. A pass ends with flush(), so it is done only once the drive has it. A
+// failed write stops it: no later write is started, and it throws once the writes still running
+// ended. Cancelled the same way, after cancel() cut them short. When it returns or throws, no
+// write or read of it runs any more. Progress counts the bytes whose write completed.
+constexpr std::size_t kWipeChunk = 8u << 20;
+constexpr unsigned kWipeInFlight = 6;
 WipeResult wipe_device(WipeDevice& device, const WipeOptions& options);
 
 // Opens a regular file to overwrite in place, through the same writes as a disk (tests, and disk
