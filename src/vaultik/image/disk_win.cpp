@@ -1133,9 +1133,10 @@ void check_online(HANDLE h, int number) {
 }
 
 // A volume opened to be locked (by its volume id, so the handle stays that volume whatever its
-// letter), for lock_volumes. After a forced dismount, a lock that fails on the handle that
-// dismounted it is tried on a new handle (the next open mounts it again, without the other
-// programs' handles).
+// letter), for lock_volumes. After a forced dismount, the handle that dismounted it no longer
+// reaches a mounted file system, and the next open mounts it again; programs that look at every
+// volume as soon as it is mounted (a virus scanner, the search indexer) may open it again at
+// once, so a failed lock forces it off once more and locks it through a new handle right away.
 class WinVolumeLock : public VolumeLock {
 public:
     WinVolumeLock(std::wstring device, std::string name, DWORD flags = 0)
@@ -1144,30 +1145,48 @@ public:
         if (!h_.valid()) throw_last_error("opening " + name_);
     }
     std::string name() const override { return name_; }
+    std::string why() const override { return why_; }
     bool lock() override {
-        DWORD got = 0;
-        if (h_.valid() && DeviceIoControl(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr)) return true;
+        if (try_lock()) return true;
         if (!forced_) return false;
-        UniqueHandle again = open_device(device_, GENERIC_READ | GENERIC_WRITE, flags_);
-        if (!again.valid()) return false;
-        h_ = std::move(again);
-        return DeviceIoControl(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr) != 0;
+        for (int i = 0; i < 3; ++i) {
+            dismount();
+            UniqueHandle again = open_device(device_, GENERIC_READ | GENERIC_WRITE, flags_);
+            if (!again.valid()) {
+                why_ = "Windows error " + std::to_string(GetLastError()) + " opening it again";
+                continue;
+            }
+            h_ = std::move(again);
+            if (try_lock()) return true;
+        }
+        return false;
     }
     void force_dismount() override {
         // Without the lock: Windows takes the volume away from every program that has it open.
-        DWORD got = 0;
-        DeviceIoControl(h_.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+        dismount();
         forced_ = true;
     }
     // The locked handle, kept open for as long as the volume must stay locked.
     UniqueHandle take() { return std::move(h_); }
 
 private:
+    bool try_lock() {
+        DWORD got = 0;
+        if (h_.valid() && DeviceIoControl(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr)) return true;
+        why_ = "Windows error " + std::to_string(GetLastError()) + " locking it";
+        return false;
+    }
+    void dismount() {
+        DWORD got = 0;
+        if (h_.valid()) DeviceIoControl(h_.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+    }
+
     std::wstring device_;
     std::string name_;
     DWORD flags_;
     UniqueHandle h_;
     bool forced_ = false;
+    std::string why_;
 };
 
 // How the user knows volume `v`: its drive letter ("F:"), its folder, or its volume id.

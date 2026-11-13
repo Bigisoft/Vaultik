@@ -132,7 +132,8 @@ void lock_volumes(const std::vector<VolumeLock*>& volumes, bool force, const Loc
         }
         if (!locked)
             throw Error(v->name() + " is still in use after it was forced closed (a program opened it again at "
-                        "once); close every program using it and try again. Nothing was written");
+                        "once" + (v->why().empty() ? std::string() : "; " + v->why()) +
+                        "); close every program using it and try again. Nothing was written");
     }
 }
 

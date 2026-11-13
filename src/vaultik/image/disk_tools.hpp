@@ -66,6 +66,8 @@ public:
     // Dismounts the volume although programs have it open (FSCTL_DISMOUNT_VOLUME without the
     // lock): their open files and handles stop working, so the lock can be taken next.
     virtual void force_dismount() = 0;
+    // Why the last lock failed, for the error message (empty when not known).
+    virtual std::string why() const { return {}; }
 };
 struct LockRetry {
     int tries = 10;  // lock attempts after a forced dismount
