@@ -17,6 +17,8 @@ where the packages (AppImage, Flatpak) are not tested yet; see
   ids are keyed BLAKE3 hashes, so the storage location learns nothing about the content.
 - **Fast incremental runs.** Files whose size and timestamps match the previous snapshot are not
   even read.
+- **Pause a plan.** A job can be paused: it keeps its settings and schedule, but nothing starts
+  it on its own until it is resumed ("Back up now" still works).
 - **Polite.** Priorities and hard limits for CPU, disk, memory and bandwidth, per job.
 - **Verifiable.** `verify --read-data` decrypts and checks every stored chunk, and jobs run
   health checks on their own (see below).
@@ -128,6 +130,13 @@ Start `vaultik-gui`, then **New backup job**:
   own times aside, which Windows updates lazily) save no new version; it shows as "nothing
   changed" and still counts as a backup for the overdue reminder (`vaultik backup
   --skip-unchanged` on the command line).
+  **Paused** (a tick in this section, or **Pause schedule** in the job's More menu, which turns
+  into **Resume schedule**) keeps the job, its schedule and every setting, but nothing starts it
+  on its own until it is resumed: no scheduled task or timer, no idle, lock, sign-out, update,
+  drive, continuous or other-computer runs, and no "not backed up for N days" reminders. The job
+  list shows it as "Paused (Daily at 18:00)". **Back up now** still runs it. Pausing a job with
+  administrator rights updates its approved copy and removes its task through the usual approval
+  (`vaultik pause-job <job>` and `vaultik resume-job <job>` on the command line).
   On Windows a job can also run with administrator rights, so scheduled runs use a shadow copy
   for open and locked files. Windows then asks for administrator approval each time the job (or
   its schedule) is saved or removed. Without the option, the task runs with normal rights and
@@ -297,6 +306,8 @@ vaultik forget    -r E:\Backups\vaultik --keep-daily 7 --keep-weekly 4 --keep-mo
 vaultik prune     -r E:\Backups\vaultik
 vaultik jobs
 vaultik run-job   documents
+vaultik pause-job documents
+vaultik resume-job documents
 vaultik check-job documents --full
 vaultik report    --month 2026-10 --html report.html
 vaultik copy      documents

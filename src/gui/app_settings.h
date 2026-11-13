@@ -37,7 +37,7 @@ StartupSetting startup_setting();
 void set_startup_setting(const StartupSetting& setting);
 
 // How many days without a backup make a job overdue: about twice its schedule's interval, or
-// `remind_after_days` for a job without one (0: never overdue).
+// `remind_after_days` for a job without one (0: never overdue). A paused job is never overdue.
 int overdue_after_days(const vaultik::jobs::Job& job, int remind_after_days);
 
 // The start time (FILETIME) of the job's last run that saved a version, 0 when there is none.

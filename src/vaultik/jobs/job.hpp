@@ -44,10 +44,17 @@ struct Schedule {
     // the installation, and the tray holds up the restart that follows while it is still running.
     bool on_update = false;
     int event_gap_hours = 4;  // 1..168
+    // Paused: the job keeps its schedule and settings, but nothing starts it on its own (no
+    // scheduled task or timer, no event, change, sign-out, drive or request runs) until it is
+    // resumed. "Back up now" still runs it.
+    bool paused = false;
 };
 
 // Whether the job has anything for the system scheduler to start (a time, idle, lock or updates).
+// A paused job has nothing.
 bool has_system_schedule(const Schedule& s);
+// The same, ignoring whether the job is paused: what it would have once resumed.
+bool has_system_schedule_unpaused(const Schedule& s);
 
 // Health checks run after a scheduled backup when they are due: a weekly check reads a share of
 // the stored data back and compares it with its hashes, a monthly full check reads all of it.
@@ -317,7 +324,8 @@ const char* to_string(Schedule::Kind kind);
 // days. A cancelled check does not count, so it is tried again after the next backup.
 std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
                                  std::uint64_t now);
-// "Daily at 02:00", "Mon, Wed at 21:30", "Every 4 hours at :15", "Manual".
+// "Daily at 02:00", "Mon, Wed at 21:30", "Every 4 hours at :15", "Manual"; a paused job's in
+// brackets after "Paused": "Paused (Daily at 02:00)".
 std::string describe(const Schedule& schedule);
 
 class JobStore {

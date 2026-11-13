@@ -128,6 +128,7 @@ void set_startup_setting(const StartupSetting& setting) {
 }
 
 int overdue_after_days(const jobs::Job& job, int remind_after_days) {
+    if (job.schedule.paused) return 0;  // paused on purpose: no reminders until it is resumed
     switch (job.schedule.kind) {
         case jobs::Schedule::Kind::Hourly: return job.schedule.every_hours <= 12 ? 1 : 2;
         case jobs::Schedule::Kind::Daily: return 2;

@@ -715,3 +715,39 @@ TEST_CASE("continuous backups ignore changes the backup leaves out") {
     CHECK_FALSE(vaultik::path_excluded({}, "/a.tmp"));
 #endif
 }
+
+TEST_CASE("a paused job keeps its schedule but nothing starts it on its own") {
+    Job j = sample();
+    j.id = "docs";
+    j.schedule.on_idle = true;
+    CHECK(has_system_schedule(j.schedule));
+    j.schedule.paused = true;
+    // No task or timer while paused, but what it would have once resumed is still known.
+    CHECK_FALSE(has_system_schedule(j.schedule));
+    CHECK(has_system_schedule_unpaused(j.schedule));
+    CHECK(describe(j.schedule) == "Paused (Mon, Wed at 21:30, also when idle)");
+    Schedule manual;
+    manual.paused = true;
+    CHECK(describe(manual) == "Paused (Manual)");
+
+    // Saved and read back; older files without the setting load as not paused.
+    const Job back = job_from_json(to_json(j));
+    CHECK(back.schedule.paused);
+    CHECK(back.schedule.kind == Schedule::Kind::Weekly);
+    CHECK(back.schedule.weekdays == 0b0000101);
+    CHECK(nlohmann::json::parse(to_json(j)).at("schedule").at("paused") == true);
+    const Job old = job_from_json(R"({"version":1,"id":"x","name":"x","repository":"E:/b","sources":["C:/a"],)"
+                                  R"("schedule":{"kind":"daily","hour":18}})");
+    CHECK_FALSE(old.schedule.paused);
+    CHECK(has_system_schedule(old.schedule));
+
+    // Neither events (idle, lock, sign-out, updates) nor connecting the drive start it.
+    TempStore t;
+    const JobStore store(t.dir());
+    Job running = sample();
+    running.id = "docs";
+    CHECK(event_backup_due(store, running));
+    CHECK_FALSE(event_backup_due(store, j));
+    j.backup_on_connect = true;
+    CHECK_FALSE(connect_backup_due(store, j));
+}

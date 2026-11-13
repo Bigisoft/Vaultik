@@ -102,6 +102,11 @@ QString when_text(std::uint64_t filetime) {
 
 // The schedule in words, in the frontend's language (jobs::describe is the engine's English).
 QString schedule_text(const jobs::Schedule& s) {
+    if (s.paused) {
+        jobs::Schedule running = s;
+        running.paused = false;
+        return QObject::tr("Paused (%1)").arg(schedule_text(running));
+    }
     const QString time = QStringLiteral("%1:%2").arg(s.hour, 2, 10, QLatin1Char('0')).arg(s.minute, 2, 10, QLatin1Char('0'));
     switch (s.kind) {
         case jobs::Schedule::Kind::Manual:
@@ -127,9 +132,10 @@ QString schedule_text(const jobs::Schedule& s) {
     return QObject::tr("Manual");
 }
 
-// When Task Scheduler starts the job next (local time); invalid for a manual job. Mirrors the
+// When Task Scheduler starts the job next (local time); invalid for a manual or paused job. Mirrors the
 // triggers in jobs/scheduler.cpp: an hourly job repeats from 2026-01-01 00:<minute>.
 QDateTime next_run(const jobs::Schedule& s, const QDateTime& now) {
+    if (s.paused) return {};  // nothing starts a paused job on its own
     switch (s.kind) {
         case jobs::Schedule::Kind::Manual:
             return {};
@@ -991,6 +997,15 @@ QWidget* MainWindow::build_job_page() {
     more_->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(more_);  // owned by the button
     menu->addAction(tr("Edit job..."), this, &MainWindow::edit_job);
+    pause_job_ = menu->addAction(tr("Pause schedule"), this, [this] {
+        const jobs::Job* job = current_job();
+        if (job) set_job_paused(!job->schedule.paused);
+    });
+    pause_job_->setToolTip(tr("Keep the job and its schedule, but let nothing start it on its own until it is resumed"));
+    connect(menu, &QMenu::aboutToShow, this, [this] {
+        const jobs::Job* job = current_job();
+        pause_job_->setText(job && job->schedule.paused ? tr("Resume schedule") : tr("Pause schedule"));
+    });
     menu->addAction(tr("Check the backup now"), this, [this] { check_job(false); })
         ->setToolTip(tr("Read part of the stored data back and check every version"));
     menu->addAction(tr("Full health check..."), this, [this] { check_job(true); });
@@ -1427,16 +1442,23 @@ void MainWindow::refresh_overview() {
             d.next_run = tr("tomorrow %1").arg(QLocale().toString(next.time(), QLocale::ShortFormat));
         d.next_run[0] = d.next_run[0].toUpper();
         d.next_detail = schedule_text(job->schedule) + ", " + tr("if the computer is on (otherwise right after)");
+    } else if (job->schedule.paused) {
+        d.next_run = tr("Paused");
+        d.next_detail = tr("Nothing starts this job on its own until you resume it (More, Resume schedule). "
+                           "\"Back up now\" still works.");
     } else {
         d.next_run = tr("When you start it");
         d.next_detail = tr("This job has no schedule.");
     }
-    if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
-    if (job->schedule.on_idle) d.next_detail += "\n" + tr("Also when the computer is idle.");
-    if (job->schedule.on_lock) d.next_detail += "\n" + tr("Also when you lock the computer.");
-    if (job->schedule.on_sign_out) d.next_detail += "\n" + tr("Also when you sign out or shut down.");
-    if (job->schedule.on_update) d.next_detail += "\n" + tr("Also when Windows starts installing updates.");
-    if (job->continuous)
+    if (job->schedule.paused) {
+        // The triggers below do not start a paused job either.
+    } else if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
+    const bool active = !job->schedule.paused;
+    if (active && job->schedule.on_idle) d.next_detail += "\n" + tr("Also when the computer is idle.");
+    if (active && job->schedule.on_lock) d.next_detail += "\n" + tr("Also when you lock the computer.");
+    if (active && job->schedule.on_sign_out) d.next_detail += "\n" + tr("Also when you sign out or shut down.");
+    if (active && job->schedule.on_update) d.next_detail += "\n" + tr("Also when Windows starts installing updates.");
+    if (active && job->continuous)
         d.next_detail += "\n" + tr("Also %1 min after files change.").arg(job->continuous_minutes);
 
     // Versions and size, once the repository is open.
@@ -1887,6 +1909,35 @@ void MainWindow::edit_job() {
         repos_.erase(dialog.job().id);
         reload_jobs(dialog.job().id);
     }
+}
+
+void MainWindow::set_job_paused(bool paused) {
+    const jobs::Job* current = current_job();
+    if (!current) return;
+    jobs::Job job = *current;  // the list may change while a message is open
+    if (job.schedule.paused == paused) return;
+    job.schedule.paused = paused;
+    // Saved the way the job dialog saves it: the job, then its system schedule (removed while
+    // paused; a job with administrator rights asks for approval).
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    try {
+        store_.save(job);
+    } catch (const Error& e) {
+        QApplication::restoreOverrideCursor();
+        QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        return;
+    }
+    try {
+        jobs::apply_schedule(job, u8(QDir::toNativeSeparators(QFileInfo(Runner::engine_path()).absolutePath())));
+    } catch (const Error& e) {
+        QApplication::restoreOverrideCursor();
+        QMessageBox::warning(this, windowTitle(),
+                             tr("The job was saved, but its schedule could not be set up:\n%1").arg(e.what()));
+        reload_jobs(job.id);
+        return;
+    }
+    QApplication::restoreOverrideCursor();
+    reload_jobs(job.id);
 }
 
 void MainWindow::delete_job() {

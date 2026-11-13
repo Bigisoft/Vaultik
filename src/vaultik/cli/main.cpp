@@ -392,6 +392,11 @@ Commands:
   schedule <job>               Register the job's schedule with the system
                                scheduler (Task Scheduler or a systemd user timer)
   unschedule <job>             Remove it again (the job itself is kept)
+  pause-job <job>              Pause the job: it keeps its settings and schedule,
+                               but nothing starts it on its own (schedule, events,
+                               drive, changes, requests) until it is resumed;
+                               run-job still runs it
+  resume-job <job>             Resume a paused job (registers its schedule again)
   admin-job install|remove     Used by schedule and the frontend for jobs with
                                administrator rights (asks for approval)
 
@@ -1501,6 +1506,25 @@ int cmd_schedule(const Args& a, bool install) {
     }
     jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
     out("Job \"" + job->name + "\" scheduled: " + jobs::describe(job->schedule) + "\n");
+    return kExitOk;
+}
+
+// Pauses or resumes a job: it keeps its settings and schedule, but while paused nothing starts it
+// on its own. Saved like an edit of the job, then its system schedule is applied (removed while
+// paused; a job with administrator rights asks for approval as when it is saved).
+int cmd_pause_job(const Args& a, bool pause) {
+    if (a.positional.empty()) throw Error(std::string("usage: vaultik ") + (pause ? "pause-job" : "resume-job") + " <job>");
+    const jobs::JobStore store;
+    auto job = store.find(a.positional[0]);
+    if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
+    if (job->schedule.paused == pause) {
+        out("Job \"" + job->name + "\" is " + (pause ? "already paused" : "not paused") + ".\n");
+        return kExitOk;
+    }
+    job->schedule.paused = pause;
+    store.save(*job);
+    jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
+    out("Job \"" + job->name + "\" " + (pause ? "paused" : "resumed") + ": " + jobs::describe(job->schedule) + "\n");
     return kExitOk;
 }
 
@@ -2747,6 +2771,12 @@ int cmd_run_job(const Args& a) {
                                a.has("--on-request");
         const std::string refusal = jobs::elevated_run_refusal(*job, automatic);
         if (!refusal.empty()) throw Error(refusal);
+    }
+    // A paused job is not started on its own: only a plain run-job (Back up now) runs it.
+    if (job->schedule.paused && (on_connect || a.has("--scheduled") || a.has("--on-event") || a.has("--on-sign-out") ||
+                                 a.has("--on-change") || a.has("--on-request"))) {
+        if (!g_json) err("The job \"" + job->name + "\" is paused: not started (vaultik resume-job resumes it).\n");
+        return kExitOk;
     }
     if (on_connect && !jobs::connect_backup_due(store, *job)) return kExitOk;
     // Started by an event rather than a time: not again soon after a backup.
@@ -4621,6 +4651,8 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "uninstall-cleanup") return cmd_uninstall_cleanup();
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);
+    if (a.command == "pause-job") return cmd_pause_job(a, true);
+    if (a.command == "resume-job") return cmd_pause_job(a, false);
     if (a.command == "recovery") return cmd_recovery(a);
     if (a.command == "recovery-media") return cmd_recovery_media(a);
 

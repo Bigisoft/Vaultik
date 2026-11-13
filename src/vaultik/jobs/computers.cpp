@@ -228,7 +228,7 @@ std::vector<StatusFile> list_statuses(Repository& repo) {
 }
 
 std::optional<std::uint64_t> next_run(const Schedule& s, std::uint64_t now) {
-    if (s.kind == Schedule::Kind::Manual || now < os::kUnixEpochTicks) return std::nullopt;
+    if (s.kind == Schedule::Kind::Manual || s.paused || now < os::kUnixEpochTicks) return std::nullopt;
     const std::time_t t = static_cast<std::time_t>((now - os::kUnixEpochTicks) / 10000000);
     const auto ticks = [](std::time_t v) { return os::from_unix(static_cast<std::int64_t>(v), 0); };
     switch (s.kind) {

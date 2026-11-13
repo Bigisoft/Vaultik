@@ -222,8 +222,12 @@ void record_copy_volume(Job& job) {
     record_one(job.second_copy.repository, job.second_copy.volume, job.second_copy.relative);
 }
 
-bool has_system_schedule(const Schedule& s) {
+bool has_system_schedule_unpaused(const Schedule& s) {
     return s.kind != Schedule::Kind::Manual || s.on_idle || s.on_lock || s.on_update;
+}
+
+bool has_system_schedule(const Schedule& s) {
+    return !s.paused && has_system_schedule_unpaused(s);
 }
 
 bool in_work_hours(const WorkHours& w, int weekday, int minute) {
@@ -465,7 +469,8 @@ std::string to_json(const Job& job) {
           {"on_lock", job.schedule.on_lock},
           {"on_sign_out", job.schedule.on_sign_out},
           {"on_update", job.schedule.on_update},
-          {"event_gap_hours", job.schedule.event_gap_hours}}},
+          {"event_gap_hours", job.schedule.event_gap_hours},
+          {"paused", job.schedule.paused}}},
         {"resources",
          {{"cpu", vaultik::to_string(r.cpu)},
           {"io", vaultik::to_string(r.io)},
@@ -564,6 +569,7 @@ Job job_from_json(const std::string& text) {
             job.schedule.on_sign_out = s.value("on_sign_out", false);
             job.schedule.on_update = s.value("on_update", false);
             job.schedule.event_gap_hours = s.value("event_gap_hours", 4);
+            job.schedule.paused = s.value("paused", false);  // older files: not paused
         }
         if (j.contains("resources")) {
             const json& r = j.at("resources");
@@ -828,6 +834,11 @@ std::string describe_time(const Schedule& s) {
 }  // namespace
 
 std::string describe(const Schedule& s) {
+    if (s.paused) {
+        Schedule running = s;
+        running.paused = false;
+        return "Paused (" + describe(running) + ")";
+    }
     std::vector<std::string> events;
     if (s.on_idle) events.push_back("when idle");
     if (s.on_lock) events.push_back("when locked");

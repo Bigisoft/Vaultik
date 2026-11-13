@@ -678,7 +678,8 @@ std::vector<RunRecord> combined_history(const JobStore& store, const std::string
 }
 
 bool connect_backup_due(const JobStore& store, const Job& job) {
-    if (!job.backup_on_connect || job.repository_volume.empty() || !drive_connected(job)) return false;
+    if (job.schedule.paused || !job.backup_on_connect || job.repository_volume.empty() || !drive_connected(job))
+        return false;
     const std::vector<RunRecord> history = combined_history(store, job.id, 50);
     const RunRecord* last = last_backup(history);
     constexpr std::uint64_t kQuiet = 10ull * 60 * 10'000'000;  // 10 minutes in FILETIME ticks
@@ -686,7 +687,7 @@ bool connect_backup_due(const JobStore& store, const Job& job) {
 }
 
 bool event_backup_due(const JobStore& store, const Job& job) {
-    if (!drive_connected(job)) return false;
+    if (job.schedule.paused || !drive_connected(job)) return false;
     const std::vector<RunRecord> history = combined_history(store, job.id, 50);
     const RunRecord* last = last_backup(history);
     const std::uint64_t gap = static_cast<std::uint64_t>(std::clamp(job.schedule.event_gap_hours, 1, 168)) * 3600 * 10'000'000;

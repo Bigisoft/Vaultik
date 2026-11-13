@@ -109,6 +109,7 @@ private:
     QWidget* time_row_ = nullptr;
     QWidget* hourly_row_ = nullptr;
     QWidget* days_row_ = nullptr;
+    QCheckBox* paused_ = nullptr;
     QCheckBox* on_connect_ = nullptr;
     QLabel* on_connect_note_ = nullptr;
     QCheckBox* on_idle_ = nullptr;
