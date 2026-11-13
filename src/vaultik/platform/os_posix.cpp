@@ -1068,6 +1068,66 @@ int run_command_elevated(const std::vector<std::string>&, bool) {
     throw Error("running as administrator is only supported on Windows");
 }
 
+namespace {
+
+class PkexecProcess : public ElevatedProcess {
+public:
+    explicit PkexecProcess(pid_t pid) : pid_(pid) {}
+    ~PkexecProcess() override {
+        // Never stopped (it runs as root); reaped when it ends, so it leaves no zombie behind.
+        if (!code_) std::thread([pid = pid_] {
+                        int status = 0;
+                        while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+                        }
+                    }).detach();
+    }
+    std::optional<int> wait(int timeout_ms) override {
+        if (code_) return code_;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms < 0 ? 0 : timeout_ms);
+        for (;;) {
+            int status = 0;
+            const pid_t r = ::waitpid(pid_, &status, WNOHANG);
+            if (r == pid_) {
+                code_ = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+                return code_;
+            }
+            if (r < 0 && errno != EINTR) {
+                code_ = 127;
+                return code_;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) return std::nullopt;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+private:
+    pid_t pid_;
+    std::optional<int> code_;
+};
+
+}  // namespace
+
+std::string pkexec_path() {
+    for (const char* p : {"/usr/bin/pkexec", "/bin/pkexec", "/usr/local/bin/pkexec"})
+        if (::access(p, X_OK) == 0) return p;
+    return {};
+}
+
+std::unique_ptr<ElevatedProcess> start_command_elevated(const std::vector<std::string>& argv, bool) {
+    if (argv.empty()) throw Error("start_command_elevated: no program");
+    const std::string pkexec = pkexec_path();
+    if (pkexec.empty()) throw Error("pkexec is not installed");
+    std::vector<std::string> args{pkexec};
+    args.insert(args.end(), argv.begin(), argv.end());
+    std::vector<char*> cargs;
+    for (std::string& a : args) cargs.push_back(a.data());
+    cargs.push_back(nullptr);
+    pid_t pid = -1;
+    const int rc = ::posix_spawn(&pid, pkexec.c_str(), nullptr, nullptr, cargs.data(), environ);
+    if (rc != 0) throw Error("cannot start " + pkexec + ": " + std::strerror(rc));
+    return std::make_unique<PkexecProcess>(pid);
+}
+
 struct PipedProcess::Impl {
     Direction direction = Direction::FromProgram;
     pid_t pid = -1;

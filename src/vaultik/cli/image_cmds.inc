@@ -562,11 +562,20 @@ int cmd_recovery_media(const Args& a) {
         if (norm != "ERASE" + drive) throw Error("not confirmed; " + drive + " was not changed");
     }
     o.on_step = [](const std::string& s) {
+        // Stops between steps (what was made so far is removed; a USB stick may be left empty).
+        if (stop_requested()) throw Cancelled();
         if (g_json) emit({{"event", "progress"}, {"current", s}});
         else out(s + "\n");
     };
     o.on_warning = [](const std::string& w) { warning(w); };
-    image::make_recovery_media(o);
+    try {
+        image::make_recovery_media(o);
+    } catch (const Cancelled&) {
+        const std::string msg = "cancelled; no recovery drive was made";
+        if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", msg}});
+        else err(msg + "\n");
+        return kExitCancelled;
+    }
     const std::string where = o.iso.empty() ? o.usb : o.iso;
     if (g_json) emit({{"event", "done"}, {"status", "success"}, {"message", "recovery drive written to " + where}});
     else out("The recovery drive is ready: " + where +

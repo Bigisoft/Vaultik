@@ -814,6 +814,50 @@ int run_command_elevated(const std::vector<std::string>& argv, bool show_window)
     return static_cast<int>(code);
 }
 
+namespace {
+
+class WinElevatedProcess : public ElevatedProcess {
+public:
+    explicit WinElevatedProcess(HANDLE process) : process_(process) {}
+    std::optional<int> wait(int timeout_ms) override {
+        if (WaitForSingleObject(process_.get(), static_cast<DWORD>(timeout_ms < 0 ? 0 : timeout_ms)) != WAIT_OBJECT_0)
+            return std::nullopt;
+        DWORD code = 0;
+        GetExitCodeProcess(process_.get(), &code);
+        return static_cast<int>(code);
+    }
+
+private:
+    UniqueHandle process_;
+};
+
+}  // namespace
+
+std::unique_ptr<ElevatedProcess> start_command_elevated(const std::vector<std::string>& argv, bool show_window) {
+    if (argv.empty()) throw Error("start_command_elevated: no program");
+    const std::wstring program = program_path(argv[0]);
+    std::wstring params;
+    for (std::size_t i = 1; i < argv.size(); ++i) params += (params.empty() ? L"" : L" ") + quote_arg(widen(argv[i]));
+
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof info;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = L"runas";
+    info.lpFile = program.c_str();
+    info.lpParameters = params.c_str();
+    info.nShow = show_window ? SW_SHOWNORMAL : SW_HIDE;
+    if (!ShellExecuteExW(&info)) {
+        if (GetLastError() == ERROR_CANCELLED) throw Error("administrator approval was declined");
+        throw_last_error("cannot start " + argv[0] + " as administrator");
+    }
+    if (info.hProcess == nullptr) throw Error("cannot start " + argv[0] + " as administrator");
+    return std::make_unique<WinElevatedProcess>(info.hProcess);
+}
+
+std::string pkexec_path() {
+    return {};
+}
+
 int run_command(const std::vector<std::string>& argv, std::string* output) {
     if (argv.empty()) throw Error("run_command: no program");
     std::wstring cmdline;

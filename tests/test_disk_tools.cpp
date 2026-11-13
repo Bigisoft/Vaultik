@@ -17,6 +17,9 @@
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/hex.hpp"
+#include "vaultik/util/task_events.hpp"
+
+#include "engine_channel.hpp"
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -1072,6 +1075,59 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
         REQUIRE(os::run_command({format, r32.volumes[0].substr(0, 2), "/FS:FAT32", "/Q", "/V:VTFAT", "/Y"}, &out) == 0);
     }
     forced_wipe("FAT32");
+
+    // As the app runs it: the engine sends its events over a progress channel the test serves
+    // (here without the approval prompt, as the tests run as administrator). Progress arrives
+    // and the last one reaches 100%; then a slower erase is stopped by a cancel sent over it.
+    {
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        const DiskInfo blank = *it;
+        REQUIRE(blank.size == size);
+        std::vector<std::string> args{"disk", "wipe", std::to_string(number), "--confirm", erase_text(blank),
+                                      "--expect-size", std::to_string(blank.size)};
+        if (!blank.serial.empty()) args.insert(args.end(), {"--expect-serial", blank.serial});
+        if (!blank.id.empty()) args.insert(args.end(), {"--expect-id", blank.id});
+        const test::EngineRun full = test::run_engine_with_channel(args, [](const std::string&, os::ProgressServer&) {});
+        CAPTURE(full.output);
+        CHECK(full.connected);
+        CHECK(full.code == 0);
+        std::vector<TaskEvent> progress;
+        TaskEvent done;
+        for (const std::string& line : full.lines) {
+            const TaskEvent e = parse_task_event(line);
+            if (e.type == TaskEvent::Type::Progress && e.has_total) progress.push_back(e);
+            if (e.type == TaskEvent::Type::Done) done = e;
+        }
+        REQUIRE_FALSE(progress.empty());
+        CHECK(progress.back().total == size);
+        CHECK(progress.back().done == progress.back().total);
+        CHECK(done.status == "success");
+        MESSAGE("ran: disk wipe through the progress channel, " << progress.size() << " progress events");
+
+        std::vector<std::string> slow = args;
+        slow.insert(slow.end(), {"--method", "dod3", "--verify"});
+        bool cancel_sent = false;
+        const test::EngineRun stopped = test::run_engine_with_channel(slow, [&](const std::string& line, os::ProgressServer& server) {
+            if (!cancel_sent && parse_task_event(line).type == TaskEvent::Type::Progress) cancel_sent = server.send_line("cancel");
+        });
+        CAPTURE(stopped.output);
+        CHECK(stopped.connected);
+        CHECK(cancel_sent);
+        CHECK(stopped.code == 4);
+        bool reached_check = false;
+        TaskEvent last;
+        for (const std::string& line : stopped.lines) {
+            const TaskEvent e = parse_task_event(line);
+            if (e.type == TaskEvent::Type::Progress && e.verifying) reached_check = true;
+            if (e.type != TaskEvent::Type::Unknown) last = e;
+        }
+        CHECK_FALSE(reached_check);  // stopped during the first passes
+        CHECK(last.type == TaskEvent::Type::Done);
+        CHECK(last.status == "cancelled");
+        MESSAGE("ran: disk wipe cancelled through the progress channel");
+    }
     attached.reset();
 }
 #else
