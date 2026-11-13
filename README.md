@@ -1059,16 +1059,23 @@ prepares a new, blank or unwanted disk for use, like a disk manager's "add new d
 what is on it, writes a new partition table (GPT, the default, or MBR for older computers, up to
 2 TiB), makes one partition over the whole disk, formats it (NTFS or exFAT on Windows; ext4, NTFS
 or exFAT on Linux) with the name given, and gives it a drive letter (Windows) or mounts it on
-request (Linux). On a GPT disk Windows gets its usual 16 MiB reserved partition first. The
-disk Windows (or Linux) runs from and the one Vaultik runs from are never offered, nor a disk
-with a volume holding Windows, a page, swap or hibernation file, or (Linux) one that is mounted,
-used as swap or by LVM, RAID or encryption. As for a disk image restore, the disk's model, size
-and serial number are shown and you type `ERASE DISK <number>` (Linux: `ERASE DISK sdb`); the
-disk is checked again, before anything is written, to be the one shown. It needs administrator
-rights and runs in a window of its own (on Linux the window shows the `sudo` command to run in a
-terminal). Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
+request (Linux). On a GPT disk Windows gets its usual 16 MiB reserved partition first. Never
+offered: the disk Windows (or Linux) runs from, the disk holding the partition the computer
+starts Windows from (the EFI system partition, or the "System Reserved" partition of an older
+computer, even when it is on another disk than Windows), the one Vaultik runs from, a disk with
+a page, swap or hibernation file, a dynamic disk, a Storage Spaces disk or a disk holding part of
+a volume over several disks, a disk Windows keeps offline or read-only (bring it online in Disk
+Management first), or (Linux) one that is mounted, used as swap or by LVM, RAID or encryption.
+When Vaultik cannot tell which disks Windows runs and starts from, it offers none. A disk from
+another computer that holds its own Windows can be erased. As for a disk image restore, the
+disk's model, size and serial number are shown and you type `ERASE DISK <number>` (Linux:
+`ERASE DISK sdb`); the disk is checked again on the opened disk, before anything is written, to
+be the one shown, and once more before it is formatted. It needs administrator rights and runs
+in a window of its own (on Linux the window shows the `sudo` command to run in a terminal).
+Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
 `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` after locking and dismounting the disk's volumes, and formats
-with `format.com`; Linux uses `wipefs`, `sfdisk` and `mkfs.ext4` (`mkfs.ntfs`, `mkfs.exfat`).
+with `format.com` (from the Windows system folder); Linux uses `sfdisk` (through the disk opened
+exclusively and checked) and `mkfs.ext4` (`mkfs.ntfs`, `mkfs.exfat`).
 
 ```
 vaultik disk list
@@ -1086,17 +1093,27 @@ sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
   not initialised (Linux: no partitions). The same guards and typed `ERASE DISK <number>` as
   above.
 - **One drive (volume):** only that partition (`ERASE E:`, Linux `ERASE sdb1`); never the one
-  Windows or Vaultik runs from, nor one with a page or hibernation file. It is locked and
-  dismounted first, so close the programs using it.
+  Windows or Vaultik runs from, nor one with a page or hibernation file, nor an EFI system,
+  reserved, recovery or active partition, nor a volume on a dynamic disk or over several disks.
+  It is locked and dismounted first, so close the programs using it. The drive is checked again
+  just before it is written to, to be the one listed (Windows: its volume id, size and serial
+  number; Linux: its partition id, where it starts, its size and the disk's serial number), so a
+  USB stick swapped for another one in the meantime is not erased.
 - **Only the free space of a drive:** a temporary file fills the free space and is deleted again,
   so files deleted earlier cannot be brought back. The files on the drive are not touched, it
-  needs no administrator rights, and it shows its progress and can be stopped in the window.
+  needs no administrator rights, and it shows its progress and can be stopped in the window. The
+  file is not compressed, and it goes away when the program ends, also when it is killed (one
+  left over after a power cut is removed the next time). On a drive that compresses it anyway,
+  random data is written instead of zeros; a drive that keeps even that compressed (ZFS with
+  deduplication, say) stops with an error.
 
 The methods are one pass of zeros (the default, enough for today's drives), one pass of random
 data, and three passes (random, random, zeros, like DoD 5220.22-M); **Read the last pass back**
 checks that the drive kept what was written. The window that erases shows the pass, the speed and
 the time left; Ctrl+C there stops it (what was written stays overwritten). From the command
-line `--confirm` gives the confirmation beforehand, for scripts.
+line `--confirm` gives the confirmation beforehand, for scripts, and `--expect-size`,
+`--expect-serial` and `--expect-id` (which the Vaultik window passes along) make it stop when the
+disk or drive is another one by then.
 
 ```
 vaultik disk wipe 2 --method dod3 --verify

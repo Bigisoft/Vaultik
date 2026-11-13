@@ -406,6 +406,7 @@ void DriveCleanserDialog::fill_targets() {
     disk_->clear();
     volumes_->clear();
     disks_.clear();
+    volume_ids_.clear();
     for (auto& [d, why] : tool_disks()) {
         QString text = disk_text(d);
         if (!why.empty()) text += "  -  " + tr("not possible: %1").arg(qs(why));
@@ -423,7 +424,7 @@ void DriveCleanserDialog::fill_targets() {
                             (v.filesystem.empty() ? QString() : ", " + qs(v.filesystem)) + ")";
             std::string refusal;
             try {
-                image::find_wipe_volume(name);
+                volume_ids_[name] = image::volume_identity(image::find_wipe_volume(name));
             } catch (const std::exception& e) {
                 refusal = e.what();
             }
@@ -519,7 +520,31 @@ void DriveCleanserDialog::start() {
         if (!id.serial.empty()) args << "--expect-serial" << qs(id.serial);
         if (!id.id.empty()) args << "--expect-id" << qs(id.id);
     } else {
-        args << "--volume" << volumes_->currentData().toString();
+        // The drive with that name now must be the one listed (a USB stick may have been swapped
+        // for another one meanwhile); the engine checks it again on the opened drive.
+        const std::string name = u8(volumes_->currentData().toString());
+        const auto shown = volume_ids_.find(name);
+        std::string other = shown == volume_ids_.end() ? std::string("the drive was not listed") : std::string();
+        if (other.empty()) {
+            try {
+                other = image::volume_mismatch(image::find_wipe_volume(name), shown->second);
+            } catch (const std::exception& e) {
+                other = e.what();
+            }
+        }
+        if (!other.empty()) {
+            confirm_->clear();
+            fill_targets();
+            QMessageBox::warning(this, windowTitle(),
+                                 tr("The drives changed since this window listed them (%1). Nothing was written. Check "
+                                    "the list and choose the drive again.")
+                                     .arg(qs(other)));
+            return;
+        }
+        const image::DiskIdentity& id = shown->second;
+        args << "--volume" << qs(name) << "--expect-size" << QString::number(id.size);
+        if (!id.serial.empty()) args << "--expect-serial" << qs(id.serial);
+        if (!id.id.empty()) args << "--expect-id" << qs(id.id);
     }
     args << "--method" << method << "--confirm" << want;
     if (verify_->isChecked()) args << "--verify";

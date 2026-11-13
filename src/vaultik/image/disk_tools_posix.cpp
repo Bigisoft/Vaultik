@@ -81,6 +81,31 @@ std::string udev_value(const std::string& sys, const std::string& key) {
     return {};
 }
 
+// The serial number of the disk whose sysfs folder is `sys`.
+std::string disk_serial(const std::string& sys) {
+    std::string serial = read_small(os::join(os::join(sys, "device"), "serial"));
+    if (serial.empty()) serial = udev_value(sys, "ID_SERIAL_SHORT");
+    return serial;
+}
+
+// The sysfs folder of the block device open as `fd` (empty when it is not one), and its device
+// number in `rdev`.
+std::string sys_of_fd(int fd, dev_t& rdev) {
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || !S_ISBLK(st.st_mode)) return {};
+    rdev = st.st_rdev;
+    return real_path("/sys/dev/block/" + std::to_string(::major(st.st_rdev)) + ":" + std::to_string(::minor(st.st_rdev)));
+}
+
+// The id of partition `psys` that wipe_volume checks: its partition table entry's id and where
+// it starts on the disk.
+std::string partition_id(const std::string& psys) {
+    std::string uuid = udev_value(psys, "ID_PART_ENTRY_UUID");
+    std::transform(uuid.begin(), uuid.end(), uuid.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    const std::uint64_t start = std::strtoull(read_small(os::join(psys, "start")).c_str(), nullptr, 10) * 512;
+    return "partuuid=" + uuid + ",start=" + std::to_string(start);
+}
+
 std::vector<std::string> active_swaps() {
     std::vector<std::string> out;
     const std::string text = read_small("/proc/swaps");
@@ -157,6 +182,12 @@ public:
     FdDevice(int fd, std::uint64_t size, std::uint32_t block, std::string what)
         : fd_(fd), size_(size), block_(block), what_(std::move(what)) {}
     ~FdDevice() override { ::close(fd_); }
+    int fd() const { return fd_; }
+    void forget_partition_table() override {
+        // The kernel reads the (now empty) partition table again, through this exclusive open.
+        struct stat st{};
+        if (::fstat(fd_, &st) == 0 && S_ISBLK(st.st_mode)) ::ioctl(fd_, BLKRRPART);
+    }
     std::uint64_t size() const override { return size_; }
     std::uint32_t block_size() const override { return block_; }
     void write_at(std::uint64_t offset, ByteSpan data) override {
@@ -197,7 +228,7 @@ private:
 
 // A block device opened exclusively: the kernel refuses while it, or a partition of it, is
 // mounted, used as swap or by device-mapper.
-std::unique_ptr<WipeDevice> open_block_device(const std::string& device) {
+std::unique_ptr<FdDevice> open_block_device(const std::string& device) {
     const int fd = ::open(device.c_str(), O_RDWR | O_EXCL | O_CLOEXEC);
     if (fd < 0) {
         const int e = errno;
@@ -222,6 +253,11 @@ std::unique_ptr<WipeDevice> open_block_device(const std::string& device) {
 class PosixFillFile : public FillFile {
 public:
     explicit PosixFillFile(int fd) : fd_(fd) {}
+    std::optional<std::uint64_t> allocated() override {
+        struct stat st{};
+        if (::fstat(fd_, &st) != 0) return std::nullopt;
+        return static_cast<std::uint64_t>(st.st_blocks) * 512;
+    }
     ~PosixFillFile() override { ::close(fd_); }
     FillResult write_at(std::uint64_t offset, ByteSpan data) override {
         std::size_t done = 0;
@@ -274,8 +310,7 @@ std::vector<DiskInfo> list_tool_disks() {
         if (d.model.empty()) d.model = read_small(os::join(dev, "name"));
         if (!vendor.empty() && vendor != "ATA" && !vendor.starts_with("0x") && !d.model.starts_with(vendor))
             d.model = vendor + " " + d.model;
-        d.serial = read_small(os::join(dev, "serial"));
-        if (d.serial.empty()) d.serial = udev_value(sys, "ID_SERIAL_SHORT");
+        d.serial = disk_serial(sys);
         if (name.starts_with("loop")) {
             d.bus = "Loop";
             d.model = "Loop device (" + read_small(os::join(sys, "loop/backing_file")) + ")";
@@ -350,8 +385,12 @@ std::unique_ptr<WipeDevice> open_wipe_file(const std::string& path) {
     return std::make_unique<FdDevice>(fd, size, size % 512 == 0 ? 512 : 1, path);
 }
 
-std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& chosen, const DiskIdentity& expected,
-                                           const std::vector<int>& protected_disks) {
+namespace {
+
+// Disk `chosen` opened exclusively, checked again (it may be erased, it is `expected`) both by
+// its path and on the opened device: its device number, serial number and size.
+std::unique_ptr<FdDevice> open_checked_disk(const DiskInfo& chosen, const DiskIdentity& expected,
+                                            const std::vector<int>& protected_disks) {
     const std::vector<DiskInfo> disks = list_tool_disks();
     auto it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == chosen.number; });
     if (it == disks.end()) throw Error(chosen.path + " is not connected any more");
@@ -360,18 +399,32 @@ std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& chosen, const DiskIde
     const std::string other = identity_mismatch(*it, expected);
     if (!other.empty()) throw Error(other + "; nothing was written");
     auto dev = open_block_device(it->path);
-    if (dev->size() != it->size) throw Error(it->path + " changed; nothing was written");
+    dev_t rdev = 0;
+    const std::string sys = sys_of_fd(dev->fd(), rdev);
+    if (sys.empty() || static_cast<int>(rdev & 0x7FFFFFFF) != it->number || dev->size() != expected.size ||
+        trim(disk_serial(sys)) != trim(expected.serial))
+        throw Error(it->path + " is not the disk that was chosen any more; nothing was written");
     return dev;
+}
+
+}  // namespace
+
+std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& chosen, const DiskIdentity& expected,
+                                           const std::vector<int>& protected_disks) {
+    return open_checked_disk(chosen, expected, protected_disks);
 }
 
 VolumeTarget find_wipe_volume(const std::string& given) {
     const std::string name = given.starts_with("/dev/") ? given : "/dev/" + given;
+    const std::vector<int> keep = protected_tool_disks();
     for (const DiskInfo& d : list_tool_disks()) {
         for (const DiskVolume& v : d.volumes) {
             if (v.name != name || v.offset == 0) continue;
             if (v.filesystem == "swap") throw Error(name + " is in use as swap");
             if (v.filesystem == "holder") throw Error(name + " is in use (LVM, RAID or encryption)");
             if (!v.mount.empty()) throw Error(name + " is mounted on " + v.mount + "; unmount it first");
+            if (std::find(keep.begin(), keep.end(), d.number) != keep.end())
+                throw Error(name + " is on a disk the system or Vaultik runs from");
             VolumeTarget t;
             t.name = name;
             t.device = name;
@@ -379,27 +432,43 @@ VolumeTarget find_wipe_volume(const std::string& given) {
             t.filesystem = v.filesystem;
             t.label = v.label;
             t.disk = d.number;
+            t.id = partition_id(real_path("/sys/class/block/" + name.substr(5)));
+            t.serial = d.serial;
             return t;
         }
     }
     throw Error(given + " is not a partition of a disk of this computer (see vaultik disk list)");
 }
 
-std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v) {
-    return open_block_device(v.device);
-}
-
-void disk_erased(const DiskInfo& d) {
-    // The kernel reads the (now empty) partition table again.
-    const int fd = ::open(d.path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return;
-    ::ioctl(fd, BLKRRPART);
-    ::close(fd);
+std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& v, const DiskIdentity& expected) {
+    // As found now (it may be another partition than the one shown by now), then the opened one.
+    const VolumeTarget now = find_wipe_volume(v.name);
+    std::string other = volume_mismatch(now, expected);
+    if (!other.empty()) throw Error(other + "; nothing was written");
+    auto dev = open_block_device(now.device);
+    dev_t rdev = 0;
+    const std::string psys = sys_of_fd(dev->fd(), rdev);
+    VolumeTarget opened = now;
+    opened.size = dev->size();
+    opened.id = psys.empty() || !os::exists(os::join(psys, "partition")) ? std::string() : partition_id(psys);
+    opened.serial = psys.empty() ? std::string() : disk_serial(os::parent_of(psys));
+    other = volume_mismatch(opened, expected);
+    if (!other.empty()) throw Error(other + "; nothing was written");
+    return dev;
 }
 
 std::unique_ptr<FillFile> create_fill_file(const std::string& path) {
     const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
     if (fd < 0) throw Error("cannot create " + path + ": " + std::strerror(errno));
+    // Out of the folder right away: written through the open file, and its space is given back
+    // when it is closed, also when the program is killed.
+    ::unlink(path.c_str());
+    // Not compressed (btrfs, and file systems that honour the flag), so zeros take room too.
+    int flags = 0;
+    if (::ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0) {
+        const int want = (flags & ~FS_COMPR_FL) | FS_NOCOMP_FL;
+        if (want != flags) ::ioctl(fd, FS_IOC_SETFLAGS, &want);
+    }
     return std::make_unique<PosixFillFile>(fd);
 }
 
@@ -408,7 +477,6 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
     check_init_options(o);
     const std::string fs = o.filesystem.empty() ? std::string("ext4") : o.filesystem;
     const std::string sfdisk = need_tool("sfdisk", "util-linux");
-    const std::string wipefs = need_tool("wipefs", "util-linux");
     const std::string mkfs = fs == "ext4"    ? need_tool("mkfs.ext4", "e2fsprogs")
                              : fs == "ntfs"  ? need_tool("mkfs.ntfs", "ntfs-3g")
                                              : need_tool("mkfs.exfat", "exfatprogs");
@@ -416,27 +484,33 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
         if (o.on_step) o.on_step(s);
     };
 
-    // Checked again and opened exclusively first (nothing may use it); closed again before sfdisk
-    // takes over.
+    // Checked again and opened exclusively (nothing may use it, and the disk cannot be swapped
+    // for another while it is open). sfdisk writes the new table through this very open
+    // device (/proc/<pid>/fd/<n>), not by its name, which may belong to another disk by now.
     const DiskInfo& d = chosen;
-    std::uint64_t size = 0;
-    std::uint32_t sector = 0;
-    {
-        auto dev = open_wipe_disk(chosen, expected, protected_disks);
-        size = dev->size();
-        sector = dev->block_size();
-    }
+    auto dev = open_checked_disk(chosen, expected, protected_disks);
+    const std::uint64_t size = dev->size();
+    const std::uint32_t sector = dev->block_size();
+    dev_t rdev = 0;
+    const std::string disk_sys = sys_of_fd(dev->fd(), rdev);
     const std::vector<NewPartition> parts = plan_partitions(size, sector, o.style, o.sizes, false);
+    const std::string held = "/proc/" + std::to_string(::getpid()) + "/fd/" + std::to_string(dev->fd());
 
-    step("Removing what was on " + d.path);
-    run_tool({wipefs, "--all", "--force", d.path}, "wipefs");
-    step("Writing a new " + std::string(o.style == TableStyle::Gpt ? "GPT" : "MBR") + " partition table");
+    step("Writing a new " + std::string(o.style == TableStyle::Gpt ? "GPT" : "MBR") + " partition table on " + d.path);
     // The script reaches sfdisk on its standard input, as an argument of the shell (no file).
+    // --wipe always removes the signatures of what was on the disk (so no wipefs is needed);
+    // --no-reread because sfdisk's check whether the disk is in use would find this program's
+    // own exclusive open, and only the holder of that open may have the kernel read the new
+    // table (done below).
     const std::string script = sfdisk_script(o.style, parts, sector, fs);
     run_tool({"/bin/sh", "-c", "printf '%s' \"$3\" | exec \"$1\" --wipe always --wipe-partitions always --no-reread -- \"$2\"",
-              "sh", sfdisk, d.path, script},
+              "sh", sfdisk, held, script},
              "sfdisk");
-    disk_erased(d);
+    if (::fsync(dev->fd()) != 0) throw Error("writing " + d.path + ": " + std::strerror(errno));
+    dev->forget_partition_table();  // the kernel reads the new table
+    // Closed: mkfs opens the partitions exclusively, which the kernel refuses while the whole
+    // disk is held. Each partition is checked to be one of this disk before it is formatted.
+    dev.reset();
     const std::string settle = find_tool("udevadm");
     if (!settle.empty()) {
         std::string ignored;
@@ -448,6 +522,17 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
         const std::string part = partition_device(d.path, static_cast<int>(i) + 1);
         for (int tries = 0; tries < 50 && !os::exists(part); ++tries) std::this_thread::sleep_for(std::chrono::milliseconds(200));
         if (!os::exists(part)) throw Error(part + " did not appear after the partition table was written");
+        // Still a partition of the disk written to, where it was planned, of that disk's serial.
+        struct stat st{};
+        const std::string psys = ::stat(part.c_str(), &st) == 0 && S_ISBLK(st.st_mode)
+                                     ? real_path("/sys/dev/block/" + std::to_string(::major(st.st_rdev)) + ":" +
+                                                 std::to_string(::minor(st.st_rdev)))
+                                     : std::string();
+        const std::uint64_t start = std::strtoull(read_small(os::join(psys, "start")).c_str(), nullptr, 10) * 512;
+        const std::uint64_t length = std::strtoull(read_small(os::join(psys, "size")).c_str(), nullptr, 10) * 512;
+        if (psys.empty() || disk_sys.empty() || os::parent_of(psys) != disk_sys || start != parts[i].offset ||
+            length != parts[i].length || trim(disk_serial(disk_sys)) != trim(expected.serial))
+            throw Error(part + " is not the new partition of the disk that was set up; it was not formatted");
         step("Formatting " + part + " as " + fs);
         if (fs == "ext4") {
             std::vector<std::string> argv = {mkfs, "-F", "-q"};

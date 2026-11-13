@@ -193,6 +193,27 @@ TEST_CASE("drive cleanser: wiping free space leaves the files and removes its ow
     const Bytes back = read_all(keep);
     CHECK(std::string(back.begin(), back.end()) == "hello");
 
+    // A fill file a killed run left behind goes; a file of another name stays. On Linux the fill
+    // file is out of the folder while it is written (it goes away also when the program is killed).
+    const std::string stale = t.file("vaultik-free-space-0123456789ab-1.tmp");
+    const std::string other = t.file("vaultik-free-space-notes.tmp");
+    os::write_file_atomic(stale, ByteSpan(reinterpret_cast<const std::uint8_t*>("old"), 3));
+    os::write_file_atomic(other, ByteSpan(reinterpret_cast<const std::uint8_t*>("mine"), 4));
+    bool seen = false;
+    o.on_progress = [&](const FreeSpaceProgress&) {
+        for (const auto& e : fs::directory_iterator(t.path))
+            if (e.path().filename().string().starts_with(kFillFilePrefix) && e.path().filename().string() != "vaultik-free-space-notes.tmp")
+                seen = true;
+    };
+    CHECK(wipe_free_space(t.file(""), o) == o.limit);
+    CHECK_FALSE(os::exists(stale));
+    CHECK(os::exists(other));
+#ifndef _WIN32
+    CHECK_FALSE(seen);
+#endif
+    os::remove_file(other);
+    o.on_progress = nullptr;
+
     // Three passes write the same files again; cancelling removes them too.
     o.method = WipeMethod::Dod3;
     CHECK(wipe_free_space(t.file(""), o) == 3 * o.limit);
@@ -250,6 +271,102 @@ TEST_CASE("drive cleanser and new disk: refusals and confirmations") {
     none.number = 99999;
     none.size = kMiB;
     CHECK_THROWS_AS(open_wipe_disk(none, identity_of(none), keep), Error);
+#ifdef _WIN32
+    // The disks Windows runs and starts from (the EFI system partition's disk too) were found.
+    CHECK(std::find(running.begin(), running.end(), kUnknownSystemDisk) == running.end());
+    CHECK_FALSE(running.empty());
+    for (const DiskInfo& disk : disks)
+        if (std::find(running.begin(), running.end(), disk.number) != running.end())
+            CHECK_FALSE(tool_refusal(disk, running, keep).empty());
+#endif
+}
+
+TEST_CASE("drive cleanser: disks of pools, offline disks and system disks that cannot be found are refused") {
+    DiskInfo d;
+    d.number = 3;
+    d.size = 64 * kMiB;
+    d.path = "/dev/sdc";
+    CHECK(tool_refusal(d, {}, {}).empty());
+    // Not known which disks Windows runs and starts from: none at all.
+    CHECK_FALSE(tool_refusal(d, {kUnknownSystemDisk}, {}).empty());
+    CHECK_FALSE(target_refusal(d, {kUnknownSystemDisk}, {}).empty());
+    DiskInfo pool = d;
+    pool.dynamic = true;
+    CHECK(tool_refusal(pool, {}, {}).find("dynamic") != std::string::npos);
+    DiskInfo offline = d;
+    offline.offline = true;
+    CHECK(tool_refusal(offline, {}, {}).find("online") != std::string::npos);
+    DiskInfo spanned = d;
+    DiskVolume part;
+    part.name = "\\\\?\\Volume{00000000-0000-0000-0000-000000000001}\\";
+    part.spans = true;
+    spanned.volumes.push_back(part);
+    CHECK(tool_refusal(spanned, {}, {}).find("several disks") != std::string::npos);
+}
+
+TEST_CASE("drive cleanser: system, reserved, recovery, active and pool partitions are not erased on their own") {
+    Partition p;
+    p.type = std::string(kBasicDataType);
+    CHECK(partition_refusal(p, true).empty());
+    p.type = std::string(kEfiSystemType);
+    CHECK(partition_refusal(p, true).find("EFI") != std::string::npos);
+    p.type = std::string(kMsrType);
+    CHECK_FALSE(partition_refusal(p, true).empty());
+    p.type = std::string(kRecoveryType);
+    CHECK(partition_refusal(p, true).find("recovery") != std::string::npos);
+    p.type = "af9b60a0-1431-4f62-bc68-3311714a69ad";  // LDM data, any case
+    CHECK(pool_partition(p, true));
+    CHECK_FALSE(partition_refusal(p, true).empty());
+    p.type = std::string(kBasicDataType);
+    p.attributes = 1;  // the platform needs it
+    CHECK_FALSE(partition_refusal(p, true).empty());
+    Partition m;
+    m.mbr_type = 0x07;
+    CHECK(partition_refusal(m, false).empty());
+    m.active = true;
+    CHECK(partition_refusal(m, false).find("active") != std::string::npos);
+    m.active = false;
+    for (const std::uint8_t t : {std::uint8_t{0xEF}, std::uint8_t{0x27}, std::uint8_t{0x42}}) {
+        m.mbr_type = t;
+        CHECK_FALSE(partition_refusal(m, false).empty());
+    }
+}
+
+TEST_CASE("drive cleanser: a volume that is not the one listed any more is refused") {
+    VolumeTarget v;
+    v.name = "E:";
+    v.size = 32 * kMiB;
+    v.id = "\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\";
+    v.serial = "1A2B3C4D";
+    const DiskIdentity id = volume_identity(v);
+    CHECK(volume_mismatch(v, id).empty());
+    VolumeTarget other = v;
+    other.size += 512;
+    CHECK(volume_mismatch(other, id).find("size") != std::string::npos);
+    other = v;
+    other.id = "\\\\?\\Volume{99999999-2222-3333-4444-555555555555}\\";
+    CHECK(volume_mismatch(other, id).find("id") != std::string::npos);
+    other = v;
+    other.serial = "0000AAAA";
+    CHECK(volume_mismatch(other, id).find("serial") != std::string::npos);
+    other = v;
+    other.serial = "1a2b3c4d";  // case does not matter
+    CHECK(volume_mismatch(other, id).empty());
+    // A drive that is not there (or not the one expected) is never opened for writing.
+    VolumeTarget gone;
+#ifdef _WIN32
+    gone.name = "B:";
+#else
+    gone.name = "/dev/vaultik-no-such-partition1";
+#endif
+    CHECK_THROWS_AS(open_wipe_volume(gone, volume_identity(gone)), Error);
+}
+
+TEST_CASE("drive cleanser: a fill file the drive keeps compressed is noticed") {
+    CHECK_FALSE(fill_compressed(10 * kMiB, 0));  // too little written to tell
+    CHECK(fill_compressed(128 * kMiB, 4 * kMiB));
+    CHECK_FALSE(fill_compressed(128 * kMiB, 128 * kMiB));
+    CHECK_FALSE(fill_compressed(128 * kMiB, 100 * kMiB));
 }
 
 TEST_CASE("new disk: where the partitions go") {
@@ -282,6 +399,11 @@ TEST_CASE("new disk: where the partitions go") {
     CHECK_THROWS_AS(plan_partitions(disk, 512, TableStyle::Gpt, {200 * kMiB}, false), Error);
     CHECK_THROWS_AS(plan_partitions(3ull << 40, 512, TableStyle::Mbr, {}, false), Error);  // over 2 TiB
     CHECK_NOTHROW(plan_partitions(3ull << 40, 512, TableStyle::Gpt, {}, false));
+    // Sizes so large that adding them would wrap around to a small number.
+    CHECK_THROWS_AS(plan_partitions(disk, 512, TableStyle::Gpt, {~0ull}, false), Error);
+    CHECK_THROWS_AS(plan_partitions(disk, 512, TableStyle::Gpt, {~0ull - kMiB + 2}, false), Error);
+    CHECK_THROWS_AS(plan_partitions(disk, 512, TableStyle::Gpt, {10 * kMiB, ~0ull - 5 * kMiB}, false), Error);
+    CHECK_THROWS_AS(plan_partitions(disk, 512, TableStyle::Mbr, {1ull << 63, 1ull << 63}, false), Error);
 
     p = plan_partitions(disk, 512, TableStyle::Gpt, {}, false);
     CHECK(sfdisk_script(TableStyle::Gpt, p, 512, "ext4") ==
@@ -380,6 +502,18 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
     const VolumeTarget vol = find_wipe_volume(root);
     CHECK(vol.disk == number);
     CHECK(erase_volume_text(vol.name) == "ERASE " + root.substr(0, 2));
+    CHECK(vol.id.starts_with("\\\\?\\Volume{"));
+    CHECK_FALSE(vol.serial.empty());
+    // Not the drive listed: nothing is written. The one listed: erased.
+    DiskIdentity wrong = volume_identity(vol);
+    wrong.serial = vol.serial == "00000001" ? "00000002" : "00000001";
+    CHECK_THROWS_AS(open_wipe_volume(vol, wrong), Error);
+    CHECK(os::exists(os::join(root, "note.txt")));
+    {
+        auto dev = open_wipe_volume(vol, volume_identity(vol));
+        WipeOptions w;
+        CHECK(wipe_device(*dev, w).bytes == dev->size());
+    }
 
     // The whole disk, checked, then without a partition table.
     const DiskInfo now = *it;
@@ -389,8 +523,8 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
         w.verify = true;
         w.clear_partition_table = true;
         CHECK(wipe_device(*dev, w).verified);
+        dev->forget_partition_table();
     }
-    disk_erased(now);
     disks = list_tool_disks();
     it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
     REQUIRE(it != disks.end());
@@ -450,8 +584,8 @@ TEST_CASE("disk tools on a loop device (Linux, root, VAULTIK_TEST_VIRTUAL_DISKS=
         wo.verify = true;
         wo.clear_partition_table = true;
         CHECK(wipe_device(*w, wo).verified);
+        w->forget_partition_table();
     }
-    disk_erased(now);
     const Bytes start = os::read_file(file, 256u << 20);
     CHECK(all_zero(start.data(), kMiB));
     CHECK(all_zero(start.data() + start.size() - kMiB, kMiB));

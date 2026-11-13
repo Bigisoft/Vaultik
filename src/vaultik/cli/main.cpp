@@ -458,9 +458,10 @@ Disk tools (administrator rights on Windows, root on Linux, except disk list and
   disk init <disk>             Set up a blank or unwanted disk for use: a new
                                partition table, one partition over the whole disk,
                                formatted, with a drive letter. Never the disk the
-                               system or Vaultik runs from, nor one with a system,
-                               boot or page file volume; asks you to type
-                               ERASE DISK <number> (Linux: ERASE DISK sdb)
+                               system starts or runs from or Vaultik runs from, nor
+                               one with a page file, a dynamic or offline disk;
+                               asks you to type ERASE DISK <number> (Linux:
+                               ERASE DISK sdb)
       --gpt, --mbr             The partition table (default GPT)
       --fs <type>              ntfs (Windows default), exfat, or ext4 (Linux default)
       --label <name>           The volume's name
@@ -474,6 +475,9 @@ Disk tools (administrator rights on Windows, root on Linux, except disk list and
                                guards and confirmation as disk init)
       --volume <X:>            ... only this volume instead (Linux: /dev/sdb1);
                                asks you to type ERASE X:
+      --expect-size <bytes>, --expect-serial <s>, --expect-id <id>
+                               The disk or volume you chose from a listing: stops
+                               when it is another one by now
       --method <m>             zeros (one pass, default), random (one pass), or
                                dod3 (random, random, zeros, as DoD 5220.22-M)
       --verify                 Read the last pass back and compare it

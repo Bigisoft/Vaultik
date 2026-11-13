@@ -392,15 +392,28 @@ std::vector<int> disks_of(const std::string& path) {
     if (!device.empty() && device.back() == L'\\') device.pop_back();
     const HANDLE h = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return disks;
+    // Grown until every extent fits: a volume can lie on many disks (and a disk left out here
+    // would not count as one the system uses).
     std::vector<std::uint8_t> buffer(sizeof(VOLUME_DISK_EXTENTS) + 7 * sizeof(DISK_EXTENT));
-    DWORD got = 0;
-    if (DeviceIoControl(h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, nullptr, 0, buffer.data(),
-                        static_cast<DWORD>(buffer.size()), &got, nullptr)) {
-        const auto* extents = reinterpret_cast<const VOLUME_DISK_EXTENTS*>(buffer.data());
-        for (DWORD i = 0; i < extents->NumberOfDiskExtents && i < 8; ++i) {
-            const int n = static_cast<int>(extents->Extents[i].DiskNumber);
-            if (std::find(disks.begin(), disks.end(), n) == disks.end()) disks.push_back(n);
+    for (int tries = 0; tries < 10; ++tries) {
+        DWORD got = 0;
+        if (DeviceIoControl(h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, nullptr, 0, buffer.data(),
+                            static_cast<DWORD>(buffer.size()), &got, nullptr)) {
+            const auto* extents = reinterpret_cast<const VOLUME_DISK_EXTENTS*>(buffer.data());
+            const std::size_t fit = (buffer.size() - offsetof(VOLUME_DISK_EXTENTS, Extents)) / sizeof(DISK_EXTENT);
+            for (DWORD i = 0; i < extents->NumberOfDiskExtents && i < fit; ++i) {
+                const int n = static_cast<int>(extents->Extents[i].DiskNumber);
+                if (std::find(disks.begin(), disks.end(), n) == disks.end()) disks.push_back(n);
+            }
+            break;
         }
+        const DWORD e = GetLastError();
+        if (e != ERROR_MORE_DATA && e != ERROR_INSUFFICIENT_BUFFER) break;
+        // The first extent count tells how many there are.
+        const auto* extents = reinterpret_cast<const VOLUME_DISK_EXTENTS*>(buffer.data());
+        const std::size_t want = offsetof(VOLUME_DISK_EXTENTS, Extents) +
+                                 std::max<std::size_t>(extents->NumberOfDiskExtents, 1) * sizeof(DISK_EXTENT);
+        buffer.resize(std::max(want, buffer.size() * 2));
     }
     CloseHandle(h);
     return disks;

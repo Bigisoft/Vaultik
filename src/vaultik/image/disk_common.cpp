@@ -46,6 +46,8 @@ std::string describe(const DiskInfo& d) {
 std::string target_refusal(const DiskInfo& target, const std::vector<int>& running_from,
                            const std::vector<int>& protected_disks) {
     if (target.number < 0) return "no such disk";
+    if (std::find(running_from.begin(), running_from.end(), kUnknownSystemDisk) != running_from.end())
+        return "the disks Windows runs and starts from could not be found, so no disk is written to";
     if (target.system || std::find(running_from.begin(), running_from.end(), target.number) != running_from.end())
         return "Windows is running from this disk. Restore it from the recovery drive instead.";
     if (std::find(protected_disks.begin(), protected_disks.end(), target.number) != protected_disks.end())

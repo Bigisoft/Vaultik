@@ -187,7 +187,8 @@ std::function<void(const image::WipeProgress&)> wipe_progress() {
 int cmd_disk_wipe(const Args& a) {
     const auto volume = a.value("--volume");
     if ((a.positional.size() < 2) == !volume.has_value() || (a.positional.size() >= 2 && volume))
-        throw Error("usage: vaultik disk wipe <disk> | --volume <X:> [--method zeros|random|dod3] [--verify]");
+        throw Error("usage: vaultik disk wipe <disk> | --volume <X:> [--method zeros|random|dod3] [--verify] "
+                    "[--expect-size <bytes> --expect-serial <s> --expect-id <id>]");
     image::WipeOptions o;
     if (auto m = a.value("--method")) {
         const auto parsed = image::parse_wipe_method(*m);
@@ -208,11 +209,19 @@ int cmd_disk_wipe(const Args& a) {
     try {
         if (volume) {
             const image::VolumeTarget v = image::find_wipe_volume(*volume);
+            // With --expect-*: the drive the caller showed the user (a letter or /dev/sdb1 may
+            // belong to another drive by now), checked again on the opened drive.
+            const auto expected = expected_disk(a);
+            if (expected) {
+                const std::string other = image::volume_mismatch(v, *expected);
+                if (!other.empty()) throw Error(other + "; nothing was written");
+            }
+            const image::DiskIdentity confirmed = expected ? *expected : image::volume_identity(v);
             std::string what = "Everything on " + v.name + " is overwritten (" + method + ") and cannot be brought back:\n  " +
                                v.name + (v.label.empty() ? "" : " " + v.label) +
                                (v.filesystem.empty() ? "" : ", " + v.filesystem) + ", " + format_bytes(v.size);
             confirm_typed(a, image::erase_volume_text(v.name), what);
-            auto dev = image::open_wipe_volume(v);
+            auto dev = image::open_wipe_volume(v, confirmed);
             r = image::wipe_device(*dev, o);
             erased = v.name;
         } else {
@@ -232,8 +241,8 @@ int cmd_disk_wipe(const Args& a) {
             {
                 auto dev = image::open_wipe_disk(d, confirmed, image::protected_tool_disks());
                 r = image::wipe_device(*dev, o);
+                dev->forget_partition_table();
             }
-            image::disk_erased(d);
             erased = tool_disk_title(d);
         }
     } catch (const vaultik::Cancelled&) {

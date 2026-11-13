@@ -143,27 +143,73 @@ std::string tool_refusal(const DiskInfo& d, const std::vector<int>& running_from
     std::string why = target_refusal(d, running_from, protected_disks);
     if (!why.empty()) {
 #ifdef _WIN32
-        if (why.starts_with("Windows is running")) why = "Windows is running from this disk";
+        if (why.starts_with("Windows is running")) why = "Windows is running or starts from this disk";
 #else
         if (why.starts_with("Windows is running")) why = "the system is running from this disk";
 #endif
         if (why.starts_with("this disk holds the backup")) why = "Vaultik is running from this disk";
         return why;
     }
+    if (d.dynamic)
+        return "it is a dynamic disk or part of a Storage Spaces pool; remove its volumes (or the disk from the "
+               "pool) in Disk Management or Storage Spaces first";
+    if (d.offline)
+        return "Windows keeps this disk offline or read-only; bring it online in Disk Management first (right-click "
+               "the disk, Online)";
     for (const DiskVolume& v : d.volumes) {
+        if (v.spans)
+            return "it holds a part of a volume that lies on several disks" +
+                   (v.mount.empty() ? std::string() : " (" + v.mount + ")") + "; remove that volume first";
 #ifdef _WIN32
-        if (v.mount.empty()) continue;
-        for (const char* file : {"pagefile.sys", "swapfile.sys", "hiberfil.sys"})
-            if (os::exists(os::join(v.mount, file)))
-                return v.mount.substr(0, 2) + " holds the Windows page or hibernation file";
-        if (os::exists(os::join(v.mount, "Windows\\System32\\config\\SYSTEM")))
-            return v.mount.substr(0, 2) + " holds a Windows installation that is in use";
+        const std::string use = windows_use_of(v);
+        if (!use.empty()) return use;
 #else
         if (v.filesystem == "swap") return v.name + " is in use as swap";
         if (v.filesystem == "holder") return v.name + " is in use (LVM, RAID or encryption)";
         if (!v.mount.empty()) return v.name + " is mounted on " + v.mount + "; unmount it first";
 #endif
     }
+    return {};
+}
+
+bool pool_partition(const Partition& p, bool gpt) {
+    if (!gpt) return p.mbr_type == 0x42;  // a dynamic disk's (LDM) partition
+    static constexpr std::string_view kPoolTypes[] = {
+        "5808C8AA-7E8F-42E0-85D2-E1E90434CFB3",  // LDM metadata (a dynamic disk)
+        "AF9B60A0-1431-4F62-BC68-3311714A69AD",  // LDM data
+        "E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D",  // Storage Spaces
+    };
+    return std::any_of(std::begin(kPoolTypes), std::end(kPoolTypes), [&](std::string_view t) { return squeeze_upper(p.type) == t; });
+}
+
+std::string partition_refusal(const Partition& p, bool gpt) {
+    if (pool_partition(p, gpt)) return "it is part of a dynamic disk or of a Storage Spaces pool";
+    if (gpt) {
+        const std::string type = squeeze_upper(p.type);
+        if (type == kEfiSystemType) return "it is an EFI system partition, which a computer starts from";
+        if (type == kMsrType) return "it is the Microsoft reserved partition";
+        if (type == kRecoveryType) return "it is a recovery partition";
+        if ((p.attributes & 1) != 0) return "the computer's firmware needs this partition";  // GPT_ATTRIBUTE_PLATFORM_REQUIRED
+        return {};
+    }
+    if (p.mbr_type == 0xEF) return "it is an EFI system partition, which a computer starts from";
+    if (p.mbr_type == 0x27) return "it is a recovery partition";
+    if (p.active) return "it is the active partition, which a BIOS computer starts from; erase the whole disk instead";
+    return {};
+}
+
+DiskIdentity volume_identity(const VolumeTarget& v) {
+    return {v.serial, v.size, v.id};
+}
+
+std::string volume_mismatch(const VolumeTarget& now, const DiskIdentity& expected) {
+    const std::string name = now.name.empty() ? std::string("the drive") : now.name;
+    const std::string again = "; list the drives again";
+    if (now.size != expected.size) return name + " is not the drive that was chosen any more (its size differs)" + again;
+    if (squeeze_upper(now.id) != squeeze_upper(expected.id))
+        return name + " is not the drive that was chosen any more (its id differs)" + again;
+    if (squeeze_upper(now.serial) != squeeze_upper(expected.serial))
+        return name + " is not the drive that was chosen any more (its serial number differs)" + again;
     return {};
 }
 
@@ -285,15 +331,61 @@ WipeResult wipe_device(WipeDevice& device, const WipeOptions& o) {
 
 // ---- wiping free space ------------------------------------------------------------------------
 
+namespace {
+
+// Whether `name` is a fill file of wipe_free_space: "vaultik-free-space-<12 hex digits>-<n>.tmp".
+bool fill_file_name(const std::string& name) {
+    const std::string prefix = kFillFilePrefix;
+    if (!name.starts_with(prefix) || !name.ends_with(".tmp")) return false;
+    const std::string rest = name.substr(prefix.size(), name.size() - prefix.size() - 4);
+    if (rest.size() < 14 || rest[12] != '-') return false;
+    for (std::size_t i = 0; i < rest.size(); ++i) {
+        const auto c = static_cast<unsigned char>(rest[i]);
+        if (i == 12) continue;
+        if (i < 12 ? !std::isxdigit(c) : !std::isdigit(c)) return false;
+    }
+    return true;
+}
+
+// Fill files an earlier run left behind when it was killed or the power went (they are removed
+// when closed, but a file system may keep one after a power loss).
+void remove_stale_fill_files(const std::string& dir) {
+    try {
+        os::DirReader reader(dir);
+        std::string name;
+        os::FileInfo info;
+        std::vector<std::string> stale;
+        while (reader.next(name, info))
+            if (info.type == os::EntryType::File && fill_file_name(name)) stale.push_back(name);
+        for (const std::string& n : stale) os::remove_file(os::join(dir, n));
+    } catch (const std::exception&) {
+        // not readable: nothing to remove
+    }
+}
+
+constexpr std::uint64_t kCompressionCheck = 64 * kMiB;  // how often the fill file's size on the drive is looked at
+
+}  // namespace
+
+bool fill_compressed(std::uint64_t written, std::uint64_t allocated) {
+    // A file that takes less than half of what was written is kept compressed (or
+    // deduplicated); the slack is for the file system's own delays.
+    return written >= kCompressionCheck && allocated < written / 2;
+}
+
 std::uint64_t wipe_free_space(const std::string& folder, const FreeSpaceOptions& o) {
     const std::string dir = os::absolute_path(folder);
     if (!os::is_directory(dir)) throw Error(folder + " is not a folder");
+    remove_stale_fill_files(dir);
     const std::optional<os::DiskSpace> space = os::disk_space(dir);
     const std::uint64_t free = space ? space->free : 0;
     std::uint8_t rnd[6];
     random_bytes(rnd);
-    const std::string base = os::join(dir, "vaultik-free-space-" + to_hex(rnd));
+    const std::string base = os::join(dir, kFillFilePrefix + to_hex(rnd));
     const std::vector<bool> passes = wipe_passes(o.method);
+    // Set when the drive turns out to compress the fill file: zeros would then take no space, so
+    // every pass writes random data.
+    bool compressing = false;
     const auto start = std::chrono::steady_clock::now();
     const auto cancelled = [&] { return o.should_cancel && o.should_cancel(); };
 
@@ -329,7 +421,7 @@ std::uint64_t wipe_free_space(const std::string& folder, const FreeSpaceOptions&
         Bytes buf(kChunk);
         std::uint8_t seed[32];
         for (std::size_t i = 0; i < passes.size(); ++i) {
-            const bool random = passes[i];
+            bool random = passes[i] || compressing;
             random_bytes(seed);
             PatternStream stream(seed);
             if (!random) std::fill(buf.begin(), buf.end(), std::uint8_t{0});
@@ -342,6 +434,9 @@ std::uint64_t wipe_free_space(const std::string& folder, const FreeSpaceOptions&
                     pieces.push_back(std::move(piece));
                     Piece& cur = pieces.back();
                     std::size_t size = kChunk;
+                    std::uint64_t next_check = kCompressionCheck;
+                    std::uint64_t from_length = 0;  // where the check starts (again after a switch to random data)
+                    std::uint64_t from_allocated = 0;
                     for (;;) {
                         if (cancelled()) throw Cancelled();
                         if (o.limit != 0) size = static_cast<std::size_t>(std::min<std::uint64_t>(size, o.limit - std::min(o.limit, written)));
@@ -355,6 +450,22 @@ std::uint64_t wipe_free_space(const std::string& folder, const FreeSpaceOptions&
                             cur.length += size;
                             written += size;
                             report();
+                            if (cur.length >= next_check) {
+                                next_check = cur.length + kCompressionCheck;
+                                cur.file->flush();
+                                const std::optional<std::uint64_t> took = cur.file->allocated();
+                                const std::uint64_t grew = took && *took > from_allocated ? *took - from_allocated : 0;
+                                if (took && fill_compressed(cur.length - from_length, grew)) {
+                                    // Zeros take no room on this drive: random data from here on.
+                                    // Random data kept that small cannot fill it at all.
+                                    if (random)
+                                        throw Error("the drive keeps the written data compressed (or deduplicated), so "
+                                                    "its free space cannot be filled; nothing on it was changed");
+                                    random = compressing = true;
+                                    from_length = cur.length;
+                                    from_allocated = *took;
+                                }
+                            }
                             continue;
                         }
                         // Smaller pieces fill what is left, down to one sector.
@@ -423,10 +534,13 @@ std::vector<NewPartition> plan_partitions(std::uint64_t disk_size, std::uint32_t
         std::uint64_t length = 0;
         if (sizes[i] == 0) {
             length = usable_end > at ? (usable_end - at) / sector_size * sector_size : 0;
-        } else {
+        } else if (sizes[i] <= usable_end && sizes[i] <= ~0ull - kMiB) {
             length = (sizes[i] + kMiB - 1) / kMiB * kMiB;
+        } else {
+            length = ~0ull;  // larger than any disk (and not rounded, which would wrap around)
         }
-        if (length < kMiB || at + length > usable_end)
+        // Compared without adding, so a huge size cannot wrap around to a small end.
+        if (length < kMiB || at > usable_end || length > usable_end - at)
             throw Error(sizes.size() == 1 && sizes[0] == 0 ? "the disk is too small for a partition"
                                                            : "the partitions do not fit on the disk");
         out.push_back({at, length, false});

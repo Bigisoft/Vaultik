@@ -22,6 +22,9 @@ struct DiskVolume {
     std::string label;
     std::uint64_t offset = 0;  // where it starts on the disk
     std::uint64_t length = 0;
+    // Only a part of a volume that lies on several disks (a spanned, striped or mirrored dynamic
+    // volume, or a Storage Spaces volume): offset and length are this disk's part.
+    bool spans = false;
 };
 
 struct DiskInfo {
@@ -36,6 +39,8 @@ struct DiskInfo {
     std::string id;      // "gpt-<GUID>", "mbr-<signature>" or empty
     bool removable = false;
     bool system = false;  // Windows runs from it
+    bool dynamic = false;  // a dynamic disk, or a disk of a Storage Spaces pool (Windows)
+    bool offline = false;  // Windows keeps it offline or read-only
     int partitions = 0;
     std::string path;    // the device: "\\.\PhysicalDrive2", "/dev/sdb"
     std::string media;   // "SSD", "HDD", or empty when the drive does not say
@@ -47,11 +52,16 @@ std::vector<DiskInfo> list_disks();
 // One line: "Disk 1: Samsung SSD 980 1TB, 1000 GB, NVMe, serial S64ANS0R123456".
 std::string describe(const DiskInfo& d);
 
-// The disks Windows runs from (empty in a recovery environment, which runs from memory).
+// The disks Windows runs from: the one holding the Windows folder and the one holding the
+// partition the firmware starts it from (the EFI system partition, or the active "System
+// Reserved" partition of a BIOS computer). Empty in a recovery environment, which runs from
+// memory. When they cannot be found the list holds kUnknownSystemDisk, and every disk is refused.
+constexpr int kUnknownSystemDisk = -2;
 std::vector<int> system_disks();
 
-// Why a restore must not write to `target`: it is a disk Windows runs from, or one in
-// `protected_disks` (the disk holding the backup, the program, ...). Empty when it may.
+// Why a restore must not write to `target`: it is a disk Windows runs from (or those disks are
+// not known: kUnknownSystemDisk), or one in `protected_disks` (the disk holding the backup, the
+// program, ...). Empty when it may.
 std::string target_refusal(const DiskInfo& target, const std::vector<int>& running_from,
                            const std::vector<int>& protected_disks);
 // The text the user must type to let a restore erase disk `number` ("ERASE DISK 2").

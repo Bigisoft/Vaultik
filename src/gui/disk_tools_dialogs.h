@@ -2,6 +2,8 @@
 
 #include <QDialog>
 
+#include <map>
+#include <string>
 #include <vector>
 
 #include "vaultik/image/disk.hpp"
@@ -63,6 +65,9 @@ private:
     QString confirmation() const;
 
     std::vector<vaultik::image::DiskInfo> disks_;
+    // What each listed volume was when it was listed (by its name, "E:" or "/dev/sdb1"), checked
+    // again before it is erased and passed along so the engine checks it too.
+    std::map<std::string, vaultik::image::DiskIdentity> volume_ids_;
     QRadioButton* whole_disk_ = nullptr;
     QRadioButton* volume_ = nullptr;
     QRadioButton* free_space_ = nullptr;
