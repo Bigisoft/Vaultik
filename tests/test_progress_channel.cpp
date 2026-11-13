@@ -457,7 +457,7 @@ TEST_CASE("progress channel: a process other than the engine started is dropped"
             }
             // The expected one connects next.
             ProgressClient engine(server.name(), server.user(), 5000);
-            sent.push_back(engine.send_line("{\"event\":\"progress\",\"done\":1}"));
+            sent.push_back(engine.send_line("{\"event\":\"progress\",\"done\":1,\"total\":2}"));
             step = 3;
             for (int i = 0; i < 500 && step < 4; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         } catch (const std::exception& e) {
