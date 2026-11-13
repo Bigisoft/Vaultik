@@ -36,10 +36,15 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "vaultik/image/disk.hpp"
 #include "vaultik/util/bytes.hpp"
+
+#ifndef _WIN32
+#include "vaultik/platform/mounts_posix.hpp"
+#endif
 
 namespace vaultik::image {
 
@@ -61,7 +66,8 @@ class VolumeLock {
 public:
     virtual ~VolumeLock() = default;
     virtual std::string name() const = 0;  // as the user knows it ("F:")
-    // Takes the lock; false while another program has the volume open.
+    // Takes the lock; false while another program has the volume open. Throws Error when it
+    // cannot be locked for another reason (forcing it closed would not help then).
     virtual bool lock() = 0;
     // Dismounts the volume although programs have it open (FSCTL_DISMOUNT_VOLUME without the
     // lock): their open files and handles stop working, so the lock can be taken next.
@@ -76,7 +82,8 @@ struct LockRetry {
 // Locks every volume. Every one is tried first; when some cannot be locked: without `force`,
 // throws VolumesInUse naming each of them (and nothing is forced); with `force`, dismounts each
 // of those by force and takes its lock again (retried `retry.tries` times), and throws Error
-// when one still cannot be locked. Locks already taken stay with the VolumeLock objects.
+// when one still cannot be locked. An Error from a lock (not being in use) stops it as it is,
+// before anything is forced. Locks already taken stay with the VolumeLock objects.
 void lock_volumes(const std::vector<VolumeLock*>& volumes, bool force, const LockRetry& retry = {});
 
 // Linux: the volumes of `d` that are mounted (not swap, LVM, RAID or encrypted ones, which
@@ -87,6 +94,16 @@ std::vector<std::string> mounted_volumes(const DiskInfo& d);
 // listed. Throws Error naming the mount point that stays in use; nothing was written then.
 void unmount_volumes(const std::function<std::vector<std::string>()>& mounted,
                      const std::function<bool(const std::string& point, std::string& why)>& unmount);
+
+#ifndef _WIN32
+// Linux: what umount `point` would unmount instead of the drive being erased: the top-most mount
+// at that folder (the last one /proc/self/mountinfo lists there) when its device is none of
+// `devices` (major and minor numbers of the disk and its partitions, or of the one partition),
+// as "/dev/sdc1 (8:33)"; another drive mounted over it. Empty when it is one of `devices`, or
+// nothing is mounted there any more.
+std::string other_mount_on(const std::vector<os::mounts::Mount>& mounts, const std::string& point,
+                           const std::vector<std::pair<unsigned, unsigned>>& devices);
+#endif
 
 // Every disk of this computer, as list_disks() shows them on Windows. Linux: the block devices of
 // /sys/block that are disks (also loop devices with a file attached), numbered by their device
@@ -103,7 +120,8 @@ std::vector<int> protected_tool_disks();
 // file; Linux: one mounted anywhere, used as swap or by LVM, RAID or encryption). Empty when it
 // may be erased.
 // With `mounted_ok` (Linux), a mounted volume is no reason: it is unmounted with
-// --force-dismount (see mounted_volumes).
+// --force-dismount (see mounted_volumes). A part of a file system over several devices (Linux:
+// a btrfs file system over several drives, DiskVolume::spans) is refused also then.
 std::string tool_refusal(const DiskInfo& d, const std::vector<int>& running_from, const std::vector<int>& protected_disks,
                          bool mounted_ok = false);
 

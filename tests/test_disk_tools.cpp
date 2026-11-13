@@ -459,10 +459,12 @@ public:
     std::string name() const override { return name_; }
     bool lock() override {
         ++attempts;
+        if (fails) throw Error(name_ + " cannot be locked for writing (Windows error 21); nothing was written");
         locked = !in_use_ || (forced > 0 && !reopened_);
         return locked;
     }
     void force_dismount() override { ++forced; }
+    bool fails = false;  // the lock fails for another reason than being in use
     int attempts = 0;
     int forced = 0;
     bool locked = false;
@@ -510,6 +512,19 @@ TEST_CASE("drive cleanser and new disk: a volume in use is forced closed only wh
         CHECK(e.forced == 1);
         CHECK(f.forced == 0);
         CHECK((e.locked && f.locked));
+    }
+    SUBCASE("a lock that fails for another reason: that error, not the in-use question, and nothing forced") {
+        FakeLock e("E:", true), f("F:", false);
+        f.fails = true;
+        try {
+            lock_volumes({&e, &f}, true, quick);
+            FAIL("no error");
+        } catch (const VolumesInUse&) {
+            FAIL("asked whether to force it");
+        } catch (const Error& x) {
+            CHECK(std::string(x.what()).find("F: cannot be locked") != std::string::npos);
+        }
+        CHECK(e.forced + f.forced == 0);
     }
     SUBCASE("still in use after it was forced: an error (not the in-use question again), after the retries") {
         FakeLock e("E:", true, true);
@@ -584,6 +599,32 @@ TEST_CASE("drive cleanser and new disk: mounted volumes and unmounting them (Lin
     // An unmount that reports success but leaves it mounted does not go round forever.
     CHECK_THROWS_AS(unmount_volumes(list, [](const std::string&, std::string&) { return true; }), Error);
 }
+
+#ifndef _WIN32
+TEST_CASE("drive cleanser and new disk: another drive mounted over the one to unmount is never unmounted (Linux)") {
+    const auto mount = [](unsigned major, unsigned minor, const std::string& point, const std::string& source) {
+        os::mounts::Mount m;
+        m.major = major;
+        m.minor = minor;
+        m.point = point;
+        m.source = source;
+        m.type = "ext4";
+        return m;
+    };
+    const std::vector<std::pair<unsigned, unsigned>> own{{8, 16}, {8, 17}, {8, 18}};
+    std::vector<os::mounts::Mount> mounts{mount(259, 2, "/", "/dev/nvme0n1p2"), mount(8, 17, "/media/usb", "/dev/sdb1")};
+    CHECK(other_mount_on(mounts, "/media/usb", own).empty());  // its own: unmounted
+    CHECK(other_mount_on(mounts, "/media/gone", own).empty());   // nothing there any more
+    // Another drive mounted over it later: umount would take that one.
+    mounts.push_back(mount(8, 33, "/media/usb", "/dev/sdc1"));
+    CHECK(other_mount_on(mounts, "/media/usb", own) == "/dev/sdc1 (8:33)");
+    // The drive's own second partition on top: still its own.
+    mounts.push_back(mount(8, 18, "/media/usb", "/dev/sdb2"));
+    CHECK(other_mount_on(mounts, "/media/usb", own).empty());
+    // A partition alone: the disk's other partition over it is not it.
+    CHECK(other_mount_on(mounts, "/media/usb", {{8, 17}}) == "/dev/sdb2 (8:18)");
+}
+#endif
 
 TEST_CASE("disk tools: the --force-dismount option of the command-line program") {
     std::string output;
@@ -734,6 +775,110 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
     REQUIRE(it != disks.end());
     CHECK(it->style == "RAW");
     CHECK(it->partitions == 0);
+
+    // Set up again while a drive on it is in use: refused without the option (the engine names
+    // the drive in use, also in the file the app reads, and nothing is written); with it, the
+    // drive is forced closed and the disk gets the new layout (MBR) and file system (exFAT).
+    {
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        const NewDiskResult ntfs = init_disk(*it, identity_of(*it), keep, o);
+        REQUIRE(ntfs.volumes.size() == 1);
+        const std::string root3 = ntfs.volumes[0];
+        os::write_file_atomic(os::join(root3, "note.txt"), ByteSpan(reinterpret_cast<const std::uint8_t*>("z"), 1));
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        const DiskInfo before = *it;
+        REQUIRE(before.style == "GPT");
+        const std::string in_use_file = t.file("in-use.txt");
+        std::vector<std::string> args{"disk", "init", std::to_string(number), "--mbr", "--fs", "exfat", "--label", "VTForced",
+                                      "--confirm", erase_text(before), "--expect-size", std::to_string(before.size),
+                                      "--in-use-file", in_use_file};
+        if (!before.serial.empty()) args.insert(args.end(), {"--expect-serial", before.serial});
+        if (!before.id.empty()) args.insert(args.end(), {"--expect-id", before.id});
+        auto held = std::make_unique<std::ifstream>(fs::path(std::u8string(root3.begin(), root3.end())) / "note.txt", std::ios::binary);
+        REQUIRE(held->is_open());
+        std::string output;
+        CHECK(run_cli(args, output) == 6);
+        CAPTURE(output);
+        CHECK(read_all(os::join(root3, "note.txt")) == Bytes{'z'});
+        const Bytes named = read_all(in_use_file);
+        CHECK(std::string(named.begin(), named.end()) == root3.substr(0, 2) + "\n");
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        CHECK(it->style == "GPT");
+        CHECK(it->id == before.id);
+        std::vector<std::string> forced = args;
+        forced.push_back("--force-dismount");
+        CHECK(run_cli(forced, output) == 0);
+        held.reset();
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        CHECK(it->style == "MBR");
+        CHECK(it->id != before.id);
+        bool exfat = false;
+        for (const DiskVolume& v : it->volumes)
+            if (v.label == "VTForced" && v.filesystem == "exFAT") exfat = true;
+        CHECK(exfat);
+        MESSAGE("ran: disk init --force-dismount on a disk with a drive in use");
+    }
+
+    // The forced erase of a whole disk whose drive is exFAT, then FAT32, with a file on it held
+    // open: after a forced dismount the drive is locked only through a new handle (these file
+    // systems might grant a lock on the dismounted one), and the disk ends up blank.
+    const auto forced_wipe = [&](const std::string& filesystem) {
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        const DiskInfo on = *it;
+        std::string drive;
+        for (const DiskVolume& v : on.volumes)
+            if (v.filesystem == filesystem && v.mount.size() == 3) drive = v.mount;
+        REQUIRE_FALSE(drive.empty());
+        os::write_file_atomic(os::join(drive, "note.txt"), ByteSpan(reinterpret_cast<const std::uint8_t*>("w"), 1));
+        auto held = std::make_unique<std::ifstream>(fs::path(std::u8string(drive.begin(), drive.end())) / "note.txt", std::ios::binary);
+        REQUIRE(held->is_open());
+        try {
+            open_wipe_disk(on, identity_of(on), keep);
+            FAIL("the disk in use was opened for writing");
+        } catch (const VolumesInUse& e) {
+            CHECK(e.volumes == std::vector<std::string>{drive.substr(0, 2)});
+        }
+        CHECK(read_all(os::join(drive, "note.txt")) == Bytes{'w'});
+        {
+            auto dev = open_wipe_disk(on, identity_of(on), keep, true);
+            WipeOptions w;
+            w.verify = true;
+            w.clear_partition_table = true;
+            CHECK(wipe_device(*dev, w).verified);
+            dev->forget_partition_table();
+        }
+        held.reset();
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        CHECK(it->style == "RAW");
+        CHECK(it->partitions == 0);
+        MESSAGE("ran: forced erase of a disk with an " + filesystem + " drive in use");
+    };
+    forced_wipe("exFAT");
+    {
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        NewDiskOptions fat = o;
+        fat.filesystem = "exfat";
+        fat.style = TableStyle::Mbr;
+        const NewDiskResult r32 = init_disk(*it, identity_of(*it), keep, fat);
+        REQUIRE(r32.volumes.size() == 1);
+        std::string out;
+        const std::string format = os::get_env("SystemRoot") + "\\System32\\format.com";
+        REQUIRE(os::run_command({format, r32.volumes[0].substr(0, 2), "/FS:FAT32", "/Q", "/V:VTFAT", "/Y"}, &out) == 0);
+    }
+    forced_wipe("FAT32");
     attached.reset();
 }
 #else
