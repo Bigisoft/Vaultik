@@ -354,9 +354,14 @@ void check_database(const DatabaseDump& db) {
     if (db.port < 0 || db.port > 65535) throw Error("the database's port must be between 1 and 65535");
     if (!db.container.empty() && !valid_container_name(db.container))
         throw Error("invalid Docker container name \"" + db.container + "\"");
-    // pg_dump takes a database "name" with '=' as a whole connection string.
+    // pg_dump takes a database "name" with '=', or one starting "postgresql://" or "postgres://", as
+    // a whole connection string: it would connect elsewhere (with the password).
     if (db.kind == DatabaseKind::Postgres && db.database.find('=') != std::string::npos)
         throw Error("a PostgreSQL database name with '=' is not supported");
+    if (db.kind == DatabaseKind::Postgres &&
+        (lower(db.database).starts_with("postgresql://") || lower(db.database).starts_with("postgres://")))
+        throw Error("a PostgreSQL database name cannot be a connection URI (postgresql://...); give the server, "
+                    "port and user as settings of the dump");
     if (db.kind == DatabaseKind::SqlServer && !db.container.empty() && db.user.empty())
         throw Error("SQL Server in a Docker container needs a user name (such as sa) and its password");
 }

@@ -255,6 +255,19 @@ TEST_CASE("database dump names, checks and descriptions") {
     bad = sample(DatabaseKind::Postgres);
     bad.port = 70000;
     CHECK_THROWS_AS(check_database(bad), Error);
+    // A PostgreSQL "name" that pg_dump would take as a connection to another server.
+    for (const char* uri : {"postgresql://evil.example/db", "postgres://evil.example/db", "PostgreSQL://x/db"}) {
+        bad = sample(DatabaseKind::Postgres);
+        bad.database = uri;
+        CHECK_THROWS_WITH_AS(check_database(bad), doctest::Contains("connection URI"), Error);
+    }
+    bad = sample(DatabaseKind::Postgres);
+    bad.database = "host=evil.example dbname=x";
+    CHECK_THROWS_AS(check_database(bad), Error);
+    // The same name is fine for MySQL, which takes it as a name only.
+    bad = sample(DatabaseKind::MySql);
+    bad.database = "postgres://x";
+    CHECK_NOTHROW(check_database(bad));
 
     DatabaseDump d = sample(DatabaseKind::Postgres);
     CHECK(describe(d) == "PostgreSQL shop on this computer");
