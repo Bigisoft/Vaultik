@@ -21,11 +21,14 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <thread>
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/platform/mounts_posix.hpp"
@@ -203,6 +206,10 @@ std::string fold_case(std::string_view utf8) {
 }
 
 // ---- metadata -----------------------------------------------------------------------------
+
+std::uint64_t change_time(const std::string& /*path*/) {
+    return 0;
+}
 
 bool stat(const std::string& path, FileInfo& info, ErrorCode& err) {
     struct stat st{};
@@ -442,6 +449,25 @@ void make_private_dirs(const std::string& path) {
     ::close(fd);
 }
 
+std::string make_work_dir(const std::string& name) {
+    std::string cache = get_env("XDG_CACHE_HOME");
+    if (cache.empty() || cache[0] != '/') {  // (a relative one is to be ignored, as the spec says)
+        const std::string home = user_folder(UserFolder::Profile);
+        if (home.empty()) throw Error("cannot find this account's home folder");
+        cache = join(home, ".cache");
+    }
+    const std::string dir = join(join(cache, "vaultik"), name);
+    make_private_dirs(dir);
+    // make_private_dirs leaves a folder of another account as it is: such a folder is not used.
+    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) throw_last_error("cannot open folder " + dir);
+    struct stat st{};
+    const bool own = ::fstat(fd, &st) == 0 && st.st_uid == ::geteuid() && (st.st_mode & 077) == 0;
+    ::close(fd);
+    if (!own) throw Error("the folder " + dir + " belongs to another account or others can open it, so it is not used");
+    return dir;
+}
+
 void set_metadata(const std::string& path, const FileInfo& info) {
     const bool link = info.type == EntryType::Symlink;
     // Ownership first: chown clears set-user-ID bits that chmod then restores.
@@ -615,6 +641,24 @@ const Mount* mount_of(const std::vector<Mount>& mounts, const std::string& path)
     return best;
 }
 
+std::string resolved_path(const std::string& path) {
+    std::string part = absolute_path(path);
+    std::string rest;  // below the part that exists
+    for (;;) {
+        // (realpath also fails on a mount whose program has ended: then its folder's parent is.)
+        char buf[PATH_MAX];
+        if (::realpath(part.c_str(), buf) != nullptr) {
+            const std::string real = buf;
+            return rest.empty() ? real : join(real, rest);
+        }
+        const std::size_t slash = part.rfind('/');
+        if (part == "/" || slash == std::string::npos) return absolute_path(path);
+        const std::string leaf = part.substr(slash + 1);
+        rest = rest.empty() ? leaf : join(leaf, rest);
+        part = slash == 0 ? std::string("/") : part.substr(0, slash);
+    }
+}
+
 }  // namespace mounts
 
 namespace {
@@ -674,7 +718,7 @@ constexpr std::string_view kUuidPrefix = "uuid:";
 // wherever the drive is mounted (/run/media/<user>/<label> on SteamOS and most desktops).
 VolumeLocation volume_of(const std::string& path) {
     VolumeLocation loc;
-    const std::string full = absolute_path(path);
+    const std::string full = mounts::resolved_path(path);  // the drive a link points to
     const std::vector<Mount> mounts = read_mounts();
     const Mount* m = mount_of(mounts, full);
     if (m == nullptr || network_type(m->type) || m->major == 0) return loc;  // network, or no device (tmpfs, overlay)
@@ -1024,23 +1068,234 @@ int run_command_elevated(const std::vector<std::string>&, bool) {
     throw Error("running as administrator is only supported on Windows");
 }
 
-// Streamed programs are used for WSL and Hyper-V only, which exist on Windows alone.
-struct PipedProcess::Impl {};
-PipedProcess::PipedProcess(const std::vector<std::string>&, Direction,
-                           const std::vector<std::pair<std::string, std::string>>&) {
-    throw Error("streaming a program's output is only supported on Windows");
+struct PipedProcess::Impl {
+    Direction direction = Direction::FromProgram;
+    pid_t pid = -1;
+    bool reaped = false;  // waited for: its process group may belong to another program now
+    int data = -1;        // our end of the stream
+    int messages_fd = -1;
+    std::thread reader;
+    std::atomic<bool> reader_done{false};
+    std::atomic<bool> stop_reading{false};
+    mutable std::mutex lock;
+    std::string messages;
+    bool waited = false;
+    int exit_code = 0;
+
+    void close_data() {
+        if (data >= 0) ::close(data);
+        data = -1;
+    }
+
+    // Waits for the program (at most `limit` when it is set) and keeps its exit code.
+    bool reap(std::optional<std::chrono::milliseconds> limit) {
+        if (reaped || pid < 0) return true;
+        const auto deadline = std::chrono::steady_clock::now() + limit.value_or(std::chrono::milliseconds(0));
+        int status = 0;
+        for (;;) {
+            const pid_t done = ::waitpid(pid, &status, limit ? WNOHANG : 0);
+            if (done == pid) break;
+            if (done < 0 && errno == EINTR) continue;
+            if (done < 0) {  // (reaped elsewhere: its exit code is lost)
+                reaped = true;
+                exit_code = -1;
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            ::usleep(20000);
+        }
+        reaped = true;
+        exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+        return true;
+    }
+
+    void finish_reader() {
+        if (reader.joinable()) {
+            // The program has ended; a program it left running may still hold the pipe open.
+            for (int i = 0; i < 100 && !reader_done; ++i) ::usleep(20000);
+            stop_reading = true;
+            reader.join();
+        }
+        if (messages_fd >= 0) ::close(messages_fd);
+        messages_fd = -1;
+    }
+};
+
+PipedProcess::PipedProcess(const std::vector<std::string>& argv, Direction direction,
+                           const std::vector<std::pair<std::string, std::string>>& environment)
+    : impl_(std::make_unique<Impl>()) {
+    if (argv.empty()) throw Error("PipedProcess: no program");
+    impl_->direction = direction;
+    std::vector<char*> args;
+    for (const std::string& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+    args.push_back(nullptr);
+    // This process's environment with the given variables replaced or added.
+    const std::vector<std::string> env_strings = environment.empty() ? std::vector<std::string>()
+                                                                     : shell_environment(false, environment);
+    std::vector<char*> env;
+    for (const std::string& e : env_strings) env.push_back(const_cast<char*>(e.c_str()));
+    env.push_back(nullptr);
+
+    // Close-on-exec, so programs started at the same time from other threads do not inherit
+    // them (a copy of the write end held elsewhere would keep the stream from ending).
+    int data_fd[2] = {-1, -1};
+    int msg_fd[2] = {-1, -1};
+    if (::pipe2(data_fd, O_CLOEXEC) != 0) throw_last_error("cannot create a pipe");
+    if (::pipe2(msg_fd, O_CLOEXEC) != 0) {
+        const int e = errno;
+        ::close(data_fd[0]);
+        ::close(data_fd[1]);
+        throw_error("cannot create a pipe", static_cast<ErrorCode>(e));
+    }
+    const auto close_all = [&] {
+        for (int* fd : {&data_fd[0], &data_fd[1], &msg_fd[0], &msg_fd[1]}) {
+            if (*fd >= 0) ::close(*fd);
+            *fd = -1;
+        }
+    };
+#ifdef F_SETPIPE_SZ
+    // A large pipe buffer: the stream moves in big pieces (a volume is gigabytes). Only a hint.
+    (void)::fcntl(data_fd[0], F_SETPIPE_SZ, 1 << 20);
+#endif
+
+    // The program's standard error (and its standard output when it reads the stream) goes to
+    // the messages; standard input is empty when it writes the stream.
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    if (direction == Direction::FromProgram) {
+        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+        posix_spawn_file_actions_adddup2(&actions, data_fd[1], STDOUT_FILENO);
+    } else {
+        posix_spawn_file_actions_adddup2(&actions, data_fd[0], STDIN_FILENO);
+        posix_spawn_file_actions_adddup2(&actions, msg_fd[1], STDOUT_FILENO);
+    }
+    posix_spawn_file_actions_adddup2(&actions, msg_fd[1], STDERR_FILENO);
+    // In its own process group, so stop() ends everything it started; default signal handling,
+    // whatever this process installed (see spawn_and_wait).
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setpgroup(&attr, 0);
+    sigset_t all;
+    sigfillset(&all);
+    posix_spawnattr_setsigdefault(&attr, &all);
+    sigset_t none;
+    sigemptyset(&none);
+    posix_spawnattr_setsigmask(&attr, &none);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+
+    pid_t pid = -1;
+    const int rc = ::posix_spawnp(&pid, args[0], &actions, &attr, args.data(), environment.empty() ? environ : env.data());
+    posix_spawn_file_actions_destroy(&actions);
+    posix_spawnattr_destroy(&attr);
+    if (rc != 0) {
+        close_all();
+        throw_error("cannot start " + argv[0], static_cast<ErrorCode>(rc));
+    }
+    impl_->pid = pid;
+
+    // Our ends only: the program holds its own copies.
+    if (direction == Direction::FromProgram) {
+        impl_->data = data_fd[0];
+        data_fd[0] = -1;
+    } else {
+        impl_->data = data_fd[1];
+        data_fd[1] = -1;
+    }
+    impl_->messages_fd = msg_fd[0];
+    msg_fd[0] = -1;
+    close_all();
+    Impl* impl = impl_.get();
+    impl_->reader = std::thread([impl] {
+        char buf[4096];
+        while (!impl->stop_reading) {
+            struct pollfd p{impl->messages_fd, POLLIN, 0};
+            const int ready = ::poll(&p, 1, 100);
+            if (ready < 0 && errno == EINTR) continue;
+            if (ready < 0) break;
+            if (ready == 0) continue;
+            const ssize_t n = ::read(impl->messages_fd, buf, sizeof buf);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            const std::lock_guard<std::mutex> guard(impl->lock);
+            if (impl->messages.size() < (64u << 10)) impl->messages.append(buf, static_cast<std::size_t>(n));
+        }
+        impl->reader_done = true;
+    });
 }
-PipedProcess::~PipedProcess() = default;
-std::size_t PipedProcess::read(std::uint8_t*, std::size_t) {
-    return 0;
+
+PipedProcess::~PipedProcess() {
+    if (!impl_->waited) {
+        stop();
+        impl_->close_data();
+        impl_->reap(std::chrono::milliseconds(5000));
+    }
+    impl_->finish_reader();
 }
-void PipedProcess::write(ByteSpan) {}
+
+std::size_t PipedProcess::read(std::uint8_t* dst, std::size_t max) {
+    if (impl_->direction != Direction::FromProgram || impl_->data < 0) return 0;
+    std::size_t total = 0;
+    // Fill the buffer as far as the pipe allows, so chunking sees large reads.
+    while (total < max) {
+        const ssize_t n = ::read(impl_->data, dst + total, std::min<std::size_t>(max - total, 1u << 24));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) throw_last_error("cannot read the program's output");
+        if (n == 0) break;
+        total += static_cast<std::size_t>(n);
+        if (total >= (1u << 16)) break;  // enough for one call; the next one continues
+    }
+    return total;
+}
+
+void PipedProcess::write(ByteSpan data) {
+    if (impl_->direction != Direction::ToProgram || impl_->data < 0) throw Error("the program's input is closed");
+    // A program that stopped reading would end this whole process with SIGPIPE: the signal is
+    // held back for this thread while writing, so the write fails with EPIPE instead, and a
+    // SIGPIPE it raised is taken off again.
+    sigset_t pipe_only, old_mask, pending;
+    sigemptyset(&pipe_only);
+    sigaddset(&pipe_only, SIGPIPE);
+    sigemptyset(&pending);
+    pthread_sigmask(SIG_BLOCK, &pipe_only, &old_mask);
+    sigpending(&pending);
+    const bool was_pending = sigismember(&pending, SIGPIPE) == 1;
+    int error = 0;
+    std::size_t done = 0;
+    while (done < data.size()) {
+        const ssize_t n = ::write(impl_->data, data.data() + done, std::min<std::size_t>(data.size() - done, 1u << 24));
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) {
+            error = errno;
+            break;
+        }
+        done += static_cast<std::size_t>(n);
+    }
+    if (error == EPIPE && !was_pending) {
+        const struct timespec now{0, 0};
+        while (sigtimedwait(&pipe_only, nullptr, &now) < 0 && errno == EINTR) {
+        }
+    }
+    pthread_sigmask(SIG_SETMASK, &old_mask, nullptr);
+    if (error != 0) throw_error("the program stopped reading its input", static_cast<ErrorCode>(error));
+}
+
 int PipedProcess::wait() {
-    return -1;
+    if (impl_->waited) return impl_->exit_code;
+    impl_->close_data();
+    impl_->reap(std::nullopt);
+    impl_->finish_reader();
+    impl_->waited = true;
+    return impl_->exit_code;
 }
-void PipedProcess::stop() {}
+
+void PipedProcess::stop() {
+    // The whole process group: the program and everything it started.
+    if (impl_->pid > 0 && !impl_->reaped) ::kill(-impl_->pid, SIGKILL);
+}
+
 std::string PipedProcess::messages() const {
-    return {};
+    const std::lock_guard<std::mutex> guard(impl_->lock);
+    return impl_->messages;
 }
 
 int run_command(const std::vector<std::string>& argv, std::string* output) {

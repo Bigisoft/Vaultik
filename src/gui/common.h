@@ -8,6 +8,7 @@
 #include <functional>
 #include <string>
 
+class QIODevice;
 class QWidget;
 
 namespace vaultik {
@@ -37,6 +38,12 @@ QWidget* scrolled(QWidget* page);
 void fit_to_screen(QWidget* window, QSize wanted, const QWidget* anchor = nullptr);
 // The same for a Yes/No question; true for Yes.
 bool plain_question(QWidget* parent, const QString& title, const QString& text);
+
+// Saves a file that only this account may read (a recovery key or kit): `write` fills a new file in
+// the same folder, made readable by the owner alone, which then takes the place of `path`. So a
+// file that was there keeps none of its own (perhaps looser) permissions, and a write that fails
+// leaves the old file as it was, never half a file. `write` returns whether it wrote it all.
+bool save_private_file(const QString& path, const std::function<bool(QIODevice&)>& write, bool text = false);
 
 inline QString qs(const std::string& s) {
     return QString::fromStdString(s);

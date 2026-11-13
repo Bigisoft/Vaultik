@@ -129,6 +129,14 @@ TEST_CASE("the image that runs tar is one already on this computer") {
     CHECK(pick_helper_image({"docker.io/library/alpine:3.20"}, "linux") == "docker.io/library/alpine:3.20");
     CHECK(pick_helper_image(images, "windows") == "mcr.microsoft.com/windows/nanoserver:ltsc2025");
     CHECK(pick_helper_image(images, "linux", "my/tools:1") == "my/tools:1");  // the job's own
+    // A named image goes on docker's command line: never as an option, never with odd characters.
+    for (const char* bad : {"--privileged", "-v", "busybox --privileged", "a;b", "a\tb", "a$b"})
+        CHECK_THROWS_AS(pick_helper_image(images, "linux", bad), Error);
+    for (const char* good : {"busybox", "busybox:1.36", "ghcr.io:443/org/tool_x:v1.2-a", "alpine@sha256:0123abcd"})
+        CHECK(valid_image_reference(good));
+    CHECK_FALSE(valid_image_reference(""));
+    CHECK_FALSE(valid_image_reference("-busybox"));
+    CHECK_FALSE(valid_image_reference(std::string(513, 'a')));
     CHECK_THROWS_WITH_AS(pick_helper_image({"acumatica:26.200"}, "linux"), doctest::Contains("docker pull busybox"),
                          Error);
     CHECK_THROWS_WITH_AS(pick_helper_image({"busybox:1"}, "windows"), doctest::Contains("nanoserver"), Error);
@@ -255,6 +263,19 @@ TEST_CASE("database dump names, checks and descriptions") {
     bad = sample(DatabaseKind::Postgres);
     bad.port = 70000;
     CHECK_THROWS_AS(check_database(bad), Error);
+    // A PostgreSQL "name" that pg_dump would take as a connection to another server.
+    for (const char* uri : {"postgresql://evil.example/db", "postgres://evil.example/db", "PostgreSQL://x/db"}) {
+        bad = sample(DatabaseKind::Postgres);
+        bad.database = uri;
+        CHECK_THROWS_WITH_AS(check_database(bad), doctest::Contains("connection URI"), Error);
+    }
+    bad = sample(DatabaseKind::Postgres);
+    bad.database = "host=evil.example dbname=x";
+    CHECK_THROWS_AS(check_database(bad), Error);
+    // The same name is fine for MySQL, which takes it as a name only.
+    bad = sample(DatabaseKind::MySql);
+    bad.database = "postgres://x";
+    CHECK_NOTHROW(check_database(bad));
 
     DatabaseDump d = sample(DatabaseKind::Postgres);
     CHECK(describe(d) == "PostgreSQL shop on this computer");
@@ -559,3 +580,40 @@ TEST_CASE("a dump with its tool missing says what to install") {
     }
     os::set_env("PATH", old_path);
 }
+
+#ifndef _WIN32
+TEST_CASE("a dump gets its password and settings, and only this account can read it") {
+    TempDir tmp;
+    const fs::path bin = tmp.path / "bin";
+    fs::create_directories(bin);
+    // A stand-in pg_dump: writes the dump file it was given, as the real one does (umask 022), with
+    // what it was handed through its environment.
+    {
+        std::ofstream(bin / "pg_dump") << "#!/bin/sh\n"
+                                          "for a in \"$@\"; do case \"$a\" in --file=*) f=\"${a#--file=}\";; esac; done\n"
+                                          "umask 022\n"
+                                          "printf '%s|%s' \"$PGCONNECT_TIMEOUT\" \"$(cat \"$PGPASSFILE\")\" > \"$f\"\n";
+    }
+    fs::permissions(bin / "pg_dump", fs::perms::owner_all);
+    const std::string old_path = os::get_env("PATH");
+    os::set_env("PATH", u8(bin) + ":" + old_path);
+
+    // A folder the user named keeps its permissions; the dump in it is private.
+    const fs::path to = tmp.path / "dumps";
+    fs::create_directories(to);
+    fs::permissions(to, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec | fs::perms::others_read |
+                            fs::perms::others_exec);
+    const DatabaseDump db = sample(DatabaseKind::Postgres);
+    const std::string file = run_dump(db, "pw:1", u8(to), {}, std::chrono::seconds(30));
+    os::set_env("PATH", old_path);
+    std::ifstream in(fs::path(file), std::ios::binary);
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text == "30|*:*:*:*:pw\\:1");  // (the shell drops the line's end)
+    CHECK((fs::status(fs::path(file)).permissions() & fs::perms::all) == (fs::perms::owner_read | fs::perms::owner_write));
+    CHECK((fs::status(to).permissions() & fs::perms::all) ==
+          (fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec | fs::perms::others_read |
+           fs::perms::others_exec));
+    // The password file is gone again.
+    for (const auto& e : fs::directory_iterator(to)) CHECK(e.path().filename().string().find("pgpass") == std::string::npos);
+}
+#endif

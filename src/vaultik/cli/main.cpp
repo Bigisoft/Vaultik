@@ -1363,7 +1363,7 @@ void add_docker_volumes(BackupOptions& o, const std::vector<std::string>& volume
     }
 }
 
-// The database dumps of one run, in a private folder of the temporary folder, removed when this
+// The database dumps of one run, in a private folder of the account's own, removed when this
 // goes away (after the backup read them).
 struct DatabaseDumps {
     std::string run;
@@ -1385,9 +1385,9 @@ std::unique_ptr<DatabaseDumps> add_database_dumps(BackupOptions& o, const std::v
                                                   const std::function<std::string(const DatabaseDump&)>& password_of) {
     auto dumps = std::make_unique<DatabaseDumps>();
     if (dbs.empty()) return dumps;
-    const std::u8string tmp = std::filesystem::temp_directory_path().u8string();
-    const std::string root = os::join(std::string(tmp.begin(), tmp.end()), "vaultik-databases");
-    os::make_private_dirs(root);
+    // The account's own folder, not the shared temporary folder: there another account could make
+    // the folder first (and read the dumps, or keep every backup from making it).
+    const std::string root = os::make_work_dir("databases");
     remove_leftover_exports(root, "database dumps");
     dumps->run = hyperv_run_folder(root);
     os::make_private_dirs(dumps->run);
@@ -1435,6 +1435,8 @@ int cmd_backup(const Args& a) {
         throw Error("usage: vaultik backup -r <repo> <path>...");
     for (const std::string& v : volumes)
         if (!valid_volume_name(v)) throw Error("invalid Docker volume name \"" + v + "\"");
+    if (const auto image = a.value("--docker-image"); image && !image->empty() && !valid_image_reference(*image))
+        throw Error("invalid Docker image name \"" + *image + "\"");
     const WslWhenRunning when = parse_wsl_when_running(a.value("--wsl-running").value_or("skip"));
     for (const std::string& d : distros)
         if (!valid_distro_name(d)) throw Error("invalid WSL distribution name \"" + d + "\"");
@@ -3882,6 +3884,8 @@ int cmd_docker(const Args& a) {
     const auto name = a.value("--name");
     if (!name) throw Error("docker restore needs --name <new volume> (an existing volume is never written to)");
     if (!valid_volume_name(*name)) throw Error("invalid Docker volume name \"" + *name + "\"");
+    if (const auto image = a.value("--image"); image && !image->empty() && !valid_image_reference(*image))
+        throw Error("invalid Docker image name \"" + *image + "\"");
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "docker restore", lock_wait(a));
     repo->reload_index();

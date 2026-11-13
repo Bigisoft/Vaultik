@@ -1372,6 +1372,56 @@ VolumeReader reader_of(const FixtureDisk& d) {
 
 }  // namespace
 
+TEST_CASE("image: NTFS metadata with impossible values is refused or not trusted") {
+    FixtureDisk disk;
+    const std::uint64_t length = disk.l.partitions[1].length;
+    const VolumeReader base = reader_of(disk);
+    const NtfsFacts good = ntfs_facts(base, length);
+    // The volume as read, with `bytes` laid over it at `at`.
+    const auto patched = [&base](std::uint64_t at, Bytes bytes) -> VolumeReader {
+        return [&base, at, bytes](std::uint64_t off, std::uint8_t* dst, std::size_t n) {
+            base(off, dst, n);
+            for (std::size_t i = 0; i < bytes.size(); ++i)
+                if (at + i >= off && at + i < off + n) dst[at + i - off] = bytes[i];
+        };
+    };
+    // Sectors per cluster given as 2^(256 - value), with exponents past any cluster size and
+    // past what a 64-bit shift can do.
+    for (const int spc : {0x81, 0xA0, 0xBF, 0xC0, 0xF3})
+        CHECK_THROWS_WITH_AS(ntfs_facts(patched(0x0D, {static_cast<std::uint8_t>(spc)}), length),
+                             doctest::Contains("cluster size"), Error);
+
+    // $Bitmap claiming a size far beyond the volume's clusters: only what they need is read.
+    Bytes boot(512);
+    base(0, boot.data(), boot.size());
+    const std::uint64_t cs = le(boot, 0x0B, 2) * le(boot, 0x0D, 1);
+    const auto rec_byte = static_cast<std::int8_t>(boot[0x40]);
+    const std::uint64_t rs = rec_byte < 0 ? std::uint64_t{1} << -rec_byte : static_cast<std::uint64_t>(rec_byte) * cs;
+    const std::uint64_t rec6 = le(boot, 0x30, 8) * cs + 6 * rs;  // in the master file table's first run
+    Bytes r6(static_cast<std::size_t>(rs));
+    base(rec6, r6.data(), r6.size());
+    REQUIRE(std::memcmp(r6.data(), "FILE", 4) == 0);
+    std::size_t a = static_cast<std::size_t>(le(r6, 0x14, 2));
+    while (a + 8 < r6.size() && le(r6, a, 4) != 0x80 && le(r6, a, 4) != 0xFFFFFFFF) a += static_cast<std::size_t>(le(r6, a + 4, 4));
+    REQUIRE(le(r6, a, 4) == 0x80);
+    const std::uint64_t size_at = rec6 + a + 0x30;
+    REQUIRE(size_at % 512 < 510);  // (not where the update sequence goes)
+    const auto le_bytes = [](std::uint64_t v) {
+        Bytes b(8);
+        for (int i = 0; i < 8; ++i) b[static_cast<std::size_t>(i)] = static_cast<std::uint8_t>(v >> (8 * i));
+        return b;
+    };
+    for (const std::uint64_t huge : {std::uint64_t{1} << 34, std::uint64_t{1} << 62}) {
+        NtfsFacts f;
+        CHECK_NOTHROW(f = ntfs_facts(patched(size_at, le_bytes(huge)), length));
+        CHECK(f.used_clusters == good.used_clusters);
+        CHECK(f.used_end == good.used_end);
+    }
+    // One too short for the clusters is refused.
+    CHECK_THROWS_WITH_AS(ntfs_facts(patched(size_at, le_bytes(good.clusters / 8 - 1)), length),
+                         doctest::Contains("$Bitmap"), Error);
+}
+
 TEST_CASE("image: an NTFS volume is shrunk to restore onto a smaller disk") {
     TempDir tmp;
     auto repo = make_repo(tmp.path / "repo");

@@ -117,7 +117,7 @@ void whole_disks(const std::string& sys, std::vector<std::string>& out, int dept
 std::vector<std::string> disks_below(const std::string& path, int depth) {
     std::vector<std::string> out;
     const std::vector<mounts::Mount> table = mounts::read_mounts();
-    const mounts::Mount* m = mounts::mount_of(table, absolute_path(path));
+    const mounts::Mount* m = mounts::mount_of(table, mounts::resolved_path(path));  // a link: where it points
     if (m == nullptr || m->major == 0) return out;
     whole_disks(real_path("/sys/dev/block/" + std::to_string(m->major) + ":" + std::to_string(m->minor)), out, depth);
     return out;

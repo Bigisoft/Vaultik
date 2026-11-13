@@ -66,6 +66,15 @@ bool same_metadata(const os::FileInfo& info, const Node& node, bool compare_ctim
            (!compare_ctime || info.ctime == node.ctime);
 }
 
+// Windows: whether something changed the file after the version was made (`since`), going by its
+// NTFS change time, which no ordinary program sets back: a file rewritten in place whose
+// modification time was then set back (VeraCrypt does that to its containers) is a change, not
+// damage. (On POSIX the ctime compared above is that time.)
+bool changed_since(const std::string& path, std::uint64_t since) {
+    const std::uint64_t t = os::change_time(path);
+    return t != 0 && t > since;
+}
+
 enum class Outcome { Same, Differs, Unreadable, OutOfTime };
 
 }  // namespace
@@ -105,7 +114,8 @@ RotCheckResult check_unchanged_files(Repository& repo, const Snapshot& snapshot,
         if (local.empty()) continue;
         os::FileInfo before;
         os::ErrorCode err = 0;
-        if (!os::stat(local, before, err) || !same_metadata(before, c.node, options.compare_ctime)) {
+        if (!os::stat(local, before, err) || !same_metadata(before, c.node, options.compare_ctime) ||
+            (options.compare_ctime && changed_since(local, snapshot.time))) {
             ++result.changed;
             continue;
         }
@@ -156,7 +166,8 @@ RotCheckResult check_unchanged_files(Repository& repo, const Snapshot& snapshot,
         }
         // Written to while it was read: not a finding.
         os::FileInfo after;
-        if (!os::stat(local, after, err) || !same_metadata(after, c.node, options.compare_ctime)) {
+        if (!os::stat(local, after, err) || !same_metadata(after, c.node, options.compare_ctime) ||
+            (options.compare_ctime && changed_since(local, snapshot.time))) {
             ++result.changed;
             continue;
         }

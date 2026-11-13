@@ -8,6 +8,7 @@
 #include <QLocale>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QSaveFile>
 #include <QStringList>
 #include <QThread>
 
@@ -53,6 +54,19 @@ bool plain_question(QWidget* parent, const QString& title, const QString& text) 
     box.setTextFormat(Qt::PlainText);
     box.setText(text);
     return box.exec() == QMessageBox::Yes;
+}
+
+bool save_private_file(const QString& path, const std::function<bool(QIODevice&)>& write, bool text) {
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly | (text ? QIODevice::Text : QIODevice::NotOpen))) return false;
+    // (QSaveFile gives the new file the old one's permissions; on Windows a file in the user's
+    // folders is private already.)
+    f.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    if (!write(f) || f.error() != QFileDevice::NoError) {
+        f.cancelWriting();
+        return false;
+    }
+    return f.commit();  // false, with the new file removed, when it could not be finished
 }
 
 QString format_bytes(std::uint64_t bytes) {

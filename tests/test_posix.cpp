@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -21,6 +22,7 @@
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/mount.hpp"
 #include "vaultik/platform/drive_health.hpp"
+#include "vaultik/platform/mounts_posix.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -159,6 +161,98 @@ TEST_CASE("POSIX: run_command clean environment and extra variables") {
     CHECK(os::run_command({"/bin/sh", "-c", "printf '%s|%s|' \"$VAULTIK_TEST_VALUE\" \"${VAULTIK_TEST_LEAK:-none}\""}, o) == 0);
     CHECK(out == "a b|secret|");
     ::unsetenv("VAULTIK_TEST_LEAK");
+}
+
+TEST_CASE("POSIX: working folders are the account's own and private") {
+    PosixTemp tmp;
+    const std::string old = os::get_env("XDG_CACHE_HOME");
+    ::setenv("XDG_CACHE_HOME", tmp.path.c_str(), 1);
+    const std::string dir = os::make_work_dir("databases");
+    CHECK(dir == os::join(os::join(tmp.path, "vaultik"), "databases"));
+    struct stat st{};
+    REQUIRE(::lstat(dir.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0700);
+    // One left open is tightened again.
+    REQUIRE(::chmod(dir.c_str(), 0755) == 0);
+    CHECK(os::make_work_dir("databases") == dir);
+    REQUIRE(::lstat(dir.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0700);
+    // A link put in its place is not followed.
+    const std::string elsewhere = os::join(tmp.path, "elsewhere");
+    fs::create_directories(elsewhere);
+    REQUIRE(::symlink(elsewhere.c_str(), os::join(os::join(tmp.path, "vaultik"), "linked").c_str()) == 0);
+    CHECK_THROWS(os::make_work_dir("linked"));
+    if (old.empty()) ::unsetenv("XDG_CACHE_HOME");
+    else ::setenv("XDG_CACHE_HOME", old.c_str(), 1);
+}
+
+TEST_CASE("POSIX: a program's output and input as streams") {
+    std::string text;
+    for (int i = 0; i < 20000; ++i) text += "line " + std::to_string(i) + " of the streamed output\n";
+    PosixTemp tmp;
+    const std::string in = os::join(tmp.path, "in.txt");
+    { std::ofstream(in, std::ios::binary) << text; }
+
+    SUBCASE("reading a program's output, with extra variables on top of this process's") {
+        ::setenv("VAULTIK_TEST_KEPT", "kept", 1);
+        os::PipedProcess p({"sh", "-c", "printf '%s|%s|' \"$VAULTIK_TEST_VAR\" \"$VAULTIK_TEST_KEPT\"; cat \"$1\"", "sh", in},
+                           os::PipedProcess::Direction::FromProgram, {{"VAULTIK_TEST_VAR", "a b"}});
+        std::string got;
+        std::uint8_t buf[100000];
+        while (const std::size_t n = p.read(buf, sizeof buf)) got.append(reinterpret_cast<const char*>(buf), n);
+        CHECK(p.wait() == 0);
+        CHECK(got == "a b|kept|" + text);
+        CHECK(p.messages().empty());
+        ::unsetenv("VAULTIK_TEST_KEPT");
+    }
+    SUBCASE("writing a program's input") {
+        // cat prints what it reads: its output is kept as messages (the first 64 KiB).
+        os::PipedProcess p({"cat"}, os::PipedProcess::Direction::ToProgram);
+        const std::string small = text.substr(0, 30000);
+        p.write(ByteSpan(reinterpret_cast<const std::uint8_t*>(small.data()), small.size()));
+        CHECK(p.wait() == 0);
+        CHECK(p.messages() == small);
+
+        // All of a large stream reaches the program.
+        const std::string out = os::join(tmp.path, "out.txt");
+        os::PipedProcess copy({"sh", "-c", "cat > \"$1\"", "sh", out}, os::PipedProcess::Direction::ToProgram);
+        for (int i = 0; i < 20; ++i) copy.write(ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+        CHECK(copy.wait() == 0);
+        CHECK(fs::file_size(out) == 20 * text.size());
+    }
+    SUBCASE("a program that stops reading gives an error, not SIGPIPE") {
+        os::PipedProcess p({"sh", "-c", "exit 4"}, os::PipedProcess::Direction::ToProgram);
+        // (Written until the program has ended and its end of the pipe is closed.)
+        bool failed = false;
+        for (int i = 0; i < 200 && !failed; ++i) {
+            try {
+                p.write(ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+            } catch (const os::OsError&) {
+                failed = true;
+            }
+        }
+        CHECK(failed);
+        CHECK(p.wait() == 4);
+    }
+    SUBCASE("exit codes, messages, programs that cannot start, and stopping") {
+        os::PipedProcess fails({"sh", "-c", "echo oops >&2; exit 3"}, os::PipedProcess::Direction::FromProgram);
+        std::uint8_t buf[16];
+        CHECK(fails.read(buf, sizeof buf) == 0);
+        CHECK(fails.wait() == 3);
+        CHECK(fails.wait() == 3);
+        CHECK(fails.messages().find("oops") != std::string::npos);
+
+        CHECK_THROWS_AS(os::PipedProcess({"/nonexistent/vaultik-no-such-program"}, os::PipedProcess::Direction::FromProgram),
+                        os::OsError);
+
+        // stop() ends the program and what it started; so does the object going away.
+        const auto start = std::chrono::steady_clock::now();
+        os::PipedProcess slow({"sh", "-c", "sleep 30 & sleep 30"}, os::PipedProcess::Direction::FromProgram);
+        slow.stop();
+        CHECK(slow.wait() != 0);
+        { os::PipedProcess dropped({"sh", "-c", "sleep 30 & sleep 30"}, os::PipedProcess::Direction::ToProgram); }
+        CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
+    }
 }
 
 TEST_CASE("POSIX: process ids past the pid_t range are not alive") {
@@ -335,6 +429,39 @@ TEST_CASE("POSIX: a version shown as a folder with FUSE") {
 
     mount.reset();
     CHECK_FALSE(fs::exists(folder));  // unmounted and removed
+
+    // An empty folder that was there before stays when the version is closed.
+    const std::string mine = os::join(tmp.path, "my folder");
+    fs::create_directories(mine);
+    mount.emplace(*repo, result.snapshot, mine);
+    CHECK(mount->active());
+    CHECK(read(mine + inside.substr(folder.size()) + "/sub/note.txt") == "hello from the backup\n");
+    mount.reset();
+    CHECK(fs::is_directory(mine));
+    CHECK(fs::is_empty(mine));
+}
+
+TEST_CASE("POSIX: a path through a link is on the drive the link points to") {
+    PosixTemp tmp;
+    const std::string real = os::join(tmp.path, "real");
+    fs::create_directories(real + "/inside");
+    const std::string link = os::join(tmp.path, "link");
+    REQUIRE(::symlink(real.c_str(), link.c_str()) == 0);
+    char buf[PATH_MAX];
+    REQUIRE(::realpath(real.c_str(), buf) != nullptr);
+    const std::string canonical = buf;
+    CHECK(os::mounts::resolved_path(link) == canonical);
+    CHECK(os::mounts::resolved_path(link + "/inside") == canonical + "/inside");
+    // A part that does not exist yet stays as it is, below the resolved part.
+    CHECK(os::mounts::resolved_path(link + "/new/folder") == canonical + "/new/folder");
+    // The same drive and volume as the folder itself.
+    CHECK(os::volume_of(link + "/inside").volume == os::volume_of(real + "/inside").volume);
+    const auto devices = [](const std::vector<os::DriveHealth>& list) {
+        std::vector<std::string> out;
+        for (const os::DriveHealth& d : list) out.push_back(d.device);
+        return out;
+    };
+    CHECK(devices(os::drive_health(link)) == devices(os::drive_health(real)));
 }
 
 TEST_CASE("POSIX: drive health of a folder never fails") {

@@ -986,7 +986,9 @@ next image). A shrunk volume gets what `ntfsresize` changes: its size in the boo
 backup boot sector in its new last sector), `$Bitmap` and the bad-cluster list cut to the new
 size, an emptied `$LogFile` and the dirty flag, so Windows checks the volume once when it first
 mounts or starts from it. Disk and partition ids stay the same, so the restored Windows starts as
-before; `--boot` (or the recovery menu) also runs `bcdboot` to write its boot files.
+before; `--boot` (or the recovery menu) also runs `bcdboot` to write its boot files. What a
+shrink or a move does not fix (boot entries of moved partitions on MBR disks, the start recorded
+in a moved FAT partition, the emptied `$LogFile`) is listed under "Current limits".
 
 The disk Windows runs from is restored from the **recovery drive** (More > **Create recovery
 drive**, or `vaultik recovery-media --usb E:` / `--iso <file>`): Windows PE with Vaultik on a
@@ -1077,8 +1079,10 @@ put on a command line, where other programs could read it: `sqlcmd` gets it in i
 `SQLCMDPASSWORD` variable, `mysqldump` from an option file and `pg_dump` from a password file
 (each in a private folder, removed right after the dump), and a tool in a container through
 `docker exec -e`, which takes the value from the environment of the `docker` command alone. The
-dumps are made in a private folder in the temporary folder (`vaultik-databases`), read from there
-by the backup and removed when the run ends; dumps left by a run that was killed are removed by
+dumps are made in a private folder of your account (Windows: `Vaultik\Temp\databases` in your
+local application data folder; Linux: `~/.cache/vaultik/databases`, or under `$XDG_CACHE_HOME`),
+not in the shared temporary folder, where another account could make the folder first. Only your
+account can read the dump files. They are read from there by the backup and removed when the run ends; dumps left by a run that was killed are removed by
 the next one. A dump that fails is a warning (with the tool's own message) and an item that could
 not be read: the files and the other dumps are still backed up and old versions are kept. Dumps
 are for jobs without administrator rights.
@@ -1171,7 +1175,16 @@ are totals, shared by all of a backup's threads. Sizes and rates use binary unit
   partition keeps its content, but Windows RE may need `reagentc /disable` and `reagentc
   /enable` in the restored Windows to be found again (its configuration notes where the
   partition was), and old restore points (shadow copies) of a shrunk volume may be dropped by
-  Windows. The target needs the same sector size.
+  Windows. The target needs the same sector size. On MBR disks Windows' boot configuration (BCD)
+  names a partition by where it starts, so its entries for a partition that moved (such as
+  Windows RE on the recovery partition) point to the old place until `reagentc` (above) or
+  `bcdboot` writes them again; the Windows partition itself never moves. A FAT partition that
+  moves keeps the start written in its own boot sector ("hidden sectors", which only NTFS
+  volumes get corrected): Windows does not use it, but starting a computer from that partition
+  in BIOS (legacy) mode may fail until it is fixed with a disk tool. A shrunk volume's
+  `$LogFile` is emptied: changes it still held that were not yet written to their place (none
+  for a volume read from a shadow copy) are lost, as after a sudden power cut, which the check
+  Windows makes at the first start deals with.
 - NTFS names that are not valid UTF-16 (unpaired surrogates, very rare) cannot be backed up.
 - The program list knows only what the Windows uninstall list and winget know. Jobs with
   administrator rights run as the system account, which has no winget and its own per-user list:

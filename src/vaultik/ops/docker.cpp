@@ -238,6 +238,17 @@ bool valid_container_name(std::string_view name) {
     return valid_docker_name(name);
 }
 
+bool valid_image_reference(std::string_view image) {
+    if (image.empty() || image.size() > 512) return false;
+    const auto alnum = [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    };
+    if (!alnum(image[0])) return false;
+    return std::all_of(image.begin() + 1, image.end(), [&](char c) {
+        return alnum(c) || c == '_' || c == '.' || c == '-' || c == '/' || c == ':' || c == '@';
+    });
+}
+
 std::vector<std::string> volume_place(const std::string& volume) {
     return {kDockerFolder, volume + ".tar"};
 }
@@ -370,6 +381,8 @@ std::vector<std::string> docker_images(const DockerInfo& info) {
 
 std::string pick_helper_image(const std::vector<std::string>& images, const std::string& os_type,
                               const std::string& wanted) {
+    // (It goes on docker's command line, where a value starting with '-' would be an option.)
+    if (!wanted.empty() && !valid_image_reference(wanted)) throw Error("invalid Docker image name \"" + wanted + "\"");
     if (!wanted.empty()) return wanted;
     const bool windows = os_type == "windows";
     const std::vector<std::string> known =

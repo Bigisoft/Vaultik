@@ -166,6 +166,16 @@ std::string fold_case(std::string_view utf8) {
 
 // ---- metadata -----------------------------------------------------------------------------
 
+std::uint64_t change_time(const std::string& path) {
+    UniqueHandle h(CreateFileW(native(path).c_str(), FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                               FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!h.valid()) return 0;
+    FILE_BASIC_INFO basic{};
+    if (!GetFileInformationByHandleEx(h.get(), FileBasicInfo, &basic, sizeof basic)) return 0;
+    return basic.ChangeTime.QuadPart > 0 ? static_cast<std::uint64_t>(basic.ChangeTime.QuadPart) : 0;
+}
+
 bool stat(const std::string& path, FileInfo& info, ErrorCode& err) {
     const std::wstring p = native(path);
     WIN32_FILE_ATTRIBUTE_DATA ad;
@@ -607,6 +617,16 @@ void make_private_dirs(const std::string& path) {
     make_dirs(path);
 }
 
+std::string make_work_dir(const std::string& name) {
+    // Not the temporary folder: for the system account (jobs with administrator rights) that is
+    // the Windows folder's Temp, where every account may make folders.
+    const std::string local = user_folder(UserFolder::LocalAppData);
+    if (local.empty()) throw Error("cannot find this account's local application data folder");
+    const std::string dir = join(join(join(local, "Vaultik"), "Temp"), name);
+    make_dirs(dir);
+    return dir;
+}
+
 void set_metadata(const std::string& path, const FileInfo& info) {
     const DWORD attrs = info.attributes & kRestorableAttributes;
     if (info.mtime == 0 && info.ctime == 0 && attrs == 0) return;
@@ -866,6 +886,46 @@ int run_shell(const std::string& command, std::string* output) {
     return run_shell(command, o);
 }
 
+// Environment variable names compared as Windows compares them: without regard to case. This also
+// gives the order CreateProcess wants the block in.
+struct EnvNameLess {
+    bool operator()(const std::wstring& a, const std::wstring& b) const {
+        return CompareStringOrdinal(a.c_str(), static_cast<int>(a.size()), b.c_str(), static_cast<int>(b.size()),
+                                    TRUE) == CSTR_LESS_THAN;
+    }
+};
+using EnvVars = std::map<std::wstring, std::wstring, EnvNameLess>;
+
+// This process's environment.
+static EnvVars current_environment() {
+    EnvVars vars;
+    if (wchar_t* block = GetEnvironmentStringsW()) {
+        for (const wchar_t* p = block; *p != L'\0'; p += wcslen(p) + 1) {
+            const std::wstring entry = p;
+            const std::size_t eq = entry.find(L'=', 1);  // ("=C:=C:\..." entries start with '=')
+            if (eq == std::wstring::npos) continue;
+            vars.emplace(entry.substr(0, eq), entry.substr(eq + 1));
+        }
+        FreeEnvironmentStringsW(block);
+    }
+    return vars;
+}
+
+// An environment block for CreateProcess: `vars` with the `extra` variables replaced or added
+// (whatever the case of the name they replace).
+static std::wstring environment_block(EnvVars vars, const std::vector<std::pair<std::string, std::string>>& extra) {
+    for (const auto& [name, value] : extra) {
+        std::wstring w = widen(name);
+        vars.erase(w);  // (assigning would keep the old spelling of the name)
+        vars.emplace(std::move(w), widen(value));
+    }
+    std::wstring env;
+    for (const auto& [name, value] : vars) env += name + L"=" + value + L'\0';
+    if (vars.empty()) env += L'\0';
+    env += L'\0';
+    return env;
+}
+
 // Runs `program` with `cmdline` without a window and with empty input, captures its output (the
 // first `output_limit` bytes), and stops it with everything it started after the timeout.
 static int run_process(const std::wstring& program, std::wstring cmdline, const ShellOptions& o,
@@ -906,13 +966,14 @@ static int run_process(const std::wstring& program, std::wstring cmdline, const 
     si.lpAttributeList = attrs;
 
     // A fixed, minimal environment when asked (commands run with administrator rights): the
-    // system's own folders only, nothing the user's settings could point elsewhere.
+    // system's own folders only, nothing the user's settings could point elsewhere. Otherwise this
+    // process's environment, with the extra variables on top when there are any.
     std::wstring env;
     if (o.clean_environment) {
         wchar_t windows[MAX_PATH] = {};
         GetSystemWindowsDirectoryW(windows, MAX_PATH);
         const std::wstring root = windows;
-        std::map<std::wstring, std::wstring, std::less<>> vars = {
+        EnvVars vars = {
             {L"SystemRoot", root},
             {L"windir", root},
             {L"SystemDrive", root.substr(0, 2)},
@@ -949,17 +1010,17 @@ static int run_process(const std::wstring& program, std::wstring cmdline, const 
         vars[L"PROCESSOR_ARCHITECTURE"] = info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64 ? L"ARM64"
                                           : info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL ? L"x86"
                                                                                                          : L"AMD64";
-        for (const auto& [name, value] : o.extra_environment) vars[widen(name)] = widen(value);
-        for (const auto& [name, value] : vars) env += name + L"=" + value + L'\0';
-        env += L'\0';
+        env = environment_block(std::move(vars), o.extra_environment);
+    } else if (!o.extra_environment.empty()) {
+        env = environment_block(current_environment(), o.extra_environment);
     }
     const std::wstring directory = o.directory.empty() ? std::wstring() : widen(o.directory);
 
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, TRUE,
                         CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED |
-                            (o.clean_environment ? CREATE_UNICODE_ENVIRONMENT : 0),
-                        o.clean_environment ? env.data() : nullptr, directory.empty() ? nullptr : directory.c_str(),
+                            (env.empty() ? 0 : CREATE_UNICODE_ENVIRONMENT),
+                        env.empty() ? nullptr : env.data(), directory.empty() ? nullptr : directory.c_str(),
                         &si.StartupInfo, &pi))
         throw_last_error("cannot start the command");
     UniqueHandle process(pi.hProcess);
@@ -1117,33 +1178,7 @@ PipedProcess::PipedProcess(const std::vector<std::string>& argv, Direction direc
 
     // This process's environment with the given variables replaced or added.
     std::wstring env;
-    if (!environment.empty()) {
-        std::map<std::wstring, std::wstring> vars;
-        std::map<std::wstring, std::wstring> folded;  // upper-case name -> name as found
-        if (wchar_t* block = GetEnvironmentStringsW()) {
-            for (const wchar_t* p = block; *p != L'\0'; p += wcslen(p) + 1) {
-                const std::wstring entry = p;
-                const std::size_t eq = entry.find(L'=', 1);  // ("=C:=C:\..." entries start with '=')
-                if (eq == std::wstring::npos) continue;
-                vars[entry.substr(0, eq)] = entry.substr(eq + 1);
-            }
-            FreeEnvironmentStringsW(block);
-        }
-        for (const auto& [name, value] : vars) {
-            std::wstring upper = name;
-            CharUpperBuffW(upper.data(), static_cast<DWORD>(upper.size()));
-            folded[upper] = name;
-        }
-        for (const auto& [name, value] : environment) {
-            std::wstring w = widen(name);
-            std::wstring upper = w;
-            CharUpperBuffW(upper.data(), static_cast<DWORD>(upper.size()));
-            if (const auto it = folded.find(upper); it != folded.end()) vars.erase(it->second);
-            vars[w] = widen(value);
-        }
-        for (const auto& [name, value] : vars) env += name + L"=" + value + L'\0';
-        env += L'\0';
-    }
+    if (!environment.empty()) env = environment_block(current_environment(), environment);
 
     PROCESS_INFORMATION pi{};
     if (!CreateProcessW(program.c_str(), cmdline.data(), nullptr, nullptr, TRUE,

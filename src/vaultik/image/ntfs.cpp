@@ -151,7 +151,8 @@ std::vector<Run> decode_runs(const Bytes& rec, const Attr& a, std::uint64_t clus
             std::uint64_t d = get(&rec[p], no);
             if (no < 8 && (d >> (8 * no - 1)) != 0) d |= ~std::uint64_t{0} << (8 * no);  // sign extension
             p += static_cast<std::size_t>(no);
-            lcn += static_cast<std::int64_t>(d);
+            // (Added without sign, so a wild offset wraps instead of overflowing; checked below.)
+            lcn = static_cast<std::int64_t>(static_cast<std::uint64_t>(lcn) + d);
             if (lcn < 0 || static_cast<std::uint64_t>(lcn) > clusters || len > clusters - static_cast<std::uint64_t>(lcn))
                 refuse("a file's data lies outside the volume");
             r.lcn = lcn;
@@ -209,6 +210,9 @@ public:
         f.sector_size = static_cast<std::uint32_t>(get(&head[0x0B], 2));
         if (f.sector_size < 512 || f.sector_size > 4096 || !std::has_single_bit(f.sector_size)) refuse("its sector size is not supported");
         const std::uint8_t spc = head[0x0D];
+        // Above 0x80 it is a power of two, 2^(256 - spc). A cluster is at most 2 MiB (checked
+        // below), so at most 2^12 sectors: a larger exponent is refused before it is shifted by.
+        if (spc > 0x80 && 256 - spc > 12) refuse("its cluster size is not supported");
         const std::uint64_t sectors_per_cluster = spc <= 0x80 ? spc : std::uint64_t{1} << (256 - spc);
         if (sectors_per_cluster == 0 || !std::has_single_bit(sectors_per_cluster) || sectors_per_cluster * f.sector_size > (2u << 20))
             refuse("its cluster size is not supported");
@@ -250,8 +254,13 @@ public:
         for (const Run& r : bitmap_runs)
             if (r.lcn < 0) refuse("$Bitmap is damaged");
         const std::uint64_t size = at(r6, bm->off + 0x30, 8);
-        if (size < (f.clusters + 7) / 8 || size > (std::uint64_t{1} << 34)) refuse("$Bitmap is too short");
-        bitmap = attr_bytes(bitmap_runs, 0, static_cast<std::size_t>(size));
+        if (size < (f.clusters + 7) / 8) refuse("$Bitmap is too short");
+        // Only the bytes for the volume's clusters (in 8-byte words, as NTFS keeps them) are read:
+        // a size from the disk says nothing about how much memory to take.
+        const std::uint64_t wanted = std::min(size, ((f.clusters + 7) / 8 + 7) / 8 * 8);
+        if (run_clusters(bitmap_runs) * f.cluster_size < wanted) refuse("$Bitmap is damaged");
+        bitmap = attr_bytes(bitmap_runs, 0, static_cast<std::size_t>(wanted));
+        if (bitmap.size() != wanted) refuse("$Bitmap is damaged");
         // Whole bytes at a time, the last one bit by bit (bits past the last cluster do not count).
         for (std::uint64_t c = 0; c < f.clusters;) {
             const std::uint8_t byte = bitmap[static_cast<std::size_t>(c / 8)];

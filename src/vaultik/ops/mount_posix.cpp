@@ -54,10 +54,12 @@ std::string find_program(const char* name) {
     return {};
 }
 
-// Whether something is mounted exactly at `path` (absolute).
+// Whether something is mounted exactly at `path` (absolute; also when reached through a link,
+// since the mount table names the folder with its links resolved).
 bool is_mount_point(const std::string& path) {
+    const std::string real = os::mounts::resolved_path(path);
     for (const os::mounts::Mount& m : os::mounts::read_mounts())
-        if (m.point == path) return true;
+        if (m.point == path || m.point == real) return true;
     return false;
 }
 
@@ -111,6 +113,7 @@ struct SnapshotMount::Impl {
     std::list<std::pair<Id, std::shared_ptr<const Bytes>>> chunks;  // recently read, newest first
     struct fuse* fs = nullptr;
     bool mounted = false;
+    bool made_folder = false;  // the folder was made for the mount (and so is removed with it)
     int wake[2] = {-1, -1};  // written to stop the loop
     std::thread loop;
     std::atomic<bool> ended{false};
@@ -385,7 +388,8 @@ void tear_down(SnapshotMount::Impl& m) {
             ::close(fd);
             fd = -1;
         }
-    if (!m.folder.empty() && !is_mount_point(m.folder)) ::rmdir(m.folder.c_str());  // only if empty
+    // Only a folder made for the mount: an empty one the user chose stays. (rmdir: only if empty.)
+    if (m.made_folder && !m.folder.empty() && !is_mount_point(m.folder)) ::rmdir(m.folder.c_str());
 }
 
 }  // namespace
@@ -412,10 +416,10 @@ SnapshotMount::SnapshotMount(Repository& repo, const Snapshot& snapshot, std::st
     m.gid = ::getgid();
     const std::filesystem::path root(std::u8string(m.folder.begin(), m.folder.end()));
     std::error_code ec;
-    std::filesystem::create_directories(root, ec);
+    m.made_folder = std::filesystem::create_directories(root, ec);
     if (ec) throw Error("cannot create " + m.folder + ": " + ec.message());
     if (!std::filesystem::is_empty(root, ec) || ec) {
-        m.folder.clear();  // not ours to remove
+        m.made_folder = false;  // not ours to remove
         throw Error(folder + " is not empty; choose an empty or new folder");
     }
     if (::pipe2(m.wake, O_CLOEXEC) != 0) {

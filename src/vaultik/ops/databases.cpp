@@ -354,9 +354,14 @@ void check_database(const DatabaseDump& db) {
     if (db.port < 0 || db.port > 65535) throw Error("the database's port must be between 1 and 65535");
     if (!db.container.empty() && !valid_container_name(db.container))
         throw Error("invalid Docker container name \"" + db.container + "\"");
-    // pg_dump takes a database "name" with '=' as a whole connection string.
+    // pg_dump takes a database "name" with '=', or one starting "postgresql://" or "postgres://", as
+    // a whole connection string: it would connect elsewhere (with the password).
     if (db.kind == DatabaseKind::Postgres && db.database.find('=') != std::string::npos)
         throw Error("a PostgreSQL database name with '=' is not supported");
+    if (db.kind == DatabaseKind::Postgres &&
+        (lower(db.database).starts_with("postgresql://") || lower(db.database).starts_with("postgres://")))
+        throw Error("a PostgreSQL database name cannot be a connection URI (postgresql://...); give the server, "
+                    "port and user as settings of the dump");
     if (db.kind == DatabaseKind::SqlServer && !db.container.empty() && db.user.empty())
         throw Error("SQL Server in a Docker container needs a user name (such as sa) and its password");
 }
@@ -590,7 +595,9 @@ std::string run_dump(const DatabaseDump& db, const std::string& password, const 
     const bool docker = !db.container.empty();
     const std::string what = docker ? std::string(kind_name(db.kind)) + "'s dump in the container " + db.container
                                     : tool_name(db.kind);
-    os::make_private_dirs(folder);
+    // A folder made here is private; one that is already there (one the user named) keeps its
+    // permissions: the files in it are private instead.
+    if (!os::is_directory(folder)) os::make_private_dirs(folder);
     std::string program;
     if (docker) {
         const DockerInfo info = docker_info();
@@ -632,6 +639,11 @@ std::string run_dump(const DatabaseDump& db, const std::string& password, const 
 #endif
     }
     if (db.kind == DatabaseKind::SqlServer && docker) container_file = "/tmp/vaultik-" + new_database_id() + ".bak";
+    // The dump is made readable for this account alone (a tool makes it as the umask says, often
+    // readable for everyone): an empty private file first, which the tool then writes over and
+    // which keeps its permissions. (Not for SQL Server on this computer, whose service makes it.)
+    const bool own_file = !(db.kind == DatabaseKind::SqlServer && !docker);
+    if (own_file) os::write_file_atomic(out, ByteSpan(), 0600);
 
     DumpCommand cmd = dump_command(db, password, out, folder, container_file);
     cmd.argv[0] = program;
@@ -654,30 +666,37 @@ std::string run_dump(const DatabaseDump& db, const std::string& password, const 
         os::write_file_atomic(cmd.secret_file,
                               ByteSpan(reinterpret_cast<const std::uint8_t*>(cmd.secret_text.data()), cmd.secret_text.size()),
                               0600);
+    // A backup file made inside a container is removed there in the end, also when the backup
+    // or copying it out failed (a backup that failed half way leaves a partial file).
+    struct RemoveInside {
+        std::string docker, container, file;
+        ~RemoveInside() {
+            if (file.empty()) return;
+            try {
+                std::string ignored;
+                os::CommandOptions o;
+                o.output = &ignored;
+                o.timeout = std::chrono::minutes(2);
+                os::run_command({docker, "exec", container, "rm", "-f", file}, o);
+            } catch (const std::exception&) {
+            }
+        }
+    } remove_inside{program, db.container, cmd.container_file};
     if (cmd.to_stdout) {
         pump_to_file(cmd.argv, cmd.env, out, what, cancelled, timeout);
     } else {
         run_tool(cmd.argv, cmd.env, what, cancelled, timeout, hint);
     }
     if (!cmd.container_file.empty()) {
-        // Copied out of the container, then removed there (also when the copy failed).
-        struct RemoveInside {
-            std::string docker, container, file;
-            ~RemoveInside() {
-                try {
-                    std::string ignored;
-                    os::CommandOptions o;
-                    o.output = &ignored;
-                    o.timeout = std::chrono::minutes(2);
-                    os::run_command({docker, "exec", container, "rm", "-f", file}, o);
-                } catch (const std::exception&) {
-                }
-            }
-        } remove_inside{program, db.container, cmd.container_file};
+        // Copied out of the container, then removed there (by remove_inside).
         pump_to_file({program, "exec", db.container, "cat", cmd.container_file}, {}, out,
                      "copying the backup out of the container " + db.container, cancelled, timeout);
     }
     std::error_code ec;
+#ifndef _WIN32
+    // (Also when a tool made the file anew.)
+    if (own_file) fs::permissions(fs_path(out), fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+#endif
     const auto size = fs::file_size(fs_path(out), ec);
     if (ec || size == 0) throw Error(what + " wrote no dump");
     return out;
