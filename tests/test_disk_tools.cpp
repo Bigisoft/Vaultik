@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -351,6 +352,104 @@ TEST_CASE("drive cleanser: a cancel stops at once, cutting short the writes stil
     CHECK(dev.late_starts == 0);
     CHECK(dev.writes.size() == kWipeInFlight);
     CHECK(dev.flushes == 0);
+}
+
+namespace {
+
+// A drive whose cancel (like CancelIoEx) cuts short only the writes it already has: a write
+// that reaches it after a cancel runs in full (`delay`) unless it is cancelled again. Each write
+// but the first takes `before` before it reaches the drive, as a thread that took its slot
+// just before the stop and had not issued its write yet.
+class LateDevice : public WipeDevice {
+public:
+    explicit LateDevice(std::uint64_t size) : size_(size) {}
+    std::uint64_t size() const override { return size_; }
+    std::uint32_t block_size() const override { return 512; }
+    bool parallel_io() const override { return true; }
+    void write_at(std::uint64_t offset, ByteSpan) override {
+        std::unique_lock<std::mutex> lock(m);
+        const bool first = entered++ == 0;
+        if (!first) {
+            lock.unlock();
+            std::this_thread::sleep_for(before);
+            lock.lock();
+        }
+        ++issued;
+        const int generation = cancels;
+        if (!cv.wait_for(lock, delay, [&] { return cancels != generation; })) {
+            ++completed;
+            return;
+        }
+        throw Error("writing the test device at byte " + std::to_string(offset) + ": cancelled");
+    }
+    void read_at(std::uint64_t, std::uint8_t*, std::size_t) override {}
+    void flush() override {}
+    void cancel() override {
+        std::lock_guard<std::mutex> lock(m);
+        ++cancels;
+        cv.notify_all();
+    }
+
+    std::uint64_t size_;
+    std::mutex m;
+    std::condition_variable cv;
+    int entered = 0;
+    int issued = 0;     // writes that reached the drive
+    int completed = 0;  // ran in full
+    int cancels = 0;
+    std::chrono::milliseconds before{300};
+    std::chrono::milliseconds delay{3000};
+};
+
+}  // namespace
+
+TEST_CASE("drive cleanser: a write that reaches the drive just after a cancel is cut short too") {
+    LateDevice dev(64 * kWipeChunk);
+    WipeOptions o;
+    o.should_cancel = [&] {
+        std::lock_guard<std::mutex> lock(dev.m);
+        // The first write runs; the others have their slot but did not reach the drive yet.
+        return dev.issued >= 1;
+    };
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_THROWS_AS(wipe_device(dev, o), Cancelled);
+    const auto took = std::chrono::steady_clock::now() - start;
+    // Not the 3 seconds of a whole write: those that came late were cancelled again.
+    CHECK(took < std::chrono::milliseconds(2000));
+    std::lock_guard<std::mutex> lock(dev.m);
+    CHECK(dev.completed == 0);
+    CHECK(dev.issued <= static_cast<int>(kWipeInFlight));
+}
+
+TEST_CASE("drive cleanser: no write starts once the erase stopped") {
+    // A drive whose first write fails while the others still run: the threads that had not
+    // reached the drive yet when it failed start nothing.
+    struct Failing : WipeDevice {
+        std::atomic<int> calls{0};
+        std::atomic<bool> failed{false};
+        std::atomic<int> after_failure{0};
+        std::uint64_t size() const override { return 64 * kWipeChunk; }
+        std::uint32_t block_size() const override { return 512; }
+        bool parallel_io() const override { return true; }
+        void write_at(std::uint64_t offset, ByteSpan) override {
+            if (calls++ == 0) {
+                // Waits until every other thread has taken a slot, then fails.
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                failed = true;
+                throw Error("writing the test device at byte " + std::to_string(offset) + ": a broken sector");
+            }
+            if (failed) ++after_failure;
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        }
+        void read_at(std::uint64_t, std::uint8_t*, std::size_t) override {}
+        void flush() override {}
+    } failing;
+    WipeOptions o;
+    CHECK_THROWS_WITH_AS(wipe_device(failing, o), doctest::Contains("a broken sector"), Error);
+    // The writes running when it failed end by themselves (this device cannot cut them short);
+    // what was queued meanwhile never started.
+    CHECK(failing.calls.load() <= static_cast<int>(kWipeInFlight));
+    CHECK(failing.after_failure.load() == 0);
 }
 
 TEST_CASE("drive cleanser: the verification reading several parts at once finds one bad sector") {

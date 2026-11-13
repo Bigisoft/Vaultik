@@ -194,7 +194,9 @@ public:
     virtual bool parallel_io() const { return false; }
     // Called from another thread when the erase stops (cancelled, or a write failed) while
     // writes or reads still run: makes them end as soon as it can (Windows: CancelIoEx), each
-    // then failing or completing. Nothing for devices whose writes cannot be cut short.
+    // then failing or completing. Called again (every 50 ms) until nothing runs any more, so a
+    // write that reached the device just after a call is cut short too. Nothing for devices
+    // whose writes cannot be cut short.
     virtual void cancel() {}
     // A whole disk, after it was erased: tells the system it has no partitions any more
     // (Windows: it shows as not initialised; Linux: the kernel reads the empty table), through
