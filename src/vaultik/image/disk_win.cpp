@@ -1164,7 +1164,7 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
         dl->PartitionCount = count;
         for (DWORD i = 0; i < count; ++i) {
             PARTITION_INFORMATION_EX& pe = dl->PartitionEntry[i];
-            pe.PartitionStyle = dl->PartitionStyle;
+            pe.PartitionStyle = gpt ? PARTITION_STYLE_GPT : PARTITION_STYLE_MBR;
             pe.RewritePartition = TRUE;
             if (i >= parts.size()) continue;  // an unused MBR entry
             const NewPartition& p = parts[i];
