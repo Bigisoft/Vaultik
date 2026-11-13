@@ -24,6 +24,7 @@
 #include <algorithm>
 
 #include "common.h"
+#include "elevated_task.h"
 #include "runner.h"
 #include "vaultik/image/disk_tools.hpp"
 #include "vaultik/platform/os.hpp"
@@ -99,33 +100,29 @@ std::vector<std::pair<image::DiskInfo, std::string>> tool_disks() {
     return out;
 }
 
-// Runs the engine with administrator rights in a console window of its own (where it shows its
-// progress and can be stopped with Ctrl+C) and waits for it. Linux: shows the command to run in
-// a terminal with sudo instead (returns -2). Returns -1 with `error` set when it did not start.
-int run_disk_engine(QWidget* parent, const QString& busy, const QStringList& args, QString& error) {
-#ifdef _WIN32
-    std::vector<std::string> argv{u8(QDir::toNativeSeparators(Runner::engine_path()))};
-    for (const QString& a : args) argv.push_back(u8(a));
-    argv.push_back("--pause");
-    int code = -1;
-    error = run_busy(parent, busy, [&](const std::function<bool()>&) { code = os::run_command_elevated(argv, true); });
-    return error.isEmpty() ? code : -1;
-#else
-    (void)busy;
-    error.clear();
-    QStringList quoted{QStringLiteral("sudo"), Runner::engine_path()};
-    for (QString a : args) quoted << "'" + a.replace("'", "'\\''") + "'";
-    const QString command = quoted.join(' ');
-    QMessageBox box(QMessageBox::Information, QObject::tr("Run as root"), QString(), QMessageBox::Close, parent);
-    box.setTextFormat(Qt::PlainText);
-    box.setText(QObject::tr("Writing to a disk needs root. Run this command in a terminal, where it shows its "
-                            "progress and Ctrl+C stops it:") +
-                "\n\n" + command);
-    QPushButton* copy = box.addButton(QObject::tr("Copy the command"), QMessageBox::ActionRole);
-    box.exec();
-    if (box.clickedButton() == copy) QApplication::clipboard()->setText(command);
-    return -2;
+// Runs the engine with administrator rights and shows its progress in a status window (see
+// run_elevated_task). Linux without pkexec: shows the command to run in a terminal with sudo
+// instead (code -2).
+ElevatedResult run_disk_engine(QWidget* parent, const ElevatedTask& task, const QStringList& args) {
+#ifndef _WIN32
+    if (!elevated_tasks_possible()) {
+        QStringList quoted{QStringLiteral("sudo"), Runner::engine_path()};
+        for (QString a : args) quoted << "'" + a.replace("'", "'\\''") + "'";
+        const QString command = quoted.join(' ');
+        QMessageBox box(QMessageBox::Information, QObject::tr("Run as root"), QString(), QMessageBox::Close, parent);
+        box.setTextFormat(Qt::PlainText);
+        box.setText(QObject::tr("Writing to a disk needs root. Run this command in a terminal, where it shows its "
+                                "progress and Ctrl+C stops it:") +
+                    "\n\n" + command);
+        QPushButton* copy = box.addButton(QObject::tr("Copy the command"), QMessageBox::ActionRole);
+        box.exec();
+        if (box.clickedButton() == copy) QApplication::clipboard()->setText(command);
+        ElevatedResult r;
+        r.code = -2;
+        return r;
+    }
 #endif
+    return run_elevated_task(parent, task, args);
 }
 
 // The engine's exit code when a drive is in use by another program (see --force-dismount).
@@ -169,36 +166,53 @@ bool ask_force_close(QWidget* parent, const QStringList& drives, const QString& 
 // Runs the engine (run_disk_engine) for a job that writes to a disk or drive. When a drive is in
 // use by another program, asks whether to force it closed and, if the user agrees, runs the same
 // job (the same identity checks and confirmation, nothing typed again) with --force-dismount.
-// Windows: the engine finds out when it locks the drives and writes the ones in use to a file
-// (--in-use-file), as its window shows no output here; the question names those, or `drives`
-// (the ones that may be in use) when it named none. Linux: `drives` are mounted, so the
-// question comes before the command is shown. Returns kEngineInUse when the user did not agree.
-int run_disk_engine_forcing(QWidget* parent, const QString& busy, QStringList args, const QStringList& drives,
-                            const QString& yes, QString& error) {
-#ifdef _WIN32
-    QStringList in_use;
-    int code = -1;
+// The engine finds out when it locks the drives and names the ones in use (an "in_use" event;
+// in a window of its own, in a file: --in-use-file); the question names those, or `drives` (the
+// ones that may be in use) when it named none. Linux: `drives` are mounted, so the question
+// comes before it starts. Returns code kEngineInUse when the user did not agree.
+ElevatedResult run_disk_engine_forcing(QWidget* parent, const ElevatedTask& task, QStringList args,
+                                       const QStringList& drives, const QString& yes) {
+#ifndef _WIN32
+    if (!drives.isEmpty()) {
+        if (!ask_force_close(parent, drives, yes)) {
+            ElevatedResult r;
+            r.code = kEngineInUse;
+            return r;
+        }
+        args << "--force-dismount";
+        return run_disk_engine(parent, task, args);
+    }
+#endif
+    ElevatedResult r;
     {
         QTemporaryDir dir;
         QStringList first = args;
         const QString file = dir.isValid() ? QDir::toNativeSeparators(dir.filePath(QStringLiteral("in-use.txt"))) : QString();
         if (!file.isEmpty()) first << "--in-use-file" << file;
-        code = run_disk_engine(parent, busy, first, error);
-        if (code == kEngineInUse && error.isEmpty() && !file.isEmpty()) {
+        r = run_disk_engine(parent, task, first);
+        if (r.code == kEngineInUse && r.in_use.isEmpty() && !file.isEmpty()) {
             QFile f(file);
             if (f.open(QIODevice::ReadOnly | QIODevice::Text))
                 for (const QString& line : QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts))
-                    if (!line.trimmed().isEmpty()) in_use << line.trimmed();
+                    if (!line.trimmed().isEmpty()) r.in_use << line.trimmed();
         }
     }
-    if (code != kEngineInUse || !error.isEmpty()) return code;
-    if (!ask_force_close(parent, in_use.isEmpty() ? drives : in_use, yes)) return kEngineInUse;
-#else
-    if (!drives.isEmpty() && !ask_force_close(parent, drives, yes)) return kEngineInUse;
-    if (drives.isEmpty()) return run_disk_engine(parent, busy, args, error);
-#endif
+    if (r.code != kEngineInUse || !r.error.isEmpty()) return r;
+    if (!ask_force_close(parent, r.in_use.isEmpty() ? drives : r.in_use, yes)) return r;
     args << "--force-dismount";
-    return run_disk_engine(parent, busy, args, error);
+    return run_disk_engine(parent, task, args);
+}
+
+// The line under a disk tool after it ran: `ok` when it finished, `in_use` when a drive was in
+// use (and not forced closed), else `not_done` and why.
+QString outcome_text(const ElevatedResult& r, const QString& ok, const QString& in_use, const QString& not_done) {
+    if (r.left_running) return QObject::tr("It goes on without Vaultik.");
+    if (!r.error.isEmpty()) return QObject::tr("It did not start: %1").arg(r.error);
+    if (r.code == kEngineInUse) return in_use;
+    if (r.code == 0) return ok;
+    if (!r.message.isEmpty()) return QObject::tr("%1: %2").arg(not_done, r.message);
+    if (r.in_window) return QObject::tr("%1; its window showed why.").arg(not_done);
+    return QObject::tr("%1 (the engine ended with code %2).").arg(not_done).arg(r.code);
 }
 
 }  // namespace
@@ -347,20 +361,20 @@ void NewDiskDialog::start() {
     if (!letter_->currentData().toString().isEmpty()) args << "--letter" << letter_->currentData().toString();
     if (!id.serial.empty()) args << "--expect-serial" << qs(id.serial);
     if (!id.id.empty()) args << "--expect-id" << qs(id.id);
-    QString error;
 #ifdef _WIN32
     const QStringList drives = drives_of(shown);
 #else
     const QStringList drives = drives_of(*current);
 #endif
-    const int code = run_disk_engine_forcing(this, tr("Setting up the disk in its own window..."), args, drives,
-                                             tr("Force close and set up"), error);
+    // Setting up takes moments and cannot be stopped halfway (a partition table half written).
+    const ElevatedTask task{windowTitle(), tr("Setting up %1...").arg(qs(image::describe(shown))), QString(),
+                            tr("The disk is ready to use.")};
+    const ElevatedResult r = run_disk_engine_forcing(this, task, args, drives, tr("Force close and set up"));
     confirm_->clear();
-    if (code == -2) return;  // Linux: the command is run in a terminal
-    if (!error.isEmpty()) status_->setText(tr("It did not start: %1").arg(error));
-    else if (code == kEngineInUse) status_->setText(tr("The disk was not set up: it is in use. Nothing was written."));
-    else if (code == 0) status_->setText(tr("The disk is ready to use."));
-    else status_->setText(tr("The disk was not set up; its window showed why."));
+    if (r.code == -2) return;  // Linux: the command is run in a terminal
+    status_->setText(outcome_text(r, tr("The disk is ready to use."),
+                                  tr("The disk was not set up: it is in use. Nothing was written."),
+                                  tr("The disk was not set up")));
     fill_disks();
 }
 
@@ -643,15 +657,23 @@ void DriveCleanserDialog::start() {
     }
     args << "--method" << method << "--confirm" << want;
     if (verify_->isChecked()) args << "--verify";
-    QString error;
-    const int code = run_disk_engine_forcing(
-        this, tr("Erasing in its own window (it shows the progress; Ctrl+C there stops it)..."), args, drives,
-        tr("Force close and erase"), error);
+    ElevatedTask task;
+    task.title = windowTitle();
+    if (whole_disk_->isChecked()) {
+        task.working = tr("Erasing %1...").arg(qs(image::describe(*chosen_disk())));
+        task.cancel_question = tr("Stop erasing? What was erased so far stays erased and the disk will not be usable "
+                                  "until it is erased or set up again.");
+    } else {
+        task.working = tr("Erasing %1...").arg(volumes_->currentData().toString());
+        task.cancel_question = tr("Stop erasing? What was erased so far stays erased and the drive will not be usable "
+                                  "until it is erased or formatted again.");
+    }
+    task.done = tr("Erased.");
+    const ElevatedResult r = run_disk_engine_forcing(this, task, args, drives, tr("Force close and erase"));
     confirm_->clear();
-    if (code == -2) return;
-    if (!error.isEmpty()) status_->setText(tr("It did not start: %1").arg(error));
-    else if (code == kEngineInUse) status_->setText(tr("Nothing was erased: the drive is in use."));
-    else if (code == 0) status_->setText(tr("Erased."));
-    else status_->setText(tr("It did not finish; its window showed why."));
+    if (r.code == -2) return;
+    status_->setText(r.code == 4 ? tr("Stopped before the end: what was erased so far stays erased.")
+                                 : outcome_text(r, tr("Erased."), tr("Nothing was erased: the drive is in use."),
+                                                tr("It did not finish")));
     fill_targets();
 }

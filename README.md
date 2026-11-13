@@ -1081,8 +1081,9 @@ When Vaultik cannot tell which disks Windows runs and starts from, it offers non
 another computer that holds its own Windows can be erased. As for a disk image restore, the
 disk's model, size and serial number are shown and you type `ERASE DISK <number>` (Linux:
 `ERASE DISK sdb`); the disk is checked again on the opened disk, before anything is written, to
-be the one shown, and once more before it is formatted. It needs administrator rights and runs
-in a window of its own (on Linux the window shows the `sudo` command to run in a terminal).
+be the one shown, and once more before it is formatted. It needs administrator rights and shows
+how far it is in a status window of Vaultik (see
+[Tasks with administrator rights](#tasks-with-administrator-rights)).
 Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
 `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` after locking and dismounting the disk's volumes, and formats
 with `format.com` (from the Windows system folder); Linux uses `sfdisk` (through the disk opened
@@ -1122,18 +1123,51 @@ The methods are one pass of zeros (the default, enough for today's drives), one 
 data, and three passes (random, random, zeros, like DoD 5220.22-M); **Read the last pass back**
 checks that the drive kept what was written. Several large writes (and, for the check, reads)
 are kept at the drive at once, so it never waits for the next one, and a pass counts as done only
-once the drive says it has written everything. The window that erases shows the pass, the speed
-and the time left (from the speed of about the last half minute, so it follows a hard drive that
-slows down towards its end); Ctrl+C there stops it at once (what was written stays
-overwritten). From the command line `--confirm` gives the confirmation beforehand, for scripts,
-and `--expect-size`, `--expect-serial` and `--expect-id` (which the Vaultik window passes along)
-make it stop when the disk or drive is another one by then.
+once the drive says it has written everything. Vaultik's status window shows the pass (or the
+check), how far it is, the speed and the time left (from the speed of about the last half
+minute, so it follows a hard drive that slows down towards its end); **Cancel** there stops it
+after asking (what was written stays overwritten), as Ctrl+C does on the command line. From the
+command line `--confirm` gives the confirmation beforehand, for scripts, and `--expect-size`,
+`--expect-serial` and `--expect-id` (which the Vaultik window passes along) make it stop when the
+disk or drive is another one by then.
 
 ```
 vaultik disk wipe 2 --method dod3 --verify
 vaultik disk wipe --volume E: --confirm "ERASE E:"
 vaultik disk wipe-free D:
 ```
+
+#### Tasks with administrator rights
+
+Erasing a disk or drive, setting up a new disk, restoring a disk image onto a disk and making a
+recovery drive need administrator rights, which the Vaultik window itself does not have. After
+the approval (UAC) prompt, Vaultik starts its engine with those rights without a console window
+and shows a status window instead: a progress bar with the percent, how much of how much is
+done (`23.1 GiB of 4.55 TiB`), the speed and the time left (`33 h 06 min left`), the pass or
+step it is at (`Pass 2 of 3`, `Checking what was written`), and a **Cancel** button that asks
+first. At the end the same window says whether it worked, or why not. Setting up a new disk
+takes moments and cannot be stopped halfway; making a recovery drive stops after the step it
+is at.
+
+The engine sends its progress over a private channel that the window makes for each task: on
+Windows a named pipe with a random name (`\\.\pipe\vaultik-progress-...`) that only you and
+the administrators can open, made as the only one of that name; the engine checks that the
+program serving it runs as you. On Linux a folder only you can open with two FIFOs in it. Only
+the progress, the steps, the drives in use and the result go over it (never a password), and
+only `cancel` comes back. The engine refuses any other name. A task cannot be ended from a
+program without administrator rights, so **Cancel** asks the engine over the channel to stop,
+and the window waits until it has (it stops writing at once). Vaultik can be closed while such
+a task runs, after a question: the task goes on and finishes, only its progress is not shown
+any more (a disk left half erased or half restored would be worse). When the channel cannot be
+made or the engine does not connect within a few seconds, the engine shows its progress in a
+console window of its own as before (Ctrl+C there stops it), and the status window says so.
+
+On Linux Vaultik starts the engine through `pkexec`, which asks for the password in a window of
+its own; without `pkexec`, the Vaultik window shows the `sudo` command to run in a terminal
+instead. Restoring a disk image onto a disk and making a recovery drive are Windows only.
+
+From the command line, `--progress-pipe <name>` (with `--progress-user <user>`) sends the
+`--json` events to such a channel instead of the standard output.
 
 #### Drives in use
 
@@ -1158,8 +1192,8 @@ Linux a mounted partition is in use: `--force-dismount` unmounts it first with `
 lazy unmount), and a file system still busy stays mounted and stops the job, naming its mount
 point. When another drive is mounted over it at the same folder, nothing is unmounted and the
 job stops, naming that drive. A swap partition in use, and a member of a btrfs file system over
-several drives, are still refused. On Linux the Vaultik window asks before it shows the `sudo` command, and
-adds `--force-dismount` to it only when you agree. Every other check (the disk the system,
+several drives, are still refused. On Linux the Vaultik window asks before it starts the task
+(or shows the `sudo` command), and adds `--force-dismount` only when you agree. Every other check (the disk the system,
 Windows or Vaultik runs from, page files, pools, the drive shown, the typed confirmation) comes
 first and is as strict as without the option; nothing is forced without it.
 

@@ -285,6 +285,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/restore_dialog.cpp
             src/gui/image_dialogs.cpp
             src/gui/disk_tools_dialogs.cpp
+            src/gui/elevated_task.cpp
             src/gui/settings_transfer_dialog.cpp
             src/gui/apps_dialog.cpp
             src/gui/key_dialog.cpp

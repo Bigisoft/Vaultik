@@ -25,6 +25,7 @@
 #include <thread>
 
 #include "common.h"
+#include "elevated_task.h"
 #include "runner.h"
 #include "vaultik/image/image.hpp"
 #include "vaultik/image/recovery_media.hpp"
@@ -49,14 +50,11 @@ QLabel* note_label(const QString& text) {
     return l;
 }
 
-// Runs vaultik with administrator rights in a console window of its own and waits for it.
-// Returns its exit code, or -1 with `error` set when it could not start (approval declined).
-int run_engine_elevated(QWidget* parent, const QString& busy, const QStringList& args, QString& error) {
-    std::vector<std::string> argv{u8(QDir::toNativeSeparators(Runner::engine_path()))};
-    for (const QString& a : args) argv.push_back(u8(a));
-    int code = -1;
-    error = run_busy(parent, busy, [&](const std::function<bool()>&) { code = os::run_command_elevated(argv, true); });
-    return error.isEmpty() ? code : -1;
+// Why an elevated task did not finish, for the line or message after it.
+QString not_finished_text(const ElevatedResult& r) {
+    if (!r.message.isEmpty()) return r.message;
+    if (r.in_window) return QObject::tr("its window showed why");
+    return QObject::tr("the engine ended with code %1").arg(r.code);
 }
 
 QString layout_text(const image::DiskLayout& l) {
@@ -376,16 +374,22 @@ void ImageRestoreDialog::start() {
     }
     QStringList args{"image", "restore", qs(id_hex(snap.id)), "--job", qs(job_.id), "--disk-index", index,
                      "--to-disk", QString::number(n), "--confirm", qs(image::confirmation_text(n)),
-                     "--expect-size", QString::number(chosen.size), "--pause"};
+                     "--expect-size", QString::number(chosen.size)};
     if (!chosen.serial.empty()) args << "--expect-serial" << qs(chosen.serial);
     if (!chosen.id.empty()) args << "--expect-id" << qs(chosen.id);
     if (boot_->isChecked()) args << "--boot";
-    QString error;
-    const int code = run_engine_elevated(this, tr("Restoring onto disk %1 in its own window...").arg(n), args, error);
+    const ElevatedTask task{windowTitle(), tr("Restoring onto disk %1...").arg(n),
+                            tr("Stop restoring? What was written so far stays on disk %1, and the disk will not be "
+                               "usable until a restore onto it finishes or it is set up again.")
+                                .arg(n),
+                            tr("Disk %1 was restored.").arg(n)};
+    const ElevatedResult r = run_elevated_task(this, task, args);
     confirm_->clear();
-    if (!error.isEmpty()) status_->setText(tr("The restore did not start: %1").arg(error));
-    else if (code == 0) status_->setText(tr("Disk %1 was restored.").arg(n));
-    else status_->setText(tr("The restore did not finish; its window showed why."));
+    if (r.left_running) status_->setText(tr("The restore goes on without Vaultik."));
+    else if (!r.error.isEmpty()) status_->setText(tr("The restore did not start: %1").arg(r.error));
+    else if (r.code == 0) status_->setText(tr("Disk %1 was restored.").arg(n));
+    else if (r.code == 4) status_->setText(tr("The restore was stopped before the end; disk %1 is not usable as it is.").arg(n));
+    else status_->setText(tr("The restore did not finish: %1").arg(not_finished_text(r)));
     disks_ = image::list_disks();
     fill_targets();
     update_state();
@@ -458,8 +462,7 @@ RecoveryDriveDialog::RecoveryDriveDialog(const std::vector<jobs::Job>& jobs, QWi
     iso_row->addWidget(iso_, 1);
     iso_row->addWidget(iso_browse);
     layout->addLayout(iso_row);
-    layout->addWidget(note_label(tr("Making it takes a few minutes and needs administrator rights; it runs in a window "
-                                    "of its own.")));
+    layout->addWidget(note_label(tr("Making it takes a few minutes and needs administrator rights.")));
     layout->addStretch();
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close);
@@ -519,21 +522,20 @@ void RecoveryDriveDialog::update_state() {
 }
 
 void RecoveryDriveDialog::start() {
-    QStringList args{"recovery-media", "--pause"};
+    QStringList args{"recovery-media"};
     const bool usb = to_usb_->isChecked();
     const QString drive = usb_->currentData().toString();
     if (usb) args << "--usb" << drive << "--confirm" << "ERASE " + drive;
     else args << "--iso" << iso_->text().trimmed();
-    QString error;
-    const int code = run_engine_elevated(this, tr("Making the recovery drive in its own window..."), args, error);
-    if (!error.isEmpty()) {
-        plain_warning(this, windowTitle(), tr("It did not start: %1").arg(error));
-        return;
-    }
-    if (code != 0) {
-        plain_warning(this, windowTitle(), tr("The recovery drive was not made; its window showed why."));
-        return;
-    }
+    const ElevatedTask task{windowTitle(), tr("Making the recovery drive..."),
+                            usb ? tr("Stop making the recovery drive? It stops after the step it is doing; %1 may be "
+                                     "left empty.")
+                                      .arg(drive)
+                                : tr("Stop making the recovery drive? It stops after the step it is doing."),
+                            tr("The recovery drive is ready.")};
+    const ElevatedResult r = run_elevated_task(this, task, args);
+    // The status window showed how it ended; only success goes on from here.
+    if (r.code != 0) return;
     QMessageBox::information(this, windowTitle(),
                              usb ? tr("The recovery drive is ready on %1. Start a computer from it (usually a key such "
                                       "as F12 at power-on opens the boot menu) to restore a disk image.")
