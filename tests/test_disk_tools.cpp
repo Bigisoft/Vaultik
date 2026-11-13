@@ -862,7 +862,7 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
         REQUIRE(it != disks.end());
         CHECK(it->style == "RAW");
         CHECK(it->partitions == 0);
-        MESSAGE("ran: forced erase of a disk with an " + filesystem + " drive in use");
+        MESSAGE("ran: forced erase of a disk with an " << filesystem << " drive in use");
     };
     forced_wipe("exFAT");
     {
