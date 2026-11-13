@@ -1151,19 +1151,27 @@ is at.
 
 The engine sends its progress over a private channel that the window makes for each task: on
 Windows a named pipe with a random name (`\\.\pipe\vaultik-progress-...`) that only you and
-the administrators can open, made as the only one of that name; the engine checks that the
-program serving it runs as you. On Linux a folder only you can open with two FIFOs in it. Only
-the progress, the steps, the drives in use and the result go over it (never a password), and
-only `cancel` comes back. The engine refuses any other name. A task cannot be ended from a
-program without administrator rights, so **Cancel** asks the engine over the channel to stop,
-and the window waits until it has (it stops writing at once). Vaultik can be closed while such
-a task runs, after a question: the task goes on and finishes, only its progress is not shown
-any more (a disk left half erased or half restored would be worse). When the channel cannot be
-made or the engine does not connect within a few seconds, the engine shows its progress in a
-console window of its own as before (Ctrl+C there stops it), and the status window says so.
+the administrators can open, made as the only one of that name, and that programs running
+with low integrity (such as a sandboxed browser) can neither read nor write; the engine checks
+that the program serving it runs as you, and the window takes only the engine it started and
+drops any other program that connects. On Linux a folder only you can open with two FIFOs in
+it, which the engine opens through the folder it checked, without following links. Only the
+progress, the steps, the drives in use and the result go over it (never a password), and only
+`cancel` comes back (the engine keeps at most 4 KiB of a line). The engine refuses any other
+name. While it is connected the engine asks nothing in its hidden console: a task that would
+need an answer there (such as a password) stops with an error that the status window shows. A
+task cannot be ended from a program without administrator rights, so **Cancel** asks the
+engine over the channel to stop, and the window waits until it has (it stops writing at once).
+When the channel breaks while the task runs, the window says that it can no longer be stopped
+from there and lets you close it; the task finishes on its own. Vaultik can be closed while
+such a task runs, after a question: the task goes on and finishes, only its progress is not
+shown any more (a disk left half erased or half restored would be worse). When the channel
+cannot be made, or the engine has not connected 20 seconds after the approval, the engine shows
+its progress in a console window of its own as before (Ctrl+C there stops it), and the status
+window says so; an engine that connects later still brings back the progress and **Cancel**.
 
 On Linux Vaultik starts the engine through `pkexec`, which asks for the password in a window of
-its own; without `pkexec`, the Vaultik window shows the `sudo` command to run in a terminal
+its own (the status window waits for it as long as it takes); without `pkexec`, the Vaultik window shows the `sudo` command to run in a terminal
 instead. Restoring a disk image onto a disk and making a recovery drive are Windows only.
 
 From the command line, `--progress-pipe <name>` (with `--progress-user <user>`) sends the
