@@ -21,6 +21,9 @@ namespace {
 
 constexpr int kExitCancelled = 4;
 constexpr int kExitInUse = 6;  // the engine's exit code when a drive is in use
+#ifndef _WIN32
+constexpr int kExitNoChannel = 7;  // it could not use the progress channel and did nothing
+#endif
 
 // Windows: how long the engine may take to connect after it started (after the approval
 // prompt) before the window says the progress cannot be shown here; an engine that connects
@@ -158,8 +161,16 @@ void ElevatedTaskDialog::work(std::vector<std::string> argv) {
 std::optional<int> ElevatedTaskDialog::follow(os::ElevatedProcess& process) {
     std::optional<int> code;
     if (server_ != nullptr) {
-        // Only the engine started here may connect.
-        server_->expect_client(process.pid());
+        // Only the engine started here may connect (none, when its process id is not known).
+        // A client whose process id cannot be read is taken only once the engine ended: it was
+        // the engine, which closed its end at once.
+        server_->expect_client(process.pid(), [&process] {
+            try {
+                return process.wait(1000).has_value();
+            } catch (const std::exception&) {
+                return false;  // seen again by the wait below
+            }
+        });
 #ifdef _WIN32
         QMetaObject::invokeMethod(this, [this] { phase_->setText(tr("Starting...")); }, Qt::QueuedConnection);
         const int slow_ms = kConnectMs;
@@ -197,6 +208,8 @@ std::optional<int> ElevatedTaskDialog::follow(os::ElevatedProcess& process) {
             }
         }
     }
+    // `process` does not outlive this call.
+    if (server_ != nullptr) server_->expect_client(process.pid());
     while (!abort_ && !code) code = process.wait(200);
     return code;
 }
@@ -312,6 +325,11 @@ void ElevatedTaskDialog::on_finished(int code, const QString& error, bool starte
         result_.code = -1;
         result_.error = tr("root rights were not given (pkexec ended with code %1)").arg(code);
     }
+    if (error.isEmpty() && !connected_ && code == kExitNoChannel) {
+        result_.code = -1;
+        result_.error = tr("the task with root rights could not reach this window, so it stopped before changing "
+                           "anything");
+    }
 #endif
     if (result_.code == kExitInUse || result_.status == QLatin1String("in_use")) {
         // The caller asks whether to force the drives closed.
@@ -322,6 +340,11 @@ void ElevatedTaskDialog::on_finished(int code, const QString& error, bool starte
     button_->setEnabled(true);
     button_->setDefault(true);
     phase_->clear();
+    if (lost_) {
+        // "You can close this window; the task goes on" no longer holds: it ended.
+        note_->clear();
+        note_->hide();
+    }
     if (!result_.error.isEmpty()) {
         bar_->setRange(0, 1);
         bar_->setValue(0);

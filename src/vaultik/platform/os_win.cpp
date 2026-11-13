@@ -823,6 +823,7 @@ namespace {
 
 class WinElevatedProcess : public ElevatedProcess {
 public:
+    // GetProcessId gives 0 when it fails: then the progress channel takes no client at all.
     explicit WinElevatedProcess(HANDLE process) : process_(process), pid_(GetProcessId(process)) {}
     std::optional<int> wait(int timeout_ms) override {
         if (code_) return code_;

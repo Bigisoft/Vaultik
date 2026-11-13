@@ -106,6 +106,7 @@ constexpr int kExitPartial = 3;  // finished, but some files could not be read o
 constexpr int kExitCancelled = 4;
 constexpr int kExitLocked = 5;  // another run holds a conflicting repository lock
 constexpr int kExitInUse = 6;   // disk tools: a volume is in use by another program (--force-dismount forces it)
+constexpr int kExitNoChannel = 7;  // POSIX: --progress-pipe was given but cannot be used; nothing was done
 
 // In pieces (the ")" R"(" joins below): Visual Studio 2022 refuses a single string literal over
 // 16 KB (error C2026); adjacent literals are joined into one string.
@@ -528,7 +529,8 @@ Options:
                                instead (the app makes it for a task it started with
                                administrator rights); a line "cancel" from there
                                stops the task. When it cannot be used, the task
-                               shows its progress in its console window
+                               shows its progress in its console window (Windows)
+                               or stops at once with exit code 7 (Linux)
   --progress-user <user>       The user that channel must belong to (default: the
                                user running this)
   --lock-wait <time>           When another run holds the repository (prune holds
@@ -622,6 +624,11 @@ bool g_json_stdout = false;               // --json: the events go to stdout
 vaultik::os::ProgressClient* g_progress = nullptr;
 bool g_pause_at_end = false;  // the progress channel could not be used: as with --pause
 
+// POSIX: --progress-pipe was given but the channel cannot be used (exit code kExitNoChannel).
+struct NoChannel : vaultik::Error {
+    using vaultik::Error::Error;
+};
+
 // Polled between files and chunks: waits while paused, then tells whether to stop.
 bool stop_requested() {
     if (interrupted()) g_cancel = true;
@@ -698,30 +705,34 @@ void start_cancel_watcher() {
     }).detach();
 }
 
+#ifdef _WIN32
 // Shows this program's console window, which a task started from the app with a progress
 // channel keeps hidden.
 void show_console_window() {
-#ifdef _WIN32
     if (HWND w = GetConsoleWindow(); w != nullptr) ShowWindow(w, SW_SHOW);
-#endif
 }
+#endif
 
 // --progress-pipe: connects to the app's progress channel; the events go there from now on, and
 // a line "cancel" from the app stops the task as Ctrl+C would. When the app goes away (closed,
 // or it crashed), the task is not stopped: a disk left half erased or half written is worse
 // than one finished; only its progress is not sent any more. When the channel cannot be used,
-// the console window shows the progress instead and stays open at the end until it was read.
+// the console window shows the progress instead and stays open at the end until it was read
+// (Windows). POSIX: started through pkexec, it has no window to show it in and nobody would see
+// it run, so it stops at once with an error (NoChannel, before it touched anything) instead.
 void connect_progress_channel(const Args& a) {
     const auto name = a.value("--progress-pipe");
     if (!name) return;
     const auto fall_back = [](const std::string& why) {
-        show_console_window();
 #ifdef _WIN32
+        show_console_window();
         // Only in a console window of its own (started from the app), not when run by a program
         // that reads its output.
         g_pause_at_end = GetConsoleWindow() != nullptr && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR;
-#endif
         err("warning: " + why + "; the progress shows here instead.\n");
+#else
+        throw NoChannel(why + "; nothing was done");
+#endif
     };
     if (!os::valid_progress_channel_name(*name)) {
         fall_back("--progress-pipe " + *name + " is not a Vaultik progress channel, so it is not used");
@@ -5018,6 +5029,8 @@ int run_guarded(const std::vector<std::string>& args) {
         if (g_json) emit({{"event", "done"}, {"status", "failed"}, {"archived", true}, {"message", e.what()}});
         err(std::string("error: ") + e.what() + "\n");
         return kExitError;
+    } catch (const NoChannel& e) {
+        return fail("failed", e.what(), kExitNoChannel);
     } catch (const vaultik::Error& e) {
         return fail("failed", e.what(), kExitError);
     } catch (const std::bad_alloc&) {

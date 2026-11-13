@@ -60,10 +60,14 @@ public:
     bool wait_connected(int timeout_ms);
 
     // Windows: only the process `pid` (the engine started) is taken as the engine; another one
-    // that connects is dropped at once and the channel waits on for the engine. Set it before
-    // wait_connected. POSIX: nothing (a FIFO cannot tell who opened it; the directory is private
-    // to the user instead).
-    void expect_client(unsigned long pid);
+    // that connects is dropped at once and the channel waits on for the engine. A `pid` of 0 (the
+    // engine's process id is not known) takes nobody. Set it before wait_connected; until it is
+    // set, any client is taken. When the process id of a client cannot be read (one that already
+    // closed its end), it is taken only when `engine_ended` (may be empty; it may wait a moment)
+    // says the engine ended meanwhile, so that what an engine that ended at once sent last is
+    // still read. POSIX: nothing (a FIFO cannot tell who opened it; the directory is private to
+    // the user instead).
+    void expect_client(unsigned long pid, std::function<bool()> engine_ended = {});
     // How many processes that were not the expected one were dropped.
     int rejected_clients() const;
 
@@ -115,7 +119,7 @@ struct EngineWait {
 // (`ended` returns its exit code; it may throw), or `abort` returns true. When it has not
 // connected after `slow_ms` (negative: never), `slow` is called once and the wait goes on, so
 // an engine that connects later (a slow start, or a password prompt answered late) is still
-// taken.
+// taken. It looks about five times a second, also when the channel failed for good.
 EngineWait wait_for_engine(ProgressServer& server, const std::function<std::optional<int>()>& ended,
                            const std::function<bool()>& abort, int slow_ms, const std::function<void()>& slow);
 

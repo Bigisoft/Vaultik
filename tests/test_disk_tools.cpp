@@ -452,6 +452,50 @@ TEST_CASE("drive cleanser: no write starts once the erase stopped") {
     CHECK(failing.after_failure.load() == 0);
 }
 
+TEST_CASE("drive cleanser: once a write failed, no thread takes another one, also when the others return at once") {
+    // Every thread has its write on the drive and more are queued when the first one fails. The
+    // others end only when the erase cuts them short (it stopped by then), and return at once:
+    // a thread free again must not take a queued write. Nothing depends on timing here.
+    struct Gate : WipeDevice {
+        std::mutex m;
+        std::condition_variable cv;
+        int calls = 0;
+        int after_stop = 0;  // writes that reached the drive after cancel()
+        bool cancelled = false;
+        bool all_running = false;
+        std::uint64_t size() const override { return 64 * kWipeChunk; }
+        std::uint32_t block_size() const override { return 512; }
+        bool parallel_io() const override { return true; }
+        void write_at(std::uint64_t offset, ByteSpan) override {
+            std::unique_lock<std::mutex> lock(m);
+            if (cancelled) ++after_stop;
+            const bool first = calls++ == 0;
+            cv.notify_all();
+            if (first) {
+                // Fails once every thread has its write running.
+                all_running = cv.wait_for(lock, std::chrono::seconds(20), [&] { return calls == static_cast<int>(kWipeInFlight); });
+                throw Error("writing the test device at byte " + std::to_string(offset) + ": a broken sector");
+            }
+            cv.wait(lock, [&] { return cancelled; });
+            // Returns as if it completed: the thread is free at once.
+        }
+        void read_at(std::uint64_t, std::uint8_t*, std::size_t) override {}
+        void flush() override {}
+        void cancel() override {
+            std::lock_guard<std::mutex> lock(m);
+            cancelled = true;
+            cv.notify_all();
+        }
+    } gate;
+    WipeOptions o;
+    CHECK_THROWS_WITH_AS(wipe_device(gate, o), doctest::Contains("a broken sector"), Error);
+    std::lock_guard<std::mutex> lock(gate.m);
+    CHECK(gate.all_running);
+    CHECK(gate.cancelled);
+    CHECK(gate.calls == static_cast<int>(kWipeInFlight));  // the writes queued behind them never started
+    CHECK(gate.after_stop == 0);
+}
+
 TEST_CASE("drive cleanser: the verification reading several parts at once finds one bad sector") {
     const std::uint64_t size = 4 * kWipeChunk + 512;
     for (const WipeMethod method : {WipeMethod::Zeros, WipeMethod::Random}) {

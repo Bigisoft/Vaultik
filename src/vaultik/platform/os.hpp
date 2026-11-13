@@ -413,7 +413,8 @@ public:
     // Its exit code once it ended, waiting at most `timeout_ms` for that; nullopt while it runs.
     // Throws Error when the exit code cannot be read (never taken for success).
     virtual std::optional<int> wait(int timeout_ms) = 0;
-    // Its process id (Windows: the program itself; POSIX: pkexec, which becomes the program).
+    // Its process id (Windows: the program itself; POSIX: pkexec, which becomes the program);
+    // 0 when it cannot be read (then ProgressServer::expect_client takes no client).
     virtual unsigned long pid() const = 0;
 };
 #ifdef _WIN32

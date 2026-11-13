@@ -432,7 +432,8 @@ a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses th
 
 Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished but some files
 were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
-tools) a drive is in use by another program (see [Drives in use](#drives-in-use)).
+tools) a drive is in use by another program (see [Drives in use](#drives-in-use)), `7` (Linux)
+the progress channel given with `--progress-pipe` cannot be used, so nothing was done.
 
 ### Old snapshots and space
 
@@ -1172,7 +1173,9 @@ window says so; an engine that connects later still brings back the progress and
 
 On Linux Vaultik starts the engine through `pkexec`, which asks for the password in a window of
 its own (the status window waits for it as long as it takes); without `pkexec`, the Vaultik window shows the `sudo` command to run in a terminal
-instead. Restoring a disk image onto a disk and making a recovery drive are Windows only.
+instead. A task with root rights that cannot use the status window's progress channel stops at
+once, before it changes anything, and the window says so (it has no window of its own to show
+its progress in). Restoring a disk image onto a disk and making a recovery drive are Windows only.
 
 From the command line, `--progress-pipe <name>` (with `--progress-user <user>`) sends the
 `--json` events to such a channel instead of the standard output.
