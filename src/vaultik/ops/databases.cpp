@@ -661,26 +661,29 @@ std::string run_dump(const DatabaseDump& db, const std::string& password, const 
         os::write_file_atomic(cmd.secret_file,
                               ByteSpan(reinterpret_cast<const std::uint8_t*>(cmd.secret_text.data()), cmd.secret_text.size()),
                               0600);
+    // A backup file made inside a container is removed there in the end, also when the backup
+    // or copying it out failed (a backup that failed half way leaves a partial file).
+    struct RemoveInside {
+        std::string docker, container, file;
+        ~RemoveInside() {
+            if (file.empty()) return;
+            try {
+                std::string ignored;
+                os::CommandOptions o;
+                o.output = &ignored;
+                o.timeout = std::chrono::minutes(2);
+                os::run_command({docker, "exec", container, "rm", "-f", file}, o);
+            } catch (const std::exception&) {
+            }
+        }
+    } remove_inside{program, db.container, cmd.container_file};
     if (cmd.to_stdout) {
         pump_to_file(cmd.argv, cmd.env, out, what, cancelled, timeout);
     } else {
         run_tool(cmd.argv, cmd.env, what, cancelled, timeout, hint);
     }
     if (!cmd.container_file.empty()) {
-        // Copied out of the container, then removed there (also when the copy failed).
-        struct RemoveInside {
-            std::string docker, container, file;
-            ~RemoveInside() {
-                try {
-                    std::string ignored;
-                    os::CommandOptions o;
-                    o.output = &ignored;
-                    o.timeout = std::chrono::minutes(2);
-                    os::run_command({docker, "exec", container, "rm", "-f", file}, o);
-                } catch (const std::exception&) {
-                }
-            }
-        } remove_inside{program, db.container, cmd.container_file};
+        // Copied out of the container, then removed there (by remove_inside).
         pump_to_file({program, "exec", db.container, "cat", cmd.container_file}, {}, out,
                      "copying the backup out of the container " + db.container, cancelled, timeout);
     }
