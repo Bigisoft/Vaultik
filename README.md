@@ -139,8 +139,9 @@ Start `vaultik-gui`, then **New backup job**:
   on its own until it is resumed: no scheduled task or timer, no idle, lock, sign-out, update,
   drive, continuous or other-computer runs, and no "not backed up for N days" reminders. The job
   list shows it as "Paused (Daily at 18:00)". **Back up now** still runs it. Pausing a job with
-  administrator rights updates its approved copy and removes its task through the usual approval
-  (`vaultik pause-job <job>` and `vaultik resume-job <job>` on the command line).
+  administrator rights updates its approved copy and removes its task through the usual approval;
+  when that approval is declined (or fails) the job stays as it was, not paused, and Vaultik says
+  so (`vaultik pause-job <job>` and `vaultik resume-job <job>` on the command line).
   On Windows a job can also run with administrator rights, so scheduled runs use a shadow copy
   for open and locked files. Windows then asks for administrator approval each time the job (or
   its schedule) is saved or removed. Without the option, the task runs with normal rights and

@@ -1557,7 +1557,8 @@ int cmd_schedule(const Args& a, bool install) {
 
 // Pauses or resumes a job: it keeps its settings and schedule, but while paused nothing starts it
 // on its own. Saved like an edit of the job, then its system schedule is applied (removed while
-// paused; a job with administrator rights asks for approval as when it is saved).
+// paused; a job with administrator rights asks for approval as when it is saved). When that
+// fails the job is saved back as it was (see jobs::set_paused).
 int cmd_pause_job(const Args& a, bool pause) {
     if (a.positional.empty()) throw Error(std::string("usage: vaultik ") + (pause ? "pause-job" : "resume-job") + " <job>");
     const jobs::JobStore store;
@@ -1567,9 +1568,8 @@ int cmd_pause_job(const Args& a, bool pause) {
         out("Job \"" + job->name + "\" is " + (pause ? "already paused" : "not paused") + ".\n");
         return kExitOk;
     }
-    job->schedule.paused = pause;
-    store.save(*job);
-    jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
+    const std::string program_dir = os::parent_of(os::executable_path());
+    jobs::set_paused(store, *job, pause, [&](const jobs::Job& j) { jobs::apply_schedule(j, program_dir); });
     out("Job \"" + job->name + "\" " + (pause ? "paused" : "resumed") + ": " + jobs::describe(job->schedule) + "\n");
     return kExitOk;
 }

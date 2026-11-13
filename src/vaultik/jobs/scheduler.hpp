@@ -7,6 +7,7 @@
 //   Linux:   a systemd user timer vaultik-<id>.timer with Persistent=true (missed runs catch up).
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,13 @@ namespace vaultik::jobs {
 // admin-only; replacing an administrator task asks for approval as well. A declined approval
 // throws Error.
 void apply_schedule(const Job& job, const std::string& program_dir);
+
+// Pauses or resumes saved job `job`: saves it with schedule.paused set to `paused`, then applies
+// its schedule with `apply` (apply_schedule, which for a job with administrator rights asks for
+// approval). When that fails (the approval was declined, the scheduler refused), the job is saved
+// again as it was and the Error is thrown on: a job never shows paused while its tasks (and the
+// approved copy an administrator run reads) still run it. `job` is left as saved.
+void set_paused(const JobStore& store, Job& job, bool paused, const std::function<void(const Job&)>& apply);
 
 // Removes the job's OS schedule if there is one; one that runs as administrator (or an admin copy
 // of the job) asks for approval. Never throws.

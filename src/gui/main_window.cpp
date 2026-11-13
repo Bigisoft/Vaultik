@@ -2002,27 +2002,25 @@ void MainWindow::set_job_paused(bool paused) {
     if (!current) return;
     jobs::Job job = *current;  // the list may change while a message is open
     if (job.schedule.paused == paused) return;
-    job.schedule.paused = paused;
     // Saved the way the job dialog saves it: the job, then its system schedule (removed while
-    // paused; a job with administrator rights asks for approval).
+    // paused; a job with administrator rights asks for approval). When the schedule cannot be
+    // changed (the approval was declined), the job is saved back as it was.
     QApplication::setOverrideCursor(Qt::WaitCursor);
+    const std::string program_dir = u8(QDir::toNativeSeparators(QFileInfo(Runner::engine_path()).absolutePath()));
+    QString error;
     try {
-        store_.save(job);
-    } catch (const Error& e) {
-        QApplication::restoreOverrideCursor();
-        QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
-        return;
-    }
-    try {
-        jobs::apply_schedule(job, u8(QDir::toNativeSeparators(QFileInfo(Runner::engine_path()).absolutePath())));
-    } catch (const Error& e) {
-        QApplication::restoreOverrideCursor();
-        QMessageBox::warning(this, windowTitle(),
-                             tr("The job was saved, but its schedule could not be set up:\n%1").arg(e.what()));
-        reload_jobs(job.id);
-        return;
+        jobs::set_paused(store_, job, paused, [&](const jobs::Job& j) { jobs::apply_schedule(j, program_dir); });
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
     }
     QApplication::restoreOverrideCursor();
+    if (!error.isEmpty())
+        QMessageBox::warning(this, windowTitle(),
+                             (paused ? tr("The job was not paused: its schedule could not be changed, so it still runs "
+                                          "on its own.")
+                                     : tr("The job was not resumed: its schedule could not be set up, so it stays "
+                                          "paused.")) +
+                                 "\n\n" + error);
     reload_jobs(job.id);
 }
 

@@ -603,4 +603,25 @@ void remove_schedule(const std::string& job_id) {
 
 #endif
 
+void set_paused(const JobStore& store, Job& job, bool paused, const std::function<void(const Job&)>& apply) {
+    if (job.schedule.paused == paused) return;
+    Job before = job;
+    job.schedule.paused = paused;
+    store.save(job);
+    try {
+        apply(job);
+    } catch (const std::exception& e) {
+        // Back as it was: the schedule was not changed (or not all of it), so the job must not
+        // look paused (or resumed) when it is not.
+        try {
+            store.save(before);
+        } catch (const std::exception&) {
+        }
+        job = before;
+        throw Error(std::string(paused ? "the job was not paused, its schedule still runs it: "
+                                       : "the job was not resumed, it stays paused: ") +
+                    e.what());
+    }
+}
+
 }  // namespace vaultik::jobs

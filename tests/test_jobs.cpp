@@ -751,3 +751,25 @@ TEST_CASE("a paused job keeps its schedule but nothing starts it on its own") {
     j.backup_on_connect = true;
     CHECK_FALSE(connect_backup_due(store, j));
 }
+
+TEST_CASE("pausing a job: when its schedule cannot be changed, it is saved back as it was") {
+    TempStore dir;
+    const JobStore store(dir.dir());
+    Job j = sample();
+    j.schedule.kind = Schedule::Kind::Daily;
+    store.save(j);
+    REQUIRE_FALSE(j.schedule.paused);
+    // The approval was declined.
+    CHECK_THROWS_AS(set_paused(store, j, true, [](const Job&) { throw Error("the approval was declined"); }), Error);
+    CHECK_FALSE(j.schedule.paused);
+    CHECK_FALSE(store.find(j.id)->schedule.paused);
+    // It worked: saved paused, and the schedule applied to the paused job.
+    bool applied_paused = false;
+    set_paused(store, j, true, [&](const Job& x) { applied_paused = x.schedule.paused && store.find(x.id)->schedule.paused; });
+    CHECK(applied_paused);
+    CHECK(store.find(j.id)->schedule.paused);
+    // Resuming that fails leaves it paused.
+    CHECK_THROWS_AS(set_paused(store, j, false, [](const Job&) { throw Error("Task Scheduler refused"); }), Error);
+    CHECK(store.find(j.id)->schedule.paused);
+    CHECK(j.schedule.paused);
+}
