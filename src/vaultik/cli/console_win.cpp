@@ -75,6 +75,9 @@ void clear_status() {
 }
 
 std::string read_password(std::string_view prompt, std::string_view without_console) {
+    // A hidden console (started from the app with a progress channel): never waits there.
+    check_prompts_allowed(without_console.empty() ? "no console to ask for the password; set VAULTIK_PASSWORD or use --password-file"
+                                                  : without_console);
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;
     if (!GetConsoleMode(in, &mode))
@@ -100,6 +103,7 @@ std::string read_password(std::string_view prompt, std::string_view without_cons
 }
 
 std::string read_line(std::string_view prompt) {
+    check_prompts_allowed(prompt_question(prompt));
     err(prompt);
     HANDLE in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD mode = 0;

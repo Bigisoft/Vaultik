@@ -2,18 +2,24 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "vaultik/crypto/crypto.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/progress_channel.hpp"
+#include "vaultik/util/error.hpp"
+#include "vaultik/util/hex.hpp"
 #include "vaultik/util/task_events.hpp"
 
 #include "engine_channel.hpp"
 
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -288,6 +294,205 @@ TEST_CASE("progress events: speed and time left for events without them") {
     CHECK(r.speed() == -1);
 }
 
+TEST_CASE("progress channel: an engine that connects after the app stopped waiting for it is still taken") {
+    ProgressServer server;
+    std::atomic<bool> stop{false};
+    std::atomic<bool> got_cancel{false};
+    std::string error;
+    std::thread engine([&] {
+        // Connects late, as an engine whose password prompt (pkexec) was answered late.
+        std::this_thread::sleep_for(std::chrono::milliseconds(900));
+        try {
+            ProgressClient client(server.name(), server.user(), 5000);
+            client.send_line(R"({"event":"progress","done":1,"total":2})");
+            std::atomic<bool> cancel{false};
+            std::thread listener([&] { listen_for_cancel(client, cancel); });
+            for (int i = 0; i < 500 && !cancel; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            got_cancel = cancel.load();
+            for (int i = 0; i < 500 && !stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            listener.detach();  // ends once the app's end closes; `client` outlives it below
+            for (int i = 0; i < 50; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    });
+    int slow_calls = 0;
+    const EngineWait w = wait_for_engine(
+        server, [] { return std::optional<int>(); }, [] { return false; }, 200, [&] { ++slow_calls; });
+    CHECK(w.connected);
+    CHECK_FALSE(w.code.has_value());
+    CHECK(slow_calls == 1);  // told once that it is slow, and the wait went on
+    std::string line;
+    REQUIRE(server.read_line(line, 5000) == ProgressServer::Read::Line);
+    CHECK(parse_task_event(line).done == 1);
+    CHECK(server.send_line("cancel"));  // and it can still be stopped
+    for (int i = 0; i < 500 && !got_cancel; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    stop = true;
+    engine.join();
+    CHECK(error.empty());
+    CHECK(got_cancel.load());
+}
+
+TEST_CASE("progress channel: the wait for the engine ends when it ended, or when the window went away") {
+    ProgressServer server;
+    SUBCASE("it ended without connecting") {
+        int polls = 0;
+        bool slow = false;
+        const EngineWait w = wait_for_engine(
+            server, [&]() -> std::optional<int> { return ++polls >= 3 ? std::optional<int>(126) : std::nullopt; },
+            [] { return false; }, -1, [&] { slow = true; });
+        CHECK_FALSE(w.connected);
+        CHECK(w.code == std::optional<int>(126));
+        CHECK_FALSE(slow);
+    }
+    SUBCASE("aborted") {
+        int polls = 0;
+        const EngineWait w = wait_for_engine(
+            server, [] { return std::optional<int>(); }, [&] { return ++polls > 2; }, -1, nullptr);
+        CHECK_FALSE(w.connected);
+        CHECK_FALSE(w.code.has_value());
+    }
+    SUBCASE("how it ended cannot be read: the error comes through") {
+        CHECK_THROWS_AS(wait_for_engine(
+                            server, []() -> std::optional<int> { throw Error("cannot read how the program ended"); },
+                            [] { return false; }, -1, nullptr),
+                        Error);
+    }
+}
+
+TEST_CASE("progress channel: the engine keeps at most 4 KiB of a line, and a flood does not stop its listener") {
+    std::optional<ProgressServer> channel(std::in_place);
+    ProgressServer& server = *channel;
+    std::vector<std::string> lines;
+    std::atomic<bool> cancel{false};
+    std::atomic<bool> flood_done{false};
+    std::atomic<bool> listener_done{false};
+    std::string error;
+    std::thread engine([&] {
+        try {
+            ProgressClient client(server.name(), server.user(), 5000);
+            std::string line;
+            for (int i = 0; i < 3 && client.read_line(line); ++i) lines.push_back(line);
+            std::thread listener([&] {
+                listen_for_cancel(client, cancel);
+                listener_done = true;
+            });
+            for (int i = 0; i < 3000 && !cancel; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            for (int i = 0; i < 3000 && !flood_done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            for (int i = 0; i < 500 && !listener_done; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (listener_done) listener.join();
+            else listener.detach();
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    });
+    REQUIRE(server.wait_connected(5000));
+    // A line of 10000 bytes (only its first 4 KiB are kept), one just at the limit, and a short one.
+    CHECK(server.send_line(std::string(10000, 'x')));
+    CHECK(server.send_line(std::string(kMaxControlLine, 'y')));
+    CHECK(server.send_line("hello"));
+    // Then 4 MiB without a line end, and a cancel after it: taken, and nothing ran out of memory.
+    std::string flood(4u << 20, 'z');
+    flood += "\ncancel";
+    CHECK(server.send_line(flood));
+    for (int i = 0; i < 3000 && !cancel; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    flood_done = true;
+    // The engine's end goes on until the app closes its end.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    channel.reset();
+    engine.join();
+    CHECK(error.empty());
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0] == std::string(kMaxControlLine, 'x'));
+    CHECK(lines[1] == std::string(kMaxControlLine, 'y'));
+    CHECK(lines[2] == "hello");
+    CHECK(cancel.load());
+    CHECK(listener_done.load());
+}
+
+#ifndef _WIN32
+TEST_CASE("progress channel: a link to the channel's folder is not followed") {
+    ProgressServer server;
+    std::uint8_t rnd[16];
+    random_bytes(rnd);
+    const std::string link = server.name().substr(0, server.name().rfind('/') + 1) + "vaultik-progress-" + to_hex(ByteSpan(rnd, sizeof rnd));
+    REQUIRE(::symlink(server.name().c_str(), link.c_str()) == 0);
+    CHECK(valid_progress_channel_name(link));
+    CHECK_THROWS_AS(ProgressClient(link, server.user(), 500), Error);
+    ::unlink(link.c_str());
+    CHECK_FALSE(server.wait_connected(0));
+}
+#endif
+
+TEST_CASE("progress channel: the user a root engine expects") {
+#ifdef _WIN32
+    CHECK(progress_channel_user("S-1-5-21-1", nullptr) == "S-1-5-21-1");
+    CHECK(progress_channel_user("", nullptr).empty());
+#else
+    CHECK(progress_channel_user("1000", nullptr) == "1000");
+    CHECK(progress_channel_user("", nullptr).empty());
+    // Under pkexec: the user that ran it, and no other.
+    CHECK(progress_channel_user("", "1000") == "1000");
+    CHECK(progress_channel_user("1000", "1000") == "1000");
+    CHECK_THROWS_AS(progress_channel_user("0", "1000"), Error);
+    CHECK_THROWS_AS(progress_channel_user("1001", "1000"), Error);
+#endif
+}
+
+#ifdef _WIN32
+TEST_CASE("progress channel: a process other than the engine started is dropped") {
+    ProgressServer server;
+    // Expects another process (the system's): this test's own client is a foreign one.
+    server.expect_client(4);
+    std::atomic<int> step{0};
+    std::vector<bool> sent;
+    std::string error;
+    std::thread clients([&] {
+        try {
+            {
+                ProgressClient foreign(server.name(), server.user(), 5000);
+                step = 1;
+                for (int i = 0; i < 500 && step < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                sent.push_back(foreign.send_line("{\"event\":\"done\",\"status\":\"success\"}", 1000));
+            }
+            // The expected one connects next.
+            ProgressClient engine(server.name(), server.user(), 5000);
+            sent.push_back(engine.send_line("{\"event\":\"progress\",\"done\":1}"));
+            step = 3;
+            for (int i = 0; i < 500 && step < 4; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    });
+    for (int i = 0; i < 500 && step < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK_FALSE(server.wait_connected(500));
+    CHECK(server.rejected_clients() == 1);
+    std::string line;
+    CHECK(server.read_line(line, 50) == ProgressServer::Read::Timeout);  // nothing of the foreign one
+    CHECK_FALSE(server.send_line("cancel"));
+    server.expect_client(GetCurrentProcessId());
+    step = 2;
+    REQUIRE(server.wait_connected(5000));
+    REQUIRE(server.read_line(line, 5000) == ProgressServer::Read::Line);
+    CHECK(parse_task_event(line).done == 1);
+    step = 4;
+    clients.join();
+    CHECK(error.empty());
+    CHECK(sent == std::vector<bool>{false, true});
+    CHECK(server.rejected_clients() == 1);
+}
+
+TEST_CASE("elevated process: an exit code that cannot be read is an error, not success") {
+    // A handle that may only be waited on: its exit code cannot be read.
+    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, GetCurrentProcessId());
+    REQUIRE(h != nullptr);
+    CHECK_THROWS_AS(os::process_exit_code(h), Error);
+    CloseHandle(h);
+    CHECK(os::process_exit_code(GetCurrentProcess()) == static_cast<int>(STILL_ACTIVE));
+}
+#endif
+
+
 // ---- the engine itself, through its --progress-pipe option ---------------------------------------
 
 TEST_CASE("progress channel: the engine sends its result there") {
@@ -318,4 +523,29 @@ TEST_CASE("progress channel: the engine refuses a name that is not a channel and
     CAPTURE(output);
     CHECK(code == 1);
     CHECK(output.find("not a Vaultik progress channel") != std::string::npos);
+}
+
+TEST_CASE("progress channel: a question the engine would ask fails with an error the app shows") {
+    // Its console is hidden: a password prompt would wait there forever.
+    namespace fs = std::filesystem;
+    std::uint8_t rnd[8];
+    random_bytes(rnd);
+    const fs::path dir = fs::temp_directory_path() / ("vaultik-channel-prompt-" + to_hex(ByteSpan(rnd, sizeof rnd)));
+    const std::string saved = os::get_env("VAULTIK_PASSWORD");
+    os::set_env("VAULTIK_PASSWORD", "");
+    const auto start = std::chrono::steady_clock::now();
+    const EngineRun r = run_engine_with_channel({"init", "--repo", (dir / "repo").string()}, [](const std::string&, ProgressServer&) {});
+    os::set_env("VAULTIK_PASSWORD", saved);
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    CAPTURE(r.output);
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(30));
+    CHECK(r.connected);
+    CHECK(r.code == 1);
+    REQUIRE_FALSE(r.lines.empty());
+    const TaskEvent last = parse_task_event(r.lines.back());
+    CHECK(last.type == TaskEvent::Type::Done);
+    CHECK(last.status == "failed");
+    CHECK(last.text.find("password") != std::string::npos);
+    CHECK(last.text.find("cannot answer questions") != std::string::npos);
 }

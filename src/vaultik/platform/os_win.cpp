@@ -808,9 +808,14 @@ int run_command_elevated(const std::vector<std::string>& argv, bool show_window)
     }
     if (info.hProcess == nullptr) throw Error("cannot start " + argv[0] + " as administrator");
     UniqueHandle process(info.hProcess);
-    WaitForSingleObject(process.get(), INFINITE);
-    DWORD code = 0;
-    GetExitCodeProcess(process.get(), &code);
+    if (WaitForSingleObject(process.get(), INFINITE) != WAIT_OBJECT_0) throw_last_error("cannot wait for " + argv[0]);
+    return process_exit_code(process.get());
+}
+
+int process_exit_code(void* process) {
+    // Not 0 before it is read: a failed read is never taken for success.
+    DWORD code = STILL_ACTIVE;
+    if (!GetExitCodeProcess(static_cast<HANDLE>(process), &code)) throw_last_error("cannot read how the program ended");
     return static_cast<int>(code);
 }
 
@@ -818,17 +823,21 @@ namespace {
 
 class WinElevatedProcess : public ElevatedProcess {
 public:
-    explicit WinElevatedProcess(HANDLE process) : process_(process) {}
+    explicit WinElevatedProcess(HANDLE process) : process_(process), pid_(GetProcessId(process)) {}
     std::optional<int> wait(int timeout_ms) override {
-        if (WaitForSingleObject(process_.get(), static_cast<DWORD>(timeout_ms < 0 ? 0 : timeout_ms)) != WAIT_OBJECT_0)
-            return std::nullopt;
-        DWORD code = 0;
-        GetExitCodeProcess(process_.get(), &code);
-        return static_cast<int>(code);
+        if (code_) return code_;
+        const DWORD r = WaitForSingleObject(process_.get(), static_cast<DWORD>(timeout_ms < 0 ? 0 : timeout_ms));
+        if (r == WAIT_TIMEOUT) return std::nullopt;
+        if (r != WAIT_OBJECT_0) throw_last_error("cannot wait for the task with administrator rights");
+        code_ = process_exit_code(process_.get());
+        return code_;
     }
+    unsigned long pid() const override { return pid_; }
 
 private:
     UniqueHandle process_;
+    unsigned long pid_;
+    std::optional<int> code_;
 };
 
 }  // namespace

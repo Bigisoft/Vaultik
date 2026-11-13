@@ -403,7 +403,7 @@ private:
 // prompt unless the process already has them. Output is not captured. Throws Error when the
 // approval is declined or the program cannot start; on POSIX it always throws. With
 // `show_window` a console program gets a window of its own, so the user can follow it.
-int run_command_elevated(const std::vector<std::string>& argv, bool show_window = false);
+int run_command_elevated(const std::vector<std::string>& argv, bool show_window = false);  // throws Error when its exit code cannot be read
 
 // A program started with administrator (root) rights: it can be waited for, but not stopped
 // from here (a process without those rights cannot end it).
@@ -411,8 +411,16 @@ class ElevatedProcess {
 public:
     virtual ~ElevatedProcess() = default;
     // Its exit code once it ended, waiting at most `timeout_ms` for that; nullopt while it runs.
+    // Throws Error when the exit code cannot be read (never taken for success).
     virtual std::optional<int> wait(int timeout_ms) = 0;
+    // Its process id (Windows: the program itself; POSIX: pkexec, which becomes the program).
+    virtual unsigned long pid() const = 0;
 };
+#ifdef _WIN32
+// The exit code of the process `process` (a HANDLE) that ended. Throws Error when it cannot
+// be read: a failure is never taken for an exit code of 0.
+int process_exit_code(void* process);
+#endif
 // Starts `argv` with administrator rights and returns at once. Windows: after the approval (UAC)
 // prompt, with its window hidden unless `show_window`; throws Error when the approval is
 // declined. POSIX: through pkexec (see pkexec_path), which asks for the password itself and

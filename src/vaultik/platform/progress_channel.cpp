@@ -63,6 +63,36 @@ int ms_left(Clock::time_point deadline) {
     return left <= 0 ? 0 : static_cast<int>(left);
 }
 
+// Adds what the engine read from the app to `pending`, keeping at most kMaxControlLine bytes of
+// any line: the rest of a longer one is dropped up to its end (`skipping` while it is).
+void add_control_input(std::string& pending, bool& skipping, std::string_view data) {
+    while (!data.empty()) {
+        if (skipping) {
+            const std::size_t nl = data.find('\n');
+            if (nl == std::string_view::npos) return;
+            data.remove_prefix(nl + 1);
+            skipping = false;
+            continue;
+        }
+        const std::size_t last = pending.rfind('\n');
+        const std::size_t open = last == std::string::npos ? pending.size() : pending.size() - last - 1;
+        const std::size_t nl = data.find('\n');
+        const std::size_t part = nl == std::string_view::npos ? data.size() : nl;
+        if (open + part <= kMaxControlLine) {
+            const std::size_t take = nl == std::string_view::npos ? data.size() : nl + 1;
+            pending.append(data.substr(0, take));
+            data.remove_prefix(take);
+            continue;
+        }
+        // Too long: its first kMaxControlLine bytes make the line, the rest is dropped.
+        const std::size_t keep = kMaxControlLine - open;
+        pending.append(data.substr(0, keep));
+        pending += '\n';
+        data.remove_prefix(keep);
+        skipping = true;
+    }
+}
+
 // Takes one line out of `pending` when it holds a whole one.
 bool take_line(std::string& pending, std::string& line) {
     const std::size_t end = pending.find('\n');
@@ -98,11 +128,55 @@ bool valid_progress_channel_name(std::string_view name) {
 #endif
 }
 
-void listen_for_cancel(ProgressClient& channel, std::atomic<bool>& cancel) {
-    std::string line;
-    while (channel.read_line(line)) {
-        while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
-        if (line == "cancel") cancel = true;
+std::string progress_channel_user(const std::string& given, const char* pkexec_uid) {
+#ifdef _WIN32
+    (void)pkexec_uid;
+    return given;
+#else
+    if (pkexec_uid == nullptr || pkexec_uid[0] == '\0') return given;
+    if (given.empty()) return pkexec_uid;
+    if (given != pkexec_uid)
+        throw Error("--progress-user " + given + " is not the user that started this with pkexec (" + pkexec_uid + ")");
+    return given;
+#endif
+}
+
+EngineWait wait_for_engine(ProgressServer& server, const std::function<std::optional<int>()>& ended,
+                           const std::function<bool()>& abort, int slow_ms, const std::function<void()>& slow) {
+    EngineWait w;
+    const auto slow_at = Clock::now() + std::chrono::milliseconds(slow_ms < 0 ? 0 : slow_ms);
+    bool told = slow_ms < 0;
+    while (!abort()) {
+        if (server.wait_connected(200)) {
+            w.connected = true;
+            return w;
+        }
+        if ((w.code = ended())) {
+            // What it sent before it ended is still read.
+            w.connected = server.wait_connected(0);
+            return w;
+        }
+        if (!told && Clock::now() >= slow_at) {
+            told = true;
+            if (slow) slow();
+        }
+    }
+    return w;
+}
+
+void listen_for_cancel(ProgressClient& channel, std::atomic<bool>& cancel) noexcept {
+    try {
+        std::string line;
+        while (channel.read_line(line)) {
+            while (!line.empty() && (line.back() == ' ' || line.back() == '\t')) line.pop_back();
+            if (line == "cancel") cancel = true;
+        }
+    } catch (...) {
+        // Out of memory or anything else: only the channel ends, never the task.
+        try {
+            channel.set_broken();
+        } catch (...) {
+        }
     }
 }
 
@@ -169,10 +243,28 @@ struct ProgressServer::Impl {
     OVERLAPPED read_ov{};
     bool connecting = false;
     bool connected = false;
+    bool checked = false;  // the client that connected is the expected one
+    unsigned long expected_pid = 0;
+    int rejected = 0;
     bool reading = false;
     bool closed = false;
     char buf[4096];
     std::string pending;
+
+    // Waits (overlapped) for the next process to connect.
+    void listen() {
+        ResetEvent(connect_event.get());
+        connect_ov = OVERLAPPED{};
+        connect_ov.hEvent = connect_event.get();
+        if (ConnectNamedPipe(pipe.get(), &connect_ov)) {
+            connected = true;
+        } else {
+            const DWORD e = GetLastError();
+            if (e == ERROR_PIPE_CONNECTED) connected = true;
+            else if (e == ERROR_IO_PENDING) connecting = true;
+            else throw_last_error("cannot wait for the engine on the progress channel");
+        }
+    }
 
     ~Impl() {
         if (!pipe.valid()) return;
@@ -191,8 +283,10 @@ ProgressServer::ProgressServer() : impl_(std::make_unique<Impl>()) {
         s.user = token_user_sid(t.get());
     }
     // Only this user and the administrators (the engine may run as another administrator
-    // account, when one was given at the approval) may open it; nobody may change that.
-    const std::wstring sddl = L"D:P(A;;GA;;;" + widen(s.user) + L")(A;;GA;;;BA)";
+    // account, when one was given at the approval) may open it; nobody may change that. Its
+    // integrity label is medium, with no write up and no read up: a program of this user that
+    // runs with low integrity (a sandboxed browser) can neither read nor write it.
+    const std::wstring sddl = L"D:P(A;;GA;;;" + widen(s.user) + L")(A;;GA;;;BA)S:(ML;;NWNR;;;ME)";
     PSECURITY_DESCRIPTOR sd = nullptr;
     if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr))
         throw_last_error("cannot describe who may open the progress channel");
@@ -212,14 +306,7 @@ ProgressServer::ProgressServer() : impl_(std::make_unique<Impl>()) {
     s.pipe.reset(h);
     s.connect_ov.hEvent = s.connect_event.get();
     s.read_ov.hEvent = s.read_event.get();
-    if (ConnectNamedPipe(h, &s.connect_ov)) {
-        s.connected = true;
-    } else {
-        const DWORD e = GetLastError();
-        if (e == ERROR_PIPE_CONNECTED) s.connected = true;
-        else if (e == ERROR_IO_PENDING) s.connecting = true;
-        else throw_last_error("cannot wait for the engine on the progress channel");
-    }
+    s.listen();
 }
 
 ProgressServer::~ProgressServer() = default;
@@ -232,18 +319,47 @@ const std::string& ProgressServer::user() const {
     return impl_->user;
 }
 
+void ProgressServer::expect_client(unsigned long pid) {
+    impl_->expected_pid = pid;
+}
+
+int ProgressServer::rejected_clients() const {
+    return impl_->rejected;
+}
+
 bool ProgressServer::wait_connected(int timeout_ms) {
     Impl& s = *impl_;
-    if (s.connected) return true;
-    if (!s.connecting) return false;
-    const long long r = finish_io(s.pipe.get(), s.connect_ov, static_cast<DWORD>(timeout_ms));
-    if (r == -2) return false;
-    s.connecting = false;
-    // A client that connected and left at once still counts: its lines (if any) are read and
-    // then the channel reads as closed.
-    s.connected = r >= 0 || GetLastError() == ERROR_PIPE_CONNECTED || GetLastError() == ERROR_NO_DATA;
-    if (!s.connected) s.closed = true;
-    return s.connected;
+    const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms < 0 ? 0 : timeout_ms);
+    for (;;) {
+        if (s.connected) {
+            if (s.checked || s.expected_pid == 0) return s.checked = true;
+            // Only the engine this app started: any other process that opened the pipe (one of
+            // this user's, or an administrator's) is dropped, and the pipe waits for the engine.
+            ULONG pid = 0;
+            if (GetNamedPipeClientProcessId(s.pipe.get(), &pid) && pid == s.expected_pid) return s.checked = true;
+            ++s.rejected;
+            DisconnectNamedPipe(s.pipe.get());
+            s.connected = false;
+            try {
+                s.listen();
+            } catch (const std::exception&) {
+                s.closed = true;
+                return false;
+            }
+            continue;
+        }
+        if (!s.connecting) return false;
+        const long long r = finish_io(s.pipe.get(), s.connect_ov, static_cast<DWORD>(ms_left(deadline)));
+        if (r == -2) return false;
+        s.connecting = false;
+        // A client that connected and left at once still counts: its lines (if any) are read and
+        // then the channel reads as closed.
+        s.connected = r >= 0 || GetLastError() == ERROR_PIPE_CONNECTED || GetLastError() == ERROR_NO_DATA;
+        if (!s.connected) {
+            s.closed = true;
+            return false;
+        }
+    }
 }
 
 ProgressServer::Read ProgressServer::read_line(std::string& line, int timeout_ms) {
@@ -259,7 +375,7 @@ ProgressServer::Read ProgressServer::read_line(std::string& line, int timeout_ms
             }
             return Read::Closed;
         }
-        if (!s.connected && !wait_connected(ms_left(deadline))) return s.closed ? Read::Closed : Read::Timeout;
+        if ((!s.connected || !s.checked) && !wait_connected(ms_left(deadline))) return s.closed ? Read::Closed : Read::Timeout;
         if (!s.reading) {
             ResetEvent(s.read_event.get());
             if (!ReadFile(s.pipe.get(), s.buf, sizeof s.buf, nullptr, &s.read_ov) && GetLastError() != ERROR_IO_PENDING) {
@@ -283,7 +399,7 @@ ProgressServer::Read ProgressServer::read_line(std::string& line, int timeout_ms
 
 bool ProgressServer::send_line(std::string_view line) {
     Impl& s = *impl_;
-    if (!s.connected || s.closed) return false;
+    if (!s.connected || !s.checked || s.closed) return false;
     std::string data(line);
     data += '\n';
     OVERLAPPED ov{};
@@ -306,6 +422,7 @@ struct ProgressClient::Impl {
     UniqueHandle read_event = new_event();
     std::atomic<bool> broken{false};
     std::string pending;
+    bool skipping = false;
 };
 
 ProgressClient::ProgressClient(const std::string& name, const std::string& expected_user, int timeout_ms)
@@ -351,6 +468,10 @@ bool ProgressClient::broken() const {
     return impl_->broken.load();
 }
 
+void ProgressClient::set_broken() {
+    impl_->broken = true;
+}
+
 bool ProgressClient::send_line(std::string_view line, int write_timeout_ms) {
     Impl& c = *impl_;
     std::lock_guard<std::mutex> lock(c.write_lock);
@@ -385,7 +506,7 @@ bool ProgressClient::read_line(std::string& line) {
         if (!ReadFile(c.pipe.get(), buf, sizeof buf, nullptr, &ov) && GetLastError() != ERROR_IO_PENDING) return false;
         const long long n = finish_io(c.pipe.get(), ov, INFINITE);
         if (n < 0) return false;
-        c.pending.append(buf, static_cast<std::size_t>(n));
+        add_control_input(c.pending, c.skipping, std::string_view(buf, static_cast<std::size_t>(n)));
     }
 }
 
@@ -478,6 +599,12 @@ const std::string& ProgressServer::user() const {
     return impl_->user;
 }
 
+void ProgressServer::expect_client(unsigned long) {}
+
+int ProgressServer::rejected_clients() const {
+    return 0;
+}
+
 bool ProgressServer::wait_connected(int timeout_ms) {
     Impl& s = *impl_;
     if (s.control >= 0) return true;
@@ -546,6 +673,7 @@ struct ProgressClient::Impl {
     std::mutex write_lock;
     std::atomic<bool> broken{false};
     std::string pending;
+    bool skipping = false;
 };
 
 ProgressClient::ProgressClient(const std::string& name, const std::string& expected_user, int timeout_ms)
@@ -559,9 +687,17 @@ ProgressClient::ProgressClient(const std::string& name, const std::string& expec
         if (end == expected_user.c_str() || *end != '\0') throw Error("not a user id: " + expected_user);
         want = static_cast<uid_t>(v);
     }
-    // The directory and both FIFOs belong to that user and nobody else can open them.
+    // The directory and both FIFOs belong to that user and nobody else can open them. The
+    // directory is opened once (not through a link) and checked, and the FIFOs are opened
+    // through it: one swapped for another between the check and the open is never used.
+    const int dir = ::open(name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dir < 0) fail("cannot open the app's progress channel " + name);
+    struct CloseDir {
+        int fd;
+        ~CloseDir() { ::close(fd); }
+    } close_dir{dir};
     struct stat st {};
-    if (::lstat(name.c_str(), &st) != 0) fail("cannot open the app's progress channel " + name);
+    if (::fstat(dir, &st) != 0) fail("cannot open the app's progress channel " + name);
     if (!S_ISDIR(st.st_mode) || st.st_uid != want || (st.st_mode & 077) != 0)
         throw Error("the progress channel " + name + " is not a private folder of the expected user");
     const auto check = [&](int fd, const std::string& path) {
@@ -572,13 +708,13 @@ ProgressClient::ProgressClient(const std::string& name, const std::string& expec
     };
     Impl& c = *impl_;
     const std::string control = name + "/control";
-    c.control = ::open(control.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+    c.control = ::openat(dir, "control", O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (c.control < 0) fail("cannot open the app's progress channel " + control);
     check(c.control, control);
     const std::string events = name + "/events";
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     for (;;) {
-        c.events = ::open(events.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        c.events = ::openat(dir, "events", O_WRONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
         if (c.events >= 0) break;
         // ENXIO: nobody reads it (yet).
         if ((errno != ENXIO && errno != EINTR) || ms_left(deadline) == 0) fail("cannot open the app's progress channel " + events);
@@ -594,6 +730,10 @@ ProgressClient::~ProgressClient() {
 
 bool ProgressClient::broken() const {
     return impl_->broken.load();
+}
+
+void ProgressClient::set_broken() {
+    impl_->broken = true;
 }
 
 bool ProgressClient::send_line(std::string_view line, int write_timeout_ms) {
@@ -620,7 +760,7 @@ bool ProgressClient::read_line(std::string& line) {
         if (r < 0) return false;
         const ssize_t n = ::read(c.control, buf, sizeof buf);
         if (n > 0) {
-            c.pending.append(buf, static_cast<std::size_t>(n));
+            add_control_input(c.pending, c.skipping, std::string_view(buf, static_cast<std::size_t>(n)));
             continue;
         }
         if (n == 0 && (p.revents & POLLHUP)) return false;  // the app closed its end

@@ -27,6 +27,16 @@ std::string read_password(std::string_view prompt, std::string_view without_cons
 // has ended.
 std::string read_line(std::string_view prompt);
 
+// From now on read_password and read_line ask nothing and throw an Error saying `why` (with
+// the message of read_password's `without_console`, or the default one, which says where else
+// a password can come from). For a run whose console window is hidden (started from the app
+// with a progress channel): a prompt there would wait forever.
+void disable_prompts(std::string why);
+// Throws that Error when prompts were disabled, with `without_console` before the reason.
+void check_prompts_allowed(std::string_view without_console);
+// The message for a read_line prompt that cannot be shown.
+std::string prompt_question(std::string_view prompt);
+
 std::string format_bytes(std::uint64_t bytes);
 std::string format_duration(double seconds);
 

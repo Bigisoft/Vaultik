@@ -727,17 +727,22 @@ void connect_progress_channel(const Args& a) {
         fall_back("--progress-pipe " + *name + " is not a Vaultik progress channel, so it is not used");
         return;
     }
-    std::string user = a.value("--progress-user").value_or(std::string());
-#ifndef _WIN32
-    if (const char* u = std::getenv("PKEXEC_UID"); user.empty() && u != nullptr) user = u;
-#endif
     try {
+#ifdef _WIN32
+        const char* pkexec_uid = nullptr;
+#else
+        const char* pkexec_uid = std::getenv("PKEXEC_UID");
+#endif
+        const std::string user = os::progress_channel_user(a.value("--progress-user").value_or(std::string()), pkexec_uid);
         g_progress = new os::ProgressClient(*name, user, 10000);
     } catch (const std::exception& e) {
         fall_back(std::string("cannot use the app's progress channel (") + e.what() + ")");
         return;
     }
     g_json = true;
+    // Its console window stays hidden: nothing may wait there for an answer nobody can see or
+    // give (a password, a confirmation). A question fails with an error the app shows instead.
+    disable_prompts("this runs from the Vaultik app, which cannot answer questions here");
     std::thread([channel = g_progress] { os::listen_for_cancel(*channel, g_cancel); }).detach();
 }
 

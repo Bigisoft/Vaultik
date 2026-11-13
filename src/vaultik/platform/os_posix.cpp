@@ -1091,14 +1091,12 @@ public:
                 code_ = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
                 return code_;
             }
-            if (r < 0 && errno != EINTR) {
-                code_ = 127;
-                return code_;
-            }
+            if (r < 0 && errno != EINTR) throw Error(std::string("cannot read how the task with root rights ended: ") + std::strerror(errno));
             if (std::chrono::steady_clock::now() >= deadline) return std::nullopt;
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
+    unsigned long pid() const override { return static_cast<unsigned long>(pid_); }
 
 private:
     pid_t pid_;
