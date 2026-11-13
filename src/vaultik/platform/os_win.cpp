@@ -166,6 +166,16 @@ std::string fold_case(std::string_view utf8) {
 
 // ---- metadata -----------------------------------------------------------------------------
 
+std::uint64_t change_time(const std::string& path) {
+    UniqueHandle h(CreateFileW(native(path).c_str(), FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                               FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (!h.valid()) return 0;
+    FILE_BASIC_INFO basic{};
+    if (!GetFileInformationByHandleEx(h.get(), FileBasicInfo, &basic, sizeof basic)) return 0;
+    return basic.ChangeTime.QuadPart > 0 ? static_cast<std::uint64_t>(basic.ChangeTime.QuadPart) : 0;
+}
+
 bool stat(const std::string& path, FileInfo& info, ErrorCode& err) {
     const std::wstring p = native(path);
     WIN32_FILE_ATTRIBUTE_DATA ad;

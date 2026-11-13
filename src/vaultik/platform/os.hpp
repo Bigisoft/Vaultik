@@ -102,6 +102,11 @@ struct FileInfo {
 
 // Metadata of `path` itself (links are not followed). Returns false and sets `err` on failure.
 bool stat(const std::string& path, FileInfo& info, ErrorCode& err);
+// Windows: the NTFS change time of `path` itself (FILETIME UTC): the time of the last change of any
+// kind to its content or metadata, which also moves when a program sets the modification time
+// back. 0 when it cannot be read (or the file system keeps none). POSIX: 0, as FileInfo::ctime is
+// that time already.
+std::uint64_t change_time(const std::string& path);
 
 bool is_directory(const std::string& path);
 bool exists(const std::string& path);

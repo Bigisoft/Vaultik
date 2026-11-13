@@ -6,6 +6,13 @@
 #include <fstream>
 #include <random>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "vaultik/jobs/growth.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/ops/backup.hpp"
@@ -53,6 +60,21 @@ void write_file(const fs::path& p, const Bytes& data) {
     std::ofstream f(p, std::ios::binary | std::ios::trunc);
     f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
 }
+
+#ifdef _WIN32
+// Sets a file's NTFS change time, which every write moves: the damage a test makes must not look
+// written to.
+void set_change_time(const fs::path& p, std::uint64_t t) {
+    const HANDLE h = CreateFileW(p.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                 nullptr, OPEN_EXISTING, 0, nullptr);
+    REQUIRE(h != INVALID_HANDLE_VALUE);
+    FILE_BASIC_INFO basic{};  // zero fields are left unchanged
+    basic.ChangeTime.QuadPart = static_cast<LONGLONG>(t);
+    CHECK(SetFileInformationByHandle(h, FileBasicInfo, &basic, sizeof basic));
+    CloseHandle(h);
+    CHECK(os::change_time(u8(p)) == t);
+}
+#endif
 
 Bytes read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -193,18 +215,36 @@ TEST_CASE("a health check notices a file whose content changed while its size an
 
     // Silent damage: one byte differs, the size and times are as they were.
     const fs::path victim = src / "dir2" / "f5.bin";
+#ifdef _WIN32
+    const std::uint64_t victim_change = os::change_time(u8(victim));
+    REQUIRE(victim_change != 0);
+    REQUIRE(victim_change <= backup.snapshot.time);
+#endif
     Bytes content = read_file(victim);
     content[20'000] ^= 0x01;
     write_file(victim, content);
     fs::last_write_time(victim, old);
+#ifdef _WIN32
+    set_change_time(victim, victim_change);
+    // Rewritten in place with its modification time set back, as VeraCrypt does with its
+    // containers: the change time tells, so it is a change, not damage.
+    const fs::path rewritten = src / "dir0" / "f3.bin";
+    Bytes rewritten_content = read_file(rewritten);
+    rewritten_content[100] ^= 0xFF;
+    write_file(rewritten, rewritten_content);
+    fs::last_write_time(rewritten, old);
+    constexpr std::uint64_t kRewritten = 1;
+#else
+    constexpr std::uint64_t kRewritten = 0;
+#endif
     // An ordinary change: new content, new time.
     const fs::path edited = src / "dir1" / "f7.bin";
     write_file(edited, seeded_bytes(30'707, 77));
     const auto victim_time = fs::last_write_time(victim);
 
     r = check_unchanged_files(*repo, backup.snapshot, o);
-    CHECK(r.changed == 1);
-    CHECK(r.checked == 19);
+    CHECK(r.changed == 1 + kRewritten);
+    CHECK(r.checked == 19 - kRewritten);
     REQUIRE(r.damaged.size() == 1);
     CHECK(r.damaged[0].path == u8(victim));
     CHECK(r.damaged[0].size == content.size());
@@ -232,7 +272,7 @@ TEST_CASE("a health check notices a file whose content changed while its size an
     o.max_files = 100;
     r = check_unchanged_files(*repo, backup.snapshot, o);
     CHECK(r.damaged.empty());
-    CHECK(r.changed == 2);
+    CHECK(r.changed == 2 + kRewritten);
 }
 
 TEST_CASE("a health check's silent damage findings are kept with the run and warn in the system log") {

@@ -207,6 +207,10 @@ std::string fold_case(std::string_view utf8) {
 
 // ---- metadata -----------------------------------------------------------------------------
 
+std::uint64_t change_time(const std::string& /*path*/) {
+    return 0;
+}
+
 bool stat(const std::string& path, FileInfo& info, ErrorCode& err) {
     struct stat st{};
     if (::lstat(path.c_str(), &st) != 0) {

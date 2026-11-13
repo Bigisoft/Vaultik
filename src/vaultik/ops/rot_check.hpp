@@ -29,7 +29,8 @@ struct RotCheckOptions {
     // time changing at once. One day by default.
     std::uint64_t min_age = 864'000'000'000ull;
     // Also require the same ctime (Windows: creation time; POSIX: the time of the last change of
-    // any kind, which no program can set back). Tests on POSIX turn it off, since setting a file's
+    // any kind, which no program can set back), and on Windows an NTFS change time (the same kind
+    // of time) no later than the version. Tests on POSIX turn it off, since setting a file's
     // modification time back changes its ctime there.
     bool compare_ctime = true;
     // Where a snapshot path is on this computer; empty when it has no such place. Unset:
