@@ -57,6 +57,7 @@
 #include "vaultik/util/resources.hpp"
 #include "vaultik/version.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/platform/progress_channel.hpp"
 #include "vaultik/platform/vss.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
@@ -523,6 +524,13 @@ Options:
   --json                       Machine-readable output: one JSON event per line;
                                a line "cancel" on stdin stops a backup or restore,
                                "pause" and "resume" pause and continue it
+  --progress-pipe <name>       Send the --json events to the app's progress channel
+                               instead (the app makes it for a task it started with
+                               administrator rights); a line "cancel" from there
+                               stops the task. When it cannot be used, the task
+                               shows its progress in its console window
+  --progress-user <user>       The user that channel must belong to (default: the
+                               user running this)
   --lock-wait <time>           When another run holds the repository (prune holds
                                it alone), wait this long for it, e.g. 30s, 10m
                                (default: do not wait; run-job: 10m)
@@ -559,7 +567,7 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--method", "--volume", "--jobs", "--in-use-file"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--method", "--volume", "--jobs", "--in-use-file", "--progress-pipe", "--progress-user"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
@@ -608,6 +616,11 @@ bool g_json = false;
 std::atomic<bool> g_cancel{false};
 std::atomic<bool> g_stdin_closed{false};  // the program that started this one went away (--json)
 std::atomic<bool> g_paused{false};        // "pause" on stdin (--json) until "resume"
+bool g_json_stdout = false;               // --json: the events go to stdout
+// --progress-pipe: the events go to the app's progress channel. Never freed: its reader thread
+// may still wait on it when the program ends.
+vaultik::os::ProgressClient* g_progress = nullptr;
+bool g_pause_at_end = false;  // the progress channel could not be used: as with --pause
 
 // Polled between files and chunks: waits while paused, then tells whether to stop.
 bool stop_requested() {
@@ -621,9 +634,11 @@ bool stop_requested() {
 void emit(const nlohmann::json& event) {
     // Whole lines only: the stdin watcher reports pauses from its own thread.
     static std::mutex mu;
-    const std::string line = event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace) + "\n";
+    const std::string line = event.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
     std::lock_guard<std::mutex> lock(mu);
-    out(line);
+    // A broken channel (the app was closed) is not tried again; the work goes on.
+    if (g_progress != nullptr) g_progress->send_line(line);
+    if (g_json_stdout) out(line + "\n");
 }
 
 void warning(const std::string& msg) {
@@ -681,6 +696,54 @@ void start_cancel_watcher() {
         }
         g_stdin_closed = true;
     }).detach();
+}
+
+// Shows this program's console window, which a task started from the app with a progress
+// channel keeps hidden.
+void show_console_window() {
+#ifdef _WIN32
+    if (HWND w = GetConsoleWindow(); w != nullptr) ShowWindow(w, SW_SHOW);
+#endif
+}
+
+// --progress-pipe: connects to the app's progress channel; the events go there from now on, and
+// a line "cancel" from the app stops the task as Ctrl+C would. When the app goes away (closed,
+// or it crashed), the task is not stopped: a disk left half erased or half written is worse
+// than one finished; only its progress is not sent any more. When the channel cannot be used,
+// the console window shows the progress instead and stays open at the end until it was read.
+void connect_progress_channel(const Args& a) {
+    const auto name = a.value("--progress-pipe");
+    if (!name) return;
+    const auto fall_back = [](const std::string& why) {
+        show_console_window();
+#ifdef _WIN32
+        // Only in a console window of its own (started from the app), not when run by a program
+        // that reads its output.
+        g_pause_at_end = GetConsoleWindow() != nullptr && GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR;
+#endif
+        err("warning: " + why + "; the progress shows here instead.\n");
+    };
+    if (!os::valid_progress_channel_name(*name)) {
+        fall_back("--progress-pipe " + *name + " is not a Vaultik progress channel, so it is not used");
+        return;
+    }
+    try {
+#ifdef _WIN32
+        const char* pkexec_uid = nullptr;
+#else
+        const char* pkexec_uid = std::getenv("PKEXEC_UID");
+#endif
+        const std::string user = os::progress_channel_user(a.value("--progress-user").value_or(std::string()), pkexec_uid);
+        g_progress = new os::ProgressClient(*name, user, 10000);
+    } catch (const std::exception& e) {
+        fall_back(std::string("cannot use the app's progress channel (") + e.what() + ")");
+        return;
+    }
+    g_json = true;
+    // Its console window stays hidden: nothing may wait there for an answer nobody can see or
+    // give (a password, a confirmation). A question fails with an error the app shows instead.
+    disable_prompts("this runs from the Vaultik app, which cannot answer questions here");
+    std::thread([channel = g_progress] { os::listen_for_cancel(*channel, g_cancel); }).detach();
 }
 
 // Resource settings from the command line on top of `base` (a job's saved settings, or the
@@ -4828,8 +4891,9 @@ int run(const std::vector<std::string>& argv) {
         out(kUsage);
         return a.command.empty() && !a.has("--help") ? kExitError : kExitOk;
     }
-    g_json = a.has("--json");
+    g_json_stdout = g_json = a.has("--json");
     if (g_json) start_cancel_watcher();
+    connect_progress_channel(a);
 
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "drives") return cmd_drives(a);
@@ -4972,7 +5036,7 @@ int run_main(const std::vector<std::string>& args) {
     // open until the result is read.
     // Not when a disk tool found a volume in use: the frontend that started it asks right away
     // whether to force it closed.
-    if (code != kExitInUse && std::find(args.begin(), args.end(), "--pause") != args.end()) {
+    if (code != kExitInUse && (g_pause_at_end || std::find(args.begin(), args.end(), "--pause") != args.end())) {
         err("\nPress Enter to close this window.");
         std::string line;
         std::getline(std::cin, line);

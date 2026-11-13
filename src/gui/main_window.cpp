@@ -1,5 +1,7 @@
 #include "main_window.h"
 
+#include "elevated_task.h"
+
 #include <algorithm>
 #include <set>
 
@@ -2184,6 +2186,17 @@ void MainWindow::closeEvent(QCloseEvent* event) {
             tray_->explain_hidden();
         }
         return;
+    }
+    if (elevated_tasks_running() > 0) {
+        // It runs with administrator rights, so it cannot (and should not) be stopped from here.
+        const auto answer = QMessageBox::question(
+            this, windowTitle(),
+            tr("A task with administrator rights is still running (such as erasing or restoring a disk). It goes on "
+               "and finishes without Vaultik, but its progress is not shown any more. Quit anyway?"));
+        if (answer != QMessageBox::Yes) {
+            event->ignore();
+            return;
+        }
     }
     if (runner_->running()) {
         const auto answer = QMessageBox::question(this, windowTitle(), tr("A backup is running. Stop it and quit?"));

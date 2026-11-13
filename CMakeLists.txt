@@ -117,6 +117,8 @@ add_library(vaultik_core STATIC
     src/vaultik/platform/drive_health.cpp
     src/vaultik/platform/http.cpp
     src/vaultik/platform/loopback.cpp
+    src/vaultik/platform/progress_channel.cpp
+    src/vaultik/util/task_events.cpp
     src/vaultik/util/base64.cpp
     src/vaultik/repo/cloud.cpp
     src/vaultik/repo/oauth.cpp
@@ -283,6 +285,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/restore_dialog.cpp
             src/gui/image_dialogs.cpp
             src/gui/disk_tools_dialogs.cpp
+            src/gui/elevated_task.cpp
             src/gui/settings_transfer_dialog.cpp
             src/gui/apps_dialog.cpp
             src/gui/key_dialog.cpp
@@ -380,6 +383,7 @@ add_executable(vaultik_tests
     tests/test_containers.cpp
     tests/test_image.cpp
     tests/test_disk_tools.cpp
+    tests/test_progress_channel.cpp
     tests/test_settings_transfer.cpp
     tests/test_posix.cpp
 )

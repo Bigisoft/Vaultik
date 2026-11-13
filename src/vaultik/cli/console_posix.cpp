@@ -116,6 +116,8 @@ void clear_status() {
 }
 
 std::string read_password(std::string_view prompt, std::string_view without_console) {
+    check_prompts_allowed(without_console.empty() ? "no terminal to ask for the password; set VAULTIK_PASSWORD or use --password-file"
+                                                  : without_console);
     if (!::isatty(STDIN_FILENO))
         throw Error(without_console.empty() ? std::string("no terminal to ask for the password; set VAULTIK_PASSWORD or use --password-file")
                                             : std::string(without_console));
@@ -158,6 +160,7 @@ std::string read_password(std::string_view prompt, std::string_view without_cons
 }
 
 std::string read_line(std::string_view prompt) {
+    check_prompts_allowed(prompt_question(prompt));
     err(prompt);
     std::string line;
     char c = 0;

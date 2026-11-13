@@ -195,10 +195,13 @@ public:
     void halt() noexcept {
         std::unique_lock<std::mutex> lock(m_);
         stop_ = true;
+        stopping_ = true;
         for (const std::size_t i : queue_) slots_[i].busy = false;
         queue_.clear();
         const auto running = [&] { return std::any_of(slots_.begin(), slots_.end(), [](const Slot& s) { return s.busy; }); };
-        if (running()) {
+        // Cut short again until nothing runs: a thread that took its slot before the stop but
+        // reached the device only after a cancel would otherwise run its whole write.
+        while (running()) {
             lock.unlock();
             try {
                 device_.cancel();
@@ -206,7 +209,7 @@ public:
                 // it ends by itself then
             }
             lock.lock();
-            cv_.wait(lock, [&] { return !running(); });
+            cv_.wait_for(lock, std::chrono::milliseconds(50), [&] { return !running(); });
         }
         quit_ = true;
         cv_.notify_all();
@@ -246,20 +249,28 @@ private:
             queue_.pop_front();
             lock.unlock();
             std::exception_ptr failed;
-            try {
-                if (reading_) device_.read_at(s.offset, s.buf->data(), s.length);
-                else device_.write_at(s.offset, ByteSpan(s.buf->data(), s.length));
-            } catch (...) {
-                failed = std::current_exception();
+            // Checked again right before the write or read is issued: once the pool stopped (a
+            // cancel, or another one failed), none starts any more.
+            const bool skipped = stopping_.load();
+            if (!skipped) {
+                try {
+                    if (reading_) device_.read_at(s.offset, s.buf->data(), s.length);
+                    else device_.write_at(s.offset, ByteSpan(s.buf->data(), s.length));
+                } catch (...) {
+                    failed = std::current_exception();
+                }
             }
             lock.lock();
             s.busy = false;
-            if (!failed) {
+            if (skipped) {
+                // not run: neither completed nor failed
+            } else if (!failed) {
                 completed_ += s.length;
             } else if (!stop_) {
                 // The first failure stops the pass: nothing queued is started any more.
                 error_ = failed;
                 stop_ = true;
+                stopping_ = true;
                 for (const std::size_t i : queue_) slots_[i].busy = false;
                 queue_.clear();
             }
@@ -274,6 +285,7 @@ private:
     std::condition_variable cv_;
     std::deque<std::size_t> queue_;  // slots to start, in order
     bool stop_ = false;
+    std::atomic<bool> stopping_{false};  // stop_, for the check without the lock right before each write or read
     bool quit_ = false;
     std::exception_ptr error_;
     std::atomic<std::uint64_t> completed_{0};

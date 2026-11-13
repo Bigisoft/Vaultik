@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -17,6 +18,9 @@
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/util/hex.hpp"
+#include "vaultik/util/task_events.hpp"
+
+#include "engine_channel.hpp"
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -348,6 +352,104 @@ TEST_CASE("drive cleanser: a cancel stops at once, cutting short the writes stil
     CHECK(dev.late_starts == 0);
     CHECK(dev.writes.size() == kWipeInFlight);
     CHECK(dev.flushes == 0);
+}
+
+namespace {
+
+// A drive whose cancel (like CancelIoEx) cuts short only the writes it already has: a write
+// that reaches it after a cancel runs in full (`delay`) unless it is cancelled again. Each write
+// but the first takes `before` before it reaches the drive, as a thread that took its slot
+// just before the stop and had not issued its write yet.
+class LateDevice : public WipeDevice {
+public:
+    explicit LateDevice(std::uint64_t size) : size_(size) {}
+    std::uint64_t size() const override { return size_; }
+    std::uint32_t block_size() const override { return 512; }
+    bool parallel_io() const override { return true; }
+    void write_at(std::uint64_t offset, ByteSpan) override {
+        std::unique_lock<std::mutex> lock(m);
+        const bool first = entered++ == 0;
+        if (!first) {
+            lock.unlock();
+            std::this_thread::sleep_for(before);
+            lock.lock();
+        }
+        ++issued;
+        const int generation = cancels;
+        if (!cv.wait_for(lock, delay, [&] { return cancels != generation; })) {
+            ++completed;
+            return;
+        }
+        throw Error("writing the test device at byte " + std::to_string(offset) + ": cancelled");
+    }
+    void read_at(std::uint64_t, std::uint8_t*, std::size_t) override {}
+    void flush() override {}
+    void cancel() override {
+        std::lock_guard<std::mutex> lock(m);
+        ++cancels;
+        cv.notify_all();
+    }
+
+    std::uint64_t size_;
+    std::mutex m;
+    std::condition_variable cv;
+    int entered = 0;
+    int issued = 0;     // writes that reached the drive
+    int completed = 0;  // ran in full
+    int cancels = 0;
+    std::chrono::milliseconds before{300};
+    std::chrono::milliseconds delay{3000};
+};
+
+}  // namespace
+
+TEST_CASE("drive cleanser: a write that reaches the drive just after a cancel is cut short too") {
+    LateDevice dev(64 * kWipeChunk);
+    WipeOptions o;
+    o.should_cancel = [&] {
+        std::lock_guard<std::mutex> lock(dev.m);
+        // The first write runs; the others have their slot but did not reach the drive yet.
+        return dev.issued >= 1;
+    };
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_THROWS_AS(wipe_device(dev, o), Cancelled);
+    const auto took = std::chrono::steady_clock::now() - start;
+    // Not the 3 seconds of a whole write: those that came late were cancelled again.
+    CHECK(took < std::chrono::milliseconds(2000));
+    std::lock_guard<std::mutex> lock(dev.m);
+    CHECK(dev.completed == 0);
+    CHECK(dev.issued <= static_cast<int>(kWipeInFlight));
+}
+
+TEST_CASE("drive cleanser: no write starts once the erase stopped") {
+    // A drive whose first write fails while the others still run: the threads that had not
+    // reached the drive yet when it failed start nothing.
+    struct Failing : WipeDevice {
+        std::atomic<int> calls{0};
+        std::atomic<bool> failed{false};
+        std::atomic<int> after_failure{0};
+        std::uint64_t size() const override { return 64 * kWipeChunk; }
+        std::uint32_t block_size() const override { return 512; }
+        bool parallel_io() const override { return true; }
+        void write_at(std::uint64_t offset, ByteSpan) override {
+            if (calls++ == 0) {
+                // Waits until every other thread has taken a slot, then fails.
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                failed = true;
+                throw Error("writing the test device at byte " + std::to_string(offset) + ": a broken sector");
+            }
+            if (failed) ++after_failure;
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        }
+        void read_at(std::uint64_t, std::uint8_t*, std::size_t) override {}
+        void flush() override {}
+    } failing;
+    WipeOptions o;
+    CHECK_THROWS_WITH_AS(wipe_device(failing, o), doctest::Contains("a broken sector"), Error);
+    // The writes running when it failed end by themselves (this device cannot cut them short);
+    // what was queued meanwhile never started.
+    CHECK(failing.calls.load() <= static_cast<int>(kWipeInFlight));
+    CHECK(failing.after_failure.load() == 0);
 }
 
 TEST_CASE("drive cleanser: the verification reading several parts at once finds one bad sector") {
@@ -1072,6 +1174,59 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
         REQUIRE(os::run_command({format, r32.volumes[0].substr(0, 2), "/FS:FAT32", "/Q", "/V:VTFAT", "/Y"}, &out) == 0);
     }
     forced_wipe("FAT32");
+
+    // As the app runs it: the engine sends its events over a progress channel the test serves
+    // (here without the approval prompt, as the tests run as administrator). Progress arrives
+    // and the last one reaches 100%; then a slower erase is stopped by a cancel sent over it.
+    {
+        disks = list_tool_disks();
+        it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+        REQUIRE(it != disks.end());
+        const DiskInfo blank = *it;
+        REQUIRE(blank.size == size);
+        std::vector<std::string> args{"disk", "wipe", std::to_string(number), "--confirm", erase_text(blank),
+                                      "--expect-size", std::to_string(blank.size)};
+        if (!blank.serial.empty()) args.insert(args.end(), {"--expect-serial", blank.serial});
+        if (!blank.id.empty()) args.insert(args.end(), {"--expect-id", blank.id});
+        const test::EngineRun full = test::run_engine_with_channel(args, [](const std::string&, os::ProgressServer&) {});
+        CAPTURE(full.output);
+        CHECK(full.connected);
+        CHECK(full.code == 0);
+        std::vector<TaskEvent> progress;
+        TaskEvent done;
+        for (const std::string& line : full.lines) {
+            const TaskEvent e = parse_task_event(line);
+            if (e.type == TaskEvent::Type::Progress && e.has_total) progress.push_back(e);
+            if (e.type == TaskEvent::Type::Done) done = e;
+        }
+        REQUIRE_FALSE(progress.empty());
+        CHECK(progress.back().total == size);
+        CHECK(progress.back().done == progress.back().total);
+        CHECK(done.status == "success");
+        MESSAGE("ran: disk wipe through the progress channel, " << progress.size() << " progress events");
+
+        std::vector<std::string> slow = args;
+        slow.insert(slow.end(), {"--method", "dod3", "--verify"});
+        bool cancel_sent = false;
+        const test::EngineRun stopped = test::run_engine_with_channel(slow, [&](const std::string& line, os::ProgressServer& server) {
+            if (!cancel_sent && parse_task_event(line).type == TaskEvent::Type::Progress) cancel_sent = server.send_line("cancel");
+        });
+        CAPTURE(stopped.output);
+        CHECK(stopped.connected);
+        CHECK(cancel_sent);
+        CHECK(stopped.code == 4);
+        bool reached_check = false;
+        TaskEvent last;
+        for (const std::string& line : stopped.lines) {
+            const TaskEvent e = parse_task_event(line);
+            if (e.type == TaskEvent::Type::Progress && e.verifying) reached_check = true;
+            if (e.type != TaskEvent::Type::Unknown) last = e;
+        }
+        CHECK_FALSE(reached_check);  // stopped during the first passes
+        CHECK(last.type == TaskEvent::Type::Done);
+        CHECK(last.status == "cancelled");
+        MESSAGE("ran: disk wipe cancelled through the progress channel");
+    }
     attached.reset();
 }
 #else

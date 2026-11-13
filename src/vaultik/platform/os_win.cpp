@@ -808,10 +808,63 @@ int run_command_elevated(const std::vector<std::string>& argv, bool show_window)
     }
     if (info.hProcess == nullptr) throw Error("cannot start " + argv[0] + " as administrator");
     UniqueHandle process(info.hProcess);
-    WaitForSingleObject(process.get(), INFINITE);
-    DWORD code = 0;
-    GetExitCodeProcess(process.get(), &code);
+    if (WaitForSingleObject(process.get(), INFINITE) != WAIT_OBJECT_0) throw_last_error("cannot wait for " + argv[0]);
+    return process_exit_code(process.get());
+}
+
+int process_exit_code(void* process) {
+    // Not 0 before it is read: a failed read is never taken for success.
+    DWORD code = STILL_ACTIVE;
+    if (!GetExitCodeProcess(static_cast<HANDLE>(process), &code)) throw_last_error("cannot read how the program ended");
     return static_cast<int>(code);
+}
+
+namespace {
+
+class WinElevatedProcess : public ElevatedProcess {
+public:
+    explicit WinElevatedProcess(HANDLE process) : process_(process), pid_(GetProcessId(process)) {}
+    std::optional<int> wait(int timeout_ms) override {
+        if (code_) return code_;
+        const DWORD r = WaitForSingleObject(process_.get(), static_cast<DWORD>(timeout_ms < 0 ? 0 : timeout_ms));
+        if (r == WAIT_TIMEOUT) return std::nullopt;
+        if (r != WAIT_OBJECT_0) throw_last_error("cannot wait for the task with administrator rights");
+        code_ = process_exit_code(process_.get());
+        return code_;
+    }
+    unsigned long pid() const override { return pid_; }
+
+private:
+    UniqueHandle process_;
+    unsigned long pid_;
+    std::optional<int> code_;
+};
+
+}  // namespace
+
+std::unique_ptr<ElevatedProcess> start_command_elevated(const std::vector<std::string>& argv, bool show_window) {
+    if (argv.empty()) throw Error("start_command_elevated: no program");
+    const std::wstring program = program_path(argv[0]);
+    std::wstring params;
+    for (std::size_t i = 1; i < argv.size(); ++i) params += (params.empty() ? L"" : L" ") + quote_arg(widen(argv[i]));
+
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof info;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = L"runas";
+    info.lpFile = program.c_str();
+    info.lpParameters = params.c_str();
+    info.nShow = show_window ? SW_SHOWNORMAL : SW_HIDE;
+    if (!ShellExecuteExW(&info)) {
+        if (GetLastError() == ERROR_CANCELLED) throw Error("administrator approval was declined");
+        throw_last_error("cannot start " + argv[0] + " as administrator");
+    }
+    if (info.hProcess == nullptr) throw Error("cannot start " + argv[0] + " as administrator");
+    return std::make_unique<WinElevatedProcess>(info.hProcess);
+}
+
+std::string pkexec_path() {
+    return {};
 }
 
 int run_command(const std::vector<std::string>& argv, std::string* output) {
