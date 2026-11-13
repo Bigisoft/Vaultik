@@ -36,6 +36,8 @@ where the packages (AppImage, Flatpak) are not tested yet; see
   File Explorer (or, on Linux, the file manager).
 - **Disk tools.** Set up a new disk (partition table, file system, drive letter) and erase a
   disk, a drive or a drive's free space so the data cannot be brought back (drive cleanser).
+- **Moves to a new computer.** Export the settings and every backup job to one file and import
+  them on another computer; passwords and keys only on request, and then encrypted.
 - **Several PCs in one view.** Computers that back up into the same place (a shared folder, a
   NAS, a cloud bucket) leave an encrypted status note there, so any of them shows how every
   computer's backups are doing.
@@ -310,6 +312,8 @@ vaultik jobs
 vaultik run-job   documents
 vaultik pause-job documents
 vaultik resume-job documents
+vaultik settings export moving.vaultik-settings --with-secrets
+vaultik settings import moving.vaultik-settings --jobs documents --replace
 vaultik check-job documents --full
 vaultik report    --month 2026-10 --html report.html
 vaultik copy      documents
@@ -717,6 +721,36 @@ account's permissions are never applied. `--dry-run` lists what goes where; `--o
 documents,browsers` picks groups or single items; `--account` picks one when the backup holds
 several. Close the browsers and email programs first; saved browser passwords were sealed for the
 old account, so browsers ask you to sign in again.
+
+### Settings and plans to another computer
+
+**Export settings and plans...** (Tools in the sidebar) saves Vaultik's settings (notification
+area, reminders, updates), the alert settings and every backup job in one file,
+`Vaultik-settings-<computer>-<date>.vaultik-settings`. By default it holds no password, cloud
+storage key, database password or alert token. **Include the passwords and cloud storage keys**
+adds them, and then the whole file (jobs and folders too) is encrypted with AES-256-GCM under a key
+derived from a password you type (PBKDF2-HMAC-SHA256, 600,000 rounds), so nothing is written in
+clear; keep that password apart from the file.
+
+**Import settings and plans...** on the other computer reads the file (asking for its password
+when it is encrypted; a wrong one is refused), shows its jobs to choose from, and for a job whose
+id is taken there either imports it next to the existing one (under a new id, "(imported)" after
+its name) or replaces it. Imported jobs keep their schedule but start **paused**, so nothing runs
+before you checked their folders and destination on the new computer: choose **Resume schedule**
+for each then. A job imported without its password asks for it the first time it runs or is
+opened (Edit job shows "not saved on this computer yet"), and one on cloud storage needs its key or
+sign-in entered again in Edit job > Cloud storage.... A file from a newer Vaultik (a newer
+format) is refused with a note to update.
+
+```
+vaultik settings export                                   # Vaultik-settings-<computer>-<date>.vaultik-settings
+vaultik settings export moving.vaultik-settings --with-secrets
+vaultik settings import moving.vaultik-settings --jobs documents,photos
+vaultik settings import moving.vaultik-settings --replace
+```
+
+From the command line the password comes from `--password-file`, `VAULTIK_SETTINGS_PASSWORD` or
+the console; the frontend's own settings are exported and imported by the frontend only.
 
 ### Programs from the old PC
 

@@ -136,6 +136,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/growth.cpp
     src/vaultik/jobs/recovery_kit.cpp
     src/vaultik/jobs/computers.cpp
+    src/vaultik/jobs/settings_transfer.cpp
     src/vaultik/jobs/update_check.cpp
     src/vaultik/jobs/profile_items.cpp
     src/vaultik/ops/move_here.cpp
@@ -282,6 +283,7 @@ if(VAULTIK_BUILD_GUI)
             src/gui/restore_dialog.cpp
             src/gui/image_dialogs.cpp
             src/gui/disk_tools_dialogs.cpp
+            src/gui/settings_transfer_dialog.cpp
             src/gui/apps_dialog.cpp
             src/gui/key_dialog.cpp
             src/gui/cloud_dialog.cpp
@@ -378,6 +380,7 @@ add_executable(vaultik_tests
     tests/test_containers.cpp
     tests/test_image.cpp
     tests/test_disk_tools.cpp
+    tests/test_settings_transfer.cpp
     tests/test_posix.cpp
 )
 target_link_libraries(vaultik_tests PRIVATE vaultik_core doctest::doctest)

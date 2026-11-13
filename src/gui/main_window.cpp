@@ -58,6 +58,7 @@
 #include "restore_dialog.h"
 #include "disk_tools_dialogs.h"
 #include "image_dialogs.h"
+#include "settings_transfer_dialog.h"
 #include "app_settings.h"
 #include "runner.h"
 #include "settings_dialog.h"
@@ -618,6 +619,26 @@ void MainWindow::relock() {
 }
 
 bool MainWindow::ensure_password(const jobs::Job& job) {
+    // A job imported without its keys (Import settings and plans) cannot reach its cloud storage
+    // until they are entered again in the job.
+    const CloudKind kind = cloud_kind(job.repository);
+    if (kind == CloudKind::S3 || kind == CloudKind::PCloud || kind == CloudKind::OneDrive ||
+        kind == CloudKind::GoogleDrive || kind == CloudKind::Mega) {
+        bool have_key = false;
+        try {
+            std::string key = store_.cloud_secret(job.id);
+            have_key = !key.empty();
+            secure_wipe(key.data(), key.size());
+        } catch (const Error&) {
+        }
+        if (!have_key) {
+            QMessageBox::information(this, tr("Cloud storage of %1").arg(qs(job.name)),
+                                     tr("The cloud storage key or sign-in of this job is not saved on this computer, "
+                                        "for example because the job was imported without its passwords and keys. "
+                                        "Choose Edit job, then Cloud storage..., and enter it or sign in again."));
+            return false;
+        }
+    }
     try {
         std::string saved = store_.password(job.id);
         const bool have = !saved.empty();
@@ -629,7 +650,8 @@ bool MainWindow::ensure_password(const jobs::Job& job) {
         bool ok = false;
         QString pw = QInputDialog::getText(
             this, tr("Password for %1").arg(qs(job.name)),
-            tr("Enter the password of this backup. Vaultik saves it for your account on this computer."),
+            tr("Enter the password of this backup. It is not saved on this computer yet (for example, the job was "
+               "imported without passwords); Vaultik saves it for your account here."),
             QLineEdit::Password, QString(), &ok);
         if (!ok || pw.isEmpty()) return false;
         std::string bytes = u8(pw);
@@ -915,7 +937,7 @@ QWidget* MainWindow::build_sidebar() {
     connect(computers_, &QPushButton::clicked, this, &MainWindow::show_computers);
     l->addWidget(computers_);
 
-    // Tools that do not belong to one job.
+    // Tools that do not belong to one job: settings and plans to another computer, disks.
     tools_ = new QToolButton;
     tools_->setText(tr("Tools"));
     tools_->setProperty("role", "flat");
@@ -923,6 +945,11 @@ QWidget* MainWindow::build_sidebar() {
     tools_->setToolButtonStyle(Qt::ToolButtonTextOnly);
     auto* tools = new QMenu(tools_);  // owned by the button
     tools->setToolTipsVisible(true);
+    tools->addAction(tr("Export settings and plans..."), this, &MainWindow::export_settings)
+        ->setToolTip(tr("Save the settings and every backup job in one file, to set up another computer the same way"));
+    tools->addAction(tr("Import settings and plans..."), this, &MainWindow::import_settings)
+        ->setToolTip(tr("Take settings and backup jobs from a file exported on this or another computer"));
+    tools->addSeparator();
     tools->addAction(tr("Create recovery drive..."), this, [this] {
         RecoveryDriveDialog dialog(jobs_, this);
         dialog.exec();
@@ -1927,6 +1954,36 @@ void MainWindow::edit_job() {
         repos_.erase(dialog.job().id);
         reload_jobs(dialog.job().id);
     }
+}
+
+void MainWindow::export_settings() {
+    ExportSettingsDialog dialog(store_, this);
+    dialog.exec();
+}
+
+void MainWindow::import_settings() {
+    const auto bundle = ImportSettingsDialog::open_file(this);
+    if (!bundle) return;
+    ImportSettingsDialog dialog(store_, bundle, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const jobs::ImportResult& r = dialog.result();
+    repos_.clear();
+    reload_jobs(r.jobs.empty() ? std::string() : r.jobs.front().id);
+    QStringList lines;
+    for (const jobs::ImportedJob& i : r.jobs) {
+        QString line = qs(i.name);
+        if (i.replaced) line += "  -  " + tr("replaced the job that was here");
+        else if (i.renamed) line += "  -  " + tr("imported next to the job of the same id");
+        if (!i.secrets) line += "  -  " + tr("asks for its password when it first runs");
+        lines << line;
+    }
+    QMessageBox::information(
+        this, tr("Import settings and plans"),
+        (r.jobs.empty() ? tr("The settings were imported.")
+                        : tr("Imported %1 backup job(s), all paused:").arg(r.jobs.size()) + "\n\n" + lines.join('\n') +
+                              "\n\n" +
+                              tr("Check their folders and destinations on this computer (Edit job), then choose Resume "
+                                 "schedule in the More menu of each.")));
 }
 
 void MainWindow::add_disk_tools(QMenu* menu) {

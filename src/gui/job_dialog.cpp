@@ -119,6 +119,19 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
     fit_to_screen(this, QSize(720, 640), parent);
 
     if (existing != nullptr) {
+        // A job imported without its password (see Import settings and plans) has none saved here.
+        bool saved = false;
+        try {
+            std::string pw = store_.password(existing->id);
+            saved = !pw.empty();
+            secure_wipe(pw.data(), pw.size());
+        } catch (const std::exception&) {
+        }
+        missing_password_ = !saved;
+        if (missing_password_) {
+            password_->setPlaceholderText(tr("not saved on this computer yet: enter it"));
+            password2_->setPlaceholderText(QString());
+        }
         job_ = *existing;
         load(*existing);
     } else {
@@ -1262,6 +1275,12 @@ void JobDialog::accept() {
     }
     if (!editing_ && pw.empty()) {
         QMessageBox::warning(this, windowTitle(), tr("Enter the repository password."));
+        return;
+    }
+    if (missing_password_ && pw.empty()) {
+        QMessageBox::warning(this, windowTitle(),
+                             tr("This job's password is not saved on this computer yet (it was imported without "
+                                "passwords). Enter the password of its backup on the General page."));
         return;
     }
 

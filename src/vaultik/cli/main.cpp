@@ -30,6 +30,7 @@
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
+#include "vaultik/jobs/settings_transfer.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/image/disk.hpp"
 #include "vaultik/image/disk_tools.hpp"
@@ -398,6 +399,17 @@ Commands:
                                drive, changes, requests) until it is resumed;
                                run-job still runs it
   resume-job <job>             Resume a paused job (registers its schedule again)
+  settings export [<file>]     Write the settings and every saved job to one file
+                               (default Vaultik-settings-<computer>-<date>
+                               .vaultik-settings), to set up another computer the
+                               same way; without passwords and cloud keys
+      --with-secrets           With them, and the whole file encrypted with a
+                               password (asked for, or VAULTIK_SETTINGS_PASSWORD)
+  settings import <file>       Take the jobs (and alert settings) from such a file;
+                               they keep their schedule but start paused
+      --jobs <a,b>             Only these jobs (their ids in the file)
+      --replace                A job whose id is taken here replaces that job
+                               (otherwise it is imported under a new id)
   admin-job install|remove     Used by schedule and the frontend for jobs with
                                administrator rights (asks for approval)
 
@@ -1556,6 +1568,125 @@ int cmd_pause_job(const Args& a, bool pause) {
     jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
     out("Job \"" + job->name + "\" " + (pause ? "paused" : "resumed") + ": " + jobs::describe(job->schedule) + "\n");
     return kExitOk;
+}
+
+// The password of a settings file: --password-file, VAULTIK_SETTINGS_PASSWORD, or asked for
+// (twice when it is made).
+std::string settings_password(const Args& a, bool confirm) {
+    if (auto file = a.value("--password-file")) {
+        std::string pw = read_small_file(*file, "password file");
+        while (!pw.empty() && (pw.back() == '\n' || pw.back() == '\r')) pw.pop_back();
+        if (pw.empty()) throw Error("password file is empty");
+        return pw;
+    }
+    const std::string env = os::get_env("VAULTIK_SETTINGS_PASSWORD");
+    if (!env.empty()) return env;
+    std::string pw = read_password("Password for the settings file: ",
+                                   "no console to ask for the password; set VAULTIK_SETTINGS_PASSWORD");
+    if (confirm) {
+        if (pw.size() < 8) throw Error("use a password of at least 8 characters");
+        std::string again = read_password("Repeat the password: ");
+        const bool same = again == pw;
+        secure_wipe(again.data(), again.size());
+        if (!same) throw Error("passwords do not match");
+    }
+    if (pw.empty()) throw Error("empty password");
+    return pw;
+}
+
+// Settings and plans to another computer: one file with every saved job and the alert settings
+// (the frontend adds its own settings when it exports), secrets only with --with-secrets and
+// then encrypted with a password.
+int cmd_settings(const Args& a) {
+    const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
+    const jobs::JobStore store;
+    if (sub == "export") {
+        const bool secrets = a.has("--with-secrets");
+        std::string path = a.positional.size() >= 2 ? a.positional[1]
+                                                    : jobs::default_settings_file_name(os::hostname(), os::now());
+        path = os::absolute_path(path);
+        if (os::exists(path) && !a.has("--force")) throw Error(path + " exists already (--force replaces it)");
+        const jobs::SettingsBundle bundle = jobs::collect_settings(store, secrets);
+        std::string pw = secrets ? settings_password(a, true) : std::string();
+        Bytes data;
+        try {
+            data = jobs::write_settings_file(bundle, pw);
+        } catch (...) {
+            secure_wipe(pw.data(), pw.size());
+            throw;
+        }
+        secure_wipe(pw.data(), pw.size());
+        os::write_file_atomic(path, data, 0600);
+        const std::string msg = "Exported " + std::to_string(bundle.jobs.size()) + " job(s) to " + path +
+                                (secrets ? " (with passwords and keys, encrypted)" : " (without passwords and keys)");
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"file", path}, {"message", msg}});
+        else out(msg + "\n");
+        return kExitOk;
+    }
+    if (sub == "import") {
+        if (a.positional.size() < 2) throw Error("usage: vaultik settings import <file> [--jobs a,b] [--replace]");
+        const Bytes data = os::read_file(os::absolute_path(a.positional[1]), 64u << 20);
+        std::string pw = jobs::settings_file_encrypted(data) ? settings_password(a, false) : std::string();
+        jobs::SettingsBundle bundle;
+        try {
+            bundle = jobs::read_settings_file(data, pw);
+        } catch (...) {
+            secure_wipe(pw.data(), pw.size());
+            throw;
+        }
+        secure_wipe(pw.data(), pw.size());
+        jobs::ImportChoice choice;
+        choice.replace = a.has("--replace");
+        if (auto list = a.value("--jobs")) {
+            std::size_t at = 0;
+            while (at <= list->size()) {
+                const std::size_t comma = list->find(',', at);
+                std::string id = list->substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                while (!id.empty() && id.back() == ' ') id.pop_back();
+                while (!id.empty() && id.front() == ' ') id.erase(0, 1);
+                if (!id.empty()) choice.jobs.push_back(id);
+                if (comma == std::string::npos) break;
+                at = comma + 1;
+            }
+        }
+        if (!g_json) {
+            out("The file was made on " + (bundle.computer.empty() ? std::string("another computer") : bundle.computer) +
+                (bundle.created ? " on " + os::format_time_local(bundle.created) : std::string()) + " and has these jobs:\n");
+            for (const jobs::Job& j : bundle.jobs)
+                out("  " + pad(j.id, 24) + pad(j.name, 28) + j.repository + "\n");
+        }
+        const jobs::ImportResult r = jobs::import_settings(store, bundle, choice);
+        // Paused, so this removes the tasks of a job that was replaced (and sets up nothing new).
+        for (const jobs::ImportedJob& i : r.jobs) {
+            if (const auto job = store.find(i.id)) {
+                try {
+                    jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
+                } catch (const Error& e) {
+                    warning("the schedule of " + i.name + ": " + e.what());
+                }
+            }
+        }
+        if (g_json) {
+            nlohmann::json list = nlohmann::json::array();
+            for (const jobs::ImportedJob& i : r.jobs)
+                list.push_back({{"from", i.from_id}, {"id", i.id}, {"name", i.name}, {"replaced", i.replaced},
+                                {"renamed", i.renamed}, {"secrets", i.secrets}});
+            emit({{"event", "done"}, {"status", "success"}, {"jobs", list}, {"alerts", r.alerts},
+                  {"message", "imported " + std::to_string(r.jobs.size()) + " job(s)"}});
+            return kExitOk;
+        }
+        for (const jobs::ImportedJob& i : r.jobs) {
+            std::string how = i.replaced ? "replaced the job of that id" : i.renamed ? "imported as " + i.id + " (the id was taken)" : "imported";
+            if (!i.secrets) how += "; its password is asked for when it first runs";
+            out("  " + i.name + ": " + how + "\n");
+        }
+        out("Imported " + std::to_string(r.jobs.size()) + " job(s), all paused: check their folders on this computer, then\n"
+            "resume them (vaultik resume-job <job>, or Resume schedule in Vaultik).\n");
+        if (r.alerts) out("The alert settings were imported too.\n");
+        if (!bundle.app.empty()) out("The frontend's own settings in the file are imported when the file is imported in Vaultik.\n");
+        return kExitOk;
+    }
+    throw Error("usage: vaultik settings export [<file>] [--with-secrets] | import <file> [--jobs a,b] [--replace]");
 }
 
 // After a job's backup: removes its snapshots beyond its retention, then the data nothing uses any
@@ -4683,6 +4814,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);
     if (a.command == "pause-job") return cmd_pause_job(a, true);
+    if (a.command == "settings") return cmd_settings(a);
     if (a.command == "resume-job") return cmd_pause_job(a, false);
     if (a.command == "recovery") return cmd_recovery(a);
     if (a.command == "recovery-media") return cmd_recovery_media(a);

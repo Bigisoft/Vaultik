@@ -2,6 +2,8 @@
 
 #include <QString>
 
+#include <nlohmann/json.hpp>
+
 #include "vaultik/jobs/job.hpp"
 
 // The frontend's own preferences (not part of any job), kept in the user's registry hive.
@@ -26,6 +28,11 @@ struct AppSettings {
 
     static AppSettings load();
     void save() const;
+
+    // For "Export settings and plans": every setting by name, and back (names missing in `j` keep
+    // their value here).
+    nlohmann::json to_json() const;
+    void apply_json(const nlohmann::json& j);
 };
 
 // Starting with Windows (a Run entry for the current user), optionally hidden in the tray.

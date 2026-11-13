@@ -82,6 +82,9 @@ private:
     void set_job_paused(bool paused);
     // "Set up a new disk..." and "Drive cleanser..." in `menu`.
     void add_disk_tools(QMenu* menu);
+    // Settings and plans to and from a file (see jobs/settings_transfer.hpp).
+    void export_settings();
+    void import_settings();
     void run_job();
     // A health check of the current job now: its weekly share of the data, or all of it.
     void check_job(bool full);
