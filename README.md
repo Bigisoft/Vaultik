@@ -1120,11 +1120,14 @@ sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
 
 The methods are one pass of zeros (the default, enough for today's drives), one pass of random
 data, and three passes (random, random, zeros, like DoD 5220.22-M); **Read the last pass back**
-checks that the drive kept what was written. The window that erases shows the pass, the speed and
-the time left; Ctrl+C there stops it (what was written stays overwritten). From the command
-line `--confirm` gives the confirmation beforehand, for scripts, and `--expect-size`,
-`--expect-serial` and `--expect-id` (which the Vaultik window passes along) make it stop when the
-disk or drive is another one by then.
+checks that the drive kept what was written. Several large writes (and, for the check, reads)
+are kept at the drive at once, so it never waits for the next one, and a pass counts as done only
+once the drive says it has written everything. The window that erases shows the pass, the speed
+and the time left (from the speed of about the last half minute, so it follows a hard drive that
+slows down towards its end); Ctrl+C there stops it at once (what was written stays
+overwritten). From the command line `--confirm` gives the confirmation beforehand, for scripts,
+and `--expect-size`, `--expect-serial` and `--expect-id` (which the Vaultik window passes along)
+make it stop when the disk or drive is another one by then.
 
 ```
 vaultik disk wipe 2 --method dod3 --verify

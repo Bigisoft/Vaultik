@@ -45,13 +45,30 @@ UniqueHandle open_device(const std::wstring& path, DWORD access, DWORD flags = 0
                                     flags, nullptr));
 }
 
+// DeviceIoControl on a handle opened with or without FILE_FLAG_OVERLAPPED (the drive cleanser's
+// handles are, for its writes): with an OVERLAPPED of its own, waited for here. GetLastError
+// tells why it failed.
+BOOL control(HANDLE h, DWORD code, const void* in, DWORD in_size, void* out, DWORD out_size, DWORD* got) {
+    UniqueHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    if (!event.valid()) return FALSE;
+    OVERLAPPED ov{};
+    ov.hEvent = event.get();
+    DWORD n = 0;
+    BOOL ok = DeviceIoControl(h, code, const_cast<void*>(in), in_size, out, out_size, &n, &ov);
+    if (!ok && GetLastError() == ERROR_IO_PENDING) ok = GetOverlappedResult(h, &ov, &n, TRUE);
+    const DWORD e = ok ? ERROR_SUCCESS : GetLastError();
+    event.reset();
+    if (got != nullptr) *got = n;
+    SetLastError(e);
+    return ok;
+}
+
 // An IOCTL whose answer can be long: retried with a larger buffer. Empty on failure.
 Bytes ioctl(HANDLE h, DWORD code, const void* in = nullptr, DWORD in_size = 0, std::size_t start = 4096) {
     Bytes out(start);
     for (int tries = 0; tries < 12; ++tries) {
         DWORD got = 0;
-        if (DeviceIoControl(h, code, const_cast<void*>(in), in_size, out.data(), static_cast<DWORD>(out.size()), &got,
-                            nullptr)) {
+        if (control(h, code, in, in_size, out.data(), static_cast<DWORD>(out.size()), &got)) {
             out.resize(got);
             return out;
         }
@@ -440,13 +457,13 @@ bool probe_disk(HANDLE h, int n, DiskInfo& d) {
     q.PropertyId = StorageAccessAlignmentProperty;
     STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR al{};
     DWORD got = 0;
-    if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &al, sizeof al, &got, nullptr) &&
+    if (control(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &al, sizeof al, &got) &&
         got >= sizeof al && al.BytesPerPhysicalSector != 0)
         d.physical_sector_size = al.BytesPerPhysicalSector;
     // A drive without a seek penalty is a solid-state one.
     q.PropertyId = StorageDeviceSeekPenaltyProperty;
     DEVICE_SEEK_PENALTY_DESCRIPTOR seek{};
-    if (DeviceIoControl(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &seek, sizeof seek, &got, nullptr) &&
+    if (control(h, IOCTL_STORAGE_QUERY_PROPERTY, &q, sizeof q, &seek, sizeof seek, &got) &&
         got >= sizeof seek)
         d.media = seek.IncursSeekPenalty ? "HDD" : "SSD";
     d.path = narrow(disk_path(n));
@@ -468,7 +485,7 @@ bool probe_disk(HANDLE h, int n, DiskInfo& d) {
         if (pool_partition(p, l.style == PARTITION_STYLE_GPT)) d.dynamic = true;
     }
     GET_DISK_ATTRIBUTES attrs{};
-    if (DeviceIoControl(h, IOCTL_DISK_GET_DISK_ATTRIBUTES, nullptr, 0, &attrs, sizeof attrs, &got, nullptr) &&
+    if (control(h, IOCTL_DISK_GET_DISK_ATTRIBUTES, nullptr, 0, &attrs, sizeof attrs, &got) &&
         (attrs.Attributes & (DISK_ATTRIBUTE_OFFLINE | DISK_ATTRIBUTE_READ_ONLY)) != 0)
         d.offline = true;
     return true;
@@ -1038,53 +1055,97 @@ std::string repair_boot(int number) {
 
 namespace {
 
+// The drive cleanser's handles: overlapped, so the erase's threads have several writes (or
+// reads) at the drive at once (a handle without it runs one after another), and unbuffered.
+// Without FILE_FLAG_WRITE_THROUGH: the drive may keep a write in its cache when it says it has
+// it, so it takes the next one at once; each pass ends with FlushFileBuffers, which returns once
+// the drive has written everything, so a pass is done only then.
+constexpr DWORD kWipeFlags = FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED;
+
 // A disk or volume opened for writing, with its volumes locked and dismounted until it is
-// closed. Unbuffered: every write goes through an aligned buffer.
+// closed. Overlapped: each write or read waits for its own event, so several run at once from
+// the erase's threads; unbuffered ones go straight from the erase's page-aligned buffers.
 class WinWipeDevice : public WipeDevice {
 public:
     WinWipeDevice(UniqueHandle h, std::vector<UniqueHandle> locks, std::uint64_t size, std::uint32_t sector, std::string what,
                   bool whole_disk = false)
         : h_(std::move(h)), locks_(std::move(locks)), size_(size), sector_(sector), what_(std::move(what)),
-          whole_disk_(whole_disk), buf_(4u << 20) {}
+          whole_disk_(whole_disk) {}
     void forget_partition_table() override {
         // On the handle that was checked to be the chosen disk (not the disk number opened again).
         if (!whole_disk_) return;
         DWORD got = 0;
-        DeviceIoControl(h_.get(), IOCTL_DISK_DELETE_DRIVE_LAYOUT, nullptr, 0, nullptr, 0, &got, nullptr);
-        DeviceIoControl(h_.get(), IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
+        control(h_.get(), IOCTL_DISK_DELETE_DRIVE_LAYOUT, nullptr, 0, nullptr, 0, &got);
+        control(h_.get(), IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got);
     }
     std::uint64_t size() const override { return size_; }
     std::uint32_t block_size() const override { return sector_; }
+    bool parallel_io() const override { return true; }
     void write_at(std::uint64_t offset, ByteSpan data) override {
-        std::size_t done = 0;
-        while (done < data.size()) {
-            const std::size_t n = std::min(buf_.size(), data.size() - done);
-            std::memcpy(buf_.data(), data.data() + done, n);
-            OVERLAPPED ov{};
-            const std::uint64_t at = offset + done;
-            ov.Offset = static_cast<DWORD>(at);
-            ov.OffsetHigh = static_cast<DWORD>(at >> 32);
-            DWORD put = 0;
-            if (!WriteFile(h_.get(), buf_.data(), static_cast<DWORD>(n), &put, &ov) || put != n)
-                throw_last_error("writing " + what_ + " at byte " + std::to_string(at));
-            done += n;
+        if (aligned(data.data(), data.size())) {
+            transfer(true, offset, const_cast<std::uint8_t*>(data.data()), data.size());
+            return;
         }
+        AlignedBuffer buf(data.size());
+        std::memcpy(buf.data(), data.data(), data.size());
+        transfer(true, offset, buf.data(), data.size());
     }
     void read_at(std::uint64_t offset, std::uint8_t* dst, std::size_t length) override {
-        vaultik::image::read_at(h_.get(), offset, dst, length, buf_, what_);
+        if (aligned(dst, length)) {
+            transfer(false, offset, dst, length);
+            return;
+        }
+        AlignedBuffer buf(length);
+        transfer(false, offset, buf.data(), length);
+        std::memcpy(dst, buf.data(), length);
     }
     void flush() override {
         if (!FlushFileBuffers(h_.get())) throw_last_error("writing " + what_);
     }
+    void cancel() override {
+        // Every write and read still running on this handle, from any thread: each ends at once
+        // with ERROR_OPERATION_ABORTED (or completes), and its thread sees that.
+        CancelIoEx(h_.get(), nullptr);
+    }
 
 private:
+    // Unbuffered I/O takes whole sectors from an address aligned to the sector size.
+    bool aligned(const std::uint8_t* p, std::size_t n) const {
+        return reinterpret_cast<std::uintptr_t>(p) % 4096 == 0 && n % std::max<std::uint32_t>(sector_, 1) == 0;
+    }
+    // One write or read, waited for: when it returns or throws, the drive is done with `p`.
+    void transfer(bool write, std::uint64_t offset, std::uint8_t* p, std::size_t length) {
+        while (length > 0) {
+            const auto n = static_cast<DWORD>(std::min<std::size_t>(length, 64u << 20));
+            UniqueHandle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+            if (!event.valid()) throw_last_error("writing " + what_);
+            OVERLAPPED ov{};
+            ov.Offset = static_cast<DWORD>(offset);
+            ov.OffsetHigh = static_cast<DWORD>(offset >> 32);
+            ov.hEvent = event.get();
+            BOOL ok = write ? WriteFile(h_.get(), p, n, nullptr, &ov) : ReadFile(h_.get(), p, n, nullptr, &ov);
+            DWORD e = ok ? ERROR_SUCCESS : GetLastError();
+            DWORD moved = 0;
+            if (ok || e == ERROR_IO_PENDING) {
+                // Waits also when it was cancelled: it returns only once the I/O ended.
+                ok = GetOverlappedResult(h_.get(), &ov, &moved, TRUE);
+                e = ok ? ERROR_SUCCESS : GetLastError();
+            }
+            const std::string where = (write ? "writing " : "reading ") + what_ + " at byte " + std::to_string(offset);
+            if (!ok) throw_win32(where, e);
+            if (moved != n) throw Error(where + ": cut short");
+            p += n;
+            offset += n;
+            length -= n;
+        }
+    }
+
     UniqueHandle h_;
     std::vector<UniqueHandle> locks_;
     std::uint64_t size_;
     std::uint32_t sector_;
     std::string what_;
     bool whole_disk_;
-    AlignedBuffer buf_;
 };
 
 class WinFillFile : public FillFile {
@@ -1126,7 +1187,7 @@ private:
 void check_online(HANDLE h, int number) {
     GET_DISK_ATTRIBUTES attrs{};
     DWORD got = 0;
-    if (!DeviceIoControl(h, IOCTL_DISK_GET_DISK_ATTRIBUTES, nullptr, 0, &attrs, sizeof attrs, &got, nullptr)) return;
+    if (!control(h, IOCTL_DISK_GET_DISK_ATTRIBUTES, nullptr, 0, &attrs, sizeof attrs, &got)) return;
     if ((attrs.Attributes & (DISK_ATTRIBUTE_OFFLINE | DISK_ATTRIBUTE_READ_ONLY)) != 0)
         throw Error("disk " + std::to_string(number) + " is offline or read-only in Windows; bring it online in Disk "
                     "Management first (right-click the disk, Online), then try again. Nothing was written");
@@ -1186,7 +1247,7 @@ public:
 private:
     bool try_lock() {
         DWORD got = 0;
-        if (h_.valid() && DeviceIoControl(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr)) return true;
+        if (h_.valid() && control(h_.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got)) return true;
         last_error_ = h_.valid() ? GetLastError() : ERROR_INVALID_HANDLE;
         note("locking it", last_error_);
         return false;
@@ -1198,7 +1259,7 @@ private:
     }
     void dismount() {
         DWORD got = 0;
-        if (h_.valid()) DeviceIoControl(h_.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+        if (h_.valid()) control(h_.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got);
     }
 
     std::wstring device_;
@@ -1216,12 +1277,12 @@ std::string volume_title(const DiskVolume& v) {
     return v.mount.empty() ? v.name : v.mount;
 }
 
-// Disk `d` opened for writing, checked to be the disk the user chose, with every volume on it
-// locked and dismounted (the handles in `locks`). A volume another program uses stops it with
-// VolumesInUse, unless `force` (see lock_volumes).
+// Disk `d` opened for writing (with `flags`), checked to be the disk the user chose, with every
+// volume on it locked and dismounted (the handles in `locks`). A volume another program uses
+// stops it with VolumesInUse, unless `force` (see lock_volumes).
 UniqueHandle open_locked_disk(const DiskInfo& d, const DiskIdentity& expected, std::vector<UniqueHandle>& locks,
-                              bool force = false) {
-    UniqueHandle disk = open_device(disk_path(d.number), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
+                              bool force = false, DWORD flags = FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH) {
+    UniqueHandle disk = open_device(disk_path(d.number), GENERIC_READ | GENERIC_WRITE, flags);
     if (!disk.valid()) throw_last_error("opening disk " + std::to_string(d.number) + " for writing");
     DiskInfo now;
     if (!probe_disk(disk.get(), d.number, now)) throw Error("disk " + std::to_string(d.number) + " has no medium");
@@ -1278,7 +1339,7 @@ std::vector<int> protected_tool_disks() {
 
 std::unique_ptr<WipeDevice> open_wipe_file(const std::string& path) {
     UniqueHandle h(CreateFileW(long_path(full_path(widen(path))).c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr));
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OVERLAPPED, nullptr));
     if (!h.valid()) throw_last_error("opening " + path);
     LARGE_INTEGER size{};
     if (!GetFileSizeEx(h.get(), &size)) throw_last_error("reading the size of " + path);
@@ -1290,7 +1351,7 @@ std::unique_ptr<WipeDevice> open_wipe_disk(const DiskInfo& chosen, const DiskIde
                                            const std::vector<int>& protected_disks, bool force_dismount) {
     const DiskInfo d = recheck(chosen, expected, protected_disks);
     std::vector<UniqueHandle> locks;
-    UniqueHandle disk = open_locked_disk(d, expected, locks, force_dismount);
+    UniqueHandle disk = open_locked_disk(d, expected, locks, force_dismount, kWipeFlags);
     return std::make_unique<WinWipeDevice>(std::move(disk), std::move(locks), d.size, d.sector_size,
                                            "disk " + std::to_string(d.number), true);
 }
@@ -1370,7 +1431,7 @@ std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& given, const Di
     std::string other = volume_mismatch(v, expected);
     if (!other.empty()) throw Error(other + "; nothing was written");
     // Opened by its volume id, so the handle is that volume whatever letter it has.
-    WinVolumeLock volume(widen(v.device), v.name, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
+    WinVolumeLock volume(widen(v.device), v.name, kWipeFlags);
     // The serial number through the volume's own path, just before the lock: a handle to the
     // volume device itself is not a handle to a file, so GetVolumeInformationByHandleW may not
     // answer for it below.
@@ -1399,20 +1460,20 @@ std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& given, const Di
         char text[16];
         std::snprintf(text, sizeof text, "%08X", static_cast<unsigned>(serial));
         opened.serial = text;
-    } else if (DeviceIoControl(h.get(), FSCTL_GET_NTFS_VOLUME_DATA, nullptr, 0, &ntfs, sizeof ntfs, &got, nullptr)) {
+    } else if (control(h.get(), FSCTL_GET_NTFS_VOLUME_DATA, nullptr, 0, &ntfs, sizeof ntfs, &got)) {
         char text[16];
         std::snprintf(text, sizeof text, "%08X", static_cast<unsigned>(ntfs.VolumeSerialNumber.QuadPart & 0xFFFFFFFFu));
         opened.serial = text;
     }
     GET_LENGTH_INFORMATION len{};
-    if (!DeviceIoControl(h.get(), IOCTL_DISK_GET_LENGTH_INFO, nullptr, 0, &len, sizeof len, &got, nullptr))
+    if (!control(h.get(), IOCTL_DISK_GET_LENGTH_INFO, nullptr, 0, &len, sizeof len, &got))
         throw_last_error("reading the size of " + v.name);
     opened.size = static_cast<std::uint64_t>(len.Length.QuadPart);
     other = volume_mismatch(opened, expected);
     if (!other.empty()) throw Error(other + "; nothing was written");
-    DeviceIoControl(h.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr);
+    control(h.get(), FSCTL_DISMOUNT_VOLUME, nullptr, 0, nullptr, 0, &got);
     // Its last sectors too, past the end of the file system.
-    DeviceIoControl(h.get(), FSCTL_ALLOW_EXTENDED_DASD_IO, nullptr, 0, nullptr, 0, &got, nullptr);
+    control(h.get(), FSCTL_ALLOW_EXTENDED_DASD_IO, nullptr, 0, nullptr, 0, &got);
     std::uint32_t sector = 512;
     const Bytes geo = ioctl(h.get(), IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, 1024);
     if (geo.size() >= sizeof(DISK_GEOMETRY)) {

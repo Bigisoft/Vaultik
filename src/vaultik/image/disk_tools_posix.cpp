@@ -188,7 +188,8 @@ void run_tool(const std::vector<std::string>& argv, const std::string& what) {
     if (code != 0) throw Error(what + " failed (exit code " + std::to_string(code) + "): " + trim(output));
 }
 
-// A disk, partition or plain file, written with pwrite.
+// A disk, partition or plain file, written with pwrite (several at once, from the erase's
+// threads, each at its own offset).
 class FdDevice : public WipeDevice {
 public:
     FdDevice(int fd, std::uint64_t size, std::uint32_t block, std::string what)
@@ -202,6 +203,7 @@ public:
     }
     std::uint64_t size() const override { return size_; }
     std::uint32_t block_size() const override { return block_; }
+    bool parallel_io() const override { return true; }
     void write_at(std::uint64_t offset, ByteSpan data) override {
         std::size_t done = 0;
         while (done < data.size()) {
