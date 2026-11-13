@@ -607,6 +607,16 @@ void make_private_dirs(const std::string& path) {
     make_dirs(path);
 }
 
+std::string make_work_dir(const std::string& name) {
+    // Not the temporary folder: for the system account (jobs with administrator rights) that is
+    // the Windows folder's Temp, where every account may make folders.
+    const std::string local = user_folder(UserFolder::LocalAppData);
+    if (local.empty()) throw Error("cannot find this account's local application data folder");
+    const std::string dir = join(join(join(local, "Vaultik"), "Temp"), name);
+    make_dirs(dir);
+    return dir;
+}
+
 void set_metadata(const std::string& path, const FileInfo& info) {
     const DWORD attrs = info.attributes & kRestorableAttributes;
     if (info.mtime == 0 && info.ctime == 0 && attrs == 0) return;

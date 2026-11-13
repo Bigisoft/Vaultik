@@ -1077,8 +1077,10 @@ put on a command line, where other programs could read it: `sqlcmd` gets it in i
 `SQLCMDPASSWORD` variable, `mysqldump` from an option file and `pg_dump` from a password file
 (each in a private folder, removed right after the dump), and a tool in a container through
 `docker exec -e`, which takes the value from the environment of the `docker` command alone. The
-dumps are made in a private folder in the temporary folder (`vaultik-databases`), read from there
-by the backup and removed when the run ends; dumps left by a run that was killed are removed by
+dumps are made in a private folder of your account (Windows: `Vaultik\Temp\databases` in your
+local application data folder; Linux: `~/.cache/vaultik/databases`, or under `$XDG_CACHE_HOME`),
+not in the shared temporary folder, where another account could make the folder first. Only your
+account can read the dump files. They are read from there by the backup and removed when the run ends; dumps left by a run that was killed are removed by
 the next one. A dump that fails is a warning (with the tool's own message) and an item that could
 not be read: the files and the other dumps are still backed up and old versions are kept. Dumps
 are for jobs without administrator rights.

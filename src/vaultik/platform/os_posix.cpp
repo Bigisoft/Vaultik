@@ -445,6 +445,25 @@ void make_private_dirs(const std::string& path) {
     ::close(fd);
 }
 
+std::string make_work_dir(const std::string& name) {
+    std::string cache = get_env("XDG_CACHE_HOME");
+    if (cache.empty() || cache[0] != '/') {  // (a relative one is to be ignored, as the spec says)
+        const std::string home = user_folder(UserFolder::Profile);
+        if (home.empty()) throw Error("cannot find this account's home folder");
+        cache = join(home, ".cache");
+    }
+    const std::string dir = join(join(cache, "vaultik"), name);
+    make_private_dirs(dir);
+    // make_private_dirs leaves a folder of another account as it is: such a folder is not used.
+    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) throw_last_error("cannot open folder " + dir);
+    struct stat st{};
+    const bool own = ::fstat(fd, &st) == 0 && st.st_uid == ::geteuid() && (st.st_mode & 077) == 0;
+    ::close(fd);
+    if (!own) throw Error("the folder " + dir + " belongs to another account or others can open it, so it is not used");
+    return dir;
+}
+
 void set_metadata(const std::string& path, const FileInfo& info) {
     const bool link = info.type == EntryType::Symlink;
     // Ownership first: chown clears set-user-ID bits that chmod then restores.

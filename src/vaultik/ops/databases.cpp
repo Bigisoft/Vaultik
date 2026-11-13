@@ -590,7 +590,9 @@ std::string run_dump(const DatabaseDump& db, const std::string& password, const 
     const bool docker = !db.container.empty();
     const std::string what = docker ? std::string(kind_name(db.kind)) + "'s dump in the container " + db.container
                                     : tool_name(db.kind);
-    os::make_private_dirs(folder);
+    // A folder made here is private; one that is already there (one the user named) keeps its
+    // permissions: the files in it are private instead.
+    if (!os::is_directory(folder)) os::make_private_dirs(folder);
     std::string program;
     if (docker) {
         const DockerInfo info = docker_info();
@@ -632,6 +634,11 @@ std::string run_dump(const DatabaseDump& db, const std::string& password, const 
 #endif
     }
     if (db.kind == DatabaseKind::SqlServer && docker) container_file = "/tmp/vaultik-" + new_database_id() + ".bak";
+    // The dump is made readable for this account alone (a tool makes it as the umask says, often
+    // readable for everyone): an empty private file first, which the tool then writes over and
+    // which keeps its permissions. (Not for SQL Server on this computer, whose service makes it.)
+    const bool own_file = !(db.kind == DatabaseKind::SqlServer && !docker);
+    if (own_file) os::write_file_atomic(out, ByteSpan(), 0600);
 
     DumpCommand cmd = dump_command(db, password, out, folder, container_file);
     cmd.argv[0] = program;
@@ -678,6 +685,10 @@ std::string run_dump(const DatabaseDump& db, const std::string& password, const 
                      "copying the backup out of the container " + db.container, cancelled, timeout);
     }
     std::error_code ec;
+#ifndef _WIN32
+    // (Also when a tool made the file anew.)
+    if (own_file) fs::permissions(fs_path(out), fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+#endif
     const auto size = fs::file_size(fs_path(out), ec);
     if (ec || size == 0) throw Error(what + " wrote no dump");
     return out;

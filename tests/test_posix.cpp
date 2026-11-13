@@ -161,6 +161,29 @@ TEST_CASE("POSIX: run_command clean environment and extra variables") {
     ::unsetenv("VAULTIK_TEST_LEAK");
 }
 
+TEST_CASE("POSIX: working folders are the account's own and private") {
+    PosixTemp tmp;
+    const std::string old = os::get_env("XDG_CACHE_HOME");
+    ::setenv("XDG_CACHE_HOME", tmp.path.c_str(), 1);
+    const std::string dir = os::make_work_dir("databases");
+    CHECK(dir == os::join(os::join(tmp.path, "vaultik"), "databases"));
+    struct stat st{};
+    REQUIRE(::lstat(dir.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0700);
+    // One left open is tightened again.
+    REQUIRE(::chmod(dir.c_str(), 0755) == 0);
+    CHECK(os::make_work_dir("databases") == dir);
+    REQUIRE(::lstat(dir.c_str(), &st) == 0);
+    CHECK((st.st_mode & 0777) == 0700);
+    // A link put in its place is not followed.
+    const std::string elsewhere = os::join(tmp.path, "elsewhere");
+    fs::create_directories(elsewhere);
+    REQUIRE(::symlink(elsewhere.c_str(), os::join(os::join(tmp.path, "vaultik"), "linked").c_str()) == 0);
+    CHECK_THROWS(os::make_work_dir("linked"));
+    if (old.empty()) ::unsetenv("XDG_CACHE_HOME");
+    else ::setenv("XDG_CACHE_HOME", old.c_str(), 1);
+}
+
 TEST_CASE("POSIX: a program's output and input as streams") {
     std::string text;
     for (int i = 0; i < 20000; ++i) text += "line " + std::to_string(i) + " of the streamed output\n";

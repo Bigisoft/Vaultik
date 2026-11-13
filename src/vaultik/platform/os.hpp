@@ -322,6 +322,12 @@ void append_file(const std::string& path, ByteSpan data, std::uint32_t mode = 06
 // mode 0700, also set on a folder that is already there. Windows: make_dirs (the profile's
 // permissions already keep other accounts out). Throws OsError.
 void make_private_dirs(const std::string& path);
+// A folder for this account's own working files (such as database dumps), made when missing, in
+// a place no other account can have made it first: Windows: <Local AppData>\Vaultik\Temp\<name>
+// (in the account's profile); POSIX: $XDG_CACHE_HOME/vaultik/<name> or ~/.cache/vaultik/<name>,
+// mode 0700. On POSIX one that is a link, belongs to another account or that others can open is
+// refused. Throws Error.
+std::string make_work_dir(const std::string& name);
 
 // Encrypts a secret so only the current user can read it back (Windows DPAPI). On POSIX it is
 // sealed (AES-256-GCM) with a random key kept in this account's own settings folder
