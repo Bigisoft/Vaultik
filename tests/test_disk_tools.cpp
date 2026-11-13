@@ -976,3 +976,86 @@ TEST_CASE("disk tools on a loop device (Linux, root, VAULTIK_TEST_VIRTUAL_DISKS=
     CHECK(all_zero(start.data() + start.size() - kMiB, kMiB));
 }
 #endif
+
+namespace {
+
+// A device that throws away what is written to it (and reads back zeros): how fast the erase
+// itself goes when the drive is never what holds it back.
+class DiscardDevice : public WipeDevice {
+public:
+    explicit DiscardDevice(std::uint64_t size) : size_(size) {}
+    std::uint64_t size() const override { return size_; }
+    std::uint32_t block_size() const override { return 512; }
+    void write_at(std::uint64_t, ByteSpan) override {}
+    void read_at(std::uint64_t, std::uint8_t* dst, std::size_t length) override { std::memset(dst, 0, length); }
+    void flush() override {}
+
+private:
+    std::uint64_t size_;
+};
+
+double mib_per_second(std::uint64_t bytes, double seconds) {
+    return seconds > 0 ? static_cast<double>(bytes) / static_cast<double>(kMiB) / seconds : 0;
+}
+
+// Erases `dev` with zeros, then random data, then zeros read back, and logs the speed of each.
+void measure_wipe(WipeDevice& dev, const std::string& what) {
+    const std::uint64_t size = dev.size();
+    WipeOptions zeros;
+    const WipeResult z = wipe_device(dev, zeros);
+    WipeOptions random;
+    random.method = WipeMethod::Random;
+    const WipeResult r = wipe_device(dev, random);
+    WipeOptions verified;
+    verified.verify = true;
+    const WipeResult v = wipe_device(dev, verified);
+    CHECK(v.verified);
+    const double verify_seconds = v.seconds - z.seconds;
+    MESSAGE("throughput, " << what << " (" << size / kMiB << " MiB): zeros " << static_cast<int>(mib_per_second(size, z.seconds))
+                           << " MiB/s, random " << static_cast<int>(mib_per_second(size, r.seconds)) << " MiB/s, verify about "
+                           << static_cast<int>(mib_per_second(size, verify_seconds > 0 ? verify_seconds : 0)) << " MiB/s");
+}
+
+}  // namespace
+
+TEST_CASE("drive cleanser: throughput (measured and logged, not checked)") {
+    {
+        DiscardDevice nowhere(1024 * kMiB);
+        WipeOptions o;
+        o.method = WipeMethod::Random;
+        const WipeResult r = wipe_device(nowhere, o);
+        MESSAGE("throughput, random data to a device that discards it (the generator's limit): "
+                << static_cast<int>(mib_per_second(nowhere.size(), r.seconds)) << " MiB/s");
+    }
+    {
+        TempDir t;
+        const std::string path = fake_disk(t, 512 * kMiB);
+        auto dev = open_wipe_file(path);
+        measure_wipe(*dev, "a file");
+    }
+#ifdef _WIN32
+    // A virtual disk of its own, attached and erased as a whole disk (the path a USB drive takes).
+    if (os::get_env("VAULTIK_TEST_VIRTUAL_DISKS") != "1" || !os::process_elevated()) return;
+    TempDir t;
+    const std::string path = t.file("speed.vhdx");
+    const std::uint64_t size = 1024 * kMiB;
+    {
+        auto file = create_random_file(path);
+        VhdxWriter w(*file, size);
+        w.finish();
+    }
+    auto attached = attach_vhdx(path, false);
+    const int number = attached->number();
+    REQUIRE(number >= 0);
+    const std::vector<DiskInfo> disks = list_tool_disks();
+    auto it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+    REQUIRE(it != disks.end());
+    REQUIRE(it->size == size);
+    REQUIRE(it->style == "RAW");
+    {
+        auto dev = open_wipe_disk(*it, identity_of(*it), protected_tool_disks());
+        measure_wipe(*dev, "a virtual disk");
+    }
+    attached.reset();
+#endif
+}
