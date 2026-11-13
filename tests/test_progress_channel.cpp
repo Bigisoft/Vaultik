@@ -20,6 +20,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -482,6 +483,41 @@ TEST_CASE("progress channel: a process other than the engine started is dropped"
     CHECK(server.rejected_clients() == 1);
 }
 
+TEST_CASE("progress channel: an engine whose process id is not known takes no client") {
+    ProgressServer server;
+    // 0: the process id of the engine could not be read. Even an engine said to have ended does
+    // not make a client acceptable then.
+    int asked = 0;
+    server.expect_client(0, [&] {
+        ++asked;
+        return true;
+    });
+    std::atomic<int> step{0};
+    bool sent = true;
+    std::string error;
+    std::thread client([&] {
+        try {
+            ProgressClient c(server.name(), server.user(), 5000);
+            step = 1;
+            for (int i = 0; i < 500 && step < 2; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            sent = c.send_line("{\"event\":\"done\",\"status\":\"success\"}", 1000);
+        } catch (const std::exception& e) {
+            error = e.what();
+        }
+    });
+    for (int i = 0; i < 500 && step < 1; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK_FALSE(server.wait_connected(500));
+    CHECK(server.rejected_clients() == 1);
+    std::string line;
+    CHECK(server.read_line(line, 50) == ProgressServer::Read::Timeout);
+    CHECK_FALSE(server.send_line("cancel"));
+    step = 2;
+    client.join();
+    CHECK(error.empty());
+    CHECK_FALSE(sent);
+    CHECK(asked == 0);
+}
+
 TEST_CASE("elevated process: an exit code that cannot be read is an error, not success") {
     // A handle that may only be waited on: its exit code cannot be read.
     HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, GetCurrentProcessId());
@@ -521,9 +557,96 @@ TEST_CASE("progress channel: the engine refuses a name that is not a channel and
     const int code = os::run_command({VAULTIK_TEST_CLI, "disk", "wipe", "99999", "--confirm", "ERASE DISK 99999", "--progress-pipe", bad},
                                      &output);
     CAPTURE(output);
-    CHECK(code == 1);
+#ifdef _WIN32
+    CHECK(code == 1);  // it ran without the channel (disk 99999 is not there)
+#else
+    CHECK(code == 7);  // it stopped at once
+#endif
     CHECK(output.find("not a Vaultik progress channel") != std::string::npos);
 }
+
+#ifndef _WIN32
+TEST_CASE("progress channel: a root engine that cannot use its channel stops at once and writes nothing") {
+    // Under pkexec it has no window of its own: running on without the channel, nobody would see
+    // it run or be able to stop it.
+    namespace fs = std::filesystem;
+    std::uint8_t rnd[16];
+    random_bytes(rnd);
+    const fs::path dir = fs::temp_directory_path() / ("vaultik-channel-none-" + to_hex(ByteSpan(rnd, 8)));
+    // A channel name of the right form that nobody serves.
+    const std::string missing = (fs::temp_directory_path() / ("vaultik-progress-" + to_hex(ByteSpan(rnd, sizeof rnd)))).string();
+    REQUIRE(valid_progress_channel_name(missing));
+    const std::string saved = os::get_env("VAULTIK_PASSWORD");
+    os::set_env("VAULTIK_PASSWORD", "a test password");
+    std::string output;
+    const int code = os::run_command({VAULTIK_TEST_CLI, "init", "--repo", (dir / "repo").string(), "--progress-pipe", missing}, &output);
+    os::set_env("VAULTIK_PASSWORD", saved);
+    CAPTURE(output);
+    CHECK(code == 7);
+    CHECK(output.find("cannot use the app's progress channel") != std::string::npos);
+    CHECK(output.find("nothing was done") != std::string::npos);
+    CHECK_FALSE(fs::exists(dir));  // no repository was made
+    CHECK_FALSE(fs::exists(missing));
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("progress channel: the wait for an engine does not keep a processor busy when the channel failed") {
+    ProgressServer server;
+    // Gone: every wait for the engine fails at once from now on.
+    REQUIRE(::unlink((server.name() + "/control").c_str()) == 0);
+    CHECK_FALSE(server.wait_connected(0));
+    int polls = 0;
+    const auto start = std::chrono::steady_clock::now();
+    const EngineWait w = wait_for_engine(
+        server,
+        [&]() -> std::optional<int> {
+            ++polls;
+            return std::nullopt;
+        },
+        [&] { return std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(1000); }, -1, nullptr);
+    CHECK_FALSE(w.connected);
+    CHECK_FALSE(w.code.has_value());
+    CAPTURE(polls);
+    CHECK(polls >= 2);
+    CHECK(polls <= 10);  // about five times a second, not in a busy loop
+}
+
+namespace {
+
+int open_descriptors() {
+    int n = 0;
+    for ([[maybe_unused]] const auto& e : std::filesystem::directory_iterator("/proc/self/fd")) ++n;
+    return n;
+}
+
+}  // namespace
+
+TEST_CASE("progress channel: an engine end that cannot be opened leaves no descriptor open") {
+    namespace fs = std::filesystem;
+    std::uint8_t rnd[16];
+    random_bytes(rnd);
+    const std::string name = (fs::temp_directory_path() / ("vaultik-progress-" + to_hex(ByteSpan(rnd, sizeof rnd)))).string();
+    REQUIRE(::mkdir(name.c_str(), 0700) == 0);
+    REQUIRE(::chmod(name.c_str(), 0700) == 0);
+    REQUIRE(::mkfifo((name + "/control").c_str(), 0600) == 0);
+    SUBCASE("the second one is missing") {
+        const int before = open_descriptors();
+        CHECK_THROWS_AS(ProgressClient(name, "", 200), Error);
+        CHECK(open_descriptors() == before);
+    }
+    SUBCASE("the second one is not a pipe") {
+        const int f = ::open((name + "/events").c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        REQUIRE(f >= 0);
+        ::close(f);
+        const int before = open_descriptors();
+        CHECK_THROWS_WITH_AS(ProgressClient(name, "", 200), doctest::Contains("not a private pipe"), Error);
+        CHECK(open_descriptors() == before);
+    }
+    std::error_code ec;
+    fs::remove_all(name, ec);
+}
+#endif
 
 TEST_CASE("progress channel: a question the engine would ask fails with an error the app shows") {
     // Its console is hidden: a password prompt would wait there forever.

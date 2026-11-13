@@ -147,6 +147,7 @@ EngineWait wait_for_engine(ProgressServer& server, const std::function<std::opti
     const auto slow_at = Clock::now() + std::chrono::milliseconds(slow_ms < 0 ? 0 : slow_ms);
     bool told = slow_ms < 0;
     while (!abort()) {
+        const auto round = Clock::now();
         if (server.wait_connected(200)) {
             w.connected = true;
             return w;
@@ -160,6 +161,10 @@ EngineWait wait_for_engine(ProgressServer& server, const std::function<std::opti
             told = true;
             if (slow) slow();
         }
+        // A channel that failed for good answers at once: the engine is still waited for, but
+        // without keeping a processor busy.
+        const auto spent = Clock::now() - round;
+        if (spent < std::chrono::milliseconds(200)) std::this_thread::sleep_for(std::chrono::milliseconds(200) - spent);
     }
     return w;
 }
@@ -244,7 +249,10 @@ struct ProgressServer::Impl {
     bool connecting = false;
     bool connected = false;
     bool checked = false;  // the client that connected is the expected one
-    unsigned long expected_pid = 0;
+    // Unset: any client is taken (expect_client was never called). 0: none is (the engine's
+    // process id is not known).
+    std::optional<unsigned long> expected_pid;
+    std::function<bool()> engine_ended;
     int rejected = 0;
     bool reading = false;
     bool closed = false;
@@ -319,8 +327,9 @@ const std::string& ProgressServer::user() const {
     return impl_->user;
 }
 
-void ProgressServer::expect_client(unsigned long pid) {
+void ProgressServer::expect_client(unsigned long pid, std::function<bool()> engine_ended) {
     impl_->expected_pid = pid;
+    impl_->engine_ended = std::move(engine_ended);
 }
 
 int ProgressServer::rejected_clients() const {
@@ -332,11 +341,19 @@ bool ProgressServer::wait_connected(int timeout_ms) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms < 0 ? 0 : timeout_ms);
     for (;;) {
         if (s.connected) {
-            if (s.checked || s.expected_pid == 0) return s.checked = true;
+            if (s.checked || !s.expected_pid) return s.checked = true;
             // Only the engine this app started: any other process that opened the pipe (one of
             // this user's, or an administrator's) is dropped, and the pipe waits for the engine.
+            // An engine whose process id is not known (0) never matches: then nobody is taken.
+            const unsigned long expected = *s.expected_pid;
             ULONG pid = 0;
-            if (GetNamedPipeClientProcessId(s.pipe.get(), &pid) && pid == s.expected_pid) return s.checked = true;
+            const bool known = expected != 0 && GetNamedPipeClientProcessId(s.pipe.get(), &pid) != FALSE;
+            if (known && pid == expected) return s.checked = true;
+            // The process id of a client that already closed its end may not be readable: when
+            // the engine has ended meanwhile, that client was the engine, and the lines it sent
+            // last (its error, the drives in use) are read. Its exit code still decides how it
+            // ended.
+            if (!known && expected != 0 && s.engine_ended && s.engine_ended()) return s.checked = true;
             ++s.rejected;
             DisconnectNamedPipe(s.pipe.get());
             s.connected = false;
@@ -599,7 +616,7 @@ const std::string& ProgressServer::user() const {
     return impl_->user;
 }
 
-void ProgressServer::expect_client(unsigned long) {}
+void ProgressServer::expect_client(unsigned long, std::function<bool()>) {}
 
 int ProgressServer::rejected_clients() const {
     return 0;
@@ -674,6 +691,12 @@ struct ProgressClient::Impl {
     std::atomic<bool> broken{false};
     std::string pending;
     bool skipping = false;
+
+    // Also when the constructor of ProgressClient throws after it opened one of them.
+    ~Impl() {
+        if (events >= 0) ::close(events);
+        if (control >= 0) ::close(control);
+    }
 };
 
 ProgressClient::ProgressClient(const std::string& name, const std::string& expected_user, int timeout_ms)
@@ -723,10 +746,7 @@ ProgressClient::ProgressClient(const std::string& name, const std::string& expec
     check(c.events, events);
 }
 
-ProgressClient::~ProgressClient() {
-    if (impl_->events >= 0) ::close(impl_->events);
-    if (impl_->control >= 0) ::close(impl_->control);
-}
+ProgressClient::~ProgressClient() = default;
 
 bool ProgressClient::broken() const {
     return impl_->broken.load();
