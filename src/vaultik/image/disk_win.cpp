@@ -1276,17 +1276,36 @@ std::unique_ptr<WipeDevice> open_wipe_volume(const VolumeTarget& given, const Di
     // Opened by its volume id, so the handle is that volume whatever letter it has.
     UniqueHandle h = open_device(widen(v.device), GENERIC_READ | GENERIC_WRITE, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH);
     if (!h.valid()) throw_last_error("opening " + v.name + " for writing");
+    // The serial number through the volume's own path, just before the lock: a handle to the
+    // volume device itself is not a handle to a file, so GetVolumeInformationByHandleW may not
+    // answer for it below.
+    std::string serial_before;
+    {
+        DWORD serial = 0;
+        if (GetVolumeInformationW(widen(v.id).c_str(), nullptr, 0, &serial, nullptr, nullptr, nullptr, 0)) {
+            char text[16];
+            std::snprintf(text, sizeof text, "%08X", static_cast<unsigned>(serial));
+            serial_before = text;
+        }
+    }
     DWORD got = 0;
     if (!DeviceIoControl(h.get(), FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &got, nullptr))
         throw Error(v.name + " is in use; close every program using it (and File Explorer windows on it) and try again");
     // Locked: nothing can change it any more. Its file system's serial number, read while it is
-    // still mounted, and its size, on this handle.
+    // still mounted (on this handle where Windows answers: by handle, or NTFS's own volume data,
+    // whose low 32 bits are the serial number shown; otherwise the one read just before the
+    // lock), and its size, on this handle.
     VolumeTarget opened = v;
-    opened.serial.clear();
+    opened.serial = serial_before;
     DWORD serial = 0;
+    NTFS_VOLUME_DATA_BUFFER ntfs{};
     if (GetVolumeInformationByHandleW(h.get(), nullptr, 0, &serial, nullptr, nullptr, nullptr, 0)) {
         char text[16];
         std::snprintf(text, sizeof text, "%08X", static_cast<unsigned>(serial));
+        opened.serial = text;
+    } else if (DeviceIoControl(h.get(), FSCTL_GET_NTFS_VOLUME_DATA, nullptr, 0, &ntfs, sizeof ntfs, &got, nullptr)) {
+        char text[16];
+        std::snprintf(text, sizeof text, "%08X", static_cast<unsigned>(ntfs.VolumeSerialNumber.QuadPart & 0xFFFFFFFFu));
         opened.serial = text;
     }
     GET_LENGTH_INFORMATION len{};
