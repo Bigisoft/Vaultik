@@ -21,5 +21,9 @@ struct Mount {
 std::vector<Mount> read_mounts();
 // The mount `path` (absolute) is on: the latest (top-most) mount whose point holds it.
 const Mount* mount_of(const std::vector<Mount>& mounts, const std::string& path);
+// `path` made absolute with its links resolved as far as it exists (the rest as it is), as the
+// mount table names folders: a link to a folder on another drive is on that drive, and a mount
+// reached through a link is found.
+std::string resolved_path(const std::string& path);
 
 }  // namespace vaultik::os::mounts

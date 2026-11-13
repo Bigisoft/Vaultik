@@ -54,10 +54,12 @@ std::string find_program(const char* name) {
     return {};
 }
 
-// Whether something is mounted exactly at `path` (absolute).
+// Whether something is mounted exactly at `path` (absolute; also when reached through a link,
+// since the mount table names the folder with its links resolved).
 bool is_mount_point(const std::string& path) {
+    const std::string real = os::mounts::resolved_path(path);
     for (const os::mounts::Mount& m : os::mounts::read_mounts())
-        if (m.point == path) return true;
+        if (m.point == path || m.point == real) return true;
     return false;
 }
 

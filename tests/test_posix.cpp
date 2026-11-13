@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <climits>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -21,6 +22,7 @@
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/mount.hpp"
 #include "vaultik/platform/drive_health.hpp"
+#include "vaultik/platform/mounts_posix.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -437,6 +439,29 @@ TEST_CASE("POSIX: a version shown as a folder with FUSE") {
     mount.reset();
     CHECK(fs::is_directory(mine));
     CHECK(fs::is_empty(mine));
+}
+
+TEST_CASE("POSIX: a path through a link is on the drive the link points to") {
+    PosixTemp tmp;
+    const std::string real = os::join(tmp.path, "real");
+    fs::create_directories(real + "/inside");
+    const std::string link = os::join(tmp.path, "link");
+    REQUIRE(::symlink(real.c_str(), link.c_str()) == 0);
+    char buf[PATH_MAX];
+    REQUIRE(::realpath(real.c_str(), buf) != nullptr);
+    const std::string canonical = buf;
+    CHECK(os::mounts::resolved_path(link) == canonical);
+    CHECK(os::mounts::resolved_path(link + "/inside") == canonical + "/inside");
+    // A part that does not exist yet stays as it is, below the resolved part.
+    CHECK(os::mounts::resolved_path(link + "/new/folder") == canonical + "/new/folder");
+    // The same drive and volume as the folder itself.
+    CHECK(os::volume_of(link + "/inside").volume == os::volume_of(real + "/inside").volume);
+    const auto devices = [](const std::vector<os::DriveHealth>& list) {
+        std::vector<std::string> out;
+        for (const os::DriveHealth& d : list) out.push_back(d.device);
+        return out;
+    };
+    CHECK(devices(os::drive_health(link)) == devices(os::drive_health(real)));
 }
 
 TEST_CASE("POSIX: drive health of a folder never fails") {

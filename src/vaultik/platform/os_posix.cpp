@@ -641,6 +641,24 @@ const Mount* mount_of(const std::vector<Mount>& mounts, const std::string& path)
     return best;
 }
 
+std::string resolved_path(const std::string& path) {
+    std::string part = absolute_path(path);
+    std::string rest;  // below the part that exists
+    for (;;) {
+        // (realpath also fails on a mount whose program has ended: then its folder's parent is.)
+        char buf[PATH_MAX];
+        if (::realpath(part.c_str(), buf) != nullptr) {
+            const std::string real = buf;
+            return rest.empty() ? real : join(real, rest);
+        }
+        const std::size_t slash = part.rfind('/');
+        if (part == "/" || slash == std::string::npos) return absolute_path(path);
+        const std::string leaf = part.substr(slash + 1);
+        rest = rest.empty() ? leaf : join(leaf, rest);
+        part = slash == 0 ? std::string("/") : part.substr(0, slash);
+    }
+}
+
 }  // namespace mounts
 
 namespace {
@@ -700,7 +718,7 @@ constexpr std::string_view kUuidPrefix = "uuid:";
 // wherever the drive is mounted (/run/media/<user>/<label> on SteamOS and most desktops).
 VolumeLocation volume_of(const std::string& path) {
     VolumeLocation loc;
-    const std::string full = absolute_path(path);
+    const std::string full = mounts::resolved_path(path);  // the drive a link points to
     const std::vector<Mount> mounts = read_mounts();
     const Mount* m = mount_of(mounts, full);
     if (m == nullptr || network_type(m->type) || m->major == 0) return loc;  // network, or no device (tmpfs, overlay)
