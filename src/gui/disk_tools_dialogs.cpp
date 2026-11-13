@@ -84,13 +84,14 @@ QString disk_arg(const image::DiskInfo& d) {
 #endif
 }
 
-// The disks, each with why it cannot be erased (empty when it can).
+// The disks, each with why it cannot be erased (empty when it can). A mounted partition (Linux)
+// is no reason: the user is asked whether to unmount it when the job starts.
 std::vector<std::pair<image::DiskInfo, std::string>> tool_disks() {
     std::vector<std::pair<image::DiskInfo, std::string>> out;
     const std::vector<int> running = image::system_disks();
     const std::vector<int> keep = image::protected_tool_disks();
     for (image::DiskInfo& d : image::list_tool_disks()) {
-        std::string why = image::tool_refusal(d, running, keep);
+        std::string why = image::tool_refusal(d, running, keep, true);
         out.emplace_back(std::move(d), std::move(why));
     }
     return out;
@@ -123,6 +124,63 @@ int run_disk_engine(QWidget* parent, const QString& busy, const QStringList& arg
     if (box.clickedButton() == copy) QApplication::clipboard()->setText(command);
     return -2;
 #endif
+}
+
+// The engine's exit code when a drive is in use by another program (see --force-dismount).
+constexpr int kEngineInUse = 6;
+
+// The drives of disk `d` a program may be using, as the user knows them. Windows: its drive
+// letters (or the disk itself), any of which may be the one in use; Linux: the mounted ones.
+QStringList drives_of(const image::DiskInfo& d) {
+    QStringList out;
+#ifdef _WIN32
+    for (const image::DiskVolume& v : d.volumes)
+        if (!v.mount.empty()) out << (v.mount.size() <= 3 ? qs(v.mount.substr(0, 2)) : qs(v.mount));
+    if (out.isEmpty()) out << qs(image::describe(d));
+#else
+    for (const std::string& m : image::mounted_volumes(d)) out << qs(m);
+#endif
+    return out;
+}
+
+// Asks whether to force `drives` closed; true when the user agreed.
+bool ask_force_close(QWidget* parent, const QStringList& drives, const QString& yes) {
+    const QString text =
+        drives.size() == 1
+            ? QObject::tr("%1 is being used by another program. Vaultik can force it closed: any program with files "
+                          "open on it loses access to them, and unsaved changes to files on that drive are lost. Force "
+                          "it closed and continue?")
+                  .arg(drives.front())
+            : QObject::tr("%1 are being used by other programs. Vaultik can force them closed: any program with files "
+                          "open on them loses access to them, and unsaved changes to files on those drives are lost. "
+                          "Force them closed and continue?")
+                  .arg(drives.join(", "));
+    QMessageBox box(QMessageBox::Warning, parent->windowTitle(), text, QMessageBox::Cancel, parent);
+    box.setTextFormat(Qt::PlainText);
+    QPushButton* force = box.addButton(yes, QMessageBox::DestructiveRole);
+    box.setDefaultButton(QMessageBox::Cancel);
+    box.exec();
+    return box.clickedButton() == force;
+}
+
+// Runs the engine (run_disk_engine) for a job that writes to a disk or drive. When a drive is in
+// use by another program, asks whether to force it closed and, if the user agrees, runs the same
+// job (the same identity checks and confirmation, nothing typed again) with --force-dismount.
+// Windows: the engine finds out when it locks the drives (`drives` are the ones that may be in
+// use); Linux: `drives` are mounted, so the question comes before the command is shown. Returns
+// kEngineInUse when the user did not agree.
+int run_disk_engine_forcing(QWidget* parent, const QString& busy, QStringList args, const QStringList& drives,
+                            const QString& yes, QString& error) {
+#ifdef _WIN32
+    const int code = run_disk_engine(parent, busy, args, error);
+    if (code != kEngineInUse || !error.isEmpty()) return code;
+    if (!ask_force_close(parent, drives, yes)) return kEngineInUse;
+#else
+    if (!drives.isEmpty() && !ask_force_close(parent, drives, yes)) return kEngineInUse;
+    if (drives.isEmpty()) return run_disk_engine(parent, busy, args, error);
+#endif
+    args << "--force-dismount";
+    return run_disk_engine(parent, busy, args, error);
 }
 
 }  // namespace
@@ -272,10 +330,17 @@ void NewDiskDialog::start() {
     if (!id.serial.empty()) args << "--expect-serial" << qs(id.serial);
     if (!id.id.empty()) args << "--expect-id" << qs(id.id);
     QString error;
-    const int code = run_disk_engine(this, tr("Setting up the disk in its own window..."), args, error);
+#ifdef _WIN32
+    const QStringList drives = drives_of(shown);
+#else
+    const QStringList drives = drives_of(*current);
+#endif
+    const int code = run_disk_engine_forcing(this, tr("Setting up the disk in its own window..."), args, drives,
+                                             tr("Force close and set up"), error);
     confirm_->clear();
     if (code == -2) return;  // Linux: the command is run in a terminal
     if (!error.isEmpty()) status_->setText(tr("It did not start: %1").arg(error));
+    else if (code == kEngineInUse) status_->setText(tr("The disk was not set up: it is in use. Nothing was written."));
     else if (code == 0) status_->setText(tr("The disk is ready to use."));
     else status_->setText(tr("The disk was not set up; its window showed why."));
     fill_disks();
@@ -424,7 +489,7 @@ void DriveCleanserDialog::fill_targets() {
                             (v.filesystem.empty() ? QString() : ", " + qs(v.filesystem)) + ")";
             std::string refusal;
             try {
-                volume_ids_[name] = image::volume_identity(image::find_wipe_volume(name));
+                volume_ids_[name] = image::volume_identity(image::find_wipe_volume(name, true));
             } catch (const std::exception& e) {
                 refusal = e.what();
             }
@@ -500,6 +565,7 @@ void DriveCleanserDialog::start() {
     const QString want = confirmation();
     if (want.isEmpty() || !image::typed_matches(u8(confirm_->text()), u8(want))) return;
     QStringList args{"disk", "wipe"};
+    QStringList drives;  // the ones that may be in use (see run_disk_engine_forcing)
     if (whole_disk_->isChecked()) {
         const image::DiskInfo shown = *chosen_disk();
         const std::vector<image::DiskInfo> now = image::list_tool_disks();
@@ -516,6 +582,11 @@ void DriveCleanserDialog::start() {
             return;
         }
         const image::DiskIdentity id = image::identity_of(shown);
+#ifdef _WIN32
+        drives = drives_of(shown);
+#else
+        drives = drives_of(*current);
+#endif
         args << disk_arg(shown) << "--expect-size" << QString::number(id.size);
         if (!id.serial.empty()) args << "--expect-serial" << qs(id.serial);
         if (!id.id.empty()) args << "--expect-id" << qs(id.id);
@@ -527,7 +598,13 @@ void DriveCleanserDialog::start() {
         std::string other = shown == volume_ids_.end() ? std::string("the drive was not listed") : std::string();
         if (other.empty()) {
             try {
-                other = image::volume_mismatch(image::find_wipe_volume(name), shown->second);
+                const image::VolumeTarget now = image::find_wipe_volume(name, true);
+                other = image::volume_mismatch(now, shown->second);
+#ifdef _WIN32
+                drives << qs(now.name);
+#else
+                if (!now.mount.empty()) drives << qs(now.mount);
+#endif
             } catch (const std::exception& e) {
                 other = e.what();
             }
@@ -549,11 +626,13 @@ void DriveCleanserDialog::start() {
     args << "--method" << method << "--confirm" << want;
     if (verify_->isChecked()) args << "--verify";
     QString error;
-    const int code = run_disk_engine(this, tr("Erasing in its own window (it shows the progress; Ctrl+C there stops it)..."),
-                                     args, error);
+    const int code = run_disk_engine_forcing(
+        this, tr("Erasing in its own window (it shows the progress; Ctrl+C there stops it)..."), args, drives,
+        tr("Force close and erase"), error);
     confirm_->clear();
     if (code == -2) return;
     if (!error.isEmpty()) status_->setText(tr("It did not start: %1").arg(error));
+    else if (code == kEngineInUse) status_->setText(tr("Nothing was erased: the drive is in use."));
     else if (code == 0) status_->setText(tr("Erased."));
     else status_->setText(tr("It did not finish; its window showed why."));
     fill_targets();
