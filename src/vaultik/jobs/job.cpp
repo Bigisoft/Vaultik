@@ -368,7 +368,7 @@ void validate(const Job& job) {
     for (const std::string& v : job.docker_volumes)
         if (!valid_volume_name(v)) throw Error("invalid Docker volume name \"" + v + "\"");
     check_text("the Docker image", job.docker_image);
-    if (job.docker_image.starts_with("-") || job.docker_image.find_first_of(" 	") != std::string::npos)
+    if (!job.docker_image.empty() && !valid_image_reference(job.docker_image))
         throw Error("invalid Docker image name \"" + job.docker_image + "\"");
     for (const DatabaseDump& db : job.databases) {
         check_text("a database dump's setting", db.name + db.host + db.database + db.user + db.container);

@@ -46,6 +46,10 @@ std::string docker_program();
 // digits, '_', '.' and '-'; at least 2 and at most 255 characters.
 bool valid_volume_name(std::string_view name);
 bool valid_container_name(std::string_view name);
+// An image reference as Docker writes them ("busybox", "busybox:1.36", "ghcr.io:443/a/b@sha256:..."):
+// a letter or digit first (so never an option such as "--privileged"), then letters, digits and
+// '_', '.', '-', '/', ':', '@'; at most 512 characters.
+bool valid_image_reference(std::string_view image);
 
 // Where a volume's export is in a version: {"Docker", "<volume>.tar"} and "Docker/<volume>.tar".
 std::vector<std::string> volume_place(const std::string& volume);

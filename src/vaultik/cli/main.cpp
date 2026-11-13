@@ -1435,6 +1435,8 @@ int cmd_backup(const Args& a) {
         throw Error("usage: vaultik backup -r <repo> <path>...");
     for (const std::string& v : volumes)
         if (!valid_volume_name(v)) throw Error("invalid Docker volume name \"" + v + "\"");
+    if (const auto image = a.value("--docker-image"); image && !image->empty() && !valid_image_reference(*image))
+        throw Error("invalid Docker image name \"" + *image + "\"");
     const WslWhenRunning when = parse_wsl_when_running(a.value("--wsl-running").value_or("skip"));
     for (const std::string& d : distros)
         if (!valid_distro_name(d)) throw Error("invalid WSL distribution name \"" + d + "\"");
@@ -3882,6 +3884,8 @@ int cmd_docker(const Args& a) {
     const auto name = a.value("--name");
     if (!name) throw Error("docker restore needs --name <new volume> (an existing volume is never written to)");
     if (!valid_volume_name(*name)) throw Error("invalid Docker volume name \"" + *name + "\"");
+    if (const auto image = a.value("--image"); image && !image->empty() && !valid_image_reference(*image))
+        throw Error("invalid Docker image name \"" + *image + "\"");
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "docker restore", lock_wait(a));
     repo->reload_index();

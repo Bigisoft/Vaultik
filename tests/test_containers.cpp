@@ -129,6 +129,14 @@ TEST_CASE("the image that runs tar is one already on this computer") {
     CHECK(pick_helper_image({"docker.io/library/alpine:3.20"}, "linux") == "docker.io/library/alpine:3.20");
     CHECK(pick_helper_image(images, "windows") == "mcr.microsoft.com/windows/nanoserver:ltsc2025");
     CHECK(pick_helper_image(images, "linux", "my/tools:1") == "my/tools:1");  // the job's own
+    // A named image goes on docker's command line: never as an option, never with odd characters.
+    for (const char* bad : {"--privileged", "-v", "busybox --privileged", "a;b", "a\tb", "a$b"})
+        CHECK_THROWS_AS(pick_helper_image(images, "linux", bad), Error);
+    for (const char* good : {"busybox", "busybox:1.36", "ghcr.io:443/org/tool_x:v1.2-a", "alpine@sha256:0123abcd"})
+        CHECK(valid_image_reference(good));
+    CHECK_FALSE(valid_image_reference(""));
+    CHECK_FALSE(valid_image_reference("-busybox"));
+    CHECK_FALSE(valid_image_reference(std::string(513, 'a')));
     CHECK_THROWS_WITH_AS(pick_helper_image({"acumatica:26.200"}, "linux"), doctest::Contains("docker pull busybox"),
                          Error);
     CHECK_THROWS_WITH_AS(pick_helper_image({"busybox:1"}, "windows"), doctest::Contains("nanoserver"), Error);
