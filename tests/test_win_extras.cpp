@@ -291,6 +291,29 @@ TEST_CASE("a command runs with a time limit, and programs it leaves running are 
     CHECK(env.find("[success]") != std::string::npos);
 }
 
+TEST_CASE("extra variables reach a program run with this process's environment") {
+    // (Passwords for sqlcmd and pg_dump go this way.) A name in another case replaces the
+    // variable, as Windows treats names; the rest of the environment is kept.
+    os::set_env("VAULTIK_TEST_CASE", "old");
+    std::string out;
+    os::CommandOptions o;
+    o.output = &out;
+    o.extra_environment = {{"VAULTIK_TEST_EXTRA", "a b"}, {"vaultik_test_case", "new"}};
+    CHECK(os::run_command({"cmd.exe", "/d", "/c", "echo [%VAULTIK_TEST_EXTRA%] [%VAULTIK_TEST_CASE%] [%SystemRoot%]"}, o) ==
+          0);
+    CHECK(out.find("[a b]") != std::string::npos);
+    CHECK(out.find("[new]") != std::string::npos);
+    CHECK(out.find("[%SystemRoot%]") == std::string::npos);
+
+    std::string shell_out;
+    os::ShellOptions s;
+    s.output = &shell_out;
+    s.extra_environment = {{"VAULTIK_TEST_EXTRA", "from the shell"}};
+    CHECK(os::run_shell("echo [%VAULTIK_TEST_EXTRA%] [%VAULTIK_TEST_CASE%]", s) == 0);
+    CHECK(shell_out.find("[from the shell] [old]") != std::string::npos);
+    os::set_env("VAULTIK_TEST_CASE", "");
+}
+
 TEST_CASE("short (8.3) names are written out in full") {
     TempDir tmp;
     const fs::path folder = tmp.path / "a folder with a long name";
