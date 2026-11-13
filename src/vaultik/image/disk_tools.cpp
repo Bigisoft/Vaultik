@@ -7,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstring>
+#include <thread>
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/ops/backup.hpp"
@@ -95,7 +96,71 @@ std::size_t utf16_units(const std::string& s) {
     return n;
 }
 
+std::string joined(const std::vector<std::string>& names) {
+    std::string s;
+    for (const std::string& n : names) s += (s.empty() ? "" : ", ") + n;
+    return s;
+}
+
 }  // namespace
+
+// ---- volumes in use ---------------------------------------------------------------------------
+
+VolumesInUse::VolumesInUse(std::vector<std::string> names)
+    : Error(joined(names) + (names.size() == 1 ? " is" : " are") +
+            " in use by another program; close every program using it and try again. Nothing was written"),
+      volumes(std::move(names)) {}
+
+void lock_volumes(const std::vector<VolumeLock*>& volumes, bool force, const LockRetry& retry) {
+    std::vector<VolumeLock*> busy;
+    for (VolumeLock* v : volumes)
+        if (!v->lock()) busy.push_back(v);
+    if (busy.empty()) return;
+    if (!force) {
+        std::vector<std::string> names;
+        for (const VolumeLock* v : busy) names.push_back(v->name());
+        throw VolumesInUse(std::move(names));
+    }
+    // Asked for: each one is taken away from the programs using it (as format /X does), then
+    // locked, so Windows cannot mount it again while it is written.
+    for (VolumeLock* v : busy) {
+        v->force_dismount();
+        bool locked = false;
+        for (int i = 0; i < std::max(1, retry.tries) && !locked; ++i) {
+            if (i > 0) std::this_thread::sleep_for(retry.wait);
+            locked = v->lock();
+        }
+        if (!locked)
+            throw Error(v->name() + " is still in use after it was forced closed (a program opened it again at "
+                        "once); close every program using it and try again. Nothing was written");
+    }
+}
+
+std::vector<std::string> mounted_volumes(const DiskInfo& d) {
+    std::vector<std::string> out;
+    for (const DiskVolume& v : d.volumes)
+        if (!v.mount.empty() && v.filesystem != "swap" && v.filesystem != "holder") out.push_back(v.mount);
+    return out;
+}
+
+void unmount_volumes(const std::function<std::vector<std::string>()>& mounted,
+                     const std::function<bool(const std::string& point, std::string& why)>& unmount) {
+    // A volume can be mounted in several places (and one mount can hide another): listed again
+    // after each round, until nothing is left or a round changes nothing.
+    for (int round = 0; round < 16; ++round) {
+        const std::vector<std::string> points = mounted();
+        if (points.empty()) return;
+        for (const std::string& point : points) {
+            std::string why;
+            if (!unmount(point, why))
+                throw Error(point + " is still in use and could not be unmounted" + (why.empty() ? "" : " (" + why + ")") +
+                            "; close every program using it and try again. Nothing was written");
+        }
+    }
+    const std::vector<std::string> left = mounted();
+    if (!left.empty())
+        throw Error(left.front() + " is still mounted; unmount it and try again. Nothing was written");
+}
 
 // ---- names and confirmations ----------------------------------------------------------------
 
@@ -139,7 +204,8 @@ const DiskInfo& find_tool_disk(const std::vector<DiskInfo>& disks, const std::st
     throw Error("disk " + arg + " is not connected (see vaultik disk list)");
 }
 
-std::string tool_refusal(const DiskInfo& d, const std::vector<int>& running_from, const std::vector<int>& protected_disks) {
+std::string tool_refusal(const DiskInfo& d, const std::vector<int>& running_from, const std::vector<int>& protected_disks,
+                         bool mounted_ok) {
     std::string why = target_refusal(d, running_from, protected_disks);
     if (!why.empty()) {
 #ifdef _WIN32
@@ -161,12 +227,14 @@ std::string tool_refusal(const DiskInfo& d, const std::vector<int>& running_from
             return "it holds a part of a volume that lies on several disks" +
                    (v.mount.empty() ? std::string() : " (" + v.mount + ")") + "; remove that volume first";
 #ifdef _WIN32
+        (void)mounted_ok;  // a volume with a letter is not in use for that
         const std::string use = windows_use_of(v);
         if (!use.empty()) return use;
 #else
         if (v.filesystem == "swap") return v.name + " is in use as swap";
         if (v.filesystem == "holder") return v.name + " is in use (LVM, RAID or encryption)";
-        if (!v.mount.empty()) return v.name + " is mounted on " + v.mount + "; unmount it first";
+        if (!v.mount.empty() && !mounted_ok)
+            return v.name + " is mounted on " + v.mount + "; unmount it first (or give --force-dismount)";
 #endif
     }
     return {};
