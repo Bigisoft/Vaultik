@@ -22,8 +22,11 @@ namespace {
 constexpr int kExitCancelled = 4;
 constexpr int kExitInUse = 6;  // the engine's exit code when a drive is in use
 
-// How long the engine has to connect after it started (after the approval prompt).
-constexpr auto kConnectTime = std::chrono::seconds(20);
+// Windows: how long the engine may take to connect after it started (after the approval
+// prompt) before the window says the progress cannot be shown here; an engine that connects
+// later is still taken. POSIX: no limit (pkexec returns before its password prompt was
+// answered, which may take any time).
+constexpr int kConnectMs = 20000;
 
 std::atomic<int> g_running{0};
 
@@ -88,7 +91,7 @@ ElevatedTaskDialog::ElevatedTaskDialog(const ElevatedTask& task, const QStringLi
     auto* buttons = new QDialogButtonBox;
     button_ = buttons->addButton(tr("Cancel"), QDialogButtonBox::RejectRole);
     connect(button_, &QPushButton::clicked, this, [this] {
-        if (running_) reject();
+        if (running_ && !may_close_) reject();
         else accept();
     });
     layout->addWidget(buttons);
@@ -132,59 +135,87 @@ void ElevatedTaskDialog::post_line(const std::string& line) {
 // On a thread of its own: starts the engine (the approval prompt waits here), reads its
 // events and passes them on, sends "cancel" when asked, and waits for it to end.
 void ElevatedTaskDialog::work(std::vector<std::string> argv) {
+    const auto finish = [this](int code, const QString& error, bool started) {
+        QMetaObject::invokeMethod(this, [this, code, error, started] { on_finished(code, error, started); }, Qt::QueuedConnection);
+    };
     std::unique_ptr<os::ElevatedProcess> process;
     try {
         process = os::start_command_elevated(argv, server_ == nullptr);
     } catch (const std::exception& e) {
-        const QString error = QString::fromUtf8(e.what());
-        QMetaObject::invokeMethod(this, [this, error] { on_finished(-1, error); }, Qt::QueuedConnection);
+        finish(-1, QString::fromUtf8(e.what()), false);
         return;
     }
+    try {
+        const std::optional<int> code = follow(*process);
+        if (code) finish(*code, {}, true);
+    } catch (const std::exception& e) {
+        // How it ended cannot be read: never taken for success.
+        finish(-1, QString::fromUtf8(e.what()), true);
+    }
+}
+
+// Follows the engine until it ended (its exit code), or the window went away (nullopt).
+std::optional<int> ElevatedTaskDialog::follow(os::ElevatedProcess& process) {
     std::optional<int> code;
     if (server_ != nullptr) {
+        // Only the engine started here may connect.
+        server_->expect_client(process.pid());
+#ifdef _WIN32
         QMetaObject::invokeMethod(this, [this] { phase_->setText(tr("Starting...")); }, Qt::QueuedConnection);
-        const auto deadline = std::chrono::steady_clock::now() + kConnectTime;
-        bool connected = false;
-        while (!abort_ && !(connected = server_->wait_connected(200))) {
-            if ((code = process->wait(0))) break;
-            if (std::chrono::steady_clock::now() > deadline) break;
-        }
-        if (!connected && !abort_) connected = server_->wait_connected(0);
-        if (connected) {
+        const int slow_ms = kConnectMs;
+#else
+        const int slow_ms = -1;  // the password prompt may be answered at any time
+#endif
+        const os::EngineWait w = os::wait_for_engine(
+            *server_, [&] { return process.wait(0); }, [this] { return abort_.load(); }, slow_ms,
+            [this] { QMetaObject::invokeMethod(this, [this] { on_in_window(); }, Qt::QueuedConnection); });
+        code = w.code;
+        if (w.connected) {
             QMetaObject::invokeMethod(this, [this] { on_connected(); }, Qt::QueuedConnection);
-            bool cancel_sent = false;
+            bool cancel_tried = false;
             std::string line;
             while (!abort_) {
-                if (cancel_ && !cancel_sent) cancel_sent = server_->send_line("cancel");
+                if (cancel_ && !cancel_tried) {
+                    cancel_tried = true;
+                    if (!server_->send_line("cancel"))
+                        QMetaObject::invokeMethod(this, [this] { on_channel_lost(); }, Qt::QueuedConnection);
+                }
                 const os::ProgressServer::Read got = server_->read_line(line, 200);
                 if (got == os::ProgressServer::Read::Line) {
                     post_line(line);
                 } else if (got == os::ProgressServer::Read::Closed) {
+                    // Its end closed: it ends (then it is gone within moments), or the channel
+                    // broke while it goes on, and a Cancel can no longer reach it.
+                    if (!code) code = process.wait(3000);
+                    if (!code) QMetaObject::invokeMethod(this, [this] { on_channel_lost(); }, Qt::QueuedConnection);
                     break;
-                } else if (!code && (code = process->wait(0))) {
+                } else if (!code && (code = process.wait(0))) {
                     // It ended: what it sent last is read, then no more is waited for.
                     while (server_->read_line(line, 300) == os::ProgressServer::Read::Line) post_line(line);
                     break;
                 }
             }
-        } else if (!code && !abort_) {
-            QMetaObject::invokeMethod(this, [this] { on_in_window(); }, Qt::QueuedConnection);
         }
     }
-    while (!abort_ && !code) code = process->wait(200);
-    if (code) {
-        const int c = *code;
-        QMetaObject::invokeMethod(this, [this, c] { on_finished(c, {}); }, Qt::QueuedConnection);
-    }
+    while (!abort_ && !code) code = process.wait(200);
+    return code;
 }
 
 void ElevatedTaskDialog::on_connected() {
+    if (!running_) return;
     connected_ = true;
     phase_->setText(QString());
-    if (task_.cancel_question.isEmpty()) button_->setEnabled(false);
+    if (result_.in_window) {
+        // It connected late, after the window said its progress could not be shown here.
+        result_.in_window = false;
+        note_->clear();
+        note_->hide();
+    }
+    button_->setEnabled(!task_.cancel_question.isEmpty());
 }
 
 void ElevatedTaskDialog::on_in_window() {
+    if (!running_ || connected_) return;
     result_.in_window = true;
     phase_->setText(QString());
 #ifdef _WIN32
@@ -194,6 +225,22 @@ void ElevatedTaskDialog::on_in_window() {
 #endif
     note_->show();
     button_->setEnabled(false);
+}
+
+void ElevatedTaskDialog::on_channel_lost() {
+    if (!running_ || lost_) return;
+    lost_ = true;
+    connected_ = false;
+    may_close_ = true;
+    if (cancelling_) phase_->clear();
+    note_->setText(cancelling_ ? tr("Vaultik can no longer reach the task, so it cannot be stopped from here: it "
+                                    "finishes on its own. You can close this window; the task goes on.")
+                               : tr("Vaultik can no longer reach the task: its progress cannot be shown and it cannot "
+                                    "be stopped from here; it finishes on its own. You can close this window; the "
+                                    "task goes on."));
+    note_->show();
+    button_->setText(tr("Close"));
+    button_->setEnabled(true);
 }
 
 void ElevatedTaskDialog::on_line(const QString& line) {
@@ -246,12 +293,19 @@ void ElevatedTaskDialog::show_progress(const TaskEvent& e) {
     details_->setText(parts.join(QStringLiteral(", ")));
 }
 
-void ElevatedTaskDialog::on_finished(int code, const QString& error) {
+void ElevatedTaskDialog::on_finished(int code, const QString& error, bool started) {
     if (!running_) return;
     running_ = false;
     --g_running;
+    result_.ended = true;
     result_.code = code;
-    result_.error = error;
+    if (started && !error.isEmpty()) {
+        // It ran, but how it ended cannot be told: a failure, never success.
+        result_.status.clear();
+        result_.message = tr("Vaultik cannot tell how it ended (%1).").arg(error);
+    } else {
+        result_.error = error;
+    }
 #ifndef _WIN32
     // pkexec: 126 when the password was not given, 127 when it is not allowed.
     if (error.isEmpty() && !connected_ && (code == 126 || code == 127)) {
@@ -295,7 +349,8 @@ void ElevatedTaskDialog::on_finished(int code, const QString& error) {
 }
 
 void ElevatedTaskDialog::reject() {
-    if (!running_) {
+    if (!running_ || may_close_) {
+        // Closed while it runs (it can no longer be reached): it goes on.
         QDialog::reject();
         return;
     }
@@ -318,6 +373,7 @@ void ElevatedTaskDialog::reject() {
     box.setDefaultButton(go_on);
     box.exec();
     if (box.clickedButton() != stop || !running_) return;
+    if (lost_) return;  // it said so meanwhile
     cancelling_ = true;
     cancel_ = true;
     button_->setEnabled(false);
@@ -329,7 +385,9 @@ ElevatedResult run_elevated_task(QWidget* parent, const ElevatedTask& task, cons
     dialog.start();
     dialog.exec();
     ElevatedResult r = dialog.result_of();
-    // exec() also ends when Vaultik quits (after asking): the task goes on without it.
-    if (r.code == -1 && r.error.isEmpty()) r.left_running = true;
+    // exec() also ends when Vaultik quits (after asking), or when the window was closed after
+    // the task could no longer be reached: the task goes on without it. Not for an engine that
+    // ended, whatever its exit code.
+    if (!r.ended) r.left_running = true;
     return r;
 }

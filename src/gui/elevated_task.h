@@ -14,6 +14,7 @@
 #include "vaultik/util/task_events.hpp"
 
 namespace vaultik::os {
+class ElevatedProcess;
 class ProgressServer;
 }
 
@@ -36,7 +37,8 @@ struct ElevatedResult {
     QString message;          // the engine's own message with it
     QStringList in_use;       // the drives in use it named
     bool in_window = false;   // no progress channel: it ran in a window of its own
-    bool left_running = false;  // Vaultik was closed while it ran (it goes on)
+    bool ended = false;       // it ended (or did not start), and `code` tells how
+    bool left_running = false;  // the window was closed (or Vaultik was) while it ran: it goes on
 };
 
 // Runs the command-line engine with `args` with administrator rights and shows its progress in
@@ -73,9 +75,12 @@ private:
     void on_line(const QString& line);
     void on_in_window();
     void on_connected();
-    void on_finished(int code, const QString& error);
+    void on_channel_lost();
+    // `error`: why it did not start, or (`started`) why how it ended cannot be told.
+    void on_finished(int code, const QString& error, bool started);
     void show_progress(const vaultik::TaskEvent& e);
     void work(std::vector<std::string> argv);
+    std::optional<int> follow(vaultik::os::ElevatedProcess& process);
     void post_line(const std::string& line);
 
     ElevatedTask task_;
@@ -90,6 +95,8 @@ private:
     bool running_ = false;
     bool connected_ = false;
     bool cancelling_ = false;
+    bool lost_ = false;       // the channel broke while it runs: it can no longer be stopped from here
+    bool may_close_ = false;  // the window may be closed while it runs (it goes on)
     vaultik::RateEstimator rate_;
     std::uint64_t last_total_ = 0;
     int last_pass_ = -1;
