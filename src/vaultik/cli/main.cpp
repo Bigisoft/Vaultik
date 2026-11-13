@@ -410,6 +410,10 @@ Commands:
       --jobs <a,b>             Only these jobs (their ids in the file)
       --replace                A job whose id is taken here replaces that job
                                (otherwise it is imported under a new id)
+      --alerts                 Also the alert settings (where alerts are sent)
+      --keep-commands          Keep the jobs' commands before and after the
+                               backup and their administrator rights (left out
+                               otherwise: only for a file you made yourself)
   admin-job install|remove     Used by schedule and the frontend for jobs with
                                administrator rights (asks for approval)
 
@@ -549,7 +553,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1628,7 +1632,7 @@ int cmd_settings(const Args& a) {
         return kExitOk;
     }
     if (sub == "import") {
-        if (a.positional.size() < 2) throw Error("usage: vaultik settings import <file> [--jobs a,b] [--replace]");
+        if (a.positional.size() < 2) throw Error("usage: vaultik settings import <file> [--jobs a,b] [--replace] [--alerts] [--keep-commands]");
         const Bytes data = os::read_file(os::absolute_path(a.positional[1]), 64u << 20);
         std::string pw = jobs::settings_file_encrypted(data) ? settings_password(a, false) : std::string();
         jobs::SettingsBundle bundle;
@@ -1641,6 +1645,8 @@ int cmd_settings(const Args& a) {
         secure_wipe(pw.data(), pw.size());
         jobs::ImportChoice choice;
         choice.replace = a.has("--replace");
+        choice.alerts = a.has("--alerts");
+        choice.keep_commands = a.has("--keep-commands");
         if (auto list = a.value("--jobs")) {
             std::size_t at = 0;
             while (at <= list->size()) {
@@ -1656,17 +1662,24 @@ int cmd_settings(const Args& a) {
         if (!g_json) {
             out("The file was made on " + (bundle.computer.empty() ? std::string("another computer") : bundle.computer) +
                 (bundle.created ? " on " + os::format_time_local(bundle.created) : std::string()) + " and has these jobs:\n");
-            for (const jobs::Job& j : bundle.jobs)
+            for (const jobs::Job& j : bundle.jobs) {
                 out("  " + pad(j.id, 24) + pad(j.name, 28) + j.repository + "\n");
+                if (!j.before_command.empty()) out("      runs before the backup: " + j.before_command + "\n");
+                if (!j.after_command.empty()) out("      runs after the backup: " + j.after_command + "\n");
+                if (j.run_as_admin) out("      runs with administrator rights\n");
+            }
         }
         const jobs::ImportResult r = jobs::import_settings(store, bundle, choice);
         // Paused, so this removes the tasks of a job that was replaced (and sets up nothing new).
+        bool schedule_failed = false;
         for (const jobs::ImportedJob& i : r.jobs) {
             if (const auto job = store.find(i.id)) {
                 try {
                     jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
                 } catch (const Error& e) {
-                    warning("the schedule of " + i.name + ": " + e.what());
+                    if (i.replaced) schedule_failed = true;
+                    warning("the schedule of " + i.name + " could not be changed, so it may still run on its own (" +
+                            e.what() + "); pause it with vaultik pause-job " + i.id);
                 }
             }
         }
@@ -1674,8 +1687,9 @@ int cmd_settings(const Args& a) {
             nlohmann::json list = nlohmann::json::array();
             for (const jobs::ImportedJob& i : r.jobs)
                 list.push_back({{"from", i.from_id}, {"id", i.id}, {"name", i.name}, {"replaced", i.replaced},
-                                {"renamed", i.renamed}, {"secrets", i.secrets}});
+                                {"renamed", i.renamed}, {"secrets", i.secrets}, {"stripped", i.stripped}});
             emit({{"event", "done"}, {"status", "success"}, {"jobs", list}, {"alerts", r.alerts},
+                  {"schedule_failed", schedule_failed},
                   {"message", "imported " + std::to_string(r.jobs.size()) + " job(s)"}});
             return kExitOk;
         }
@@ -1683,14 +1697,20 @@ int cmd_settings(const Args& a) {
             std::string how = i.replaced ? "replaced the job of that id" : i.renamed ? "imported as " + i.id + " (the id was taken)" : "imported";
             if (!i.secrets) how += "; its password is asked for when it first runs";
             out("  " + i.name + ": " + how + "\n");
+            for (const std::string& left : i.stripped) out("      left out: " + left + "\n");
         }
+        if (std::any_of(r.jobs.begin(), r.jobs.end(), [](const jobs::ImportedJob& i) { return !i.stripped.empty(); }))
+            out("Commands and administrator rights were left out (they would run on this computer); import again\n"
+                "with --keep-commands for a file you made yourself, or set them in the job.\n");
         out("Imported " + std::to_string(r.jobs.size()) + " job(s), all paused: check their folders on this computer, then\n"
             "resume them (vaultik resume-job <job>, or Resume schedule in Vaultik).\n");
         if (r.alerts) out("The alert settings were imported too.\n");
+        else if (bundle.alerts) out("The alert settings in the file were not imported (--alerts imports them).\n");
         if (!bundle.app.empty()) out("The frontend's own settings in the file are imported when the file is imported in Vaultik.\n");
         return kExitOk;
     }
-    throw Error("usage: vaultik settings export [<file>] [--with-secrets] | import <file> [--jobs a,b] [--replace]");
+    throw Error("usage: vaultik settings export [<file>] [--with-secrets] | import <file> [--jobs a,b] [--replace] [--alerts] "
+                "[--keep-commands]");
 }
 
 // After a job's backup: removes its snapshots beyond its retention, then the data nothing uses any

@@ -31,6 +31,11 @@ struct AlertSettings {
 
 AlertSettings load_alerts(const std::string& dir = config_dir());
 void save_alerts(const AlertSettings& settings, const std::string& dir = config_dir());
+// What save_alerts checks before it writes: no control characters, URLs it may send to. Throws Error.
+void check_alerts(const AlertSettings& settings);
+// Whether `which` is the name of an alert channel with a token ("ntfy", "telegram"). The two
+// below throw Error for any other name.
+bool alert_secret_name(const std::string& which);
 // The sealed tokens: ntfy's access token (optional) and the Telegram bot token.
 std::string alert_secret(const std::string& which, const std::string& dir = config_dir());
 void set_alert_secret(const std::string& which, const std::string& secret, const std::string& dir = config_dir());

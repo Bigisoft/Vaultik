@@ -15,7 +15,8 @@
 //           "secrets": {"<job id>": {...}, ...}, "alert_secrets": {...}}
 //
 // Imported jobs keep their schedule but start paused, so nothing runs before the user checked
-// their folders on the new computer.
+// their folders on the new computer. Their commands before and after the backup and their
+// administrator rights, and the alert settings, are only imported when asked for.
 
 #include <cstdint>
 #include <map>
@@ -73,7 +74,12 @@ SettingsBundle read_settings_file(ByteSpan file, const std::string& password);
 struct ImportChoice {
     std::vector<std::string> jobs;  // the ids to import; empty: all of them
     bool replace = false;           // a job whose id is taken replaces that job (else it is renamed)
-    bool alerts = true;             // also the alert settings (when the file has them)
+    // Also the alert settings (when the file has them). Not unless asked for: they say where
+    // this computer's alerts (and, through the webhook, what they tell) are sent.
+    bool alerts = false;
+    // Keep the jobs' commands before and after the backup and their administrator rights. Not
+    // unless asked for: someone else's file could run anything here, with the rights.
+    bool keep_commands = false;
 };
 struct ImportedJob {
     std::string from_id;  // in the file
@@ -82,14 +88,21 @@ struct ImportedJob {
     bool replaced = false;
     bool renamed = false;
     bool secrets = false;  // its password (and keys) came with it
+    std::vector<std::string> stripped;  // what was left out (without keep_commands): "the command before the backup (...)"
 };
 struct ImportResult {
     std::vector<ImportedJob> jobs;
     bool alerts = false;
 };
-// Writes the chosen jobs into `store`, paused, with their secrets when the file has them. The
-// caller then applies their schedules (jobs::apply_schedule), which removes the tasks of a job
-// that was replaced. Throws Error for an id not in the file.
+// Writes the chosen jobs into `store`, paused, with their secrets when the file has them. Every
+// chosen job is checked first, so when one is not right (Error) nothing was written and no saved
+// secret was removed. The caller then applies their schedules (jobs::apply_schedule), which
+// removes the tasks of a job that was replaced. Throws Error for an id not in the file.
 ImportResult import_settings(const JobStore& store, const SettingsBundle& bundle, const ImportChoice& choice);
+
+// Whether a job runs commands before or after its backup, or runs with administrator rights.
+bool runs_commands(const Job& job);
+// Removes those from `job`; returns what was removed, for the user.
+std::vector<std::string> strip_commands(Job& job);
 
 }  // namespace vaultik::jobs

@@ -103,7 +103,9 @@ void ExportSettingsDialog::accept() {
         QMessageBox::question(this, windowTitle(), tr("%1 exists already. Replace it?").arg(path)) != QMessageBox::Yes)
         return;
     const bool secrets = secrets_->isChecked();
-    std::string pw = secrets ? u8(password_->text()) : std::string();
+    QString typed = secrets ? password_->text() : QString();
+    std::string pw = u8(typed);
+    typed.fill(QChar(0));
     QString error;
     std::size_t count = 0;
     QApplication::setOverrideCursor(Qt::WaitCursor);
@@ -122,6 +124,8 @@ void ExportSettingsDialog::accept() {
         plain_warning(this, windowTitle(), error);
         return;
     }
+    password_->clear();  // not kept in the window's memory longer than needed
+    password2_->clear();
     QMessageBox::information(this, windowTitle(),
                              tr("Saved %1 backup job(s) and the settings to %2.")
                                  .arg(count)
@@ -185,11 +189,20 @@ ImportSettingsDialog::ImportSettingsDialog(const jobs::JobStore& store, std::sha
     layout->addWidget(new QLabel(tr("Backup jobs to import:")));
     jobs_ = new QListWidget;
     bool clash = false;
+    bool commands = false;
     for (const jobs::Job& j : bundle_->jobs) {
         QString text = qs(j.name) + "   " + QDir::toNativeSeparators(qs(j.repository));
         if (store_.find(j.id)) {
             text += "   " + tr("(a job with this id is here already)");
             clash = true;
+        }
+        QStringList runs;
+        if (!j.before_command.empty()) runs << tr("runs before the backup: %1").arg(qs(j.before_command));
+        if (!j.after_command.empty()) runs << tr("runs after the backup: %1").arg(qs(j.after_command));
+        if (j.run_as_admin) runs << tr("runs with administrator rights");
+        if (!runs.isEmpty()) {
+            text += "\n      " + runs.join("\n      ");
+            commands = true;
         }
         auto* item = new QListWidgetItem(text, jobs_);
         item->setData(Qt::UserRole, qs(j.id));
@@ -204,12 +217,28 @@ ImportSettingsDialog::ImportSettingsDialog(const jobs::JobStore& store, std::sha
     replace_->setVisible(clash);
     layout->addWidget(rename_);
     layout->addWidget(replace_);
+    keep_commands_ = new QCheckBox(tr("Keep the commands and administrator rights shown above (only for a file you "
+                                      "made yourself: they run on this computer)"));
+    keep_commands_->setChecked(false);
+    keep_commands_->setVisible(commands);
+    layout->addWidget(keep_commands_);
+    if (commands)
+        layout->addWidget(note(tr("Without that tick, those jobs are imported without their commands and run without "
+                                  "administrator rights.")));
     app_ = new QCheckBox(tr("Also Vaultik's settings (notification area, reminders, updates)"));
     app_->setChecked(!bundle_->app.empty());
     app_->setEnabled(!bundle_->app.empty());
     layout->addWidget(app_);
-    alerts_ = new QCheckBox(tr("Also the alert settings (ntfy, Telegram, webhook)"));
-    alerts_->setChecked(bundle_->alerts.has_value());
+    QStringList where;
+    if (bundle_->alerts) {
+        if (!bundle_->alerts->ntfy_url.empty()) where << qs(bundle_->alerts->ntfy_url);
+        if (!bundle_->alerts->telegram_chat.empty()) where << tr("Telegram chat %1").arg(qs(bundle_->alerts->telegram_chat));
+        if (!bundle_->alerts->webhook_url.empty()) where << qs(bundle_->alerts->webhook_url);
+    }
+    // Not ticked unless chosen: they say where this computer's alerts go.
+    alerts_ = new QCheckBox(where.isEmpty() ? tr("Also the alert settings (ntfy, Telegram, webhook)")
+                                            : tr("Also the alert settings, sent to: %1").arg(where.join(", ")));
+    alerts_->setChecked(false);
     alerts_->setEnabled(bundle_->alerts.has_value());
     layout->addWidget(alerts_);
     layout->addWidget(note(tr("Imported jobs keep their schedule but start paused, so nothing runs before you checked "
@@ -231,11 +260,13 @@ void ImportSettingsDialog::accept() {
         if (jobs_->item(i)->checkState() == Qt::Checked) choice.jobs.push_back(u8(jobs_->item(i)->data(Qt::UserRole).toString()));
     choice.replace = replace_->isChecked();
     choice.alerts = alerts_->isChecked();
+    choice.keep_commands = keep_commands_->isChecked();
     if (choice.jobs.empty() && !choice.alerts && !app_->isChecked()) {
         QMessageBox::information(this, windowTitle(), tr("Choose at least one job or setting to import."));
         return;
     }
     QString error;
+    QStringList schedule_errors;
     QApplication::setOverrideCursor(Qt::WaitCursor);
     try {
         if (choice.jobs.empty()) {
@@ -252,8 +283,10 @@ void ImportSettingsDialog::accept() {
             if (const auto job = store_.find(i.id)) {
                 try {
                     jobs::apply_schedule(*job, dir);
-                } catch (const std::exception&) {
-                    // a paused job has no task to set up; a failed removal is retried when it is resumed
+                } catch (const std::exception& e) {
+                    // The tasks of a replaced job (one with administrator rights asks for
+                    // approval to remove them) may still run it: the user must know.
+                    if (i.replaced) schedule_errors << qs(i.name) + ": " + QString::fromUtf8(e.what());
                 }
             }
         if (app_->isChecked()) {
@@ -269,5 +302,11 @@ void ImportSettingsDialog::accept() {
         plain_warning(this, windowTitle(), error);
         return;
     }
+    if (!schedule_errors.isEmpty())
+        plain_warning(this, windowTitle(),
+                      tr("The jobs were imported, but the schedule of a job that was replaced could not be removed, so "
+                         "it may still run on its own. Open the job and choose Pause schedule, or delete its task in "
+                         "Task Scheduler:") +
+                          "\n\n" + schedule_errors.join("\n"));
     QDialog::accept();
 }

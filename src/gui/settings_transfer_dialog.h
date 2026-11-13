@@ -57,6 +57,7 @@ private:
     QListWidget* jobs_ = nullptr;
     QRadioButton* rename_ = nullptr;
     QRadioButton* replace_ = nullptr;
+    QCheckBox* keep_commands_ = nullptr;
     QCheckBox* app_ = nullptr;
     QCheckBox* alerts_ = nullptr;
     vaultik::jobs::ImportResult result_;

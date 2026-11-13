@@ -93,7 +93,9 @@ TEST_CASE("settings export without secrets: no password or key in the file, impo
     CHECK(in.alerts->telegram_chat == "12345");
 
     const JobStore to(to_dir.dir());
-    const ImportResult r = import_settings(to, in, {});
+    ImportChoice with_alerts;
+    with_alerts.alerts = true;
+    const ImportResult r = import_settings(to, in, with_alerts);
     REQUIRE(r.jobs.size() == 2);
     CHECK(r.alerts);
     for (const Job& j : to.list()) {
@@ -133,7 +135,9 @@ TEST_CASE("settings export with secrets: encrypted, a wrong password is refused,
     const SettingsBundle in = read_settings_file(file, "transfer password");
     CHECK(in.with_secrets);
     const JobStore to(to_dir.dir());
-    const ImportResult r = import_settings(to, in, {});
+    ImportChoice with_alerts;
+    with_alerts.alerts = true;
+    const ImportResult r = import_settings(to, in, with_alerts);
     REQUIRE(r.jobs.size() == 2);
     const auto docs = to.find("documents");
     REQUIRE(docs.has_value());
@@ -219,4 +223,111 @@ TEST_CASE("settings files of another format version are refused") {
 
     CHECK(default_settings_file_name("My PC/1", os::now()).starts_with("Vaultik-settings-My-PC-1-20"));
     CHECK(default_settings_file_name("pc", os::now()).ends_with(".vaultik-settings"));
+}
+
+TEST_CASE("settings import: alert settings only when asked for, and only the known alert channels") {
+    TempStore from_dir, to_dir;
+    const JobStore from(from_dir.dir());
+    fill(from);
+    const SettingsBundle in = read_settings_file(write_settings_file(collect_settings(from, true), "transfer password"),
+                                                 "transfer password");
+    const JobStore to(to_dir.dir());
+    ImportResult r = import_settings(to, in, {});
+    CHECK_FALSE(r.alerts);
+    CHECK_FALSE(load_alerts(to.dir()).any());
+    CHECK(alert_secret("telegram", to.dir()).empty());
+
+    // A file naming an alert channel that is a path ("x/../<job id>") is refused as damaged; it
+    // would overwrite a job's saved password otherwise.
+    SettingsBundle crafted;
+    crafted.with_secrets = true;
+    crafted.alerts = AlertSettings{};
+    crafted.alert_secrets["x/../documents"] = "evil";
+    ImportChoice alerts;
+    alerts.alerts = true;
+    CHECK_THROWS_AS(import_settings(to, crafted, alerts), Error);
+    // The same through a file.
+    SettingsBundle saved = collect_settings(from, true);
+    saved.alert_secrets["../../secret"] = "evil";
+    const Bytes file = write_settings_file(saved, "transfer password");
+    CHECK_THROWS_AS(read_settings_file(file, "transfer password"), Error);
+    // And the store itself takes no other name.
+    CHECK_THROWS_AS(set_alert_secret("x/../documents", "evil", to.dir()), Error);
+    CHECK_THROWS_AS(set_alert_secret("", "", to.dir()), Error);
+    CHECK_THROWS_AS(alert_secret("../telegram", to.dir()), Error);
+    CHECK_NOTHROW(set_alert_secret("ntfy", "token", to.dir()));
+    CHECK(alert_secret("ntfy", to.dir()) == "token");
+}
+
+TEST_CASE("settings import: every job is checked before anything is written or a secret removed") {
+    TempStore from_dir, to_dir;
+    const JobStore from(from_dir.dir());
+    fill(from);
+    SettingsBundle in = read_settings_file(write_settings_file(collect_settings(from, true), "transfer password"),
+                                           "transfer password");
+    const JobStore to(to_dir.dir());
+    Job mine = job("Documents", "F:/Elsewhere");
+    to.save(mine);
+    to.set_password(mine.id, "my own password");
+    REQUIRE(in.jobs.size() == 2);
+    // The second job in the file is not a valid job: the first (which replaces "documents" and
+    // would remove its password) must not be imported either.
+    std::sort(in.jobs.begin(), in.jobs.end(), [](const Job& a, const Job& b) { return a.id < b.id; });
+    REQUIRE(in.jobs[0].id == "documents");
+    in.jobs[1].repository.clear();
+    ImportChoice replace;
+    replace.replace = true;
+    CHECK_THROWS_AS(import_settings(to, in, replace), Error);
+    CHECK(to.list().size() == 1);
+    CHECK(to.find("documents")->repository == "F:/Elsewhere");
+    CHECK(to.password("documents") == "my own password");
+}
+
+TEST_CASE("settings import: commands and administrator rights only when asked for") {
+    TempStore from_dir, to_dir;
+    const JobStore from(from_dir.dir());
+    Job j = job("Documents", "E:/Backups/docs");
+    j.before_command = "net stop something";
+    j.after_command = "shutdown /s";
+    j.run_as_admin = true;
+    from.save(j);
+    const SettingsBundle in = read_settings_file(write_settings_file(collect_settings(from, false), ""), "");
+    REQUIRE(in.jobs.size() == 1);
+    CHECK(runs_commands(in.jobs[0]));
+
+    const JobStore to(to_dir.dir());
+    ImportResult r = import_settings(to, in, {});
+    REQUIRE(r.jobs.size() == 1);
+    CHECK(r.jobs[0].stripped.size() == 3);
+    auto got = to.find(r.jobs[0].id);
+    REQUIRE(got.has_value());
+    CHECK(got->before_command.empty());
+    CHECK(got->after_command.empty());
+    CHECK_FALSE(got->run_as_admin);
+    CHECK_FALSE(runs_commands(*got));
+
+    ImportChoice keep;
+    keep.keep_commands = true;
+    keep.replace = true;
+    r = import_settings(to, in, keep);
+    REQUIRE(r.jobs.size() == 1);
+    CHECK(r.jobs[0].stripped.empty());
+    got = to.find(r.jobs[0].id);
+    REQUIRE(got.has_value());
+    CHECK(got->before_command == "net stop something");
+    CHECK(got->after_command == "shutdown /s");
+    CHECK(got->run_as_admin);
+}
+
+TEST_CASE("settings files nested too deep are refused before they are parsed") {
+    std::string deep = R"({"format":"vaultik-settings","version":1,"encrypted":false,"content":{"jobs":[)";
+    for (int i = 0; i < 100000; ++i) deep += "[";
+    for (int i = 0; i < 100000; ++i) deep += "]";
+    deep += "]}}";
+    CHECK_THROWS_AS(read_settings_file(Bytes(deep.begin(), deep.end()), ""), Error);
+    // Brackets inside a string do not count.
+    std::string text = R"({"format":"vaultik-settings","version":1,"encrypted":false,"content":{"computer":")";
+    for (int i = 0; i < 1000; ++i) text += "[{";
+    text += R"(\"","jobs":[]}})";
+    CHECK(read_settings_file(Bytes(text.begin(), text.end()), "").jobs.empty());
 }

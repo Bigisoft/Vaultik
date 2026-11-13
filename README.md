@@ -741,13 +741,20 @@ before you checked their folders and destination on the new computer: choose **R
 for each then. A job imported without its password asks for it the first time it runs or is
 opened (Edit job shows "not saved on this computer yet"), and one on cloud storage needs its key or
 sign-in entered again in Edit job > Cloud storage.... A file from a newer Vaultik (a newer
-format) is refused with a note to update.
+format) is refused with a note to update. The list shows which jobs run a command before or after
+the backup or run with administrator rights; those are left out unless you tick **Keep the
+commands and administrator rights** (`--keep-commands`), since a file from someone else could
+run anything on this computer. The alert settings are imported only when ticked (`--alerts`),
+and the window shows where they send alerts. Every chosen job is checked before anything is
+written, so a damaged file changes nothing (and removes no saved password). When the schedule of
+a replaced job cannot be removed (an approval was declined), Vaultik says so: that job may still
+run on its own until it is paused.
 
 ```
 vaultik settings export                                   # Vaultik-settings-<computer>-<date>.vaultik-settings
 vaultik settings export moving.vaultik-settings --with-secrets
 vaultik settings import moving.vaultik-settings --jobs documents,photos
-vaultik settings import moving.vaultik-settings --replace
+vaultik settings import moving.vaultik-settings --replace --alerts
 ```
 
 From the command line the password comes from `--password-file`, `VAULTIK_SETTINGS_PASSWORD` or
