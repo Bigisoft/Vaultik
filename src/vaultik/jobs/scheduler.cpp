@@ -492,6 +492,11 @@ void delete_named_task(const std::string& name) {
 }  // namespace
 
 int create_task(const Job& job, const std::string& program_dir, const std::string& temp_dir, std::string* output) {
+    // A paused job has no tasks at all; resuming it registers them again.
+    if (job.schedule.paused) {
+        delete_task(job.id);
+        return 0;
+    }
     // The time schedule, and a second task for the idle and lock triggers: those runs check
     // first whether the last backup was recent (--on-event), which scheduled ones must not.
     int code = 0;
@@ -512,7 +517,12 @@ void delete_task(const std::string& job_id) {
 }
 
 void apply_schedule(const Job& job, const std::string& program_dir) {
-    if (!has_system_schedule(job.schedule)) {
+    // A paused job with administrator rights keeps its approved copy (so "Back up now" in Vaultik
+    // started as administrator still runs it with the rights): the approved step updates the copy
+    // and removes the tasks, which create_task leaves out for a paused job.
+    const bool paused_admin = job.run_as_admin && job.schedule.paused && has_system_schedule_unpaused(job.schedule) &&
+                              has_admin_copy(job.id);
+    if (!has_system_schedule(job.schedule) && !paused_admin) {
         remove_schedule(job.id);
         return;
     }
@@ -592,5 +602,26 @@ void remove_schedule(const std::string& job_id) {
 }
 
 #endif
+
+void set_paused(const JobStore& store, Job& job, bool paused, const std::function<void(const Job&)>& apply) {
+    if (job.schedule.paused == paused) return;
+    Job before = job;
+    job.schedule.paused = paused;
+    store.save(job);
+    try {
+        apply(job);
+    } catch (const std::exception& e) {
+        // Back as it was: the schedule was not changed (or not all of it), so the job must not
+        // look paused (or resumed) when it is not.
+        try {
+            store.save(before);
+        } catch (const std::exception&) {
+        }
+        job = before;
+        throw Error(std::string(paused ? "the job was not paused, its schedule still runs it: "
+                                       : "the job was not resumed, it stays paused: ") +
+                    e.what());
+    }
+}
 
 }  // namespace vaultik::jobs

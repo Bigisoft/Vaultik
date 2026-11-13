@@ -92,6 +92,10 @@ jobs:
       # is kept as an artifact.
       - name: Test
         shell: pwsh
+        # The runner has administrator rights: the disk tools test makes, attaches and erases a
+        # small virtual disk of its own (and only that disk).
+        env:
+          VAULTIK_TEST_VIRTUAL_DISKS: '1'
         run: |
           & build\release\vaultik_tests.exe *> tests.log
           $code = $LASTEXITCODE

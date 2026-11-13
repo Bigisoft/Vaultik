@@ -82,6 +82,37 @@ void AppSettings::save() const {
     s.setValue(QStringLiteral("notify/remind_after_days"), remind_after_days);
 }
 
+nlohmann::json AppSettings::to_json() const {
+    return {{"tray_icon", tray_icon},
+            {"tray_status", tray_status},
+            {"close_to_tray", close_to_tray},
+            {"minimize_to_tray", minimize_to_tray},
+            {"single_click_toggle", single_click_toggle},
+            {"notify_failures", notify_failures},
+            {"notify_overdue", notify_overdue},
+            {"remind_after_days", remind_after_days},
+            {"require_hello", require_hello},
+            {"check_updates", check_updates}};
+}
+
+void AppSettings::apply_json(const nlohmann::json& j) {
+    if (!j.is_object()) return;
+    const auto flag = [&](const char* key, bool& value) {
+        if (j.contains(key) && j.at(key).is_boolean()) value = j.at(key).get<bool>();
+    };
+    flag("tray_icon", tray_icon);
+    flag("tray_status", tray_status);
+    flag("close_to_tray", close_to_tray);
+    flag("minimize_to_tray", minimize_to_tray);
+    flag("single_click_toggle", single_click_toggle);
+    flag("notify_failures", notify_failures);
+    flag("notify_overdue", notify_overdue);
+    flag("require_hello", require_hello);
+    flag("check_updates", check_updates);
+    if (j.contains("remind_after_days") && j.at("remind_after_days").is_number_integer())
+        remind_after_days = std::clamp(j.at("remind_after_days").get<int>(), 0, 365);
+}
+
 StartupSetting startup_setting() {
     StartupSetting out;
 #ifdef Q_OS_WIN
@@ -128,6 +159,7 @@ void set_startup_setting(const StartupSetting& setting) {
 }
 
 int overdue_after_days(const jobs::Job& job, int remind_after_days) {
+    if (job.schedule.paused) return 0;  // paused on purpose: no reminders until it is resumed
     switch (job.schedule.kind) {
         case jobs::Schedule::Kind::Hourly: return job.schedule.every_hours <= 12 ? 1 : 2;
         case jobs::Schedule::Kind::Daily: return 2;

@@ -20,7 +20,10 @@ std::string settings_path(const std::string& dir) {
     return os::join(dir, "alerts.json");
 }
 
+// The file of an alert channel's token. Only the known channels: the name becomes part of a file
+// name, and one such as "x/../<job id>" would reach a job's saved password.
 std::string secret_path(const std::string& dir, const std::string& which) {
+    if (!alert_secret_name(which)) throw Error("there is no alert channel \"" + which + "\"");
     return os::join(os::join(dir, "secrets"), "alerts-" + which + ".key");
 }
 
@@ -73,12 +76,16 @@ AlertSettings load_alerts(const std::string& dir) {
     return s;
 }
 
-void save_alerts(const AlertSettings& s, const std::string& dir) {
+void check_alerts(const AlertSettings& s) {
     for (const std::string* text : {&s.ntfy_url, &s.ntfy_email, &s.telegram_chat, &s.webhook_url})
         for (const char c : *text)
             if (static_cast<unsigned char>(c) < 0x20 || c == 0x7F) throw Error("an alert setting contains control characters");
     for (const std::string* url : {&s.ntfy_url, &s.webhook_url})
         if (!url->empty()) check_url(*url);
+}
+
+void save_alerts(const AlertSettings& s, const std::string& dir) {
+    check_alerts(s);
     const nlohmann::json j = {{"on_failure", s.on_failure},   {"on_damage", s.on_damage},
                               {"on_success", s.on_success},   {"monthly_summary", s.monthly_summary},
                               {"ntfy_url", s.ntfy_url},
@@ -87,7 +94,12 @@ void save_alerts(const AlertSettings& s, const std::string& dir) {
     os::write_file_atomic(settings_path(dir), bytes_of(j.dump(2) + "\n"), 0600);
 }
 
+bool alert_secret_name(const std::string& which) {
+    return which == "ntfy" || which == "telegram";
+}
+
 std::string alert_secret(const std::string& which, const std::string& dir) {
+    if (!alert_secret_name(which)) throw Error("there is no alert channel \"" + which + "\"");
     try {
         Bytes sealed = os::read_file(secret_path(dir, which), 64 * 1024);
         Bytes plain = os::unprotect_secret(sealed);

@@ -30,8 +30,10 @@
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
+#include "vaultik/jobs/settings_transfer.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/image/disk.hpp"
+#include "vaultik/image/disk_tools.hpp"
 #include "vaultik/image/recovery_media.hpp"
 #include "vaultik/ops/apps.hpp"
 #include "vaultik/ops/backup.hpp"
@@ -392,6 +394,26 @@ Commands:
   schedule <job>               Register the job's schedule with the system
                                scheduler (Task Scheduler or a systemd user timer)
   unschedule <job>             Remove it again (the job itself is kept)
+  pause-job <job>              Pause the job: it keeps its settings and schedule,
+                               but nothing starts it on its own (schedule, events,
+                               drive, changes, requests) until it is resumed;
+                               run-job still runs it
+  resume-job <job>             Resume a paused job (registers its schedule again)
+  settings export [<file>]     Write the settings and every saved job to one file
+                               (default Vaultik-settings-<computer>-<date>
+                               .vaultik-settings), to set up another computer the
+                               same way; without passwords and cloud keys
+      --with-secrets           With them, and the whole file encrypted with a
+                               password (asked for, or VAULTIK_SETTINGS_PASSWORD)
+  settings import <file>       Take the jobs (and alert settings) from such a file;
+                               they keep their schedule but start paused
+      --jobs <a,b>             Only these jobs (their ids in the file)
+      --replace                A job whose id is taken here replaces that job
+                               (otherwise it is imported under a new id)
+      --alerts                 Also the alert settings (where alerts are sent)
+      --keep-commands          Keep the jobs' commands before and after the
+                               backup and their administrator rights (left out
+                               otherwise: only for a file you made yourself)
   admin-job install|remove     Used by schedule and the frontend for jobs with
                                administrator rights (asks for approval)
 
@@ -434,6 +456,39 @@ Disk images (Windows, administrator rights except image disks and --vhdx):
       --usb <drive>            ... on a USB stick (erased; asks you to type
                                ERASE <drive>, or give --confirm)
   recovery                     The restore menu the recovery drive starts with
+
+Disk tools (administrator rights on Windows, root on Linux, except disk list and wipe-free):
+  disk list                    The disks, with what keeps one from being erased
+  disk init <disk>             Set up a blank or unwanted disk for use: a new
+                               partition table, one partition over the whole disk,
+                               formatted, with a drive letter. Never the disk the
+                               system starts or runs from or Vaultik runs from, nor
+                               one with a page file, a dynamic or offline disk;
+                               asks you to type ERASE DISK <number> (Linux:
+                               ERASE DISK sdb)
+      --gpt, --mbr             The partition table (default GPT)
+      --fs <type>              ntfs (Windows default), exfat, or ext4 (Linux default)
+      --label <name>           The volume's name
+      --letter <X>             Windows: its drive letter (default: a free one)
+      --mount <folder>         Linux: mount it there
+      --size <size>            Partitions of these sizes instead (repeatable; "rest"
+                               as the last one takes what is left)
+      --confirm <text>         The confirmation, given beforehand
+  disk wipe <disk>             Erase a whole disk so its data cannot be read back,
+                               then leave it without a partition table (the same
+                               guards and confirmation as disk init)
+      --volume <X:>            ... only this volume instead (Linux: /dev/sdb1);
+                               asks you to type ERASE X:
+      --expect-size <bytes>, --expect-serial <s>, --expect-id <id>
+                               The disk or volume you chose from a listing: stops
+                               when it is another one by now
+      --method <m>             zeros (one pass, default), random (one pass), or
+                               dod3 (random, random, zeros, as DoD 5220.22-M)
+      --verify                 Read the last pass back and compare it
+  disk wipe-free <folder>      Overwrite the free space of the drive holding the
+                               folder (or X:), so deleted files cannot be brought
+                               back; files on it are not touched
+      --method <m>             As for disk wipe
 
 <snapshot> is an ID prefix (at least 4 characters) or "latest".
 
@@ -494,11 +549,11 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--method", "--volume", "--jobs"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -1502,6 +1557,160 @@ int cmd_schedule(const Args& a, bool install) {
     jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
     out("Job \"" + job->name + "\" scheduled: " + jobs::describe(job->schedule) + "\n");
     return kExitOk;
+}
+
+// Pauses or resumes a job: it keeps its settings and schedule, but while paused nothing starts it
+// on its own. Saved like an edit of the job, then its system schedule is applied (removed while
+// paused; a job with administrator rights asks for approval as when it is saved). When that
+// fails the job is saved back as it was (see jobs::set_paused).
+int cmd_pause_job(const Args& a, bool pause) {
+    if (a.positional.empty()) throw Error(std::string("usage: vaultik ") + (pause ? "pause-job" : "resume-job") + " <job>");
+    const jobs::JobStore store;
+    auto job = store.find(a.positional[0]);
+    if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
+    if (job->schedule.paused == pause) {
+        out("Job \"" + job->name + "\" is " + (pause ? "already paused" : "not paused") + ".\n");
+        return kExitOk;
+    }
+    const std::string program_dir = os::parent_of(os::executable_path());
+    jobs::set_paused(store, *job, pause, [&](const jobs::Job& j) { jobs::apply_schedule(j, program_dir); });
+    out("Job \"" + job->name + "\" " + (pause ? "paused" : "resumed") + ": " + jobs::describe(job->schedule) + "\n");
+    return kExitOk;
+}
+
+// The password of a settings file: --password-file, VAULTIK_SETTINGS_PASSWORD, or asked for
+// (twice when it is made).
+std::string settings_password(const Args& a, bool confirm) {
+    if (auto file = a.value("--password-file")) {
+        std::string pw = read_small_file(*file, "password file");
+        while (!pw.empty() && (pw.back() == '\n' || pw.back() == '\r')) pw.pop_back();
+        if (pw.empty()) throw Error("password file is empty");
+        return pw;
+    }
+    const std::string env = os::get_env("VAULTIK_SETTINGS_PASSWORD");
+    if (!env.empty()) return env;
+    std::string pw = read_password("Password for the settings file: ",
+                                   "no console to ask for the password; set VAULTIK_SETTINGS_PASSWORD");
+    if (confirm) {
+        if (pw.size() < 8) throw Error("use a password of at least 8 characters");
+        std::string again = read_password("Repeat the password: ");
+        const bool same = again == pw;
+        secure_wipe(again.data(), again.size());
+        if (!same) throw Error("passwords do not match");
+    }
+    if (pw.empty()) throw Error("empty password");
+    return pw;
+}
+
+// Settings and plans to another computer: one file with every saved job and the alert settings
+// (the frontend adds its own settings when it exports), secrets only with --with-secrets and
+// then encrypted with a password.
+int cmd_settings(const Args& a) {
+    const std::string sub = a.positional.empty() ? std::string() : a.positional[0];
+    const jobs::JobStore store;
+    if (sub == "export") {
+        const bool secrets = a.has("--with-secrets");
+        std::string path = a.positional.size() >= 2 ? a.positional[1]
+                                                    : jobs::default_settings_file_name(os::hostname(), os::now());
+        path = os::absolute_path(path);
+        if (os::exists(path) && !a.has("--force")) throw Error(path + " exists already (--force replaces it)");
+        const jobs::SettingsBundle bundle = jobs::collect_settings(store, secrets);
+        std::string pw = secrets ? settings_password(a, true) : std::string();
+        Bytes data;
+        try {
+            data = jobs::write_settings_file(bundle, pw);
+        } catch (...) {
+            secure_wipe(pw.data(), pw.size());
+            throw;
+        }
+        secure_wipe(pw.data(), pw.size());
+        os::write_file_atomic(path, data, 0600);
+        const std::string msg = "Exported " + std::to_string(bundle.jobs.size()) + " job(s) to " + path +
+                                (secrets ? " (with passwords and keys, encrypted)" : " (without passwords and keys)");
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"file", path}, {"message", msg}});
+        else out(msg + "\n");
+        return kExitOk;
+    }
+    if (sub == "import") {
+        if (a.positional.size() < 2) throw Error("usage: vaultik settings import <file> [--jobs a,b] [--replace] [--alerts] [--keep-commands]");
+        const Bytes data = os::read_file(os::absolute_path(a.positional[1]), 64u << 20);
+        std::string pw = jobs::settings_file_encrypted(data) ? settings_password(a, false) : std::string();
+        jobs::SettingsBundle bundle;
+        try {
+            bundle = jobs::read_settings_file(data, pw);
+        } catch (...) {
+            secure_wipe(pw.data(), pw.size());
+            throw;
+        }
+        secure_wipe(pw.data(), pw.size());
+        jobs::ImportChoice choice;
+        choice.replace = a.has("--replace");
+        choice.alerts = a.has("--alerts");
+        choice.keep_commands = a.has("--keep-commands");
+        if (auto list = a.value("--jobs")) {
+            std::size_t at = 0;
+            while (at <= list->size()) {
+                const std::size_t comma = list->find(',', at);
+                std::string id = list->substr(at, comma == std::string::npos ? std::string::npos : comma - at);
+                while (!id.empty() && id.back() == ' ') id.pop_back();
+                while (!id.empty() && id.front() == ' ') id.erase(0, 1);
+                if (!id.empty()) choice.jobs.push_back(id);
+                if (comma == std::string::npos) break;
+                at = comma + 1;
+            }
+        }
+        if (!g_json) {
+            out("The file was made on " + (bundle.computer.empty() ? std::string("another computer") : bundle.computer) +
+                (bundle.created ? " on " + os::format_time_local(bundle.created) : std::string()) + " and has these jobs:\n");
+            for (const jobs::Job& j : bundle.jobs) {
+                out("  " + pad(j.id, 24) + pad(j.name, 28) + j.repository + "\n");
+                if (!j.before_command.empty()) out("      runs before the backup: " + j.before_command + "\n");
+                if (!j.after_command.empty()) out("      runs after the backup: " + j.after_command + "\n");
+                if (j.run_as_admin) out("      runs with administrator rights\n");
+            }
+        }
+        const jobs::ImportResult r = jobs::import_settings(store, bundle, choice);
+        // Paused, so this removes the tasks of a job that was replaced (and sets up nothing new).
+        bool schedule_failed = false;
+        for (const jobs::ImportedJob& i : r.jobs) {
+            if (const auto job = store.find(i.id)) {
+                try {
+                    jobs::apply_schedule(*job, os::parent_of(os::executable_path()));
+                } catch (const Error& e) {
+                    if (i.replaced) schedule_failed = true;
+                    warning("the schedule of " + i.name + " could not be changed, so it may still run on its own (" +
+                            e.what() + "); pause it with vaultik pause-job " + i.id);
+                }
+            }
+        }
+        if (g_json) {
+            nlohmann::json list = nlohmann::json::array();
+            for (const jobs::ImportedJob& i : r.jobs)
+                list.push_back({{"from", i.from_id}, {"id", i.id}, {"name", i.name}, {"replaced", i.replaced},
+                                {"renamed", i.renamed}, {"secrets", i.secrets}, {"stripped", i.stripped}});
+            emit({{"event", "done"}, {"status", "success"}, {"jobs", list}, {"alerts", r.alerts},
+                  {"schedule_failed", schedule_failed},
+                  {"message", "imported " + std::to_string(r.jobs.size()) + " job(s)"}});
+            return kExitOk;
+        }
+        for (const jobs::ImportedJob& i : r.jobs) {
+            std::string how = i.replaced ? "replaced the job of that id" : i.renamed ? "imported as " + i.id + " (the id was taken)" : "imported";
+            if (!i.secrets) how += "; its password is asked for when it first runs";
+            out("  " + i.name + ": " + how + "\n");
+            for (const std::string& left : i.stripped) out("      left out: " + left + "\n");
+        }
+        if (std::any_of(r.jobs.begin(), r.jobs.end(), [](const jobs::ImportedJob& i) { return !i.stripped.empty(); }))
+            out("Commands and administrator rights were left out (they would run on this computer); import again\n"
+                "with --keep-commands for a file you made yourself, or set them in the job.\n");
+        out("Imported " + std::to_string(r.jobs.size()) + " job(s), all paused: check their folders on this computer, then\n"
+            "resume them (vaultik resume-job <job>, or Resume schedule in Vaultik).\n");
+        if (r.alerts) out("The alert settings were imported too.\n");
+        else if (bundle.alerts) out("The alert settings in the file were not imported (--alerts imports them).\n");
+        if (!bundle.app.empty()) out("The frontend's own settings in the file are imported when the file is imported in Vaultik.\n");
+        return kExitOk;
+    }
+    throw Error("usage: vaultik settings export [<file>] [--with-secrets] | import <file> [--jobs a,b] [--replace] [--alerts] "
+                "[--keep-commands]");
 }
 
 // After a job's backup: removes its snapshots beyond its retention, then the data nothing uses any
@@ -2731,6 +2940,7 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
 }
 
 #include "vaultik/cli/image_cmds.inc"
+#include "vaultik/cli/disk_cmds.inc"
 
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
@@ -2747,6 +2957,12 @@ int cmd_run_job(const Args& a) {
                                a.has("--on-request");
         const std::string refusal = jobs::elevated_run_refusal(*job, automatic);
         if (!refusal.empty()) throw Error(refusal);
+    }
+    // A paused job is not started on its own: only a plain run-job (Back up now) runs it.
+    if (job->schedule.paused && (on_connect || a.has("--scheduled") || a.has("--on-event") || a.has("--on-sign-out") ||
+                                 a.has("--on-change") || a.has("--on-request"))) {
+        if (!g_json) err("The job \"" + job->name + "\" is paused: not started (vaultik resume-job resumes it).\n");
+        return kExitOk;
     }
     if (on_connect && !jobs::connect_backup_due(store, *job)) return kExitOk;
     // Started by an event rather than a time: not again soon after a backup.
@@ -4621,6 +4837,9 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "uninstall-cleanup") return cmd_uninstall_cleanup();
     if (a.command == "schedule") return cmd_schedule(a, true);
     if (a.command == "unschedule") return cmd_schedule(a, false);
+    if (a.command == "pause-job") return cmd_pause_job(a, true);
+    if (a.command == "settings") return cmd_settings(a);
+    if (a.command == "resume-job") return cmd_pause_job(a, false);
     if (a.command == "recovery") return cmd_recovery(a);
     if (a.command == "recovery-media") return cmd_recovery_media(a);
 
@@ -4658,6 +4877,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "estimate") return cmd_estimate(a);
     if (a.command == "find") return cmd_find(a);
     if (a.command == "image") return cmd_image(a);
+    if (a.command == "disk") return cmd_disk(a);
     throw Error("unknown command " + a.command + " (see vaultik --help)");
 }
 

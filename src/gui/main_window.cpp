@@ -56,7 +56,9 @@
 #include "report_dialog.h"
 #include "grew_dialog.h"
 #include "restore_dialog.h"
+#include "disk_tools_dialogs.h"
 #include "image_dialogs.h"
+#include "settings_transfer_dialog.h"
 #include "app_settings.h"
 #include "runner.h"
 #include "settings_dialog.h"
@@ -102,6 +104,11 @@ QString when_text(std::uint64_t filetime) {
 
 // The schedule in words, in the frontend's language (jobs::describe is the engine's English).
 QString schedule_text(const jobs::Schedule& s) {
+    if (s.paused) {
+        jobs::Schedule running = s;
+        running.paused = false;
+        return QObject::tr("Paused (%1)").arg(schedule_text(running));
+    }
     const QString time = QStringLiteral("%1:%2").arg(s.hour, 2, 10, QLatin1Char('0')).arg(s.minute, 2, 10, QLatin1Char('0'));
     switch (s.kind) {
         case jobs::Schedule::Kind::Manual:
@@ -127,9 +134,10 @@ QString schedule_text(const jobs::Schedule& s) {
     return QObject::tr("Manual");
 }
 
-// When Task Scheduler starts the job next (local time); invalid for a manual job. Mirrors the
+// When Task Scheduler starts the job next (local time); invalid for a manual or paused job. Mirrors the
 // triggers in jobs/scheduler.cpp: an hourly job repeats from 2026-01-01 00:<minute>.
 QDateTime next_run(const jobs::Schedule& s, const QDateTime& now) {
+    if (s.paused) return {};  // nothing starts a paused job on its own
     switch (s.kind) {
         case jobs::Schedule::Kind::Manual:
             return {};
@@ -611,6 +619,26 @@ void MainWindow::relock() {
 }
 
 bool MainWindow::ensure_password(const jobs::Job& job) {
+    // A job imported without its keys (Import settings and plans) cannot reach its cloud storage
+    // until they are entered again in the job.
+    const CloudKind kind = cloud_kind(job.repository);
+    if (kind == CloudKind::S3 || kind == CloudKind::PCloud || kind == CloudKind::OneDrive ||
+        kind == CloudKind::GoogleDrive || kind == CloudKind::Mega) {
+        bool have_key = false;
+        try {
+            std::string key = store_.cloud_secret(job.id);
+            have_key = !key.empty();
+            secure_wipe(key.data(), key.size());
+        } catch (const Error&) {
+        }
+        if (!have_key) {
+            QMessageBox::information(this, tr("Cloud storage of %1").arg(qs(job.name)),
+                                     tr("The cloud storage key or sign-in of this job is not saved on this computer, "
+                                        "for example because the job was imported without its passwords and keys. "
+                                        "Choose Edit job, then Cloud storage..., and enter it or sign in again."));
+            return false;
+        }
+    }
     try {
         std::string saved = store_.password(job.id);
         const bool have = !saved.empty();
@@ -622,7 +650,8 @@ bool MainWindow::ensure_password(const jobs::Job& job) {
         bool ok = false;
         QString pw = QInputDialog::getText(
             this, tr("Password for %1").arg(qs(job.name)),
-            tr("Enter the password of this backup. Vaultik saves it for your account on this computer."),
+            tr("Enter the password of this backup. It is not saved on this computer yet (for example, the job was "
+               "imported without passwords); Vaultik saves it for your account here."),
             QLineEdit::Password, QString(), &ok);
         if (!ok || pw.isEmpty()) return false;
         std::string bytes = u8(pw);
@@ -908,6 +937,27 @@ QWidget* MainWindow::build_sidebar() {
     connect(computers_, &QPushButton::clicked, this, &MainWindow::show_computers);
     l->addWidget(computers_);
 
+    // Tools that do not belong to one job: settings and plans to another computer, disks.
+    tools_ = new QToolButton;
+    tools_->setText(tr("Tools"));
+    tools_->setProperty("role", "flat");
+    tools_->setPopupMode(QToolButton::InstantPopup);
+    tools_->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    auto* tools = new QMenu(tools_);  // owned by the button
+    tools->setToolTipsVisible(true);
+    tools->addAction(tr("Export settings and plans..."), this, &MainWindow::export_settings)
+        ->setToolTip(tr("Save the settings and every backup job in one file, to set up another computer the same way"));
+    tools->addAction(tr("Import settings and plans..."), this, &MainWindow::import_settings)
+        ->setToolTip(tr("Take settings and backup jobs from a file exported on this or another computer"));
+    tools->addSeparator();
+    tools->addAction(tr("Create recovery drive..."), this, [this] {
+        RecoveryDriveDialog dialog(jobs_, this);
+        dialog.exec();
+    });
+    add_disk_tools(tools);
+    tools_->setMenu(tools);
+    l->addWidget(tools_);
+
     settings_ = new QPushButton(tr("Settings..."));
     settings_->setProperty("role", "flat");
     settings_->setToolTip(tr("Notifications, and starting Vaultik in the notification area"));
@@ -991,6 +1041,15 @@ QWidget* MainWindow::build_job_page() {
     more_->setPopupMode(QToolButton::InstantPopup);
     auto* menu = new QMenu(more_);  // owned by the button
     menu->addAction(tr("Edit job..."), this, &MainWindow::edit_job);
+    pause_job_ = menu->addAction(tr("Pause schedule"), this, [this] {
+        const jobs::Job* job = current_job();
+        if (job) set_job_paused(!job->schedule.paused);
+    });
+    pause_job_->setToolTip(tr("Keep the job and its schedule, but let nothing start it on its own until it is resumed"));
+    connect(menu, &QMenu::aboutToShow, this, [this] {
+        const jobs::Job* job = current_job();
+        pause_job_->setText(job && job->schedule.paused ? tr("Resume schedule") : tr("Pause schedule"));
+    });
     menu->addAction(tr("Check the backup now"), this, [this] { check_job(false); })
         ->setToolTip(tr("Read part of the stored data back and check every version"));
     menu->addAction(tr("Full health check..."), this, [this] { check_job(true); });
@@ -1003,6 +1062,7 @@ QWidget* MainWindow::build_job_page() {
         RecoveryDriveDialog dialog(jobs_, this);
         dialog.exec();
     })->setToolTip(tr("A USB stick or ISO file that starts a computer and restores a disk image onto it"));
+    add_disk_tools(menu);
     menu->addAction(tr("Refresh"), this, [this] {
         repos_.clear();
         reload_jobs(current_job() ? current_job()->id : std::string());
@@ -1427,16 +1487,23 @@ void MainWindow::refresh_overview() {
             d.next_run = tr("tomorrow %1").arg(QLocale().toString(next.time(), QLocale::ShortFormat));
         d.next_run[0] = d.next_run[0].toUpper();
         d.next_detail = schedule_text(job->schedule) + ", " + tr("if the computer is on (otherwise right after)");
+    } else if (job->schedule.paused) {
+        d.next_run = tr("Paused");
+        d.next_detail = tr("Nothing starts this job on its own until you resume it (More, Resume schedule). "
+                           "\"Back up now\" still works.");
     } else {
         d.next_run = tr("When you start it");
         d.next_detail = tr("This job has no schedule.");
     }
-    if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
-    if (job->schedule.on_idle) d.next_detail += "\n" + tr("Also when the computer is idle.");
-    if (job->schedule.on_lock) d.next_detail += "\n" + tr("Also when you lock the computer.");
-    if (job->schedule.on_sign_out) d.next_detail += "\n" + tr("Also when you sign out or shut down.");
-    if (job->schedule.on_update) d.next_detail += "\n" + tr("Also when Windows starts installing updates.");
-    if (job->continuous)
+    if (job->schedule.paused) {
+        // The triggers below do not start a paused job either.
+    } else if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
+    const bool active = !job->schedule.paused;
+    if (active && job->schedule.on_idle) d.next_detail += "\n" + tr("Also when the computer is idle.");
+    if (active && job->schedule.on_lock) d.next_detail += "\n" + tr("Also when you lock the computer.");
+    if (active && job->schedule.on_sign_out) d.next_detail += "\n" + tr("Also when you sign out or shut down.");
+    if (active && job->schedule.on_update) d.next_detail += "\n" + tr("Also when Windows starts installing updates.");
+    if (active && job->continuous)
         d.next_detail += "\n" + tr("Also %1 min after files change.").arg(job->continuous_minutes);
 
     // Versions and size, once the repository is open.
@@ -1887,6 +1954,74 @@ void MainWindow::edit_job() {
         repos_.erase(dialog.job().id);
         reload_jobs(dialog.job().id);
     }
+}
+
+void MainWindow::export_settings() {
+    ExportSettingsDialog dialog(store_, this);
+    dialog.exec();
+}
+
+void MainWindow::import_settings() {
+    const auto bundle = ImportSettingsDialog::open_file(this);
+    if (!bundle) return;
+    ImportSettingsDialog dialog(store_, bundle, this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    const jobs::ImportResult& r = dialog.result();
+    repos_.clear();
+    reload_jobs(r.jobs.empty() ? std::string() : r.jobs.front().id);
+    QStringList lines;
+    for (const jobs::ImportedJob& i : r.jobs) {
+        QString line = qs(i.name);
+        if (i.replaced) line += "  -  " + tr("replaced the job that was here");
+        else if (i.renamed) line += "  -  " + tr("imported next to the job of the same id");
+        if (!i.secrets) line += "  -  " + tr("asks for its password when it first runs");
+        lines << line;
+    }
+    QMessageBox::information(
+        this, tr("Import settings and plans"),
+        (r.jobs.empty() ? tr("The settings were imported.")
+                        : tr("Imported %1 backup job(s), all paused:").arg(r.jobs.size()) + "\n\n" + lines.join('\n') +
+                              "\n\n" +
+                              tr("Check their folders and destinations on this computer (Edit job), then choose Resume "
+                                 "schedule in the More menu of each.")));
+}
+
+void MainWindow::add_disk_tools(QMenu* menu) {
+    menu->addAction(tr("Set up a new disk..."), this, [this] {
+        NewDiskDialog dialog(this);
+        dialog.exec();
+    })->setToolTip(tr("Partition and format a new or unwanted disk, and give it a drive letter"));
+    menu->addAction(tr("Drive cleanser..."), this, [this] {
+        DriveCleanserDialog dialog(this);
+        dialog.exec();
+    })->setToolTip(tr("Erase a disk, a drive or a drive's free space so the data cannot be brought back"));
+}
+
+void MainWindow::set_job_paused(bool paused) {
+    const jobs::Job* current = current_job();
+    if (!current) return;
+    jobs::Job job = *current;  // the list may change while a message is open
+    if (job.schedule.paused == paused) return;
+    // Saved the way the job dialog saves it: the job, then its system schedule (removed while
+    // paused; a job with administrator rights asks for approval). When the schedule cannot be
+    // changed (the approval was declined), the job is saved back as it was.
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const std::string program_dir = u8(QDir::toNativeSeparators(QFileInfo(Runner::engine_path()).absolutePath()));
+    QString error;
+    try {
+        jobs::set_paused(store_, job, paused, [&](const jobs::Job& j) { jobs::apply_schedule(j, program_dir); });
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+    }
+    QApplication::restoreOverrideCursor();
+    if (!error.isEmpty())
+        QMessageBox::warning(this, windowTitle(),
+                             (paused ? tr("The job was not paused: its schedule could not be changed, so it still runs "
+                                          "on its own.")
+                                     : tr("The job was not resumed: its schedule could not be set up, so it stays "
+                                          "paused.")) +
+                                 "\n\n" + error);
+    reload_jobs(job.id);
 }
 
 void MainWindow::delete_job() {

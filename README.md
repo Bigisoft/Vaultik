@@ -17,6 +17,8 @@ where the packages (AppImage, Flatpak) are not tested yet; see
   ids are keyed BLAKE3 hashes, so the storage location learns nothing about the content.
 - **Fast incremental runs.** Files whose size and timestamps match the previous snapshot are not
   even read.
+- **Pause a plan.** A job can be paused: it keeps its settings and schedule, but nothing starts
+  it on its own until it is resumed ("Back up now" still works).
 - **Polite.** Priorities and hard limits for CPU, disk, memory and bandwidth, per job.
 - **Verifiable.** `verify --read-data` decrypts and checks every stored chunk, and jobs run
   health checks on their own (see below).
@@ -32,6 +34,10 @@ where the packages (AppImage, Flatpak) are not tested yet; see
 - **Easy to get files back.** A timeline of versions, a search across all of them, the history
   of any file, a preview of pictures and code without restoring, and each version as a folder in
   File Explorer (or, on Linux, the file manager).
+- **Disk tools.** Set up a new disk (partition table, file system, drive letter) and erase a
+  disk, a drive or a drive's free space so the data cannot be brought back (drive cleanser).
+- **Moves to a new computer.** Export the settings and every backup job to one file and import
+  them on another computer; passwords and keys only on request, and then encrypted.
 - **Several PCs in one view.** Computers that back up into the same place (a shared folder, a
   NAS, a cloud bucket) leave an encrypted status note there, so any of them shows how every
   computer's backups are doing.
@@ -128,6 +134,14 @@ Start `vaultik-gui`, then **New backup job**:
   own times aside, which Windows updates lazily) save no new version; it shows as "nothing
   changed" and still counts as a backup for the overdue reminder (`vaultik backup
   --skip-unchanged` on the command line).
+  **Paused** (a tick in this section, or **Pause schedule** in the job's More menu, which turns
+  into **Resume schedule**) keeps the job, its schedule and every setting, but nothing starts it
+  on its own until it is resumed: no scheduled task or timer, no idle, lock, sign-out, update,
+  drive, continuous or other-computer runs, and no "not backed up for N days" reminders. The job
+  list shows it as "Paused (Daily at 18:00)". **Back up now** still runs it. Pausing a job with
+  administrator rights updates its approved copy and removes its task through the usual approval;
+  when that approval is declined (or fails) the job stays as it was, not paused, and Vaultik says
+  so (`vaultik pause-job <job>` and `vaultik resume-job <job>` on the command line).
   On Windows a job can also run with administrator rights, so scheduled runs use a shadow copy
   for open and locked files. Windows then asks for administrator approval each time the job (or
   its schedule) is saved or removed. Without the option, the task runs with normal rights and
@@ -297,6 +311,10 @@ vaultik forget    -r E:\Backups\vaultik --keep-daily 7 --keep-weekly 4 --keep-mo
 vaultik prune     -r E:\Backups\vaultik
 vaultik jobs
 vaultik run-job   documents
+vaultik pause-job documents
+vaultik resume-job documents
+vaultik settings export moving.vaultik-settings --with-secrets
+vaultik settings import moving.vaultik-settings --jobs documents --replace
 vaultik check-job documents --full
 vaultik report    --month 2026-10 --html report.html
 vaultik copy      documents
@@ -311,6 +329,10 @@ vaultik recovery-kit -r E:\Backups\vaultik --out kit.pdf
 vaultik grew         --job documents --since 30d
 vaultik apps         --job documents latest --missing
 vaultik apps install --job documents Git.Git 7zip.7zip
+vaultik disk list
+vaultik disk init    2 --label Backups
+vaultik disk wipe    2 --method dod3 --verify
+vaultik disk wipe-free D:
 ```
 
 The repository can be any folder: an internal disk, a USB drive or a network share
@@ -701,6 +723,43 @@ documents,browsers` picks groups or single items; `--account` picks one when the
 several. Close the browsers and email programs first; saved browser passwords were sealed for the
 old account, so browsers ask you to sign in again.
 
+### Settings and plans to another computer
+
+**Export settings and plans...** (Tools in the sidebar) saves Vaultik's settings (notification
+area, reminders, updates), the alert settings and every backup job in one file,
+`Vaultik-settings-<computer>-<date>.vaultik-settings`. By default it holds no password, cloud
+storage key, database password or alert token. **Include the passwords and cloud storage keys**
+adds them, and then the whole file (jobs and folders too) is encrypted with AES-256-GCM under a key
+derived from a password you type (PBKDF2-HMAC-SHA256, 600,000 rounds), so nothing is written in
+clear; keep that password apart from the file.
+
+**Import settings and plans...** on the other computer reads the file (asking for its password
+when it is encrypted; a wrong one is refused), shows its jobs to choose from, and for a job whose
+id is taken there either imports it next to the existing one (under a new id, "(imported)" after
+its name) or replaces it. Imported jobs keep their schedule but start **paused**, so nothing runs
+before you checked their folders and destination on the new computer: choose **Resume schedule**
+for each then. A job imported without its password asks for it the first time it runs or is
+opened (Edit job shows "not saved on this computer yet"), and one on cloud storage needs its key or
+sign-in entered again in Edit job > Cloud storage.... A file from a newer Vaultik (a newer
+format) is refused with a note to update. The list shows which jobs run a command before or after
+the backup or run with administrator rights; those are left out unless you tick **Keep the
+commands and administrator rights** (`--keep-commands`), since a file from someone else could
+run anything on this computer. The alert settings are imported only when ticked (`--alerts`),
+and the window shows where they send alerts. Every chosen job is checked before anything is
+written, so a damaged file changes nothing (and removes no saved password). When the schedule of
+a replaced job cannot be removed (an approval was declined), Vaultik says so: that job may still
+run on its own until it is paused.
+
+```
+vaultik settings export                                   # Vaultik-settings-<computer>-<date>.vaultik-settings
+vaultik settings export moving.vaultik-settings --with-secrets
+vaultik settings import moving.vaultik-settings --jobs documents,photos
+vaultik settings import moving.vaultik-settings --replace --alerts
+```
+
+From the command line the password comes from `--password-file`, `VAULTIK_SETTINGS_PASSWORD` or
+the console; the frontend's own settings are exported and imported by the frontend only.
+
 ### Programs from the old PC
 
 Each version of a saved job also keeps the list of programs installed on the computer (name,
@@ -1000,6 +1059,83 @@ computer opens a menu: it finds backups on the connected drives (or a network sh
 the password, lists the disk images and the disks, and after the typed confirmation restores
 and makes the disk start. Vaultik is one program with no other files, so the same drive works
 for every computer.
+
+### Setting up a new disk
+
+**Set up a new disk...** (Tools in the sidebar, or More next to **Create recovery drive...**)
+prepares a new, blank or unwanted disk for use, like a disk manager's "add new disk": it removes
+what is on it, writes a new partition table (GPT, the default, or MBR for older computers, up to
+2 TiB), makes one partition over the whole disk, formats it (NTFS or exFAT on Windows; ext4, NTFS
+or exFAT on Linux) with the name given, and gives it a drive letter (Windows) or mounts it on
+request (Linux). On a GPT disk Windows gets its usual 16 MiB reserved partition first. Never
+offered: the disk Windows (or Linux) runs from, the disk holding the partition the computer
+starts Windows from (the EFI system partition, or the "System Reserved" partition of an older
+computer, even when it is on another disk than Windows), the one Vaultik runs from, a disk with
+a page, swap or hibernation file, a dynamic disk, a Storage Spaces disk or a disk holding part of
+a volume over several disks, a disk Windows keeps offline or read-only (bring it online in Disk
+Management first), or (Linux) one that is mounted, used as swap or by LVM, RAID or encryption.
+When Vaultik cannot tell which disks Windows runs and starts from, it offers none. A disk from
+another computer that holds its own Windows can be erased. As for a disk image restore, the
+disk's model, size and serial number are shown and you type `ERASE DISK <number>` (Linux:
+`ERASE DISK sdb`); the disk is checked again on the opened disk, before anything is written, to
+be the one shown, and once more before it is formatted. It needs administrator rights and runs
+in a window of its own (on Linux the window shows the `sudo` command to run in a terminal).
+Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
+`IOCTL_DISK_SET_DRIVE_LAYOUT_EX` after locking and dismounting the disk's volumes, and formats
+with `format.com` (from the Windows system folder); Linux uses `sfdisk` (through the disk opened
+exclusively and checked) and `mkfs.ext4` (`mkfs.ntfs`, `mkfs.exfat`).
+
+```
+vaultik disk list
+vaultik disk init 2 --label Backups                       # GPT, NTFS, a free letter
+vaultik disk init 2 --mbr --fs exfat --label CAMERA --letter K
+vaultik disk init 2 --size 200G --size rest               # two partitions
+sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
+```
+
+### Drive cleanser
+
+**Drive cleanser...** (next to **Set up a new disk...**) erases so the data cannot be read back:
+
+- **A whole disk:** every byte of it, then its partition table goes too, so Windows shows it as
+  not initialised (Linux: no partitions). The same guards and typed `ERASE DISK <number>` as
+  above.
+- **One drive (volume):** only that partition (`ERASE E:`, Linux `ERASE sdb1`); never the one
+  Windows or Vaultik runs from, nor one with a page or hibernation file, nor an EFI system,
+  reserved, recovery or active partition, nor a volume on a dynamic disk or over several disks.
+  It is locked and dismounted first, so close the programs using it. The drive is checked again
+  just before it is written to, to be the one listed (Windows: its volume id, size and serial
+  number; Linux: its partition id, where it starts, its size and the disk's serial number), so a
+  USB stick swapped for another one in the meantime is not erased.
+- **Only the free space of a drive:** a temporary file fills the free space and is deleted again,
+  so files deleted earlier cannot be brought back. The files on the drive are not touched, it
+  needs no administrator rights, and it shows its progress and can be stopped in the window. The
+  file is not compressed, and it goes away when the program ends, also when it is killed (one
+  left over after a power cut is removed the next time). On a drive that compresses it anyway,
+  random data is written instead of zeros; a drive that keeps even that compressed (ZFS with
+  deduplication, say) stops with an error.
+
+The methods are one pass of zeros (the default, enough for today's drives), one pass of random
+data, and three passes (random, random, zeros, like DoD 5220.22-M); **Read the last pass back**
+checks that the drive kept what was written. The window that erases shows the pass, the speed and
+the time left; Ctrl+C there stops it (what was written stays overwritten). From the command
+line `--confirm` gives the confirmation beforehand, for scripts, and `--expect-size`,
+`--expect-serial` and `--expect-id` (which the Vaultik window passes along) make it stop when the
+disk or drive is another one by then.
+
+```
+vaultik disk wipe 2 --method dod3 --verify
+vaultik disk wipe --volume E: --confirm "ERASE E:"
+vaultik disk wipe-free D:
+```
+
+**Solid-state drives (SSD, NVMe, memory cards):** overwriting reaches every block the computer can
+see, but not the spare blocks the drive keeps for itself (for wear levelling and bad blocks),
+which may still hold old data. Vaultik does not send the drive's own secure erase command (NVMe
+Format with Secure Erase, ATA SECURE ERASE): done wrong it can leave a drive locked or unusable,
+and many computers block it. Use the drive maker's tool or the computer's firmware setup for that,
+or keep the data on an encrypted drive (BitLocker, LUKS) from the start. Wiping free space does
+not reach small files NTFS keeps inside its file table, nor the slack at the end of files.
 
 ### Event Log
 

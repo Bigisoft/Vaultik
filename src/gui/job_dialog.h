@@ -51,6 +51,7 @@ private:
     bool prepare_repository(const vaultik::jobs::Job& job, const std::string& password);
 
     const vaultik::jobs::JobStore& store_;
+    bool missing_password_ = false;  // editing a job with no password saved here (imported without it)
     bool editing_ = false;
     vaultik::jobs::Job job_;
     CloudTarget cloud_;  // the cloud destination's keys, when the destination is cloud storage
@@ -109,6 +110,7 @@ private:
     QWidget* time_row_ = nullptr;
     QWidget* hourly_row_ = nullptr;
     QWidget* days_row_ = nullptr;
+    QCheckBox* paused_ = nullptr;
     QCheckBox* on_connect_ = nullptr;
     QLabel* on_connect_note_ = nullptr;
     QCheckBox* on_idle_ = nullptr;

@@ -70,7 +70,8 @@ struct StatusFile {
 };
 std::vector<StatusFile> list_statuses(Repository& repo);
 
-// When the schedule starts the job next after `now` (FILETIME ticks); empty for a manual job.
+// When the schedule starts the job next after `now` (FILETIME ticks); empty for a manual or
+// paused job.
 // Mirrors the Task Scheduler triggers (an hourly job repeats from 2026-01-01 00:<minute>, local).
 std::optional<std::uint64_t> next_run(const Schedule& schedule, std::uint64_t now);
 

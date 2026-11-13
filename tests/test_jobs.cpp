@@ -715,3 +715,61 @@ TEST_CASE("continuous backups ignore changes the backup leaves out") {
     CHECK_FALSE(vaultik::path_excluded({}, "/a.tmp"));
 #endif
 }
+
+TEST_CASE("a paused job keeps its schedule but nothing starts it on its own") {
+    Job j = sample();
+    j.id = "docs";
+    j.schedule.on_idle = true;
+    CHECK(has_system_schedule(j.schedule));
+    j.schedule.paused = true;
+    // No task or timer while paused, but what it would have once resumed is still known.
+    CHECK_FALSE(has_system_schedule(j.schedule));
+    CHECK(has_system_schedule_unpaused(j.schedule));
+    CHECK(describe(j.schedule) == "Paused (Mon, Wed at 21:30, also when idle)");
+    Schedule manual;
+    manual.paused = true;
+    CHECK(describe(manual) == "Paused (Manual)");
+
+    // Saved and read back; older files without the setting load as not paused.
+    const Job back = job_from_json(to_json(j));
+    CHECK(back.schedule.paused);
+    CHECK(back.schedule.kind == Schedule::Kind::Weekly);
+    CHECK(back.schedule.weekdays == 0b0000101);
+    CHECK(nlohmann::json::parse(to_json(j)).at("schedule").at("paused") == true);
+    const Job old = job_from_json(R"({"version":1,"id":"x","name":"x","repository":"E:/b","sources":["C:/a"],)"
+                                  R"("schedule":{"kind":"daily","hour":18}})");
+    CHECK_FALSE(old.schedule.paused);
+    CHECK(has_system_schedule(old.schedule));
+
+    // Neither events (idle, lock, sign-out, updates) nor connecting the drive start it.
+    TempStore t;
+    const JobStore store(t.dir());
+    Job running = sample();
+    running.id = "docs";
+    CHECK(event_backup_due(store, running));
+    CHECK_FALSE(event_backup_due(store, j));
+    j.backup_on_connect = true;
+    CHECK_FALSE(connect_backup_due(store, j));
+}
+
+TEST_CASE("pausing a job: when its schedule cannot be changed, it is saved back as it was") {
+    TempStore dir;
+    const JobStore store(dir.dir());
+    Job j = sample();
+    j.schedule.kind = Schedule::Kind::Daily;
+    store.save(j);
+    REQUIRE_FALSE(j.schedule.paused);
+    // The approval was declined.
+    CHECK_THROWS_AS(set_paused(store, j, true, [](const Job&) { throw Error("the approval was declined"); }), Error);
+    CHECK_FALSE(j.schedule.paused);
+    CHECK_FALSE(store.find(j.id)->schedule.paused);
+    // It worked: saved paused, and the schedule applied to the paused job.
+    bool applied_paused = false;
+    set_paused(store, j, true, [&](const Job& x) { applied_paused = x.schedule.paused && store.find(x.id)->schedule.paused; });
+    CHECK(applied_paused);
+    CHECK(store.find(j.id)->schedule.paused);
+    // Resuming that fails leaves it paused.
+    CHECK_THROWS_AS(set_paused(store, j, false, [](const Job&) { throw Error("Task Scheduler refused"); }), Error);
+    CHECK(store.find(j.id)->schedule.paused);
+    CHECK(j.schedule.paused);
+}

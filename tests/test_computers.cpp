@@ -496,6 +496,20 @@ TEST_CASE("next scheduled run") {
     CHECK(*w <= now + 7 * kDay + 3600ull * 10000000);
     weekly.weekdays = 0;
     CHECK_FALSE(next_run(weekly, now).has_value());
+
+    // A paused job has no next run, so it is never stale however long it waits.
+    daily.paused = true;
+    CHECK_FALSE(next_run(daily, now).has_value());
+    Job job;
+    job.id = "docs";
+    job.schedule = daily;
+    RunRecord old;
+    old.started = now - 30 * kDay;
+    old.finished = old.started + 1000;
+    const JobStatus s = job_status(job, {old}, now);
+    CHECK(s.next_run == 0);
+    CHECK(s.schedule == "Paused (Daily at 03:00)");
+    CHECK(job_health(s, now) == Health::Ok);
 }
 
 TEST_CASE("staleness and health rules") {

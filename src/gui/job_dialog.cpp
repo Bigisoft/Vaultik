@@ -119,6 +119,19 @@ JobDialog::JobDialog(const jobs::JobStore& store, const jobs::Job* existing, QWi
     fit_to_screen(this, QSize(720, 640), parent);
 
     if (existing != nullptr) {
+        // A job imported without its password (see Import settings and plans) has none saved here.
+        bool saved = false;
+        try {
+            std::string pw = store_.password(existing->id);
+            saved = !pw.empty();
+            secure_wipe(pw.data(), pw.size());
+        } catch (const std::exception&) {
+        }
+        missing_password_ = !saved;
+        if (missing_password_) {
+            password_->setPlaceholderText(tr("not saved on this computer yet: enter it"));
+            password2_->setPlaceholderText(QString());
+        }
         job_ = *existing;
         load(*existing);
     } else {
@@ -538,6 +551,10 @@ QWidget* JobDialog::build_schedule() {
     }
     dl->addStretch();
     form->addRow(tr("Days:"), days_row_);
+    paused_ = new QCheckBox(tr("Paused: nothing starts this job on its own"));
+    paused_->setToolTip(tr("The job keeps its schedule and settings, but neither the schedule nor any of the "
+                           "triggers below start it until you resume it. \"Back up now\" still works."));
+    form->addRow(QString(), paused_);
 
     // Also when the destination drive is plugged in (an external disk that is not always there).
     // Conditions for scheduled runs; "Back up now" always runs.
@@ -990,6 +1007,7 @@ void JobDialog::load(const jobs::Job& job) {
     minute_->setValue(job.schedule.minute);
     for (int d = 0; d < 7; ++d) days_[d]->setChecked((job.schedule.weekdays >> d) & 1u);
     skip_battery_->setChecked(job.schedule.skip_on_battery);
+    paused_->setChecked(job.schedule.paused);
     skip_unchanged_->setChecked(job.skip_unchanged);
     check_every_file_->setChecked(job.check_every_file);
     record_apps_->setChecked(job.record_apps);
@@ -1144,6 +1162,7 @@ jobs::Job JobDialog::collect() const {
     for (int d = 0; d < 7; ++d)
         if (days_[d]->isChecked()) j.schedule.weekdays |= static_cast<std::uint8_t>(1u << d);
     j.schedule.skip_on_battery = skip_battery_->isChecked();
+    j.schedule.paused = paused_->isChecked();
     j.skip_unchanged = skip_unchanged_->isChecked();
     j.check_every_file = check_every_file_->isChecked();
     j.record_apps = record_apps_->isChecked();
@@ -1256,6 +1275,12 @@ void JobDialog::accept() {
     }
     if (!editing_ && pw.empty()) {
         QMessageBox::warning(this, windowTitle(), tr("Enter the repository password."));
+        return;
+    }
+    if (missing_password_ && pw.empty()) {
+        QMessageBox::warning(this, windowTitle(),
+                             tr("This job's password is not saved on this computer yet (it was imported without "
+                                "passwords). Enter the password of its backup on the General page."));
         return;
     }
 

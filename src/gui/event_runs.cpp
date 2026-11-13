@@ -267,7 +267,7 @@ void EventRuns::poll_requests() {
     const bool cloud = request_ticks_++ % 4 == 0 && !os::metered_connection();
     bool any = false;
     for (const jobs::Job& job : jobs_)
-        if (!job.run_as_admin && (cloud || !is_cloud_location(job.repository))) any = true;
+        if (!job.run_as_admin && !job.schedule.paused && (cloud || !is_cloud_location(job.repository))) any = true;
     if (!any) return;
     request_poll_ = new QProcess(this);
     QStringList args = {QStringLiteral("computers"), QStringLiteral("--poll"), QStringLiteral("--json")};
@@ -288,7 +288,7 @@ void EventRuns::poll_requests() {
             for (const QJsonValue& v : ev.value(QStringLiteral("jobs")).toArray()) {
                 const std::string id = v.toString().toStdString();
                 const auto job = std::find_if(jobs_.begin(), jobs_.end(), [&](const jobs::Job& j) { return j.id == id; });
-                if (job == jobs_.end() || running(id)) continue;
+                if (job == jobs_.end() || job->schedule.paused || running(id)) continue;
                 if (start(*job, QStringLiteral("--on-request"), false))
                     emit notify(tr("Backing up %1").arg(qs(job->name)),
                                 tr("Another computer that shares this backup asked for a backup now."), false);
@@ -308,7 +308,7 @@ void EventRuns::set_jobs(const std::vector<jobs::Job>& list) {
     jobs_ = list;
     std::map<std::string, Watched> keep;
     for (const jobs::Job& job : list) {
-        if (!job.continuous || job.run_as_admin) continue;
+        if (!job.continuous || job.run_as_admin || job.schedule.paused) continue;
         auto it = watched_.find(job.id);
         if (it != watched_.end() && it->second.job.sources == job.sources && it->second.job.excludes == job.excludes &&
             it->second.job.repository == job.repository) {
@@ -406,7 +406,7 @@ bool EventRuns::session_ending(std::intptr_t flags) {
     const jobs::JobStore store;
     bool started = false;
     for (const jobs::Job& job : store.list()) {
-        if (!job.schedule.on_sign_out || job.run_as_admin || running(job.id)) continue;
+        if (!job.schedule.on_sign_out || job.schedule.paused || job.run_as_admin || running(job.id)) continue;
         if (!jobs::event_backup_due(store, job)) continue;
         started = start(job, QStringLiteral("--on-sign-out"), true) || started;
     }
