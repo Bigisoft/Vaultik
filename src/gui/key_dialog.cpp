@@ -52,6 +52,12 @@ bool same_location(const QString& a, const QString& b) {
 #endif
 }
 
+// The backup's location as the user reads it: a folder on this computer with this system's
+// separators, a cloud location (s3:https://..., a WebDAV or SFTP address) exactly as it is.
+QString shown_location(const QString& location) {
+    return is_cloud_location(u8(location)) ? location : QDir::toNativeSeparators(location);
+}
+
 }  // namespace
 
 void show_recovery_key(QWidget* parent, const QString& key, const QString& location) {
@@ -328,7 +334,7 @@ void KeyDialog::print_kit() {
     }
     QApplication::restoreOverrideCursor();
     wipe(credential.secret);
-    print_recovery_kit(this, qs(key), QDir::toNativeSeparators(dir));
+    print_recovery_kit(this, qs(key), shown_location(dir));
     wipe(key);
 }
 
@@ -361,6 +367,6 @@ void KeyDialog::make_recovery_key() {
     QApplication::restoreOverrideCursor();
     wipe(credential.secret);
     secret_->clear();
-    show_recovery_key(this, qs(key), QDir::toNativeSeparators(dir));
+    show_recovery_key(this, qs(key), shown_location(dir));
     wipe(key);
 }
