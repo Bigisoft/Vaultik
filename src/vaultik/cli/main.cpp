@@ -108,6 +108,7 @@ constexpr int kExitCancelled = 4;
 constexpr int kExitLocked = 5;  // another run holds a conflicting repository lock
 constexpr int kExitInUse = 6;   // disk tools: a volume is in use by another program (--force-dismount forces it)
 constexpr int kExitNoChannel = 7;  // POSIX: --progress-pipe was given but cannot be used; nothing was done
+constexpr int kExitWaiting = 8;    // run-job: the backup drive is not connected; nothing was done
 
 // In pieces (the ")" R"(" joins below): Visual Studio 2022 refuses a single string literal over
 // 16 KB (error C2026); adjacent literals are joined into one string.
@@ -541,7 +542,8 @@ Options:
   --version                    Show the version
 
 Exit codes: 0 ok, 1 error, 2 wrong password or damaged data, 3 finished with skipped files,
-4 cancelled, 5 repository in use by another run.
+4 cancelled, 5 repository in use by another run, 8 (run-job) the backup drive is not
+connected, so the run waits for it.
 )";
 
 struct Args {
@@ -2651,8 +2653,16 @@ int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job
     record.kind = jobs::RunKind::Copy;
     record.started = os::now();
     const std::string& where = job.second_copy.repository;
+    if (!jobs::copy_drive_connected(job)) {
+        // Kept elsewhere (often on purpose, away from the computer): it waits for its drive.
+        record = jobs::waiting_for_drive_record(jobs::RunKind::Copy, os::now(), where);
+        record.message = "waiting for the drive of the second copy: it is not connected (" + where +
+                         "); the copy catches up after the next backup with the drive connected";
+        if (g_json) emit({{"event", "copy"}, {"status", "waiting"}, {"message", record.message}});
+        else out("Second copy: " + record.message + "\n");
+        return kExitWaiting;
+    }
     try {
-        if (!jobs::copy_drive_connected(job)) throw Error("the drive of the second copy is not connected (" + where + ")");
         std::string pw = store.password(job.id);
         if (pw.empty()) pw = get_password(a, false);
         std::unique_ptr<Repository> target;
@@ -3088,9 +3098,22 @@ int cmd_run_job(const Args& a) {
         else out("Job \"" + job->name + "\": " + record.message + "\n");
         return kExitOk;
     }
+    // The backup drive is elsewhere: no failure, the run waits for it (recorded quietly, never
+    // alerted; the drive's return runs it, and the overdue reminder is what escalates). A run of
+    // a job already waiting adds no second record.
+    if (!jobs::drive_connected(*job)) {
+        const jobs::RunRecord waiting = jobs::waiting_for_drive_record(jobs::RunKind::Backup, os::now(), job->repository);
+        try {
+            if (jobs::missed_run_waiting(jobs::combined_history(store, job->id, 50)) == nullptr)
+                store.append_history(job->id, waiting);
+        } catch (const std::exception& e) {
+            warning(std::string("could not record the run: ") + e.what());
+        }
+        if (g_json) emit({{"event", "done"}, {"status", "waiting"}, {"reason", "drive"}, {"message", waiting.message}});
+        else out("Job \"" + job->name + "\": " + waiting.message + "\n");
+        return kExitWaiting;
+    }
     try {
-        if (!jobs::drive_connected(*job))
-            throw Error("the backup drive is not connected (" + job->repository + ")");
         repo = open_job_repo(a, store, *job);
         const unsigned readers = apply_parallelism(*repo, a, job->repository, policy);
         if ((on_connect || !trigger.empty()) && backup_running(*repo, *job)) {
@@ -3240,7 +3263,10 @@ int cmd_run_job(const Args& a) {
         jobs::RunRecord copy;
         second_copy(a, store, *job, *repo, copy, !record.alert.empty() || !record.hold.empty());
         try {
-            store.append_history(job->id, copy);
+            // Still waiting for the copy's drive: no second record of it.
+            const jobs::RunRecord* last = jobs::last_copy(jobs::combined_history(store, job->id, 50));
+            if (copy.status != jobs::RunStatus::Waiting || last == nullptr || last->status != jobs::RunStatus::Waiting)
+                store.append_history(job->id, copy);
         } catch (const Error& e) {
             warning(std::string("could not record the second copy: ") + e.what());
         }

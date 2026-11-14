@@ -678,9 +678,11 @@ std::vector<RunRecord> combined_history(const JobStore& store, const std::string
 }
 
 bool connect_backup_due(const JobStore& store, const Job& job) {
-    if (job.schedule.paused || !job.backup_on_connect || job.repository_volume.empty() || !drive_connected(job))
-        return false;
+    if (job.schedule.paused || job.repository_volume.empty() || !drive_connected(job)) return false;
     const std::vector<RunRecord> history = combined_history(store, job.id, 50);
+    // A job without "back up when connected" still catches up on a run it missed while the drive
+    // was away.
+    if (!job.backup_on_connect && missed_run_waiting(history) == nullptr) return false;
     const RunRecord* last = last_backup(history);
     constexpr std::uint64_t kQuiet = 10ull * 60 * 10'000'000;  // 10 minutes in FILETIME ticks
     return !(last && last->status != RunStatus::Failed && last->finished + kQuiet > os::now());

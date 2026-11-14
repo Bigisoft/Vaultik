@@ -39,6 +39,7 @@ RunStatus status_from(const std::string& s) {
     if (s == "partial") return RunStatus::Partial;
     if (s == "failed") return RunStatus::Failed;
     if (s == "cancelled") return RunStatus::Cancelled;
+    if (s == "waiting") return RunStatus::Waiting;
     throw Error("unknown run status \"" + s + "\"");
 }
 
@@ -750,8 +751,28 @@ RunRecord password_not_saved_record(std::uint64_t now) {
 
 const RunRecord* last_backup(const std::vector<RunRecord>& history) {
     for (auto it = history.rbegin(); it != history.rend(); ++it)
-        if (it->kind == RunKind::Backup) return &*it;
+        if (it->kind == RunKind::Backup && it->status != RunStatus::Waiting) return &*it;
     return nullptr;
+}
+
+const RunRecord* missed_run_waiting(const std::vector<RunRecord>& history) {
+    for (auto it = history.rbegin(); it != history.rend(); ++it) {
+        if (it->kind != RunKind::Backup) continue;
+        return it->status == RunStatus::Waiting ? &*it : nullptr;
+    }
+    return nullptr;
+}
+
+RunRecord waiting_for_drive_record(RunKind kind, std::uint64_t now, const std::string& what) {
+    RunRecord r;
+    r.kind = kind;
+    r.started = now;
+    r.finished = now;
+    r.status = RunStatus::Waiting;
+    r.reason = "drive";
+    r.message = "waiting for the backup drive: it is not connected (" + what +
+                "); the backup runs when it is connected while Vaultik is open, or at the next scheduled time";
+    return r;
 }
 
 const RunRecord* last_check(const std::vector<RunRecord>& history) {
@@ -798,6 +819,7 @@ const char* to_string(RunStatus status) {
         case RunStatus::Partial: return "partial";
         case RunStatus::Failed: return "failed";
         case RunStatus::Cancelled: return "cancelled";
+        case RunStatus::Waiting: return "waiting";
     }
     return "failed";
 }
@@ -1119,7 +1141,7 @@ void log_runs_to_system(bool on) {
 }
 
 // Event ids: 100s a backup, 200s a health check, 300s the second copy, 400s a test restore; the
-// last digit the result (0 success, 1 partial, 2 failed, 3 cancelled), +5 when it succeeded but
+// last digit the result (0 success, 1 partial, 2 failed, 3 cancelled, 4 waiting for the drive), +5 when it succeeded but
 // warns (ransomware signs, old versions kept, the drive's health, silent damage on this computer).
 // Monitoring tools filter by them.
 // Every account of the computer can read the Application log, so an entry holds only what the run
@@ -1142,6 +1164,7 @@ SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name,
         case RunStatus::Partial: result = 1; break;
         case RunStatus::Failed: result = 2; break;
         case RunStatus::Cancelled: result = 3; break;
+        case RunStatus::Waiting: result = 4; break;
     }
     e.id = base + result;
     e.level = r.status == RunStatus::Failed ? 2 : (r.status == RunStatus::Partial || warns) ? 1 : 0;
@@ -1149,7 +1172,8 @@ SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name,
     for (char& c : name)
         if (static_cast<unsigned char>(c) < 0x20) c = ' ';
     e.text = what + " of the Vaultik job \"" + name + "\" (" + job_id + "): " + to_string(r.status);
-    if (r.kind == RunKind::Backup && r.status != RunStatus::Failed && r.status != RunStatus::Cancelled)
+    if (r.kind == RunKind::Backup && r.status != RunStatus::Failed && r.status != RunStatus::Cancelled &&
+        r.status != RunStatus::Waiting)
         e.text += "\nFiles: " + std::to_string(r.files) + ", new data: " + std::to_string(r.new_bytes) + " bytes";
     if (r.errors > 0) e.text += "\nErrors: " + std::to_string(r.errors);
     if (!r.alert.empty()) e.text += "\nWarning: it saw signs of ransomware";

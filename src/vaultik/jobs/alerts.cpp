@@ -75,7 +75,9 @@ std::string size_text(std::uint64_t bytes) {
 
 std::optional<Alert> alert_for_run(const AlertSettings& s, const std::string& job_name, const RunRecord& r,
                                    const std::string& computer) {
-    if (!s.any()) return std::nullopt;
+    // Nothing to tell: no channel, or a run that only waited for its drive (the overdue reminder
+    // is what speaks up when that goes on too long).
+    if (!s.any() || r.status == RunStatus::Waiting) return std::nullopt;
     Alert a;
     a.job = job_name;
     const std::string where = " Open Vaultik on " + computer + " for the details.";

@@ -88,6 +88,7 @@ QString status_text(jobs::RunStatus s) {
         case jobs::RunStatus::Partial: return QObject::tr("Completed, some files skipped");
         case jobs::RunStatus::Failed: return QObject::tr("Failed");
         case jobs::RunStatus::Cancelled: return QObject::tr("Cancelled");
+        case jobs::RunStatus::Waiting: return QObject::tr("Waiting for the drive");
     }
     return {};
 }
@@ -1497,6 +1498,11 @@ void MainWindow::refresh_overview() {
         d.next_run = tr("When you start it");
         d.next_detail = tr("This job has no schedule.");
     }
+    // A scheduled run found the drive away: said calmly, it runs when the drive is back.
+    if (const jobs::RunRecord* waiting = jobs::missed_run_waiting(records); waiting != nullptr && !job->schedule.paused)
+        d.next_detail = tr("Waiting for the backup drive since %1: connect it and the missed backup runs while "
+                           "Vaultik is open, or at the next scheduled time.")
+                            .arg(when_text(waiting->started));
     if (job->schedule.paused) {
         // The triggers below do not start a paused job either.
     } else if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
@@ -1661,7 +1667,9 @@ void MainWindow::refresh_overview() {
 
     // Backup days.
     for (const jobs::RunRecord& r : records) {
-        if (r.kind != jobs::RunKind::Backup || r.status == jobs::RunStatus::Cancelled) continue;
+        if (r.kind != jobs::RunKind::Backup || r.status == jobs::RunStatus::Cancelled ||
+            r.status == jobs::RunStatus::Waiting)
+            continue;
         const QDate day = to_datetime(r.started).date();
         const OverviewData::Day kind = r.status == jobs::RunStatus::Success   ? OverviewData::Day::Saved
                                        : r.status == jobs::RunStatus::Partial ? OverviewData::Day::Partial

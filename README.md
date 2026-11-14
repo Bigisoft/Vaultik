@@ -443,7 +443,8 @@ a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses th
 Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished but some files
 were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
 tools) a drive is in use by another program (see [Drives in use](#drives-in-use)), `7` (Linux)
-the progress channel given with `--progress-pipe` cannot be used, so nothing was done.
+the progress channel given with `--progress-pipe` cannot be used, so nothing was done, `8`
+(`run-job`) the backup drive is not connected, so the run waits for it (see below).
 
 ### Old snapshots and space
 
@@ -541,6 +542,18 @@ comes back as `G:` instead of `F:` still works. With "Also back up when the dest
 connected" (Schedule tab), the running frontend or tray icon starts the job as soon as the drive
 is plugged in (`run-job <job> --on-connect`, which does nothing when the job just saved a
 version or is already running), then says when the drive can be unplugged.
+
+When a run finds the backup drive not connected, that is no failure: the drive is simply
+elsewhere. The run is recorded once as "Waiting for the drive" (grey, not red; `"status":
+"waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert and no
+failure notification, and the Overview says since when it waits. As soon as the drive is plugged
+in while Vaultik is open (or in the notification area), the missed backup runs, also for jobs
+without "Also back up when the destination drive is connected"; otherwise the next scheduled run
+does it. If the drive stays away too long, the overdue reminder ("not backed up for N days")
+speaks up as before. A second copy whose drive is away waits the same way and catches up after
+the next backup with its drive connected. (Windows has no Task Scheduler trigger for a drive
+being plugged in that works without turning on an extra event log first, so the catch-up is done
+by Vaultik itself.)
 
 ### Backing up when something happens
 

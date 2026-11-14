@@ -501,6 +501,69 @@ TEST_CASE("an unattended run of a job without a saved password fails at once and
     CHECK(record_from_json(to_json(history[0])).reason == "password");
 }
 
+TEST_CASE("a run whose backup drive is away waits quietly: recorded once, not alerted, caught up later") {
+    // The record and how it reads.
+    const RunRecord w = waiting_for_drive_record(RunKind::Backup, 500, "E:\\Backup");
+    CHECK(w.status == RunStatus::Waiting);
+    CHECK(std::string(to_string(w.status)) == "waiting");
+    CHECK(record_from_json(to_json(w)).status == RunStatus::Waiting);
+    CHECK(record_from_json(to_json(w)).reason == "drive");
+    AlertSettings s;
+    s.webhook_url = "https://example.com/hook";
+    s.on_success = true;
+    CHECK_FALSE(alert_for_run(s, "Docs", w, "pc").has_value());
+    RunRecord copy = waiting_for_drive_record(RunKind::Copy, 500, "F:\\Copy");
+    CHECK_FALSE(alert_for_run(s, "Docs", copy, "pc").has_value());
+    const SystemLogEntry e = system_log_entry(w, "Docs", "docs");
+    CHECK(e.id == 104);
+    CHECK(e.level == 0);
+
+    // It is not a backup run, and it marks a missed run until a backup runs.
+    RunRecord saved;
+    saved.started = 100;
+    saved.finished = 200;
+    std::vector<RunRecord> history = {saved, w};
+    REQUIRE(last_backup(history) != nullptr);
+    CHECK(last_backup(history)->finished == 200);
+    CHECK(missed_run_waiting(history) == &history[1]);
+    history.push_back(copy);  // other kinds do not end the wait
+    CHECK(missed_run_waiting(history) == &history[1]);
+    saved.started = 600;
+    history.push_back(saved);
+    CHECK(missed_run_waiting(history) == nullptr);
+
+    // The command line: exit code 8, one record however often it runs, never an error.
+    TempStore tmp;
+    JobStore store(tmp.dir());
+    Job j;
+    j.name = "Away";
+    j.sources = {tmp.dir()};
+    j.schedule.kind = Schedule::Kind::Hourly;
+#ifdef _WIN32
+    j.repository = "Q:\\Backups\\vaultik";
+    j.repository_volume = "\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\";
+    j.repository_relative = "Backups\\vaultik";
+#else
+    j.repository = "/run/media/nobody/USB/Backups/vaultik";
+    j.repository_volume = "uuid:00000000-0000-0000-0000-00000000dead";
+    j.repository_relative = "Backups/vaultik";
+#endif
+    store.save(j);
+    REQUIRE_FALSE(drive_connected(*store.find(j.id)));
+    os::CommandOptions o;
+    std::string output;
+    o.output = &output;
+    o.timeout = std::chrono::seconds(60);
+    o.extra_environment = {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "not used here"}};
+    CHECK(os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o) == 8);
+    CHECK(output.find("waiting for the backup drive") != std::string::npos);
+    CHECK(os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o) == 8);
+    const std::vector<RunRecord> recorded = store.history(j.id);
+    REQUIRE(recorded.size() == 1);
+    CHECK(recorded[0].status == RunStatus::Waiting);
+    CHECK(missed_run_waiting(recorded) != nullptr);
+}
+
 TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {
     TempStore tmp;
     AlertSettings s;

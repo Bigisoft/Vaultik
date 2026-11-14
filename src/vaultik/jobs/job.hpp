@@ -224,7 +224,10 @@ const std::vector<ExclusionPreset>& exclusion_presets();
 // check only for a folder (a full check of cloud storage downloads everything).
 HealthPolicy default_health(std::string_view repository);
 
-enum class RunStatus { Success, Partial, Failed, Cancelled };
+// Waiting: a run that found its backup drive not connected and did nothing. It is no failure (the
+// drive is simply elsewhere): recorded quietly, shown neutrally, never alerted; the run happens
+// once the drive is back (see missed_run_waiting), and the overdue reminder is what escalates.
+enum class RunStatus { Success, Partial, Failed, Cancelled, Waiting };
 
 // What a run did: a backup, a health check that read a sample of the data or all of it, or the
 // second copy after a backup.
@@ -263,7 +266,8 @@ struct RunRecord {
     std::uint64_t errors = 0;
     std::string message;  // error text for Failed, summary otherwise
     // Why a run could not run, in a fixed word the alerts and the app can tell apart: "password"
-    // (an unattended run of a job whose password is not saved on this computer); empty otherwise.
+    // (an unattended run of a job whose password is not saved on this computer), "drive" (its
+    // backup drive was not connected, status Waiting); empty otherwise.
     std::string reason;
     // Set when the backup saw signs of ransomware (see ChangeAlarm in ops/backup.hpp); the version
     // before it was pinned and old versions were not removed.
@@ -309,11 +313,17 @@ Job job_from_json(const std::string& text);
 std::string to_json(const RunRecord& record);
 RunRecord record_from_json(const std::string& text);
 
-// The newest backup run, or the newest health check, in a history (oldest first); null if none.
+// The newest backup run (one that was not just waiting for its drive), or the newest health
+// check, in a history (oldest first); null if none.
 const RunRecord* last_backup(const std::vector<RunRecord>& history);
 const RunRecord* last_check(const std::vector<RunRecord>& history);
 const RunRecord* last_copy(const std::vector<RunRecord>& history);
 const RunRecord* last_restore_test(const std::vector<RunRecord>& history);
+// The newest record of a backup that waited for its drive, when no backup ran after it (so a run
+// was missed while the drive was away); null otherwise.
+const RunRecord* missed_run_waiting(const std::vector<RunRecord>& history);
+// What a run that finds its backup drive not connected records (`what`: the destination).
+RunRecord waiting_for_drive_record(RunKind kind, std::uint64_t now, const std::string& what);
 // Whether the monthly test restore is on and none finished (not cancelled) in the last 30 days.
 bool restore_test_due(const HealthPolicy& policy, const std::vector<RunRecord>& history, std::uint64_t now);
 // A health check that found damaged or missing data (not one that could not run).

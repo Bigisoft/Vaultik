@@ -272,7 +272,7 @@ MonthlyReport build_report(const std::vector<ReportJob>& jobs, const std::vector
         std::set<std::string> drive_seen;
         std::uint64_t drive_runs = 0;
         for (const RunRecord& x : in.history) {
-            if (x.started >= r.end) continue;
+            if (x.started >= r.end || x.status == RunStatus::Waiting) continue;  // nothing ran
             const bool inside = in_month(x);
             // The size: the last known value before the month, then the newest in it.
             if (x.backup_size > 0) {
