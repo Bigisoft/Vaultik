@@ -191,7 +191,13 @@ jobs with their last result; the job page shows live progress and four tabs:
 
 **Restore** opens a version browser: pick a file or folder (or nothing, for everything) and
 restore it to another folder or to its original location; right-click an item for all its
-versions. A **preview** beside the browser (and **Preview** in Find a file) shows a file of any
+versions. Before it writes anything, a restore works out how much it will write and stops
+with a clear message when the target drive does not have room for it ("the restore needs about
+40 GiB but only 12 GiB is free"; `--ignore-space` restores anyway). **Skip files that are already
+identical** (on by default; `--skip-identical`) leaves files in the target that have the same
+size, date and content as in the backup as they are, so a restore that was interrupted (the drive
+was unplugged, the computer went off) simply goes on where it stopped when run again; a file it
+left half written is restored again (with **Replace files that already exist**). A **preview** beside the browser (and **Preview** in Find a file) shows a file of any
 version without restoring it, decrypted into memory only:
 
 - Pictures (JPEG, PNG, GIF, BMP, TIFF, ICO, and HEIC or WebP where Windows has the codecs), fitted

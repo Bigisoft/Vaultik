@@ -238,6 +238,10 @@ Commands:
       --target <folder>        Where to restore (required)
       --path <path>            Only this file or folder, e.g. C/Users/me/Documents
       --overwrite              Replace existing files in the target
+      --skip-identical         Leave files that are already identical (size, time
+                               and content) as they are: run an interrupted
+                               restore again with this to go on where it stopped
+      --ignore-space           Restore even when the target seems too small
       --permissions            Windows: give items their stored owner and access
                                list (needs administrator rights for other owners)
       --no-links               Windows: skip symlinks and junctions
@@ -585,7 +589,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands", "--force-dismount"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands", "--force-dismount", "--skip-identical", "--ignore-space"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -4520,8 +4524,26 @@ int cmd_restore(const Args& a) {
     o.target = *target;
     if (auto p = a.value("--path")) o.subpath = *p;
     o.overwrite = a.has("--overwrite");
+    o.skip_identical = a.has("--skip-identical");
     o.permissions = a.has("--permissions");
     o.links = !a.has("--no-links");
+    // Before anything is written: is there room for it at the target?
+    {
+        const RestoreEstimate need = estimate_restore(*repo, ref.snapshot, o);
+        std::string at = os::absolute_path(o.target);
+        while (!at.empty() && !os::exists(at) && os::parent_of(at) != at) at = os::parent_of(at);
+        const std::optional<os::DiskSpace> space = at.empty() ? std::nullopt : os::disk_space(at);
+        const std::uint64_t margin = 64ull << 20;  // folders, streams, the file system's own
+        if (space && need.needed + margin > space->free) {
+            const std::string text = "the restore needs about " + format_bytes(need.needed) + " but only " +
+                                     format_bytes(space->free) + " is free at " + o.target;
+            if (!a.has("--ignore-space"))
+                throw Error(text + "; free up space or choose another folder (--ignore-space restores anyway)");
+            warning(text + "; restoring anyway, it may stop when the drive is full");
+        }
+        if (g_json) emit({{"event", "restore_plan"}, {"files", need.files}, {"bytes", need.bytes}, {"needed", need.needed},
+                          {"free", space ? space->free : 0}});
+    }
     const auto start = std::chrono::steady_clock::now();
     o.on_progress = [&](const RestoreProgress& p) {
         if (g_json) {
@@ -4543,6 +4565,7 @@ int cmd_restore(const Args& a) {
               {"dirs", r.dirs},
               {"bytes", r.bytes},
               {"skipped", r.skipped},
+              {"identical", r.identical},
               {"errors", r.errors},
               {"seconds", seconds_since(start)}});
         return r.errors > 0 ? kExitPartial : kExitOk;
@@ -4551,6 +4574,7 @@ int cmd_restore(const Args& a) {
     out("Restored " + std::to_string(r.files) + " files in " + std::to_string(r.dirs) + " folders, " +
         format_bytes(r.bytes) + " in " + format_duration(seconds_since(start)) + " from snapshot " +
         short_id(ref.id) + "\n");
+    if (r.identical > 0) out("  already identical, left as they were: " + std::to_string(r.identical) + "\n");
     if (r.skipped > 0) out("  skipped: " + std::to_string(r.skipped) + " (existing files, links or placeholders)\n");
     if (r.errors > 0) {
         out("  " + std::to_string(r.errors) + " item(s) failed; see warnings above\n");

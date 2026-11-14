@@ -1324,3 +1324,66 @@ TEST_CASE("a file only in the cloud is counted, not read, unless the job downloa
     CHECK(second.snapshot.stats.bytes == 12 + 17);
 }
 #endif
+
+TEST_CASE("restore: an interrupted restore goes on, leaving identical files alone; its size is known first") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "a.bin", seeded_bytes(300000, 41));
+    write_file(src / "b.bin", seeded_bytes(200000, 42));
+    write_file(src / "sub" / "c.txt", text("small file"));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions bo;
+    bo.paths = {u8(src)};
+    const BackupResult b = run_backup(*repo, bo);
+    const Snapshot snap = repo->load_snapshot(b.snapshot_id);
+
+    RestoreOptions o;
+    o.target = u8(tmp.path / "out");
+    RestoreEstimate e = estimate_restore(*repo, snap, o);
+    CHECK(e.files == 3);
+    CHECK(e.bytes == 300000 + 200000 + 10);
+    CHECK(e.needed == e.bytes);
+
+    RestoreResult r = run_restore(*repo, snap, o);
+    CHECK(r.files == 3);
+    const fs::path out = restored_location(tmp.path / "out", src);
+    REQUIRE(fs::exists(out / "a.bin"));
+    CHECK(estimate_restore(*repo, snap, o).needed == 0);  // all there already
+
+    // As if the restore stopped during b.bin: half of it written, with a time of now.
+    {
+        std::ofstream f(out / "b.bin", std::ios::binary | std::ios::trunc);
+        const Bytes half = seeded_bytes(100000, 42);
+        f.write(reinterpret_cast<const char*>(half.data()), static_cast<std::streamsize>(half.size()));
+    }
+    e = estimate_restore(*repo, snap, o);
+    CHECK(e.needed == 200000);
+
+    // Run again: identical files are left alone, the half one is restored again.
+    o.overwrite = true;
+    o.skip_identical = true;
+    r = run_restore(*repo, snap, o);
+    CHECK(r.identical == 2);
+    CHECK(r.files == 1);
+    CHECK(r.bytes == 200000);
+    CHECK(read_file(out / "b.bin") == seeded_bytes(200000, 42));
+    CHECK(r.errors == 0);
+
+    // Same size and time but other content: not identical, restored again.
+    {
+        Bytes changed = seeded_bytes(300000, 41);
+        changed[1000] ^= 1;
+        os::FileInfo info;
+        os::ErrorCode err = 0;
+        REQUIRE(os::stat(u8(out / "a.bin"), info, err));
+        std::ofstream(out / "a.bin", std::ios::binary | std::ios::trunc)
+            .write(reinterpret_cast<const char*>(changed.data()), static_cast<std::streamsize>(changed.size()));
+        os::set_metadata(u8(out / "a.bin"), info);
+    }
+    r = run_restore(*repo, snap, o);
+    CHECK(r.identical == 2);
+    CHECK(r.files == 1);
+    CHECK(read_file(out / "a.bin") == seeded_bytes(300000, 41));
+}
