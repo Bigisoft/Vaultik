@@ -346,6 +346,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         }
         if (check) {
             msg = result == "success"   ? tr("Health check: no problems.")
+                  : result == "partial"   ? tr("Health check: %1").arg(ev.value("message").toString())
                   : result == "cancelled" ? tr("Health check cancelled.")
                                           : tr("Health check failed: %1").arg(ev.value("message").toString());
             log_->appendPlainText(msg);
@@ -1330,7 +1331,9 @@ void MainWindow::refresh_history() {
                                    damage                                        ? tr("problems found")
                                    : check->rot_files > 0                        ? tr("files on this PC changed by themselves")
                                    : check->status == jobs::RunStatus::Success ? tr("no problems")
-                                                                                 : status_text(check->status).toLower());
+                                   : check->status == jobs::RunStatus::Partial
+                                       ? tr("no problems so far, the rest after the next backup")
+                                       : status_text(check->status).toLower());
     }
     status_text_->setText(text + "  ·  " + tr("Schedule: %1").arg(next));
     refresh_overview();

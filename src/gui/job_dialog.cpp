@@ -646,7 +646,11 @@ QWidget* JobDialog::build_schedule() {
     check_percent_ = spin(1, 100, QStringLiteral("%"), QString());
     form->addRow(tr("Check:"), row({check_weekly_, check_percent_, new QLabel(tr("of the stored data"))}));
     check_monthly_ = new QCheckBox(tr("Once a month, read back all of it"));
-    form->addRow(QString(), check_monthly_);
+    check_hours_ = spin(0, 168, tr(" h"), tr("no limit"));
+    check_hours_->setValue(jobs::HealthPolicy{}.full_check_hours);
+    check_hours_->setToolTip(tr("A full check reads at most this long per run and goes on where it stopped after "
+                                "the next backup, until all of it was read within 30 days."));
+    form->addRow(QString(), row({check_monthly_, new QLabel(tr("at most")), check_hours_, new QLabel(tr("per run"))}));
     check_restore_ = new QCheckBox(tr("Once a month, test a restore of a few files"));
     check_restore_->setToolTip(tr("Restores up to 20 files (at most 500 MB) of the newest version into a temporary "
                                   "folder, checks them, compares them with the unchanged files on this PC and "
@@ -668,6 +672,7 @@ QWidget* JobDialog::build_schedule() {
     check_note->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(QString(), check_note);
     connect(check_weekly_, &QCheckBox::toggled, check_percent_, &QWidget::setEnabled);
+    connect(check_monthly_, &QCheckBox::toggled, check_hours_, &QWidget::setEnabled);
     connect(check_monthly_, &QCheckBox::clicked, this, [this] { check_monthly_touched_ = true; });
     connect(repository_, &QLineEdit::textChanged, this, [this](const QString& text) {
         if (!editing_ && !check_monthly_touched_)
@@ -996,6 +1001,8 @@ void JobDialog::load(const jobs::Job& job) {
     check_percent_->setValue(job.health.sample_percent);
     check_percent_->setEnabled(job.health.weekly);
     check_monthly_->setChecked(job.health.monthly);
+    check_hours_->setValue(job.health.full_check_hours);
+    check_hours_->setEnabled(job.health.monthly);
     check_restore_->setChecked(job.health.restore_test);
     check_rot_->setChecked(job.health.rot_check);
     before_command_->setText(qs(job.before_command));
@@ -1197,6 +1204,7 @@ jobs::Job JobDialog::collect() const {
     j.health.weekly = check_weekly_->isChecked();
     j.health.sample_percent = check_percent_->value();
     j.health.monthly = check_monthly_->isChecked();
+    j.health.full_check_hours = check_hours_->value();
     j.health.restore_test = check_restore_->isChecked();
     j.health.rot_check = check_rot_->isChecked();
     return j;

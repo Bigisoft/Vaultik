@@ -715,6 +715,14 @@ notification. `check-job <job> [--full]` runs one now; `verify --read-data --rea
 the same on any repository. New cloud jobs skip the monthly full check, since it downloads the
 whole backup.
 
+Vaultik remembers on this PC (in `checks` in its settings folder, never in the backup) when each
+stored pack was last read back intact. The weekly check reads the share read longest ago, so
+over the weeks every part of the backup is read. The monthly full check reads for at most 3 hours
+per run by default (the job's Schedule tab: "at most ... per run", or no limit) and reads what was
+not read in the last 30 days; when the time is up it stops calmly ("the rest after the next
+backup"), and the next check goes on where it stopped, also after a cancel or an unplugged drive.
+A full check is complete once every pack was read within 30 days.
+
 Only a check that read what it set out to read counts as done. A check that could not finish
 (the drive was unplugged part way, say) or was cancelled does not: it stays due and runs again
 after the next backup, and one that could not finish shows a notification and sends a "health

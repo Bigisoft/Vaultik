@@ -125,6 +125,7 @@ private:
     // Health checks after scheduled backups.
     QCheckBox* check_weekly_ = nullptr;
     QSpinBox* check_percent_ = nullptr;
+    QSpinBox* check_hours_ = nullptr;
     QCheckBox* check_monthly_ = nullptr;
     QCheckBox* check_restore_ = nullptr;
     QCheckBox* check_rot_ = nullptr;

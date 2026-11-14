@@ -28,6 +28,7 @@
 
 #include "vaultik/cli/console.hpp"
 #include "vaultik/crypto/hash.hpp"
+#include "vaultik/jobs/check_state.hpp"
 #include "vaultik/jobs/drive_lock.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
@@ -2146,13 +2147,33 @@ std::string rot_check(Repository& repo, const jobs::Job& job, jobs::RunRecord& r
            "a failing drive?): " + record.rot + "; the version of " + when + " holds the earlier copy";
 }
 
-int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record) {
+constexpr std::uint64_t kFullCheckPeriod = 30ull * 864'000'000'000ull;  // 30 days in FILETIME ticks
+
+int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record,
+                 const std::string& settings_dir) {
     record.kind = kind;
     record.started = os::now();
     const bool full = kind == jobs::RunKind::FullCheck;
     std::vector<std::string> problems;
     VerifyResult r;
     std::string rot;
+    // What earlier checks of this repository read (see jobs/check_state.hpp): read longest ago
+    // first, and kept however this check ends, so the next one goes on from there.
+    const std::string state_key = jobs::check_state_key(repo);
+    jobs::PackTimes state = jobs::load_check_state(settings_dir, state_key);
+    struct SaveState {
+        const std::string& dir;
+        const std::string& key;
+        const jobs::PackTimes& times;
+        const Repository& repo;
+        ~SaveState() {
+            try {
+                jobs::save_check_state(dir, key, times, repo);
+            } catch (const std::exception& e) {
+                warning(std::string("could not remember which data the check read: ") + e.what());
+            }
+        }
+    } save_state{settings_dir, state_key, state, repo};
     try {
         RepoLock lock(repo, RepoLock::Mode::Shared, "check (job " + job.id + ")");
         repo.reload_index();  // a prune may have finished before the lock was granted
@@ -2160,7 +2181,11 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         o.read_data = true;
         o.read_share = full ? 1.0 : job.health.sample_percent / 100.0;
         o.add_parity = repo.parity_percent();  // data from before repair data gets it over time
-        o.sample_seed = record.started;  // a different share each time
+        o.sample_seed = record.started;
+        o.pack_state = &state;
+        o.now = record.started;
+        o.fresh_ticks = full ? kFullCheckPeriod : 0;
+        if (full) o.time_budget = std::chrono::hours(job.health.full_check_hours);
         o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
         o.on_progress = [](const std::string& msg) {
             if (g_json) emit({{"event", "check_progress"}, {"current", msg}});
@@ -2193,7 +2218,12 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     record.files = r.packs_read;
     record.bytes = r.bytes_read;
     record.errors = r.errors;
-    record.status = r.errors > 0 ? jobs::RunStatus::Failed : jobs::RunStatus::Success;
+    // A full check is complete once every pack was read within the period, by this check or the
+    // ones before it; one that stopped at its time limit goes on after the next backup.
+    const std::uint64_t still_due = full ? jobs::packs_due(state, repo, record.started, kFullCheckPeriod) : 0;
+    record.status = r.errors > 0 ? jobs::RunStatus::Failed
+                    : still_due > 0 ? jobs::RunStatus::Partial
+                                    : jobs::RunStatus::Success;
     if (r.errors > 0) {
         record.message = std::to_string(r.errors) + " problem(s) found: ";
         for (std::size_t i = 0; i < problems.size(); ++i) record.message += (i ? "; " : "") + problems[i];
@@ -2201,6 +2231,11 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         record.message = "read " + format_bytes(r.bytes_read) + " in " + std::to_string(r.packs_read) + " of " +
                          std::to_string(r.packs) + " pack(s), checked " + std::to_string(r.snapshots) +
                          " version(s); no problems";
+        if (still_due > 0)
+            record.message += "; " + std::to_string(still_due) + " pack(s) are left for the next check (time limit of " +
+                              std::to_string(job.health.full_check_hours) + " hour(s)), which goes on where this one stopped";
+        else if (full && r.packs_read < r.packs)
+            record.message += "; the other packs were read by the checks of the last 30 days";
     }
     if (r.packs_repairable > 0)
         record.message += "; " + std::to_string(r.packs_repairable) +
@@ -2793,7 +2828,7 @@ int cmd_check_job(const Args& a) {
     try {
         drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
         repo = open_job_repo(a, store, *job);
-        code = health_check(*repo, *job, record.kind, record);
+        code = health_check(*repo, *job, record.kind, record, store.dir());
     } catch (const LockedError&) {
         throw;  // nothing was checked; not a result for the history
     } catch (const std::exception& e) {
@@ -3306,7 +3341,7 @@ int cmd_run_job(const Args& a) {
     if (due) {
         jobs::RunRecord check;
         try {
-            health_check(*repo, *job, *due, check);
+            health_check(*repo, *job, *due, check, store.dir());
         } catch (const LockedError&) {
             // Another run is using the repository: try again after the next backup.
             if (!g_json) clear_status();

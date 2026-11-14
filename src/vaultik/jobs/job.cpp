@@ -279,9 +279,10 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
     std::uint64_t last_full = 0, last_any = 0;
     for (const RunRecord& r : history) {
-        if (!check_completed(r)) continue;
+        const bool partial_full = r.kind == RunKind::FullCheck && r.status == RunStatus::Partial;
+        if (!check_completed(r) && !partial_full) continue;
         last_any = std::max(last_any, r.finished);
-        if (r.kind == RunKind::FullCheck) last_full = std::max(last_full, r.finished);
+        if (r.kind == RunKind::FullCheck && !partial_full) last_full = std::max(last_full, r.finished);
     }
     const auto older_than = [now](std::uint64_t at, std::uint64_t age) { return at == 0 || at + age <= now; };
     if (policy.monthly && older_than(last_full, 30 * kDay)) return RunKind::FullCheck;
@@ -436,6 +437,8 @@ void validate(const Job& job) {
         throw Error("unknown storage class " + job.cloud_storage_class);
     if (job.health.sample_percent < 1 || job.health.sample_percent > 100)
         throw Error("the weekly check must read between 1% and 100% of the data");
+    if (job.health.full_check_hours < 0 || job.health.full_check_hours > 168)
+        throw Error("the time limit of the full check must be between 0 (none) and 168 hours");
 }
 
 std::string to_json(const Job& job) {
@@ -524,7 +527,8 @@ std::string to_json(const Job& job) {
           {"sample_percent", job.health.sample_percent},
           {"monthly", job.health.monthly},
           {"restore_test", job.health.restore_test},
-          {"rot_check", job.health.rot_check}}},
+          {"rot_check", job.health.rot_check},
+          {"full_check_hours", job.health.full_check_hours}}},
     };
     try {
         return j.dump(2) + "\n";
@@ -666,6 +670,7 @@ Job job_from_json(const std::string& text) {
             job.health.monthly = h.value("monthly", job.health.monthly);
             job.health.restore_test = h.value("restore_test", job.health.restore_test);
             job.health.rot_check = h.value("rot_check", job.health.rot_check);
+            job.health.full_check_hours = h.value("full_check_hours", job.health.full_check_hours);
         }
         validate(job);
         return job;

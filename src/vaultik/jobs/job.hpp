@@ -71,6 +71,10 @@ struct HealthPolicy {
     // change since the newest version, and compares their content with the stored one (see
     // ops/rot_check.hpp), to notice data a failing drive changed by itself.
     bool rot_check = true;
+    // The monthly full check reads for at most this many hours per run (0: no limit) and goes on
+    // where it stopped after the next backup, until every pack was read within 30 days (see
+    // jobs/check_state.hpp). Three hours read about 400 GiB from a drive behind USB 2.0.
+    int full_check_hours = 3;
 };
 
 // Lower speed limits while people work: on the given days (bit 0 = Monday) from start_minute to
@@ -348,7 +352,8 @@ const char* to_string(Schedule::Kind kind);
 // The health check due now (FILETIME ticks), judged from the job's history (oldest first): a full
 // check when the monthly one is on and no full check finished in the last 30 days, otherwise a
 // sampled check when the weekly one is on and no check of either kind finished in the last 7
-// days. Only a completed check counts (check_completed): one that was cancelled, could not run
+// days. A full check that stopped at its time limit (status Partial) counts as a weekly check,
+// and the full one stays due until one completes. Only a completed check counts (check_completed): one that was cancelled, could not run
 // or stopped part way is tried again after the next backup.
 std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
                                  std::uint64_t now);

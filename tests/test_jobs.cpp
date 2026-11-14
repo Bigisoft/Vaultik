@@ -168,6 +168,12 @@ TEST_CASE("health checks: settings and when they are due") {
     CHECK_FALSE(check_not_finished(damage));
     history.back() = damage;
     CHECK_FALSE(due_check(h, history, now).has_value());
+    // A full check that stopped at its time limit: the weekly check is done, the full one stays due.
+    history = {run(RunKind::FullCheck, now - 40 * day), run(RunKind::FullCheck, now - day, RunStatus::Partial)};
+    CHECK(due_check(h, history, now) == RunKind::FullCheck);
+    h.monthly = false;
+    CHECK_FALSE(due_check(h, history, now).has_value());
+    h.monthly = true;
     // A sampled check that failed leaves the weekly one due.
     h.monthly = false;
     history = {run(RunKind::Check, now - 8 * day), run(RunKind::Check, now - day, RunStatus::Failed)};

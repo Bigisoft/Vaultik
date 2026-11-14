@@ -133,6 +133,7 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/sftp_location.cpp
     src/vaultik/jobs/job.cpp
     src/vaultik/jobs/drive_lock.cpp
+    src/vaultik/jobs/check_state.cpp
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/report.cpp
@@ -368,6 +369,7 @@ add_executable(vaultik_tests
     tests/test_formats.cpp
     tests/test_end_to_end.cpp
     tests/test_jobs.cpp
+    tests/test_checks.cpp
     tests/test_report.cpp
     tests/test_forecast.cpp
     tests/test_kit.cpp
