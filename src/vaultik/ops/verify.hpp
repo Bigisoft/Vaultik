@@ -43,6 +43,10 @@ struct VerifyOptions {
 
     std::function<void(const std::string&)> on_progress;
     std::function<void(const std::string&)> on_error;
+    // How far the reading is: the stored bytes of the packs read so far and of all packs this
+    // check reads (both from the index, so `done` reaches `total` when every one was read).
+    // Called once before the first pack and after each pack read.
+    std::function<void(std::uint64_t done, std::uint64_t total)> on_bytes;
 };
 
 struct VerifyResult {

@@ -152,3 +152,33 @@ TEST_CASE("resumable check: a cancelled check keeps what it read, a weekly share
     CHECK(state.size() == packs);
     CHECK(jobs::packs_due(state, *repo, 41 * kDay, 30 * kDay) == 0);
 }
+
+TEST_CASE("check progress: the bytes read so far and in all, reaching the total") {
+    TempDir tmp;
+    auto repo = repo_with_packs(tmp.path, 4);
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> seen;
+    VerifyOptions o;
+    o.read_data = true;
+    o.on_bytes = [&](std::uint64_t done, std::uint64_t total) { seen.emplace_back(done, total); };
+    const VerifyResult r = run_verify(*repo, o);
+    REQUIRE(seen.size() == r.packs_read + 1);  // once before, once per pack
+    CHECK(seen.front().first == 0);
+    const std::uint64_t total = seen.front().second;
+    CHECK(total > 0);
+    CHECK(total <= r.bytes_read);  // the stored blobs, without the pack headers
+    for (std::size_t i = 1; i < seen.size(); ++i) {
+        CHECK(seen[i].first > seen[i - 1].first);
+        CHECK(seen[i].second == total);
+    }
+    CHECK(seen.back().first == total);
+
+    // A sampled check counts only what it reads.
+    seen.clear();
+    o.read_share = 0.01;
+    o.sample_seed = 3;
+    const VerifyResult some = run_verify(*repo, o);
+    CHECK(some.packs_read == 1);
+    REQUIRE(seen.size() == 2);
+    CHECK(seen.back().first == seen.back().second);
+    CHECK(seen.back().second < total);
+}

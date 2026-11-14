@@ -2237,6 +2237,13 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
             if (problems.size() < 3) problems.push_back(msg);
             warning(msg);
         };
+        // How far the reading is, in bytes, for a percentage and the time left.
+        o.on_bytes = [](std::uint64_t done, std::uint64_t total) {
+            if (g_json) emit({{"event", "check_progress"}, {"done", done}, {"total", total}});
+            else if (total > 0)
+                status("Checking: " + std::to_string(done * 100 / total) + "% (" + format_bytes(done) + " of " +
+                       format_bytes(total) + ")");
+        };
         if (!g_json)
             out(std::string(full ? "Full health check: reading all stored data back...\n"
                                  : "Health check: reading " + std::to_string(job.health.sample_percent) +

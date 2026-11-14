@@ -85,6 +85,14 @@ void VerifyEngine::check_packs() {
     }
     const auto deadline = std::chrono::steady_clock::now() + options_.time_budget;
     const bool budgeted = state != nullptr && options_.time_budget.count() > 0;
+    // The stored size of each pack, for the progress in bytes.
+    std::vector<std::uint64_t> pack_bytes(count, 0);
+    for (std::size_t p = 0; p < count; ++p)
+        for (const auto& [id, loc] : expected[p]) pack_bytes[p] += loc.length;
+    std::uint64_t total_bytes = 0, done_bytes = 0;
+    for (std::size_t p = 0; p < count; ++p)
+        if (to_read[p] && !archived[p]) total_bytes += pack_bytes[p];
+    if (options_.on_bytes) options_.on_bytes(0, total_bytes);
 
     for (std::size_t step = 0; step < count; ++step) {
         const std::size_t p = order[step];
@@ -110,12 +118,16 @@ void VerifyEngine::check_packs() {
             if (read && budgeted && result_.packs_read > 0 && std::chrono::steady_clock::now() >= deadline) {
                 read = false;  // the time is up: the next check goes on from here
                 ++result_.packs_left;
+                total_bytes -= std::min(total_bytes, pack_bytes[p]);
+                if (options_.on_bytes) options_.on_bytes(done_bytes, total_bytes);
             }
             const std::uint64_t errors_before = result_.errors;
             if (read) {
                 pack = repo_.backend().get(name);
                 result_.bytes_read += pack.size();
                 ++result_.packs_read;
+                done_bytes += pack_bytes[p];
+                if (options_.on_bytes) options_.on_bytes(done_bytes, total_bytes);
                 if (blake3(pack) != pack_id) {
                     Bytes copy = pack;
                     if (repo_.rebuild_pack(pack_id, copy)) {

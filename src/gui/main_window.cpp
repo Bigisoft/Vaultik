@@ -274,6 +274,24 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             current_file_->setText(ev.value("current").toString());
             return;
         }
+        if (type == "check_progress" && ev.contains("total")) {
+            // How far the reading is: a percentage and the time left (smoothed as for the cleanser).
+            running_label_->setText(tr("Checking the backup..."));
+            const auto done = static_cast<std::uint64_t>(ev.value("done").toInteger());
+            const auto total = static_cast<std::uint64_t>(ev.value("total").toInteger());
+            if (total == 0) return;
+            check_rate_.add(done, total,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            bar_->setRange(0, 1000);
+            bar_->setValue(static_cast<int>(std::min<std::uint64_t>(done * 1000 / total, 1000)));
+            const QString left = time_left_text(check_rate_.seconds_left());
+            progress_text_->setText(tr("Reading stored data back: %1% (%2 of %3)")
+                                        .arg(done * 100 / total)
+                                        .arg(format_bytes(done), format_bytes(total)) +
+                                    (left.isEmpty() ? QString() : QStringLiteral("  ·  ") + left));
+            current_file_->clear();
+            return;
+        }
         if (type == "check_progress") {
             running_label_->setText(tr("Checking the backup..."));
             // "pack 3/120" while the stored data is read, then the versions' structure.
@@ -281,9 +299,11 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             static const QRegularExpression packs(QStringLiteral("^pack (\\d+)/(\\d+)$"));
             const QRegularExpressionMatch m = packs.match(current);
             if (m.hasMatch()) {
-                bar_->setRange(0, m.captured(2).toInt());
-                bar_->setValue(m.captured(1).toInt());
-                progress_text_->setText(tr("Reading stored data back: part %1 of %2").arg(m.captured(1), m.captured(2)));
+                if (bar_->maximum() != 1000) {  // (without the bytes: by parts)
+                    bar_->setRange(0, m.captured(2).toInt());
+                    bar_->setValue(m.captured(1).toInt());
+                    progress_text_->setText(tr("Reading stored data back: part %1 of %2").arg(m.captured(1), m.captured(2)));
+                }
                 current_file_->clear();
             } else {
                 bar_->setRange(0, 0);

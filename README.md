@@ -756,7 +756,10 @@ over the weeks every part of the backup is read. The monthly full check reads fo
 per run by default (the job's Schedule tab: "at most ... per run", or no limit) and reads what was
 not read in the last 30 days; when the time is up it stops calmly ("the rest after the next
 backup"), and the next check goes on where it stopped, also after a cancel or an unplugged drive.
-A full check is complete once every pack was read within 30 days.
+A full check is complete once every pack was read within 30 days. While a check reads, the app shows how far it is
+as a percentage of the data it reads this time, with the time left (smoothed over the last half
+minute, as for the drive cleanser); `--json` gives `"done"` and `"total"` bytes in its
+`check_progress` events.
 
 Only a check that read what it set out to read counts as done. A check that could not finish
 (the drive was unplugged part way, say) or was cancelled does not: it stays due and runs again
