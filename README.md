@@ -543,6 +543,14 @@ connected" (Schedule tab), the running frontend or tray icon starts the job as s
 is plugged in (`run-job <job> --on-connect`, which does nothing when the job just saved a
 version or is already running), then says when the drive can be unplugged.
 
+Jobs that back up to the same drive take turns: a backup, health check, test restore or cleanup
+waits while another job uses that drive ("Waiting for another job on this drive" in the app),
+and starts when it is done, so three jobs on one USB drive do not share its speed and each take
+as long as all three together. The turn follows the drive's volume ID, not its letter, and holds
+between runs started by Task Scheduler or a systemd timer and runs started in the app (also for
+jobs with administrator rights). A run gives up after waiting 12 hours. Cloud storage has no
+such turns.
+
 When a run finds the backup drive not connected, that is no failure: the drive is simply
 elsewhere. The run is recorded once as "Waiting for the drive" (grey, not red; `"status":
 "waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert and no

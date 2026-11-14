@@ -28,6 +28,7 @@
 
 #include "vaultik/cli/console.hpp"
 #include "vaultik/crypto/hash.hpp"
+#include "vaultik/jobs/drive_lock.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/jobs/settings_transfer.hpp"
@@ -2340,6 +2341,22 @@ std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& s
     return repo;
 }
 
+// Takes the lock of the backup drive behind `key` (see jobs/drive_lock.hpp) for this run, waiting
+// while another run uses the drive and saying so. Stopping the run stops the wait.
+std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::string& settings_dir) {
+    return std::make_unique<jobs::DriveLock>(
+        key, os::join(settings_dir, "locks"), std::chrono::duration_cast<std::chrono::milliseconds>(jobs::kDriveLockWait),
+        [] {
+            const std::string msg = "waiting for another job on this drive to finish";
+            if (g_json) emit({{"event", "drive_wait"}, {"message", msg}});
+            else out("Waiting: another job is using this backup drive; this one starts when it is done.\n");
+        },
+        [] {
+            if (stop_requested()) throw Cancelled();
+            return false;
+        });
+}
+
 // Leaves this computer's status record in the job's repository (see jobs/computers.hpp), so other
 // computers backing up there can see how this one is doing. Best effort: a record that cannot be
 // written is a warning, never a failed run.
@@ -2771,8 +2788,10 @@ int cmd_check_job(const Args& a) {
     record.kind = a.has("--full") ? jobs::RunKind::FullCheck : jobs::RunKind::Check;
     record.started = os::now();
     int code = kExitError;
+    std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
     try {
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
         repo = open_job_repo(a, store, *job);
         code = health_check(*repo, *job, record.kind, record);
     } catch (const LockedError&) {
@@ -2780,8 +2799,9 @@ int cmd_check_job(const Args& a) {
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the check started
             record.finished = os::now();
-            record.status = jobs::RunStatus::Failed;
-            record.message = std::string("the check could not run: ") + e.what();
+            const bool cancelled = dynamic_cast<const Cancelled*>(&e) != nullptr;  // while waiting for the drive
+            record.status = cancelled ? jobs::RunStatus::Cancelled : jobs::RunStatus::Failed;
+            record.message = cancelled ? std::string("cancelled") : std::string("the check could not run: ") + e.what();
         }
         try {
             store.append_history(job->id, record);
@@ -2811,8 +2831,10 @@ int cmd_test_restore(const Args& a) {
     record.kind = jobs::RunKind::RestoreTest;
     record.started = os::now();
     int code = kExitError;
+    std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
     try {
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
         repo = open_job_repo(a, store, *job);
         code = restore_check(a, store, *repo, *job, record);
     } catch (const LockedError&) {
@@ -2820,8 +2842,9 @@ int cmd_test_restore(const Args& a) {
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the test started
             record.finished = os::now();
-            record.status = jobs::RunStatus::Failed;
-            record.message = std::string("the test restore could not run: ") + e.what();
+            const bool cancelled = dynamic_cast<const Cancelled*>(&e) != nullptr;  // while waiting for the drive
+            record.status = cancelled ? jobs::RunStatus::Cancelled : jobs::RunStatus::Failed;
+            record.message = cancelled ? std::string("cancelled") : std::string("the test restore could not run: ") + e.what();
         }
         try {
             store.append_history(job->id, record);
@@ -3113,7 +3136,10 @@ int cmd_run_job(const Args& a) {
         else out("Job \"" + job->name + "\": " + waiting.message + "\n");
         return kExitWaiting;
     }
+    // One run at a time on this drive (also checks and prunes of other jobs there): held to the end.
+    std::unique_ptr<jobs::DriveLock> drive_lock;
     try {
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
         repo = open_job_repo(a, store, *job);
         const unsigned readers = apply_parallelism(*repo, a, job->repository, policy);
         if ((on_connect || !trigger.empty()) && backup_running(*repo, *job)) {
@@ -3227,8 +3253,9 @@ int cmd_run_job(const Args& a) {
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the backup started
             record.finished = os::now();
-            record.status = jobs::RunStatus::Failed;
-            record.message = e.what();
+            const bool cancelled = dynamic_cast<const Cancelled*>(&e) != nullptr;  // while waiting for the drive
+            record.status = cancelled ? jobs::RunStatus::Cancelled : jobs::RunStatus::Failed;
+            record.message = cancelled ? std::string("cancelled") : std::string(e.what());
         }
         try {
             store.append_history(job->id, record);
@@ -3361,6 +3388,7 @@ int cmd_forget(const Args& a) {
 
 int cmd_prune(const Args& a) {
     const bool dry = a.has("--dry-run");
+    const auto drive_lock = lock_drive(jobs::drive_lock_key(repo_path(a)), jobs::config_dir());
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Exclusive, "prune", lock_wait(a));
     const auto start = std::chrono::steady_clock::now();

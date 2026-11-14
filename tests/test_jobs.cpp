@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
+#include <thread>
 #include <filesystem>
 
 #include <nlohmann/json.hpp>
@@ -8,6 +10,7 @@
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/drive_lock.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
@@ -928,4 +931,66 @@ TEST_CASE("pausing a job: when its schedule cannot be changed, it is saved back 
     CHECK_THROWS_AS(set_paused(store, j, false, [](const Job&) { throw Error("Task Scheduler refused"); }), Error);
     CHECK(store.find(j.id)->schedule.paused);
     CHECK(j.schedule.paused);
+}
+
+TEST_CASE("drive lock: two runs for the same drive take turns, other drives do not wait") {
+    TempStore tmp;
+    const std::string dir = tmp.dir();
+    fs::create_directories(tmp.path);
+    CHECK(drive_lock_key("s3:https://s3.example.com/bucket").empty());  // cloud storage: no drive
+    CHECK(drive_lock_key("E:/Backup", "\\\\?\\Volume{1}\\") == "\\\\?\\Volume{1}\\");
+    CHECK_FALSE(drive_lock_key(dir).empty());
+    CHECK(drive_lock_key(dir) == drive_lock_key(dir));
+
+    const std::string key = "test-drive-" + tmp.path.filename().string();
+    std::atomic<int> state{0};  // 1: the first run holds the drive, 2: it let go
+    std::thread first([&] {
+        DriveLock lock(key, dir, std::chrono::milliseconds(5000));
+        state = lock.held() ? 1 : -1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        state = 2;
+    });
+    while (state == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE(state == 1);
+    {
+        // Another drive: at once.
+        DriveLock other(key + "-other", dir, std::chrono::milliseconds(0));
+        CHECK(other.held());
+        CHECK_FALSE(other.waited());
+    }
+    // The same drive with a short wait: busy.
+    bool busy = false;
+    int told = 0;
+    try {
+        DriveLock quick(key, dir, std::chrono::milliseconds(100), [&] { ++told; });
+    } catch (const DriveBusy&) {
+        busy = true;
+    }
+    CHECK(busy);
+    CHECK(told == 1);
+    // Cancelled while it waits.
+    bool cancelled = false;
+    try {
+        DriveLock stop(key, dir, std::chrono::milliseconds(5000), {}, [] { return true; });
+    } catch (const DriveBusy&) {
+    } catch (const Error&) {
+        cancelled = true;
+    }
+    CHECK(cancelled);
+    // A long enough wait: it gets the drive once the first run is done, never while it runs.
+    told = 0;
+    {
+        DriveLock second(key, dir, std::chrono::milliseconds(10000), [&] { ++told; });
+        CHECK(second.held());
+        CHECK(second.waited());
+        CHECK(state == 2);
+        CHECK(told == 1);
+    }
+    first.join();
+    // Free again.
+    DriveLock again(key, dir, std::chrono::milliseconds(0));
+    CHECK(again.held());
+    // No key: no lock, no wait.
+    DriveLock none("", dir, std::chrono::milliseconds(0));
+    CHECK_FALSE(none.held());
 }

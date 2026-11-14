@@ -234,6 +234,13 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             log_->appendPlainText(check_result_);
             return;
         }
+        if (type == "drive_wait") {
+            running_label_->setText(tr("Waiting for another job on this drive..."));
+            bar_->setRange(0, 0);
+            progress_text_->setText(tr("One job at a time uses a backup drive; this one starts when the other is done."));
+            current_file_->clear();
+            return;
+        }
         if (type == "restore_test") {
             const bool bad = !ev.value("problems").toArray().isEmpty();
             check_result_ = bad ? tr("The test restore found problems: %1").arg(ev.value("message").toString())
