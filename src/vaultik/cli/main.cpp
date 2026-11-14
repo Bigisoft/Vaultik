@@ -30,6 +30,7 @@
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/jobs/check_state.hpp"
 #include "vaultik/jobs/drive_lock.hpp"
+#include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/jobs/settings_transfer.hpp"
@@ -4832,6 +4833,10 @@ int cmd_recovery_kit(const Args& a) {
         // A new key exists only here now: it must not be lost with the file.
         if (a.has("--new")) out("Recovery key: " + key + "\nWrite it down: the kit could not be written.\n");
         throw;
+    }
+    try {
+        jobs::note_recovery_kit(jobs::config_dir(), location);  // the app no longer lists it as missing
+    } catch (const std::exception&) {
     }
     out("Wrote the recovery kit to " + path + ".\n");
     out("It holds the recovery key: print it, keep the paper apart from this computer, and delete the file.\n");

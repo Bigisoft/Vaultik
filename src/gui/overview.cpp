@@ -292,6 +292,22 @@ OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
     grid->setColumnStretch(1, 1);
     layout->addLayout(grid);
 
+    // What is still unprotected; filled by set_data, hidden when nothing is.
+    auto* gaps = new QFrame;
+    gaps->setProperty("role", "card");
+    auto* gl = new QVBoxLayout(gaps);
+    gl->setContentsMargins(16, 14, 16, 14);
+    gl->setSpacing(6);
+    auto* gaps_title = new QLabel(tr("Still unprotected"));
+    gaps_title->setProperty("role", "section");
+    gl->addWidget(gaps_title);
+    gaps_list_ = new QWidget;
+    new QGridLayout(gaps_list_);
+    gaps_list_->layout()->setContentsMargins(0, 0, 0, 0);
+    gl->addWidget(gaps_list_);
+    gaps_box_ = gaps;
+    layout->addWidget(gaps_box_);
+
     // The drives involved and their health; filled by set_data.
     auto* drives = new QFrame;
     drives->setProperty("role", "card");
@@ -371,6 +387,39 @@ void OverviewView::set_data(const OverviewData& d) {
         if (!d.test_ok) health_.value->setText(tr("Problems found"));
     }
     calendar_->set_days(d.days);
+
+    // What is still unprotected: a line each, with a button to its fix.
+    auto* gaps = static_cast<QGridLayout*>(gaps_list_->layout());
+    while (QLayoutItem* item = gaps->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+    gaps_box_->setVisible(!d.gaps.empty());
+    int gap_row = 0;
+    for (const OverviewData::Gap& gap : d.gaps) {
+        auto* mark = new QLabel;
+        mark->setPixmap(status_icon(vaultik::jobs::RunStatus::Partial).pixmap(16, 16));
+        auto* text = new QLabel(gap.text);
+        text->setTextFormat(Qt::PlainText);
+        text->setWordWrap(true);
+        gaps->addWidget(mark, gap_row, 0, Qt::AlignTop);
+        gaps->addWidget(text, gap_row, 1);
+        const QString label = gap.fix == "edit"     ? tr("Edit the job...")
+                              : gap.fix == "kit"    ? tr("Save the recovery kit...")
+                              : gap.fix == "test"   ? tr("Test a restore")
+                              : gap.fix == "resume" ? tr("Resume the schedule")
+                              : gap.fix == "check"  ? tr("Check now")
+                                                    : QString();
+        if (!label.isEmpty()) {
+            auto* button = new QPushButton(label);
+            button->setProperty("role", "action");
+            const QString fix = gap.fix;
+            connect(button, &QPushButton::clicked, this, [this, fix] { emit fix_requested(fix); });
+            gaps->addWidget(button, gap_row, 2, Qt::AlignTop);
+        }
+        ++gap_row;
+    }
+    gaps->setColumnStretch(1, 1);
 
     // One row per drive: its role, the drive, its health percentage and its state (in colour
     // when it has a problem).

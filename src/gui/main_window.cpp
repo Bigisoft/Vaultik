@@ -70,6 +70,7 @@
 #include "vaultik/jobs/forecast.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/report.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/jobs/scheduler.hpp"
@@ -1139,6 +1140,13 @@ QWidget* MainWindow::build_job_page() {
     versions_ = new VersionsView;
     connect(overview_, &OverviewView::versions_requested, this, [this] { tabs_->setCurrentWidget(versions_); });
     connect(overview_, &OverviewView::grew_requested, this, &MainWindow::show_grew);
+    connect(overview_, &OverviewView::fix_requested, this, [this](const QString& fix) {
+        if (fix == "edit") edit_job();
+        else if (fix == "kit") open_keys();
+        else if (fix == "test") test_restore();
+        else if (fix == "resume") set_job_paused(false);
+        else if (fix == "check") check_job(false);
+    });
     connect(versions_, &VersionsView::restore_requested, this, [this](int i) { open_restore(i); });
     connect(versions_, &VersionsView::pin_requested, this, [this](int i, bool pin) { change_version(i, pin, false); });
     connect(versions_, &VersionsView::note_requested, this, [this](int i) { change_version(i, false, true); });
@@ -1693,6 +1701,14 @@ void MainWindow::refresh_overview() {
             auto& cur = d.days[to_datetime(e.snapshot.time).date()];
             if (cur == OverviewData::Day::None || cur == OverviewData::Day::Failed) cur = OverviewData::Day::Saved;
         }
+    // What is still unprotected.
+    try {
+        const std::vector<jobs::Job> all = store_.list();
+        for (const jobs::ProtectionGap& g :
+             jobs::protection_gaps(*job, all, records, jobs::protection_facts(store_, *job), os::now()))
+            d.gaps.push_back({qs(g.text), qs(g.fix)});
+    } catch (const std::exception&) {
+    }
     overview_->set_data(d);
 }
 

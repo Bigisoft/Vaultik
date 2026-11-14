@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -11,6 +12,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_lock.hpp"
+#include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
@@ -999,4 +1001,86 @@ TEST_CASE("drive lock: two runs for the same drive take turns, other drives do n
     // No key: no lock, no wait.
     DriveLock none("", dir, std::chrono::milliseconds(0));
     CHECK_FALSE(none.held());
+}
+
+TEST_CASE("what is still unprotected: each gap is named, and goes away once fixed") {
+    constexpr std::uint64_t day = 864'000'000'000ull;
+    const std::uint64_t now = 1000 * day;
+    Job j = sample();
+    j.repository = "s3:https://s3.example.com/bucket";  // drives aside for now
+    const auto ids = [](const std::vector<ProtectionGap>& gaps) {
+        std::vector<std::string> out;
+        for (const ProtectionGap& g : gaps) out.push_back(g.id);
+        return out;
+    };
+    const auto has = [](const std::vector<std::string>& v, const char* id) {
+        return std::find(v.begin(), v.end(), id) != v.end();
+    };
+    ProtectionFacts facts;
+    RunRecord backup;
+    backup.started = now - day;
+    backup.finished = now - day;
+    std::vector<RunRecord> history = {backup};
+    auto gaps = ids(protection_gaps(j, {j}, history, facts, now));
+    CHECK(has(gaps, "password"));
+    CHECK(has(gaps, "second-copy"));
+    CHECK(has(gaps, "kit"));
+    CHECK(has(gaps, "test-restore"));
+    CHECK(has(gaps, "check-overdue"));  // backed up, never checked
+    CHECK_FALSE(has(gaps, "paused"));
+    for (const ProtectionGap& g : protection_gaps(j, {j}, history, facts, now)) {
+        CHECK_FALSE(g.text.empty());
+        CHECK_FALSE(g.fix.empty());
+    }
+
+    // Fixed one by one.
+    facts.password_saved = true;
+    facts.kit_saved = true;
+    j.second_copy.repository = "s3:https://s3.example.com/copy";
+    RunRecord check;
+    check.kind = RunKind::Check;
+    check.finished = now - day;
+    RunRecord test;
+    test.kind = RunKind::RestoreTest;
+    test.finished = now - day;
+    history = {backup, check, test};
+    CHECK(protection_gaps(j, {j}, history, facts, now).empty());
+
+    // A paused schedule, a failed or overdue check, checks turned off.
+    j.schedule.paused = true;
+    CHECK(ids(protection_gaps(j, {j}, history, facts, now)) == std::vector<std::string>{"paused"});
+    j.schedule.paused = false;
+    history[1].status = RunStatus::Failed;  // could not finish
+    CHECK(ids(protection_gaps(j, {j}, history, facts, now)) == std::vector<std::string>{"check-failed"});
+    history[1].status = RunStatus::Success;
+    CHECK(ids(protection_gaps(j, {j}, history, facts, now + 20 * day)) == std::vector<std::string>{"check-overdue"});
+    j.health.weekly = j.health.monthly = false;
+    CHECK(ids(protection_gaps(j, {j}, history, facts, now)) == std::vector<std::string>{"checks-off"});
+    j.health = HealthPolicy{};
+    // A manual job needs no saved password.
+    facts.password_saved = false;
+    j.schedule.kind = Schedule::Kind::Manual;
+    CHECK(protection_gaps(j, {j}, history, facts, now).empty());
+
+    // Every job on one drive without a second copy.
+    TempStore tmp;
+    fs::create_directories(tmp.path / "a");
+    Job a = sample();
+    a.repository = (tmp.path / "a").string();
+    a.sources = {(tmp.path / "a").string()};
+    Job b = a;
+    b.name = "Other";
+    facts.password_saved = true;
+    auto local = ids(protection_gaps(a, {a, b}, {}, facts, now));
+    CHECK(has(local, "one-drive"));
+    CHECK(has(local, "same-drive"));  // its files are on the backup's drive
+    b.second_copy.repository = "s3:https://s3.example.com/copy";
+    CHECK_FALSE(has(ids(protection_gaps(a, {a, b}, {}, facts, now)), "one-drive"));
+
+    // The recovery kit marker, however the destination is typed.
+    CHECK_FALSE(recovery_kit_noted(tmp.dir(), a.repository));
+    note_recovery_kit(tmp.dir(), a.repository);
+    CHECK(recovery_kit_noted(tmp.dir(), a.repository));
+    CHECK(recovery_kit_noted(tmp.dir(), a.repository + "/"));
+    CHECK_FALSE(recovery_kit_noted(tmp.dir(), (tmp.path / "other").string()));
 }

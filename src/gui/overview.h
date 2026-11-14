@@ -48,6 +48,14 @@ struct OverviewData {
     };
     std::vector<Drive> drives;
 
+    // What is still unprotected (see jobs/protection.hpp): one plain line each, with the fix its
+    // button leads to ("edit", "kit", "test", "resume", "check"; empty: no button).
+    struct Gap {
+        QString text;
+        QString fix;
+    };
+    std::vector<Gap> gaps;
+
     // Backup results per day (the best one of the day).
     enum class Day { None, Saved, Partial, Failed };
     std::map<QDate, Day> days;
@@ -89,6 +97,8 @@ signals:
     void test_requested();
     void versions_requested();
     void grew_requested();
+    // A button of the "still unprotected" list (its OverviewData::Gap::fix).
+    void fix_requested(const QString& fix);
 
 private:
     struct Tile {
@@ -103,6 +113,8 @@ private:
     QPushButton* warning_grew_ = nullptr;
     Tile last_, next_, versions_, health_;
     BackupCalendar* calendar_ = nullptr;
+    QWidget* gaps_box_ = nullptr;
+    QWidget* gaps_list_ = nullptr;  // rebuilt on each set_data
     QWidget* drives_box_ = nullptr;
     QWidget* drives_list_ = nullptr;  // rebuilt on each set_data
     QPushButton* check_ = nullptr;

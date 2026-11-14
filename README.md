@@ -255,6 +255,15 @@ command line, for the recovery key it asks for (or `--new` for a new one); its P
 PDF's built-in fonts, so letters outside Western European ones show as `?` there (the web page
 and the frontend's PDF have them all).
 
+**Still unprotected** on a job's Overview lists, in plain words, what would still leave the
+backup at risk, each with a button to the fix where there is one: the password is not saved on
+this PC (so scheduled runs cannot run), there is no second copy, the recovery kit was never saved
+or printed on this PC, a test restore never ran, the schedule is paused, the last health check
+found damage, could not finish or is overdue (or checks are off), the backup is on the same drive
+as files it backs up, or every job saves to one drive and none has a second copy. Saving or
+printing a recovery kit leaves a marker in `kits` in the settings folder (it holds nothing of
+the key). The card is hidden once nothing is left.
+
 ## Packages
 
 `powershell -File tools\package.ps1` builds the release programs and makes, in `dist\`:
