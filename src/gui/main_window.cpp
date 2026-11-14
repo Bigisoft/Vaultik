@@ -1783,8 +1783,10 @@ void MainWindow::refresh_overview() {
             auto& cur = d.days[to_datetime(e.snapshot.time).date()];
             if (cur == OverviewData::Day::None || cur == OverviewData::Day::Failed) cur = OverviewData::Day::Saved;
         }
-    // Ejecting the backup drive: an external drive that is connected now.
+    // Ejecting the backup drive: an external drive that is connected now. And one calm note about
+    // its file system.
     if (const std::string root = jobs::backup_drive_root(*job); !root.empty()) {
+        d.drive_note = qs(jobs::drive_note(os::file_system_of(root)));
         const os::VolumeLocation loc = os::volume_of(root);
         d.can_eject = loc.external && !job->repository_volume.empty();
         d.eject_when_done = jobs::eject_when_done(store_.dir(), job->repository_volume);

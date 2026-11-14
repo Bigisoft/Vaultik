@@ -577,6 +577,11 @@ between runs started by Task Scheduler or a systemd timer and runs started in th
 jobs with administrator rights). A run gives up after waiting 12 hours. Cloud storage has no
 such turns.
 
+A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
+Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows
+one calm note: "This drive uses exFAT: always eject it before unplugging, or reformat it to NTFS
+for more safety."
+
 **Eject the backup drive** (the Drives card of the Overview, for an external drive, or `vaultik
 eject <job>`) prepares the drive to be unplugged, as Windows' "Safely remove" does: it is
 flushed, locked and dismounted where your account may, then Windows is asked to eject it, which

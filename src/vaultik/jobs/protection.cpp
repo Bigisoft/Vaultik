@@ -1,6 +1,7 @@
 #include "vaultik/jobs/protection.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <set>
 
 #include "vaultik/crypto/hash.hpp"
@@ -39,6 +40,16 @@ std::string kit_path(const std::string& dir, const std::string& location) {
 }
 
 }  // namespace
+
+std::string drive_note(const std::string& file_system) {
+    std::string fs = file_system;
+    for (char& c : fs) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (fs == "exfat")
+        return "This drive uses exFAT: always eject it before unplugging, or reformat it to NTFS for more safety.";
+    if (fs == "fat32" || fs == "fat" || fs == "vfat" || fs == "msdos")
+        return "This drive uses FAT: always eject it before unplugging, or reformat it to NTFS for more safety.";
+    return {};
+}
 
 void note_recovery_kit(const std::string& dir, const std::string& location) {
     (void)os::make_dir(os::join(dir, "kits"));

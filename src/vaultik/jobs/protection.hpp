@@ -34,6 +34,10 @@ std::vector<ProtectionGap> protection_gaps(const Job& job, const std::vector<Job
 // The facts from the store: the saved password, the recovery kit marker.
 ProtectionFacts protection_facts(const JobStore& store, const Job& job);
 
+// One calm note about a backup drive's file system (os::file_system_of), empty for none: exFAT
+// and FAT have no journal, so a drive unplugged while it is written can lose more than that.
+std::string drive_note(const std::string& file_system);
+
 // Remembers that a recovery kit for `location` was saved or printed (a marker file in
 // <settings dir>/kits; it holds nothing of the key), and whether one was.
 void note_recovery_kit(const std::string& settings_dir, const std::string& location);

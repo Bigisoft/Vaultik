@@ -581,6 +581,14 @@ void File::preallocate(std::uint64_t size) {
     SetFileInformationByHandle(as_handle(h_), FileAllocationInfo, &alloc, sizeof alloc);
 }
 
+std::string file_system_of(const std::string& path) {
+    wchar_t root[MAX_PATH + 1] = {};
+    if (!GetVolumePathNameW(native(path).c_str(), root, MAX_PATH)) return {};
+    wchar_t name[MAX_PATH + 1] = {};
+    if (!GetVolumeInformationW(root, nullptr, 0, nullptr, nullptr, nullptr, name, MAX_PATH)) return {};
+    return narrow(name);
+}
+
 ErrorCode make_dir(const std::string& path) {
     return CreateDirectoryW(native(path).c_str(), nullptr) ? 0 : GetLastError();
 }

@@ -311,6 +311,10 @@ struct VolumeLocation {
 VolumeLocation volume_of(const std::string& path);
 // The current mount path of a volume named by volume_of ("F:\"), or empty when it is not connected.
 std::string volume_root(const std::string& volume);
+// The file system of the drive holding `path`, as the system names it: "NTFS", "exFAT", "FAT32",
+// "ReFS" (Windows), "ext4", "exfat", "vfat", "ntfs3", "btrfs" (Linux); empty when not known.
+std::string file_system_of(const std::string& path);
+
 // Prepares a backup drive for unplugging, as "Safely remove" does. Windows: flushes, locks and
 // dismounts the volume where this account may, then asks Windows to eject the device
 // (CM_Request_Device_Eject), which refuses while a program still uses it. Linux: udisksctl unmount

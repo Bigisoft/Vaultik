@@ -1179,3 +1179,16 @@ TEST_CASE("run log: every line up to its cap, the newest logs of a job kept") {
     r.log = first;
     CHECK(record_from_json(to_json(r)).log == first);
 }
+
+TEST_CASE("drive note: one calm line for a drive without a journal") {
+    CHECK(drive_note("exFAT").find("exFAT: always eject it before unplugging") != std::string::npos);
+    CHECK(drive_note("exfat").find("reformat it to NTFS") != std::string::npos);
+    CHECK_FALSE(drive_note("FAT32").empty());
+    CHECK_FALSE(drive_note("vfat").empty());
+    CHECK(drive_note("NTFS").empty());
+    CHECK(drive_note("ext4").empty());
+    CHECK(drive_note("").empty());
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    CHECK_FALSE(os::file_system_of(tmp.dir()).empty());  // whatever the test machine uses
+}
