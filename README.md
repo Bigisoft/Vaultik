@@ -225,6 +225,12 @@ that can read your account's files can read it there, but a portable copy's sett
 drive do not carry the key, so the drive alone does not give the password away). Job files live in `%LOCALAPPDATA%\Vaultik`
 or `~/.config/vaultik` (override with `VAULTIK_CONFIG_DIR`).
 
+A run that starts on its own (the schedule, a connected drive, an idle or locked computer, changed
+files) never asks for anything. When the job's password is not saved on this PC (or was saved by
+another account), it fails at once with "the password of this backup is not saved on this PC",
+records that in the job's history and sends a "password" alert, instead of waiting for an answer
+nobody can give. Edit the job and enter its password, or start it with **Back up now**.
+
 **Keep the password safe elsewhere too.** Without it the backups cannot be decrypted, and nobody
 can reset it. What helps is the **recovery key**: a new backup shows one once (8 groups of 4
 characters, with buttons to copy it or save it to a file). Keep it apart from the computer. If

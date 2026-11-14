@@ -3010,6 +3010,27 @@ int cmd_run_job(const Args& a) {
     if ((trigger == "event" || trigger == "update" || trigger == "sign-out") && !jobs::event_backup_due(store, *job))
         return kExitOk;
     if (trigger == "change" && !jobs::drive_connected(*job)) return kExitOk;
+    // Started on its own (by the schedule or an event): nobody is there to answer a question, and
+    // a scheduled task has no console to ask in. A job whose password is not saved on this computer
+    // cannot run, so it fails at once with that reason (recorded and alerted) instead of waiting.
+    const bool unattended = a.has("--scheduled") || on_connect || !trigger.empty();
+    if (unattended) {
+        disable_prompts("this run started on its own, with nobody to answer");
+        const bool saved = !store.password(job->id).empty() || a.value("--password-file") ||
+                           !os::get_env("VAULTIK_PASSWORD").empty();
+        if (!saved) {
+            const jobs::RunRecord record = jobs::password_not_saved_record(os::now());
+            try {
+                store.append_history(job->id, record);
+            } catch (const Error& e) {
+                warning(std::string("could not record the run: ") + e.what());
+            }
+            alert_for(*job, record, store.dir());
+            if (g_json) emit({{"event", "done"}, {"status", "failed"}, {"reason", "password"}, {"message", record.message}});
+            else err("Job \"" + job->name + "\": " + record.message + "\n");
+            return kExitAuth;
+        }
+    }
     // While a backup started by an update runs, the tray holds up the restart that follows it.
     struct UpdateMark {
         std::string dir, id;

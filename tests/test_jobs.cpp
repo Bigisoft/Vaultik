@@ -461,6 +461,46 @@ TEST_CASE("alerts: a health check that could not finish is announced, one that f
     CHECK_FALSE(alert_for_run(s, "Docs", r, "pc").has_value());
 }
 
+TEST_CASE("an unattended run of a job without a saved password fails at once and never asks") {
+    TempStore tmp;
+    fs::create_directories(tmp.path / "src");
+    JobStore store(tmp.dir());
+    Job j;
+    j.name = "Docs";
+    j.repository = (tmp.path / "repo").string();
+    j.sources = {(tmp.path / "src").string()};
+    j.schedule.kind = Schedule::Kind::Daily;
+    store.save(j);
+    REQUIRE(store.password(j.id).empty());
+
+    std::string output;
+    os::CommandOptions o;
+    o.output = &output;
+    o.timeout = std::chrono::seconds(60);  // a prompt would wait until this ends the test
+    o.extra_environment = {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", ""}};
+    const auto started = std::chrono::steady_clock::now();
+    const int code = os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(30));
+    CHECK(code == 2);
+    CHECK(output.find("not saved on this PC") != std::string::npos);
+    CHECK(output.find("Repository password:") == std::string::npos);
+    const std::vector<RunRecord> history = store.history(j.id);
+    REQUIRE(history.size() == 1);
+    CHECK(history[0].status == RunStatus::Failed);
+    CHECK(history[0].reason == "password");
+    CHECK_FALSE(fs::exists(tmp.path / "repo"));  // nothing was touched
+
+    // Its alert says so, in fixed words.
+    AlertSettings s;
+    s.webhook_url = "https://example.com/hook";
+    const auto a = alert_for_run(s, j.name, history[0], "pc");
+    REQUIRE(a.has_value());
+    CHECK(a->event == "password");
+    CHECK(a->level == Alert::Level::Critical);
+    // The record survives a round trip.
+    CHECK(record_from_json(to_json(history[0])).reason == "password");
+}
+
 TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {
     TempStore tmp;
     AlertSettings s;

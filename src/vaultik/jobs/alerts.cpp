@@ -109,6 +109,12 @@ std::optional<Alert> alert_for_run(const AlertSettings& s, const std::string& jo
         a.event = "ransomware";
         a.title = job_name + ": files may be encrypted by ransomware";
         a.message = "Many files changed the way ransomware changes them. Disconnect the backup drive." + where;
+    } else if (r.status == RunStatus::Failed && r.reason == "password") {
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Critical;
+        a.event = "password";
+        a.title = "Backup of " + job_name + " cannot run: its password is not saved on this PC";
+        a.message = "Scheduled backups of this job do not run until the password is saved in the job." + where;
     } else if (r.status == RunStatus::Failed) {
         if (!s.on_failure) return std::nullopt;
         a.level = Alert::Level::Critical;

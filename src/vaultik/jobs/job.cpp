@@ -686,6 +686,7 @@ std::string to_json(const RunRecord& r) {
     if (!r.alert.empty()) j["alert"] = r.alert;
     if (!r.hold.empty()) j["hold"] = r.hold;
     if (!r.drive.empty()) j["drive"] = r.drive;
+    if (!r.reason.empty()) j["reason"] = r.reason;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
     if (r.rot_files > 0) {
@@ -714,6 +715,7 @@ RunRecord record_from_json(const std::string& text) {
         r.alert = j.value("alert", std::string());
         r.hold = j.value("hold", std::string());
         r.drive = j.value("drive", std::string());
+        r.reason = j.value("reason", std::string());
         r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.free_space = j.value("free_space", std::uint64_t{0});
         r.rot_files = j.value("rot_files", std::uint64_t{0});
@@ -733,6 +735,17 @@ RunRecord record_from_json(const std::string& text) {
     } catch (const json::exception& e) {
         throw Error(std::string("invalid run record: ") + e.what());
     }
+}
+
+RunRecord password_not_saved_record(std::uint64_t now) {
+    RunRecord r;
+    r.started = now;
+    r.finished = now;
+    r.status = RunStatus::Failed;
+    r.reason = "password";
+    r.message = "the password of this backup is not saved on this PC, so it cannot run on its own: open "
+                "Vaultik, edit the job and enter its password, or start it with Back up now";
+    return r;
 }
 
 const RunRecord* last_backup(const std::vector<RunRecord>& history) {

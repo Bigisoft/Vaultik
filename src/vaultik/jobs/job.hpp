@@ -262,6 +262,9 @@ struct RunRecord {
     std::uint64_t stored_bytes = 0;
     std::uint64_t errors = 0;
     std::string message;  // error text for Failed, summary otherwise
+    // Why a run could not run, in a fixed word the alerts and the app can tell apart: "password"
+    // (an unattended run of a job whose password is not saved on this computer); empty otherwise.
+    std::string reason;
     // Set when the backup saw signs of ransomware (see ChangeAlarm in ops/backup.hpp); the version
     // before it was pinned and old versions were not removed.
     std::string alert;
@@ -284,6 +287,10 @@ struct RunRecord {
     std::string rot;
     std::uint64_t rot_version = 0;
 };
+
+// What an unattended run (scheduled, or started by an event) records, without asking anything,
+// when the job's password is not saved on this computer (or was saved for another account).
+RunRecord password_not_saved_record(std::uint64_t now);
 
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file
 // named "portable" next to the programs) keeps it in "Settings" there. Otherwise Windows:
