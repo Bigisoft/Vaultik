@@ -59,7 +59,7 @@ public:
     MemoryStream(Bytes data, bool fail) : data_(std::move(data)), fail_(fail) {}
     std::size_t read(std::uint8_t* dst, std::size_t max) override {
         const std::size_t n = std::min({max, data_.size() - pos_, std::size_t{70000}});
-        std::memcpy(dst, data_.data() + pos_, n);
+        if (n > 0) std::memcpy(dst, data_.data() + pos_, n);  // (an empty stream has no data pointer)
         pos_ += n;
         return n;
     }
