@@ -5,6 +5,7 @@
 #include <chrono>
 #include <thread>
 #include <filesystem>
+#include <fstream>
 
 #include <nlohmann/json.hpp>
 
@@ -14,6 +15,7 @@
 #include "vaultik/jobs/drive_lock.hpp"
 #include "vaultik/jobs/eject.hpp"
 #include "vaultik/jobs/protection.hpp"
+#include "vaultik/jobs/run_log.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
@@ -1131,4 +1133,49 @@ TEST_CASE("eject: refused while a run uses the drive, and the per-drive setting"
     set_eject_when_done(tmp.dir(), "uuid:1", false);
     CHECK_FALSE(eject_when_done(tmp.dir(), "uuid:1"));
     CHECK_THROWS(set_eject_when_done(tmp.dir(), "", true));
+}
+
+TEST_CASE("run log: every line up to its cap, the newest logs of a job kept") {
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    std::string first;
+    {
+        RunLog log(tmp.dir(), "docs", 100, 2000);
+        first = log.path();
+        for (int i = 0; i < 10; ++i) log.line("warning: skipped C:\\file" + std::to_string(i) + ".txt: in use");
+    }
+    std::ifstream in(fs::u8path(first));
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text.find("file0.txt") != std::string::npos);
+    CHECK(text.find("file9.txt") != std::string::npos);
+    {
+        RunLog log(tmp.dir(), "docs", 200, 2000);
+        for (int i = 0; i < 500; ++i) log.line("warning: skipped a file with a long enough name " + std::to_string(i));
+    }
+    const auto size_of = [](const fs::path& p) { return fs::file_size(p); };
+    const fs::path second = tmp.path / "logs" / "docs" / "00000000000000000200.log";
+    REQUIRE(fs::exists(second));
+    CHECK(size_of(second) <= 2000 + 200);  // the cap, plus the line that says it was cut short
+    std::ifstream in2(second);
+    const std::string text2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    CHECK(text2.find("cut short") != std::string::npos);
+
+    // Only the newest are kept: starting a run makes room for it.
+    for (std::uint64_t t = 300; t < 300 + kRunLogsKept + 5; ++t) {
+        RunLog log(tmp.dir(), "docs", t);
+        log.line("backup: success");
+    }
+    std::size_t count = 0;
+    for (const auto& e : fs::directory_iterator(tmp.path / "logs" / "docs")) count += e.path().extension() == ".log";
+    CHECK(count == kRunLogsKept);
+    CHECK_FALSE(fs::exists(first));
+    CHECK_FALSE(fs::exists(second));
+    // Other jobs keep theirs.
+    { RunLog other(tmp.dir(), "photos", 1); other.line("x"); }
+    prune_run_logs(tmp.dir(), "photos", 0);
+    CHECK_FALSE(fs::exists(tmp.path / "logs" / "photos" / "00000000000000000001.log"));
+    // The record names it.
+    RunRecord r;
+    r.log = first;
+    CHECK(record_from_json(to_json(r)).log == first);
 }

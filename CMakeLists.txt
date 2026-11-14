@@ -136,6 +136,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/check_state.cpp
     src/vaultik/jobs/protection.cpp
     src/vaultik/jobs/eject.cpp
+    src/vaultik/jobs/run_log.cpp
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/report.cpp

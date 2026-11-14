@@ -274,6 +274,8 @@ struct RunRecord {
     // A backup: files that are only in the cloud and so were not backed up (SnapshotStats::cloud_only).
     std::uint64_t cloud_only = 0;
     std::string message;  // error text for Failed, summary otherwise
+    // The run's log file, with every warning in full (see jobs/run_log.hpp); empty for none.
+    std::string log;
     // Why a run could not run, in a fixed word the alerts and the app can tell apart: "password"
     // (an unattended run of a job whose password is not saved on this computer), "drive" (its
     // backup drive was not connected, status Waiting); empty otherwise.

@@ -1294,6 +1294,16 @@ and many computers block it. Use the drive maker's tool or the computer's firmwa
 or keep the data on an encrypted drive (BitLocker, LUKS) from the start. Wiping free space does
 not reach small files NTFS keeps inside its file table, nor the slack at the end of files.
 
+### Run logs
+
+Each run of a job (backup, second copy, health check, test restore) writes every warning in full
+to a log file of its own: each file that was skipped and why, each problem a check found, what a
+command printed when it failed, and the result at the end. The history keeps only counts and the
+first few, so the log is where to look for the whole list. Logs are in `logs/<job>` in Vaultik's
+settings folder, at most 4 MiB each (a longer one says where it was cut short), and the newest 30
+of each job are kept. The run's history entry names its log (`"log"`), and in the Activity tab a
+double-click (or the menu) opens it.
+
 ### Event Log
 
 Every run of a job (backup, second copy, health check, test restore) is also written to the

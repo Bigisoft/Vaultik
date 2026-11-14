@@ -32,6 +32,7 @@
 #include "vaultik/jobs/drive_lock.hpp"
 #include "vaultik/jobs/eject.hpp"
 #include "vaultik/jobs/protection.hpp"
+#include "vaultik/jobs/run_log.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/jobs/settings_transfer.hpp"
@@ -659,7 +660,24 @@ void emit(const nlohmann::json& event) {
     if (g_json_stdout) out(line + "\n");
 }
 
+// The log file of the job's run going on (see jobs/run_log.hpp), if any: every warning goes there too.
+std::atomic<vaultik::jobs::RunLog*> g_run_log{nullptr};
+
+// Keeps the run's log for as long as it lives.
+struct RunLogScope {
+    std::unique_ptr<vaultik::jobs::RunLog> log;
+    RunLogScope(const std::string& dir, const std::string& job_id, std::uint64_t started) {
+        try {
+            log = std::make_unique<vaultik::jobs::RunLog>(dir, job_id, started);
+            g_run_log = log.get();
+        } catch (const std::exception&) {
+        }
+    }
+    ~RunLogScope() { g_run_log = nullptr; }
+};
+
 void warning(const std::string& msg) {
+    if (vaultik::jobs::RunLog* log = g_run_log.load()) log->line("warning: " + msg);
     if (g_json) {
         emit({{"event", "warning"}, {"message", msg}});
     } else {
@@ -2396,6 +2414,17 @@ std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& s
     return repo;
 }
 
+// Adds a run to the job's history, naming the run's log (with the result as its last line).
+void append_run(const jobs::JobStore& store, const std::string& id, jobs::RunRecord record) {
+    if (jobs::RunLog* log = g_run_log.load()) {
+        record.log = log->path();
+        log->line(std::string(jobs::to_string(record.kind)) + ": " + jobs::to_string(record.status) +
+                  (record.message.empty() ? std::string() : ": " + record.message));
+        log->flush();
+    }
+    store.append_history(id, record);
+}
+
 // Takes the lock of the backup drive behind `key` (see jobs/drive_lock.hpp) for this run, waiting
 // while another run uses the drive and saying so. Stopping the run stops the wait.
 std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::string& settings_dir) {
@@ -2826,7 +2855,7 @@ int cmd_copy(const Args& a) {
     const auto repo = open_job_repo(a, store, *job);
     jobs::RunRecord record;
     const int code = second_copy(a, store, *job, *repo, record);
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
@@ -2842,6 +2871,7 @@ int cmd_check_job(const Args& a) {
     jobs::RunRecord record;
     record.kind = a.has("--full") ? jobs::RunKind::FullCheck : jobs::RunKind::Check;
     record.started = os::now();
+    RunLogScope run_log(store.dir(), job->id, record.started);
     int code = kExitError;
     std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
@@ -2859,7 +2889,7 @@ int cmd_check_job(const Args& a) {
             record.message = cancelled ? std::string("cancelled") : std::string("the check could not run: ") + e.what();
         }
         try {
-            store.append_history(job->id, record);
+            append_run(store, job->id, record);
         } catch (const Error&) {
         }
         if (repo) publish_job_status(*repo, store, *job);
@@ -2868,7 +2898,7 @@ int cmd_check_job(const Args& a) {
         else err("health check cancelled\n");
         return kExitCancelled;
     }
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
@@ -2885,6 +2915,7 @@ int cmd_test_restore(const Args& a) {
     jobs::RunRecord record;
     record.kind = jobs::RunKind::RestoreTest;
     record.started = os::now();
+    RunLogScope run_log(store.dir(), job->id, record.started);
     int code = kExitError;
     std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
@@ -2902,7 +2933,7 @@ int cmd_test_restore(const Args& a) {
             record.message = cancelled ? std::string("cancelled") : std::string("the test restore could not run: ") + e.what();
         }
         try {
-            store.append_history(job->id, record);
+            append_run(store, job->id, record);
         } catch (const Error&) {
         }
         if (repo) publish_job_status(*repo, store, *job);
@@ -2911,7 +2942,7 @@ int cmd_test_restore(const Args& a) {
         else err("test restore cancelled\n");
         return kExitCancelled;
     }
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
@@ -3132,7 +3163,7 @@ int cmd_run_job(const Args& a) {
         if (!saved) {
             const jobs::RunRecord record = jobs::password_not_saved_record(os::now());
             try {
-                store.append_history(job->id, record);
+                append_run(store, job->id, record);
             } catch (const Error& e) {
                 warning(std::string("could not record the run: ") + e.what());
             }
@@ -3216,7 +3247,7 @@ int cmd_run_job(const Args& a) {
         record.finished = os::now();
         record.status = jobs::RunStatus::Cancelled;
         record.message = "skipped: the internet connection is metered";
-        store.append_history(job->id, record);
+        append_run(store, job->id, record);
         if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", record.message}});
         else out("Job \"" + job->name + "\": " + record.message + "\n");
         return kExitOk;
@@ -3228,7 +3259,7 @@ int cmd_run_job(const Args& a) {
         const jobs::RunRecord waiting = jobs::waiting_for_drive_record(jobs::RunKind::Backup, os::now(), job->repository);
         try {
             if (jobs::missed_run_waiting(jobs::combined_history(store, job->id, 50)) == nullptr)
-                store.append_history(job->id, waiting);
+                append_run(store, job->id, waiting);
         } catch (const std::exception& e) {
             warning(std::string("could not record the run: ") + e.what());
         }
@@ -3236,6 +3267,8 @@ int cmd_run_job(const Args& a) {
         else out("Job \"" + job->name + "\": " + waiting.message + "\n");
         return kExitWaiting;
     }
+    // Every warning of this run, in full, in its own log file (named by the run's history records).
+    RunLogScope run_log(store.dir(), job->id, record.started);
     try {
         drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
         repo = open_job_repo(a, store, *job);
@@ -3357,7 +3390,7 @@ int cmd_run_job(const Args& a) {
             record.message = cancelled ? std::string("cancelled") : std::string(e.what());
         }
         try {
-            store.append_history(job->id, record);
+            append_run(store, job->id, record);
         } catch (const Error&) {
         }
         run_after(jobs::to_string(record.status));
@@ -3370,7 +3403,7 @@ int cmd_run_job(const Args& a) {
         fill_before = jobs::forecast_for(jobs::combined_history(store, job->id, 500), os::now());
     } catch (const std::exception&) {
     }
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     run_after(jobs::to_string(record.status));
     alert_for(*job, record, store.dir());
     space_alert_for(store, *job, fill_before, store.dir());
@@ -3392,7 +3425,7 @@ int cmd_run_job(const Args& a) {
             // Still waiting for the copy's drive: no second record of it.
             const jobs::RunRecord* last = jobs::last_copy(jobs::combined_history(store, job->id, 50));
             if (copy.status != jobs::RunStatus::Waiting || last == nullptr || last->status != jobs::RunStatus::Waiting)
-                store.append_history(job->id, copy);
+                append_run(store, job->id, copy);
         } catch (const Error& e) {
             warning(std::string("could not record the second copy: ") + e.what());
         }
@@ -3415,7 +3448,7 @@ int cmd_run_job(const Args& a) {
             // Cancelled or could not run: the record says which.
         }
         try {
-            store.append_history(job->id, check);
+            append_run(store, job->id, check);
         } catch (const Error& e) {
             warning(std::string("could not record the health check: ") + e.what());
         }
@@ -3437,7 +3470,7 @@ int cmd_run_job(const Args& a) {
         // Cancelled or could not run: the record says which.
     }
     try {
-        store.append_history(job->id, test);
+        append_run(store, job->id, test);
     } catch (const Error& e) {
         warning(std::string("could not record the test restore: ") + e.what());
     }

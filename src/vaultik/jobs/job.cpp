@@ -696,6 +696,7 @@ std::string to_json(const RunRecord& r) {
     if (!r.drive.empty()) j["drive"] = r.drive;
     if (!r.reason.empty()) j["reason"] = r.reason;
     if (r.cloud_only > 0) j["cloud_only"] = r.cloud_only;
+    if (!r.log.empty()) j["log"] = r.log;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
     if (r.rot_files > 0) {
@@ -726,6 +727,7 @@ RunRecord record_from_json(const std::string& text) {
         r.drive = j.value("drive", std::string());
         r.reason = j.value("reason", std::string());
         r.cloud_only = j.value("cloud_only", std::uint64_t{0});
+        r.log = j.value("log", std::string());
         r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.free_space = j.value("free_space", std::uint64_t{0});
         r.rot_files = j.value("rot_files", std::uint64_t{0});

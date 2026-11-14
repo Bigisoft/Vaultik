@@ -1202,6 +1202,24 @@ QWidget* MainWindow::build_job_page() {
     history_->setHeaderLabels({tr("Started"), tr("What"), tr("Result"), tr("Files"), tr("Size"), tr("New"),
                                tr("Stored"), tr("Duration"), tr("Details")});
     history_->header()->setStretchLastSection(true);
+    // A run's log: every warning in full (double-click, or the menu).
+    history_->setContextMenuPolicy(Qt::CustomContextMenu);
+    const auto open_log = [this](QTreeWidgetItem* item) {
+        const QString path = item != nullptr ? item->data(0, Qt::UserRole).toString() : QString();
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            status_->showMessage(tr("This run has no log file (older runs, or it was removed)."), 8000);
+            return;
+        }
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    };
+    connect(history_, &QTreeWidget::itemDoubleClicked, this, [open_log](QTreeWidgetItem* item, int) { open_log(item); });
+    connect(history_, &QTreeWidget::customContextMenuRequested, this, [this, open_log](const QPoint& pos) {
+        QTreeWidgetItem* item = history_->itemAt(pos);
+        if (item == nullptr || item->data(0, Qt::UserRole).toString().isEmpty()) return;
+        QMenu menu(this);
+        menu.addAction(tr("Open the run's log"), this, [item, open_log] { open_log(item); });
+        menu.exec(history_->viewport()->mapToGlobal(pos));
+    });
     auto* activity = new QWidget;
     auto* al = new QVBoxLayout(activity);
     al->setContentsMargins(0, 8, 0, 0);
@@ -1328,6 +1346,10 @@ void MainWindow::refresh_history() {
         const bool backup = r.kind == jobs::RunKind::Backup;
         auto* item = new QTreeWidgetItem(history_);
         item->setText(0, format_time(r.started));
+        if (!r.log.empty()) {
+            item->setData(0, Qt::UserRole, qs(r.log));
+            item->setToolTip(0, tr("Double-click to open the run's log, with every warning"));
+        }
         item->setText(1, backup                                 ? tr("Backup")
                          : r.kind == jobs::RunKind::FullCheck ? tr("Full check")
                          : r.kind == jobs::RunKind::Copy      ? tr("Second copy")
