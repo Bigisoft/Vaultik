@@ -35,6 +35,32 @@ jobs:
         # purpose (another account could swap a folder there for a link).
         run: BUILD_DIR="$RUNNER_TEMP/build-${{ matrix.type }}" ./build.sh ${{ matrix.type }} test
 
+  sanitizers:
+    name: Linux (sanitizers)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the distribution's packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q g++ cmake ninja-build pkg-config libzstd-dev libssl-dev \
+            libcurl4-openssl-dev nlohmann-json3-dev doctest-dev libfuse3-dev fuse3
+      # The engine and its tests with AddressSanitizer (memory errors, leaks) and
+      # UndefinedBehaviorSanitizer; any finding stops the tests with its stack. Without the GUI,
+      # which the sanitizers would also have to cover Qt for.
+      - name: Build and test with AddressSanitizer and UndefinedBehaviorSanitizer
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          build="$RUNNER_TEMP/build-sanitizers"
+          cmake -S . -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DVAULTIK_BUILD_GUI=OFF \
+            -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build "$build"
+          "$build/vaultik_tests"
+
   windows:
     name: Windows (release)
     # Visual Studio 2026, as the release builds use: with Visual Studio 2022, vcpkg's Qt comes out
