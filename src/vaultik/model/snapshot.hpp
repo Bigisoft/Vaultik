@@ -17,7 +17,11 @@ struct SnapshotStats {
     std::uint64_t new_bytes = 0;     // uncompressed bytes of chunks that were not in the repository yet
     std::uint64_t stored_bytes = 0;  // bytes added to the repository (compressed + encrypted)
     std::uint64_t errors = 0;        // files or folders that could not be read
-    std::uint64_t skipped = 0;       // reparse points and cloud placeholders stored without content
+    std::uint64_t skipped = 0;       // links and other reparse points stored without content
+    // Cloud files (OneDrive and similar) whose content was only online and so was not backed up
+    // (stored as metadata only, like `skipped`); counted in `skipped` by Vaultik before 0.12.
+    std::uint64_t cloud_only = 0;
+    std::uint64_t cloud_only_bytes = 0;  // their size
     // Compared with the parent snapshot (all files are new without one). Known for snapshots made
     // by Vaultik 0.4 or later.
     bool changes_known = false;

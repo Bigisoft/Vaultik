@@ -13,7 +13,7 @@ namespace vaultik::jobs {
 
 struct ProtectionGap {
     // "password", "second-copy", "kit", "test-restore", "paused", "check-failed", "check-overdue",
-    // "checks-off", "one-drive", "same-drive"
+    // "checks-off", "cloud-only", "one-drive", "same-drive"
     std::string id;
     std::string text;  // one plain sentence
     // What the button does: "edit" (the job's settings), "kit" (save the recovery kit), "test" (a

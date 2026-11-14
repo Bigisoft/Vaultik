@@ -573,6 +573,14 @@ QWidget* JobDialog::build_schedule() {
            "this also checks every other file, for folders where hard links come and go, such as package "
            "stores."));
     form->addRow(QString(), check_every_file_);
+    download_cloud_ = new QCheckBox(tr("Download files that are only in the cloud (OneDrive) and back them up"));
+    download_cloud_->setToolTip(tr("Files that OneDrive keeps only online are not on this PC. Without this they are "
+                                   "listed in the backup but their content is not saved; with it, the backup "
+                                   "downloads them first, which takes time and fills the disk."));
+#ifndef _WIN32
+    download_cloud_->setVisible(false);
+#endif
+    form->addRow(QString(), download_cloud_);
     record_apps_ = new QCheckBox(tr("Keep a list of the installed programs with each version"));
     record_apps_->setToolTip(tr("On a new computer, \"Reinstall programs\" in the restore window then installs the "
                                 "missing ones with winget. The list is small and stored encrypted like the files."));
@@ -1017,6 +1025,7 @@ void JobDialog::load(const jobs::Job& job) {
     paused_->setChecked(job.schedule.paused);
     skip_unchanged_->setChecked(job.skip_unchanged);
     check_every_file_->setChecked(job.check_every_file);
+    download_cloud_->setChecked(job.download_cloud_files);
     record_apps_->setChecked(job.record_apps);
     {
         int at = repair_data_->findData(static_cast<int>(job.repair_data));
@@ -1172,6 +1181,7 @@ jobs::Job JobDialog::collect() const {
     j.schedule.paused = paused_->isChecked();
     j.skip_unchanged = skip_unchanged_->isChecked();
     j.check_every_file = check_every_file_->isChecked();
+    j.download_cloud_files = download_cloud_->isChecked();
     j.record_apps = record_apps_->isChecked();
     j.repair_data = static_cast<unsigned>(repair_data_->currentData().toInt());
     j.schedule.wake_computer = wake_->isChecked();

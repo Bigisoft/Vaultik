@@ -498,6 +498,7 @@ std::string to_json(const Job& job) {
         {"continuous_minutes", job.continuous_minutes},
         {"skip_unchanged", job.skip_unchanged},
         {"check_every_file", job.check_every_file},
+        {"download_cloud_files", job.download_cloud_files},
         {"record_apps", job.record_apps},
         {"wsl", {{"distros", job.wsl_distros}, {"when_running", job.wsl_when_running}}},
         {"hyperv", {{"machines", job.hyperv_vms}, {"staging", job.hyperv_staging}}},
@@ -609,6 +610,7 @@ Job job_from_json(const std::string& text) {
         job.before_command = j.value("before_command", std::string());
         job.skip_unchanged = j.value("skip_unchanged", false);
         job.check_every_file = j.value("check_every_file", false);
+        job.download_cloud_files = j.value("download_cloud_files", false);
         job.record_apps = j.value("record_apps", true);
         if (j.contains("wsl")) {  // missing in jobs saved before virtual machines were backed up
             const json& w = j.at("wsl");
@@ -693,6 +695,7 @@ std::string to_json(const RunRecord& r) {
     if (!r.hold.empty()) j["hold"] = r.hold;
     if (!r.drive.empty()) j["drive"] = r.drive;
     if (!r.reason.empty()) j["reason"] = r.reason;
+    if (r.cloud_only > 0) j["cloud_only"] = r.cloud_only;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
     if (r.rot_files > 0) {
@@ -722,6 +725,7 @@ RunRecord record_from_json(const std::string& text) {
         r.hold = j.value("hold", std::string());
         r.drive = j.value("drive", std::string());
         r.reason = j.value("reason", std::string());
+        r.cloud_only = j.value("cloud_only", std::uint64_t{0});
         r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.free_space = j.value("free_space", std::uint64_t{0});
         r.rot_files = j.value("rot_files", std::uint64_t{0});

@@ -22,6 +22,7 @@ constexpr std::string_view kChangesTag = "vaultik:changes=";
 constexpr std::string_view kCopyOfTag = "vaultik:copy-of=";
 constexpr std::string_view kAppsTag = "vaultik:apps=";
 constexpr std::string_view kImageTag = "vaultik:image";
+constexpr std::string_view kCloudOnlyTag = "vaultik:cloud-only=";
 
 std::string id_tag(std::string_view prefix, const Id& id) {
     return std::string(prefix) + to_hex(ByteSpan(id.data(), id.size()));
@@ -50,6 +51,9 @@ std::vector<std::string> all_tags(const Snapshot& s) {
     if (s.copy_of) tags.push_back(id_tag(kCopyOfTag, *s.copy_of));
     if (s.apps) tags.push_back(id_tag(kAppsTag, *s.apps));
     if (s.image) tags.emplace_back(kImageTag);
+    if (s.stats.cloud_only > 0)
+        tags.push_back(std::string(kCloudOnlyTag) + std::to_string(s.stats.cloud_only) + "," +
+                       std::to_string(s.stats.cloud_only_bytes));
     if (s.stats.changes_known) {
         tags.push_back(std::string(kChangesTag) + std::to_string(s.stats.files_new) + "," +
                        std::to_string(s.stats.files_changed) + "," + std::to_string(s.stats.items_removed));
@@ -68,6 +72,19 @@ void read_reserved(Snapshot& s, const std::string& tag) {
         s.copy_of = tag_id(tag, kCopyOfTag);  // a damaged tag: the snapshot is then simply not known as a copy
     } else if (tag.starts_with(kAppsTag)) {
         s.apps = tag_id(tag, kAppsTag);
+    } else if (tag.starts_with(kCloudOnlyTag)) {
+        // "<files>,<bytes>"
+        const char* p = tag.c_str() + kCloudOnlyTag.size();
+        char* end = nullptr;
+        const std::uint64_t files = std::strtoull(p, &end, 10);
+        if (end != p && *end == ',') {
+            const char* q = end + 1;
+            const std::uint64_t bytes = std::strtoull(q, &end, 10);
+            if (end != q && *end == '\0') {
+                s.stats.cloud_only = files;
+                s.stats.cloud_only_bytes = bytes;
+            }
+        }
     } else if (tag.starts_with(kChangesTag)) {
         // "<new>,<changed>,<removed>"
         const char* p = tag.c_str() + kChangesTag.size();

@@ -167,6 +167,9 @@ struct Job {
     // Ask every file for its real size and times instead of trusting the folder listing (see
     // BackupOptions::check_every_file): for folders with hard links, such as package stores.
     bool check_every_file = false;
+    // Windows: download files that are only in the cloud (OneDrive placeholders) and back up their
+    // content (see BackupOptions::download_cloud_files); otherwise they are counted, not backed up.
+    bool download_cloud_files = false;
     // Keep the list of programs installed on this computer with each version (see ops/apps.hpp),
     // so they can be installed again on a new one.
     bool record_apps = true;
@@ -268,6 +271,8 @@ struct RunRecord {
     std::uint64_t new_bytes = 0;
     std::uint64_t stored_bytes = 0;
     std::uint64_t errors = 0;
+    // A backup: files that are only in the cloud and so were not backed up (SnapshotStats::cloud_only).
+    std::uint64_t cloud_only = 0;
     std::string message;  // error text for Failed, summary otherwise
     // Why a run could not run, in a fixed word the alerts and the app can tell apart: "password"
     // (an unattended run of a job whose password is not saved on this computer), "drive" (its

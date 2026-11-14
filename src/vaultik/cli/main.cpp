@@ -1166,6 +1166,14 @@ std::function<std::optional<std::string>()> app_list_in_background() {
 // The message of a run that found nothing changed (and so saved no version).
 constexpr const char* kUnchanged = "nothing changed since the last version, so no new one was saved";
 
+// "3 files (1.20 GiB) are only in the cloud and were not backed up ...".
+std::string cloud_only_text(std::uint64_t files, std::uint64_t bytes) {
+    return std::to_string(files) + (files == 1 ? " file (" : " files (") + format_bytes(bytes) + ") " +
+           (files == 1 ? "is" : "are") +
+           " only in the cloud and were not backed up (the job's \"Download files that are only in the cloud\" "
+           "backs them up)";
+}
+
 int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
                       RepoLock& lock, VssMode vss, bool pause_sql_server, ChangeJournal* journal = nullptr) {
     // Never back up the repository into itself.
@@ -1241,6 +1249,9 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
     record.message = s.errors > 0 ? std::to_string(s.errors) + " item(s) could not be read" : "";
     if (r.unchanged)
         record.message = std::string(kUnchanged) + (record.message.empty() ? "" : "; " + record.message);
+    record.cloud_only = s.cloud_only;
+    if (s.cloud_only > 0)
+        record.message += (record.message.empty() ? "" : "; ") + cloud_only_text(s.cloud_only, s.cloud_only_bytes);
     if (r.alarm.raised()) raise_alarm(repo, r, record);
     // A source that is gone (a detached disk, a locked volume, an unreachable share) or a sharp
     // drop in files makes a near-empty version; removing old versions by count or by day would
@@ -1265,6 +1276,8 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
               {"new_bytes", s.new_bytes},
               {"stored_bytes", s.stored_bytes},
               {"skipped", s.skipped},
+              {"cloud_only", s.cloud_only},
+              {"cloud_only_bytes", s.cloud_only_bytes},
               {"errors", s.errors},
               {"alert", record.alert},
               {"unchanged", r.unchanged},
@@ -1280,7 +1293,8 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
         format_bytes(s.bytes) + "\n");
     out("  new data: " + format_bytes(s.new_bytes) + ", stored " + format_bytes(s.stored_bytes) +
         " after compression and encryption\n");
-    if (s.skipped > 0) out("  links/placeholders kept without content: " + std::to_string(s.skipped) + "\n");
+    if (s.skipped > 0) out("  links kept without content: " + std::to_string(s.skipped) + "\n");
+    if (s.cloud_only > 0) out("  " + cloud_only_text(s.cloud_only, s.cloud_only_bytes) + "\n");
     out("  time:     " + format_duration(seconds_since(start)) +
         (r.snapshot.parent ? " (compared with " + short_id(*r.snapshot.parent) + ")" : std::string(" (full)")) +
         "\n");
@@ -3198,6 +3212,7 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
+        o.download_cloud_files = job->download_cloud_files;
         o.check_every_file = job->check_every_file;
         if (job->record_apps && job->image_disks.empty()) {
             // Within a day of the last backup (continuous or triggered runs, hourly schedules) the

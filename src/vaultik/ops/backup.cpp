@@ -756,6 +756,17 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
     scan_security(path, node);
     switch (info.type) {
         case os::EntryType::Other: {
+            // A cloud file only online: downloaded and backed up when the job asks for it (reading
+            // it makes its sync program download it), otherwise counted on its own.
+            if (os::is_cloud_only(info)) {
+                if (options_.download_cloud_files)
+                    return scan_entry(path, os::downloaded_form(info), parent_device, node, pnode, job);
+                node.kind = NodeKind::Reparse;
+                node.size = 0;
+                ++stats_.cloud_only;
+                stats_.cloud_only_bytes += info.size;
+                return true;
+            }
             // Stored as metadata only; following links could loop or leave the backup set. A
             // symlink's or junction's target is kept, so a restore can bring the link back.
             node.kind = NodeKind::Reparse;
@@ -1035,7 +1046,8 @@ std::optional<Id> BackupEngine::reuse_dir(const std::string& dir, std::uint64_t 
                 ++stats_.files;
                 break;
             case NodeKind::Reparse:
-                ++stats_.skipped;
+                if (os::is_cloud_only(os::FileInfo{os::EntryType::Other, old.attributes})) ++stats_.cloud_only;
+                else ++stats_.skipped;
                 break;
             case NodeKind::Dir: {
                 // The folder's own entry is as before; what is in it is asked about in turn.

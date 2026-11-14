@@ -32,6 +32,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <share.h>
+#include <windows.h>
 #endif
 
 using namespace vaultik;
@@ -1289,3 +1290,37 @@ TEST_CASE("a backup with several readers stops promptly when cancelled") {
     CHECK(r.snapshot.stats.files == 12);
     CHECK(r.snapshot.stats.errors == 0);
 }
+
+#ifdef _WIN32
+TEST_CASE("a file only in the cloud is counted, not read, unless the job downloads it") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "here.txt", text("on this disk"));
+    write_file(src / "online.txt", text("only in the cloud"));
+    // Marked the way a sync program marks a file it keeps online (offline: reading recalls it).
+    const std::wstring online = (src / "online.txt").wstring();
+    REQUIRE(SetFileAttributesW(online.c_str(), GetFileAttributesW(online.c_str()) | FILE_ATTRIBUTE_OFFLINE));
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    REQUIRE(os::stat(u8(src / "online.txt"), info, err));
+    REQUIRE(os::is_cloud_only(info));
+
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions o;
+    o.paths = {u8(src)};
+    const BackupResult first = run_backup(*repo, o);
+    CHECK(first.snapshot.stats.cloud_only == 1);
+    CHECK(first.snapshot.stats.cloud_only_bytes == 17);
+    CHECK(first.snapshot.stats.skipped == 0);
+    CHECK(first.snapshot.stats.files == 1);
+    CHECK(repo->load_snapshot(first.snapshot_id).stats.cloud_only == 1);
+
+    o.download_cloud_files = true;
+    const BackupResult second = run_backup(*repo, o);
+    CHECK(second.snapshot.stats.cloud_only == 0);
+    CHECK(second.snapshot.stats.files == 2);
+    CHECK(second.snapshot.stats.bytes == 12 + 17);
+}
+#endif

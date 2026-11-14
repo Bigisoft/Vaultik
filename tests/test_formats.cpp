@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include "vaultik/model/snapshot.hpp"
+#include "vaultik/platform/os.hpp"
 #include "vaultik/model/tree.hpp"
 #include "vaultik/repo/config.hpp"
 #include "vaultik/repo/index.hpp"
@@ -232,4 +233,38 @@ TEST_CASE("config key wrap") {
     RepoConfig changed = back;
     changed.zstd_level = 19;
     CHECK_THROWS_AS(unwrap_master_key(changed, "correct horse"), AuthError);
+}
+
+TEST_CASE("files only in the cloud: counted on their own, kept in the version, readable by older versions") {
+    // How Windows marks them; none of this exists on POSIX, where the counts stay 0.
+    os::FileInfo f;
+    f.type = os::EntryType::Other;
+    f.attributes = 0x400000 | 0x20;  // RECALL_ON_DATA_ACCESS, ARCHIVE
+    f.size = 1234;
+    CHECK(os::is_cloud_only(f));
+    CHECK(os::downloaded_form(f).type == os::EntryType::File);
+    CHECK(os::downloaded_form(f).size == 1234);
+    f.attributes = 0x40000 | 0x10;  // a folder: RECALL_ON_OPEN, DIRECTORY
+    CHECK(os::is_cloud_only(f));
+    CHECK(os::downloaded_form(f).type == os::EntryType::Dir);
+    f.attributes = 0x400;  // a link or other reparse point: no
+    CHECK_FALSE(os::is_cloud_only(f));
+    f.type = os::EntryType::File;
+    f.attributes = 0x1000;
+    CHECK_FALSE(os::is_cloud_only(f));  // only entries reported as Other
+
+    Snapshot s;
+    s.time = 1;
+    s.hostname = "pc";
+    s.stats.skipped = 2;
+    s.stats.cloud_only = 7;
+    s.stats.cloud_only_bytes = 70000;
+    const Bytes data = serialize_snapshot(s);
+    const Snapshot back = parse_snapshot(data);
+    CHECK(back.stats.cloud_only == 7);
+    CHECK(back.stats.cloud_only_bytes == 70000);
+    CHECK(back.stats.skipped == 2);
+    CHECK(back.tags.empty());  // a reserved tag, which older versions ignore
+    Snapshot none;
+    CHECK(parse_snapshot(serialize_snapshot(none)).stats.cloud_only == 0);
 }

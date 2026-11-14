@@ -100,6 +100,13 @@ struct FileInfo {
     std::uint64_t device = 0;  // POSIX st_dev, to notice mount points (0 on Windows)
 };
 
+// Windows: a cloud file or folder (OneDrive and similar) whose content is only in the cloud, not
+// on this disk (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, _RECALL_ON_OPEN or _OFFLINE): stat reports
+// it as Other, since reading it downloads it. Always false on POSIX, which has no such attributes.
+bool is_cloud_only(const FileInfo& info);
+// The type such an entry has once it is downloaded: Dir or File (with its size).
+FileInfo downloaded_form(const FileInfo& info);
+
 // Metadata of `path` itself (links are not followed). Returns false and sets `err` on failure.
 bool stat(const std::string& path, FileInfo& info, ErrorCode& err);
 // Windows: the NTFS change time of `path` itself (FILETIME UTC): the time of the last change of any

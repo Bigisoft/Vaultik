@@ -132,6 +132,7 @@ private:
     QCheckBox* skip_battery_ = nullptr;
     QCheckBox* skip_unchanged_ = nullptr;
     QCheckBox* check_every_file_ = nullptr;
+    QCheckBox* download_cloud_ = nullptr;
     QCheckBox* record_apps_ = nullptr;
     QComboBox* repair_data_ = nullptr;
     QCheckBox* wake_ = nullptr;

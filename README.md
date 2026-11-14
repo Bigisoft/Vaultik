@@ -543,6 +543,17 @@ that one and older ones. They could likewise put back an older status note: a no
 that computer's newest version is marked as such ("status record older than its newest version",
 health at least "warning").
 
+### Files only in the cloud (OneDrive)
+
+OneDrive (and similar sync programs) can keep files only online, with a placeholder on the disk.
+Reading such a file makes OneDrive download it, so a backup does not read them by default: it
+keeps their name, size and dates, and counts them on their own. The run's result, the
+Overview's last backup and **Still unprotected** then say "N files are only in the cloud and not
+backed up" (`"cloud_only"` in the history and the `--json` result; the version keeps the count).
+Turn on **Download files that are only in the cloud** in the job's Options to have the backup
+download them first and save their content; that takes time and fills the disk with them (OneDrive
+can free the space again later).
+
 ### External drives
 
 A job saving to a folder on a drive records the drive's volume ID (`"volume"` in the job

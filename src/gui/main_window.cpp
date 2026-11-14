@@ -365,6 +365,9 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
                       .arg(format_bytes(static_cast<std::uint64_t>(ev.value("new_bytes").toInteger())))
                       .arg(format_bytes(static_cast<std::uint64_t>(ev.value("stored_bytes").toInteger())));
             if (result == "partial") msg += " " + tr("(%1 skipped, see Log)").arg(ev.value("errors").toInteger());
+            if (const qint64 cloud = ev.value("cloud_only").toInteger(); cloud > 0)
+                msg += " " + tr("%1 only in the cloud and not backed up.")
+                                 .arg(count_of(static_cast<std::uint64_t>(cloud), tr("file is"), tr("files are")));
         } else if (result == "cancelled") {
             msg = tr("Backup cancelled; no version was saved.");
         } else {
@@ -1497,6 +1500,10 @@ void MainWindow::refresh_overview() {
                                                    format_bytes(backup->new_bytes)) +
                               (backup->status == jobs::RunStatus::Partial
                                    ? "\n" + tr("%1 could not be read").arg(count_of(backup->errors, tr("item"), tr("items")))
+                                   : QString()) +
+                              (backup->cloud_only > 0
+                                   ? "\n" + tr("%1 only in the cloud and not backed up")
+                                                .arg(count_of(backup->cloud_only, tr("file is"), tr("files are")))
                                    : QString());
     }
 
