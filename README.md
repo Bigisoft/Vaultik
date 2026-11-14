@@ -98,6 +98,13 @@ release 1.5.4 and checks its SHA-256. `./build.sh vcpkg release test` builds wit
 (`VCPKG_ROOT`). Configure with `-DVAULTIK_BUILD_GUI=OFF` for a command-line-only build (servers).
 Until the Linux port is verified, the Linux notes in this README describe the intended behavior.
 
+Every push builds and tests on Windows and Linux, and once more on Linux with AddressSanitizer
+and UndefinedBehaviorSanitizer (memory errors, leaks, undefined behavior). The tests include runs
+cut short by a failing drive (a write that fails, a pack cut short, a rename that does not
+happen, a failed delete or read, through a test storage that fails on purpose): a backup, a
+cleanup or a health check stopped that way must leave every version readable, and the next run
+must finish and leave the backup whole.
+
 ## Using the frontend
 
 Start `vaultik-gui`, then **New backup job**:
