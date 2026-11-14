@@ -134,7 +134,9 @@ TEST_CASE("health checks: settings and when they are due") {
     CHECK(due_check(h, history, now) == RunKind::Check);  // full check recent, no check this week
     history.push_back(run(RunKind::Check, now - 2 * day));
     CHECK_FALSE(due_check(h, history, now).has_value());
-    history.push_back(run(RunKind::Check, now - day, RunStatus::Failed));  // problems found still count
+    RunRecord found = run(RunKind::Check, now - day, RunStatus::Failed);
+    found.errors = 3;
+    history.push_back(found);  // problems found still count
     CHECK_FALSE(due_check(h, history, now + 5 * day).has_value());
     CHECK(due_check(h, history, now + 11 * day) == RunKind::FullCheck);  // 31 days after the full check
     h.monthly = false;
@@ -146,6 +148,28 @@ TEST_CASE("health checks: settings and when they are due") {
     h = HealthPolicy{};
     history = {run(RunKind::FullCheck, now - day, RunStatus::Cancelled)};
     CHECK(due_check(h, history, now) == RunKind::FullCheck);
+
+    // A check that could not finish (the drive was unplugged part way) does not count either: the
+    // full check stays due, and the record is one the alerts announce.
+    history = {run(RunKind::FullCheck, now - 40 * day), run(RunKind::Check, now - 2 * day)};
+    CHECK(due_check(h, history, now) == RunKind::FullCheck);
+    RunRecord broken = run(RunKind::FullCheck, now - day, RunStatus::Failed);
+    history.push_back(broken);
+    CHECK(due_check(h, history, now) == RunKind::FullCheck);
+    CHECK(check_not_finished(broken));
+    CHECK_FALSE(check_completed(broken));
+    CHECK_FALSE(found_damage(broken));
+    RunRecord damage = broken;
+    damage.errors = 1;
+    CHECK(check_completed(damage));
+    CHECK_FALSE(check_not_finished(damage));
+    history.back() = damage;
+    CHECK_FALSE(due_check(h, history, now).has_value());
+    // A sampled check that failed leaves the weekly one due.
+    h.monthly = false;
+    history = {run(RunKind::Check, now - 8 * day), run(RunKind::Check, now - day, RunStatus::Failed)};
+    CHECK(due_check(h, history, now) == RunKind::Check);
+    h = HealthPolicy{};
 
     history = {run(RunKind::Backup, 1), run(RunKind::Check, 2), run(RunKind::Backup, 3)};
     REQUIRE(last_backup(history) != nullptr);
@@ -406,6 +430,35 @@ TEST_CASE("a webhook alert with a name that is not valid UTF-8 is still sent") {
     const auto j = nlohmann::json::parse(body);
     CHECK(j.at("job") == "Docs");
     CHECK(j.at("message").get<std::string>().find("\xEF\xBF\xBD") != std::string::npos);
+}
+
+TEST_CASE("alerts: a health check that could not finish is announced, one that found damage too") {
+    AlertSettings s;
+    s.webhook_url = "https://example.com/hook";
+    RunRecord r;
+    r.kind = RunKind::FullCheck;
+    r.status = RunStatus::Failed;
+    r.message = "the check could not run: cannot read E:\\Backup\\data\\ab: the device is not ready";
+    auto a = alert_for_run(s, "Docs", r, "pc");
+    REQUIRE(a.has_value());
+    CHECK(a->event == "check-failed");
+    CHECK(a->title.find("could not finish") != std::string::npos);
+    CHECK(a->message.find("E:") == std::string::npos);  // never the run's own message or paths
+    s.on_failure = false;
+    CHECK_FALSE(alert_for_run(s, "Docs", r, "pc").has_value());
+    s.on_failure = true;
+    r.errors = 2;  // found damage
+    a = alert_for_run(s, "Docs", r, "pc");
+    REQUIRE(a.has_value());
+    CHECK(a->event == "damage");
+    r.status = RunStatus::Cancelled;  // cancelled: not news
+    r.errors = 0;
+    CHECK_FALSE(alert_for_run(s, "Docs", r, "pc").has_value());
+    r.status = RunStatus::Success;
+    CHECK_FALSE(alert_for_run(s, "Docs", r, "pc").has_value());
+    s.webhook_url.clear();  // no channel set up: nothing
+    r.status = RunStatus::Failed;
+    CHECK_FALSE(alert_for_run(s, "Docs", r, "pc").has_value());
 }
 
 TEST_CASE("alert settings: saved, read back, tokens sealed, only https") {

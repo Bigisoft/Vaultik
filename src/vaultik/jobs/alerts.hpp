@@ -9,6 +9,7 @@
 // message as an email), Telegram (a bot's message to a chat), and a webhook (a JSON POST to any
 // URL, e.g. for Home Assistant, Slack or Discord gateways).
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -43,11 +44,17 @@ void set_alert_secret(const std::string& which, const std::string& secret, const
 struct Alert {
     enum class Level { Info, Warning, Critical };
     Level level = Level::Warning;
-    std::string event;  // "failed", "partial", "damage", "drive", "success", "test"
+    std::string event;  // "failed", "partial", "damage", "check-failed", "drive", "success", "test", ...
     std::string job;    // the job's name
     std::string title;  // one line: "Backup of Documents failed"
     std::string message;
 };
+
+// The alert a run calls for under these settings, if any; `computer` is this computer's name.
+// Alerts leave the computer: they say what happened in fixed words, with counts, and never carry a
+// run's own message, file names or paths (those stay in Vaultik's history).
+std::optional<Alert> alert_for_run(const AlertSettings& settings, const std::string& job_name, const RunRecord& run,
+                                   const std::string& computer);
 
 // The JSON a webhook receives (invalid UTF-8 in the texts is replaced, never refused).
 std::string webhook_body(const Alert& alert, const std::string& computer, const std::string& time);

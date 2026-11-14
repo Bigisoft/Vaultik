@@ -313,6 +313,16 @@ bool restore_test_due(const HealthPolicy& policy, const std::vector<RunRecord>& 
 inline bool found_damage(const RunRecord& r) {
     return is_check(r.kind) && r.status == RunStatus::Failed && r.errors > 0;
 }
+// A health check that read what it set out to read: one without problems, or one that found
+// damage. A check that could not run or stopped part way (the drive was unplugged, say) or was
+// cancelled did not, so it does not count as done (see due_check) and is alerted.
+inline bool check_completed(const RunRecord& r) {
+    return is_check(r.kind) && (r.status == RunStatus::Success || found_damage(r));
+}
+// A health check that could not run or could not finish (not one that found damage).
+inline bool check_not_finished(const RunRecord& r) {
+    return is_check(r.kind) && r.status == RunStatus::Failed && r.errors == 0;
+}
 
 const char* to_string(RunStatus status);
 const char* to_string(RunKind kind);
@@ -321,7 +331,8 @@ const char* to_string(Schedule::Kind kind);
 // The health check due now (FILETIME ticks), judged from the job's history (oldest first): a full
 // check when the monthly one is on and no full check finished in the last 30 days, otherwise a
 // sampled check when the weekly one is on and no check of either kind finished in the last 7
-// days. A cancelled check does not count, so it is tried again after the next backup.
+// days. Only a completed check counts (check_completed): one that was cancelled, could not run
+// or stopped part way is tried again after the next backup.
 std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
                                  std::uint64_t now);
 // "Daily at 02:00", "Mon, Wed at 21:30", "Every 4 hours at :15", "Manual"; a paused job's in

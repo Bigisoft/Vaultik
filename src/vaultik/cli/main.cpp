@@ -2831,63 +2831,10 @@ int cmd_test_restore(const Args& a) {
 // Sends the alert a run calls for (see jobs/alerts.hpp), if the user set up alerts and wants this
 // kind. A failure to send is a warning, never a reason for the run to fail.
 void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string& settings_dir) {
-    // Alerts leave the computer: they say what happened in fixed words, with counts, and never
-    // carry a run's own message, file names or paths (those stay in Vaultik's history).
     const jobs::AlertSettings s = jobs::load_alerts(settings_dir);
-    if (!s.any()) return;
-    jobs::Alert a;
-    a.job = job.name;
-    const std::string where = " Open Vaultik on " + os::hostname() + " for the details.";
-    const bool check = jobs::is_check(r.kind) || r.kind == jobs::RunKind::RestoreTest;
-    if (check && s.on_damage && r.rot_files > 0 && !(r.status == jobs::RunStatus::Failed && r.errors > 0)) {
-        // Files on this computer that changed by themselves: the backup is fine, the drive is not.
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "rot";
-        a.title = "Health check of " + job.name + " found files that changed by themselves";
-        a.message = std::to_string(r.rot_files) +
-                    " file(s) on the computer changed although nothing wrote to them, which a failing drive does. "
-                    "The backup holds the earlier copy." + where;
-    } else if (check) {
-        // Damage found (not a check that could not run: the backup before it said so).
-        if (!s.on_damage || r.status != jobs::RunStatus::Failed || r.errors == 0) return;
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "damage";
-        a.title = (r.kind == jobs::RunKind::RestoreTest ? "Test restore of " : "Health check of ") + job.name +
-                  " found damage";
-        a.message = "Some backed-up data could not be read back or restored (" + std::to_string(r.errors) +
-                    " problem(s))." + where;
-    } else if (!r.alert.empty()) {
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "ransomware";
-        a.title = job.name + ": files may be encrypted by ransomware";
-        a.message = "Many files changed the way ransomware changes them. Disconnect the backup drive." + where;
-    } else if (r.status == jobs::RunStatus::Failed) {
-        if (!s.on_failure) return;
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "failed";
-        a.title = "Backup of " + job.name + " failed";
-        a.message = "No version was saved." + where;
-    } else if (!r.drive.empty() && s.on_damage) {
-        a.level = jobs::Alert::Level::Warning;
-        a.event = "drive";
-        a.title = "The backup drive of " + job.name + " reports a problem";
-        a.message = "Copy the backup to another drive soon, before it fails." + where;
-    } else if (r.status == jobs::RunStatus::Partial) {
-        if (!s.on_failure) return;
-        a.level = jobs::Alert::Level::Warning;
-        a.event = "partial";
-        a.title = "Backup of " + job.name + " skipped " + std::to_string(r.errors) + " item(s)";
-        a.message = "A version was saved without them." + where;
-    } else if (r.status == jobs::RunStatus::Success && r.kind == jobs::RunKind::Backup && s.on_success) {
-        a.level = jobs::Alert::Level::Info;
-        a.event = "success";
-        a.title = "Backup of " + job.name + " completed";
-        a.message = std::to_string(r.files) + " files, " + format_bytes(r.new_bytes) + " new";
-    } else {
-        return;
-    }
-    a.title += " (" + os::hostname() + ")";
-    for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
+    const std::optional<jobs::Alert> a = jobs::alert_for_run(s, job.name, r, os::hostname());
+    if (!a) return;
+    for (const std::string& f : jobs::send_alert(s, *a, settings_dir)) warning("could not send the alert: " + f);
 }
 
 // When the backup drive newly fills up within jobs::kFillWarnDays (the forecast after this run warns

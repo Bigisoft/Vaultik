@@ -3,6 +3,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <thread>
 
 #include <nlohmann/json.hpp>
@@ -55,7 +56,87 @@ void expect_ok(const http::Response& r, const std::string& what) {
     throw Error(what + ": HTTP " + std::to_string(r.status) + (body.empty() ? "" : " " + body));
 }
 
+// "1.50 GiB", as the command line writes sizes.
+std::string size_text(std::uint64_t bytes) {
+    static constexpr const char* kUnits[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
+    double v = static_cast<double>(bytes);
+    int unit = 0;
+    while (v >= 1024.0 && unit < 5) {
+        v /= 1024.0;
+        ++unit;
+    }
+    char buf[32];
+    if (unit == 0) std::snprintf(buf, sizeof buf, "%llu B", static_cast<unsigned long long>(bytes));
+    else std::snprintf(buf, sizeof buf, "%.2f %s", v, kUnits[unit]);
+    return buf;
+}
+
 }  // namespace
+
+std::optional<Alert> alert_for_run(const AlertSettings& s, const std::string& job_name, const RunRecord& r,
+                                   const std::string& computer) {
+    if (!s.any()) return std::nullopt;
+    Alert a;
+    a.job = job_name;
+    const std::string where = " Open Vaultik on " + computer + " for the details.";
+    const bool check = is_check(r.kind) || r.kind == RunKind::RestoreTest;
+    if (check && s.on_damage && r.rot_files > 0 && !(r.status == RunStatus::Failed && r.errors > 0)) {
+        // Files on this computer that changed by themselves: the backup is fine, the drive is not.
+        a.level = Alert::Level::Critical;
+        a.event = "rot";
+        a.title = "Health check of " + job_name + " found files that changed by themselves";
+        a.message = std::to_string(r.rot_files) +
+                    " file(s) on the computer changed although nothing wrote to them, which a failing drive does. "
+                    "The backup holds the earlier copy." + where;
+    } else if (check_not_finished(r)) {
+        // A health check that could not run or stopped part way (the drive was unplugged, say): it
+        // does not count as done, and nobody would know the backup went unchecked.
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Warning;
+        a.event = "check-failed";
+        a.title = "Health check of " + job_name + " could not finish";
+        a.message = "The backup was not fully checked; the check runs again after the next backup." + where;
+    } else if (check) {
+        // Damage found.
+        if (!s.on_damage || r.status != RunStatus::Failed || r.errors == 0) return std::nullopt;
+        a.level = Alert::Level::Critical;
+        a.event = "damage";
+        a.title = (r.kind == RunKind::RestoreTest ? "Test restore of " : "Health check of ") + job_name + " found damage";
+        a.message = "Some backed-up data could not be read back or restored (" + std::to_string(r.errors) +
+                    " problem(s))." + where;
+    } else if (!r.alert.empty()) {
+        a.level = Alert::Level::Critical;
+        a.event = "ransomware";
+        a.title = job_name + ": files may be encrypted by ransomware";
+        a.message = "Many files changed the way ransomware changes them. Disconnect the backup drive." + where;
+    } else if (r.status == RunStatus::Failed) {
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Critical;
+        a.event = "failed";
+        a.title = "Backup of " + job_name + " failed";
+        a.message = "No version was saved." + where;
+    } else if (!r.drive.empty() && s.on_damage) {
+        a.level = Alert::Level::Warning;
+        a.event = "drive";
+        a.title = "The backup drive of " + job_name + " reports a problem";
+        a.message = "Copy the backup to another drive soon, before it fails." + where;
+    } else if (r.status == RunStatus::Partial) {
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Warning;
+        a.event = "partial";
+        a.title = "Backup of " + job_name + " skipped " + std::to_string(r.errors) + " item(s)";
+        a.message = "A version was saved without them." + where;
+    } else if (r.status == RunStatus::Success && r.kind == RunKind::Backup && s.on_success) {
+        a.level = Alert::Level::Info;
+        a.event = "success";
+        a.title = "Backup of " + job_name + " completed";
+        a.message = std::to_string(r.files) + " files, " + size_text(r.new_bytes) + " new";
+    } else {
+        return std::nullopt;
+    }
+    a.title += " (" + computer + ")";
+    return a;
+}
 
 AlertSettings load_alerts(const std::string& dir) {
     AlertSettings s;

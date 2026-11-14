@@ -278,7 +278,7 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
     std::uint64_t last_full = 0, last_any = 0;
     for (const RunRecord& r : history) {
-        if (!is_check(r.kind) || r.status == RunStatus::Cancelled) continue;
+        if (!check_completed(r)) continue;
         last_any = std::max(last_any, r.finished);
         if (r.kind == RunKind::FullCheck) last_full = std::max(last_full, r.finished);
     }

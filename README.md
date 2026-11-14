@@ -684,6 +684,11 @@ notification. `check-job <job> [--full]` runs one now; `verify --read-data --rea
 the same on any repository. New cloud jobs skip the monthly full check, since it downloads the
 whole backup.
 
+Only a check that read what it set out to read counts as done. A check that could not finish
+(the drive was unplugged part way, say) or was cancelled does not: it stays due and runs again
+after the next backup, and one that could not finish shows a notification and sends a "health
+check could not finish" alert (with "failure" alerts on).
+
 Each check also looks for silent damage on this computer ("bit rot"): it reads up to 20 files back
 from this PC (at most 256 MB, for at most 2 minutes, within the job's resource limits) whose size,
 modification time and creation time are still as the newest version of this computer stored
@@ -885,7 +890,7 @@ pack on one core.
 
 Windows notifications only reach someone at the computer. **Settings > Alerts when you are
 away** sets up alerts that the backup sends itself (so Vaultik need not be open), when a backup
-fails or skips files, when a check or test restore finds damage, when a check finds files on the
+fails or skips files, when a check or test restore finds damage or a check could not finish, when a check finds files on the
 computer that changed by themselves, or the backup drive is failing,
 and optionally after every backup:
 
