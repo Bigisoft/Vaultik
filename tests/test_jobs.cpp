@@ -12,6 +12,7 @@
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/drive_lock.hpp"
+#include "vaultik/jobs/eject.hpp"
 #include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/acl.hpp"
@@ -1083,4 +1084,51 @@ TEST_CASE("what is still unprotected: each gap is named, and goes away once fixe
     CHECK(recovery_kit_noted(tmp.dir(), a.repository));
     CHECK(recovery_kit_noted(tmp.dir(), a.repository + "/"));
     CHECK_FALSE(recovery_kit_noted(tmp.dir(), (tmp.path / "other").string()));
+}
+
+TEST_CASE("eject: refused while a run uses the drive, and the per-drive setting") {
+    TempStore tmp;
+    fs::create_directories(tmp.path / "repo");
+    Job j = sample();
+    j.repository = (tmp.path / "repo").string();
+    j.repository_volume.clear();
+    // A run (another thread, as a Windows mutex lets its own thread in again) holds the drive:
+    // nothing is ejected, the drive is never touched.
+    {
+        std::atomic<int> state{0};  // 1: held, 2: may let go
+        std::thread run([&] {
+            const DriveLock lock(drive_lock_key(j), os::join(tmp.dir(), "locks"), std::chrono::milliseconds(0));
+            state = lock.held() ? 1 : -1;
+            while (state == 1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        });
+        while (state == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        if (state == 1) {
+            const std::string failed = eject_backup_drive(j, tmp.dir());
+            CHECK(failed.find("is using this drive") != std::string::npos);
+        }
+        const bool held = state == 1;
+        state = 2;
+        run.join();
+        REQUIRE(held);
+    }
+    // Cloud storage has no drive to eject.
+    Job cloud = sample();
+    cloud.repository = "s3:https://s3.example.com/bucket";
+    CHECK(backup_drive_root(cloud).empty());
+    CHECK_FALSE(eject_backup_drive(cloud, tmp.dir()).empty());
+    // What is not a removable drive is refused before anything is done to it.
+#ifdef _WIN32
+    CHECK_FALSE(os::eject_drive("no drive").empty());
+#else
+    CHECK_FALSE(os::eject_drive("/").empty());
+#endif
+
+    // "Eject when done", per drive.
+    CHECK_FALSE(eject_when_done(tmp.dir(), "uuid:1"));
+    set_eject_when_done(tmp.dir(), "uuid:1", true);
+    CHECK(eject_when_done(tmp.dir(), "uuid:1"));
+    CHECK_FALSE(eject_when_done(tmp.dir(), "uuid:2"));
+    set_eject_when_done(tmp.dir(), "uuid:1", false);
+    CHECK_FALSE(eject_when_done(tmp.dir(), "uuid:1"));
+    CHECK_THROWS(set_eject_when_done(tmp.dir(), "", true));
 }

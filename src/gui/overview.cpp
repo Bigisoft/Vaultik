@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include <QCheckBox>
 #include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
@@ -321,6 +322,25 @@ OverviewView::OverviewView(QWidget* parent) : QWidget(parent) {
     new QGridLayout(drives_list_);
     drives_list_->layout()->setContentsMargins(0, 0, 0, 0);
     dl->addWidget(drives_list_);
+    drive_note_ = new QLabel;
+    drive_note_->setWordWrap(true);
+    drive_note_->setTextFormat(Qt::PlainText);
+    drive_note_->setProperty("role", "muted");
+    dl->addWidget(drive_note_);
+    eject_row_ = new QWidget;
+    auto* er = new QHBoxLayout(eject_row_);
+    er->setContentsMargins(0, 4, 0, 0);
+    er->setSpacing(12);
+    eject_ = new QPushButton(tr("Eject the backup drive"));
+    eject_->setProperty("role", "action");
+    eject_->setToolTip(tr("Prepare the drive to be unplugged. Not while a backup, check, cleanup or restore uses it."));
+    connect(eject_, &QPushButton::clicked, this, &OverviewView::eject_requested);
+    eject_done_ = new QCheckBox(tr("Eject it on its own when the last job using it is done"));
+    connect(eject_done_, &QCheckBox::clicked, this, &OverviewView::eject_when_done_changed);
+    er->addWidget(eject_);
+    er->addWidget(eject_done_);
+    er->addStretch(1);
+    dl->addWidget(eject_row_);
     drives_box_ = drives;
     layout->addWidget(drives_box_);
 
@@ -428,7 +448,11 @@ void OverviewView::set_data(const OverviewData& d) {
         delete item->widget();
         delete item;
     }
-    drives_box_->setVisible(!d.drives.empty());
+    drives_box_->setVisible(!d.drives.empty() || d.can_eject || !d.drive_note.isEmpty());
+    drive_note_->setText(d.drive_note);
+    drive_note_->setVisible(!d.drive_note.isEmpty());
+    eject_row_->setVisible(d.can_eject);
+    eject_done_->setChecked(d.eject_when_done);
     const Theme& t = theme();
     int row = 0;
     for (const OverviewData::Drive& drive : d.drives) {

@@ -135,6 +135,7 @@ add_library(vaultik_core STATIC
     src/vaultik/jobs/drive_lock.cpp
     src/vaultik/jobs/check_state.cpp
     src/vaultik/jobs/protection.cpp
+    src/vaultik/jobs/eject.cpp
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/report.cpp
@@ -189,6 +190,7 @@ if(WIN32)
         src/vaultik/util/resources_win.cpp
         src/vaultik/crypto/crypto_win.cpp
         src/vaultik/platform/os_win.cpp
+        src/vaultik/platform/eject_win.cpp
         src/vaultik/ops/mount_win.cpp
         src/vaultik/ops/apps_win.cpp
         src/vaultik/platform/drive_health_win.cpp
@@ -205,12 +207,14 @@ if(WIN32)
         $<$<CONFIG:Release>:/O2 /Gy /Gw>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
                           bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib wbemuuid oleaut32 netapi32 virtdisk
+                          setupapi cfgmgr32
                           libssh2::libssh2)
 else()
     target_sources(vaultik_core PRIVATE
         src/vaultik/util/resources_posix.cpp
         src/vaultik/crypto/crypto_openssl.cpp
         src/vaultik/platform/os_posix.cpp
+        src/vaultik/platform/eject_posix.cpp
         src/vaultik/ops/mount_posix.cpp
         src/vaultik/ops/apps_posix.cpp
         src/vaultik/platform/drive_health_posix.cpp

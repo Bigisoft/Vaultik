@@ -70,6 +70,7 @@
 #include "vaultik/jobs/forecast.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/eject.hpp"
 #include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/report.hpp"
 #include "vaultik/platform/acl.hpp"
@@ -1143,6 +1144,38 @@ QWidget* MainWindow::build_job_page() {
     versions_ = new VersionsView;
     connect(overview_, &OverviewView::versions_requested, this, [this] { tabs_->setCurrentWidget(versions_); });
     connect(overview_, &OverviewView::grew_requested, this, &MainWindow::show_grew);
+    connect(overview_, &OverviewView::eject_requested, this, [this] {
+        const jobs::Job* job = current_job();
+        if (!job) return;
+        if (runner_->running()) {
+            QMessageBox::information(this, tr("Eject the backup drive"),
+                                     tr("Vaultik is still working. Eject the drive once it is done."));
+            return;
+        }
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        repos_.erase(job->id);  // nothing of the backup stays open on the drive
+        const std::string failed = jobs::eject_backup_drive(*job, store_.dir());
+        QApplication::restoreOverrideCursor();
+        if (failed.empty()) {
+            status_->showMessage(tr("The backup drive can be unplugged now."), 15000);
+            if (tray_ != nullptr) tray_->notify(tr("The backup drive can be unplugged"), qs(job->name));
+        } else {
+            QMessageBox box(QMessageBox::Information, tr("Eject the backup drive"), QString(), QMessageBox::Ok, this);
+            box.setTextFormat(Qt::PlainText);
+            box.setText(tr("The drive was not ejected: %1").arg(qs(failed)));
+            box.exec();
+        }
+        refresh_overview();
+    });
+    connect(overview_, &OverviewView::eject_when_done_changed, this, [this](bool on) {
+        const jobs::Job* job = current_job();
+        if (!job) return;
+        try {
+            jobs::set_eject_when_done(store_.dir(), job->repository_volume, on);
+        } catch (const std::exception& e) {
+            QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        }
+    });
     connect(overview_, &OverviewView::fix_requested, this, [this](const QString& fix) {
         if (fix == "edit") edit_job();
         else if (fix == "kit") open_keys();
@@ -1708,6 +1741,12 @@ void MainWindow::refresh_overview() {
             auto& cur = d.days[to_datetime(e.snapshot.time).date()];
             if (cur == OverviewData::Day::None || cur == OverviewData::Day::Failed) cur = OverviewData::Day::Saved;
         }
+    // Ejecting the backup drive: an external drive that is connected now.
+    if (const std::string root = jobs::backup_drive_root(*job); !root.empty()) {
+        const os::VolumeLocation loc = os::volume_of(root);
+        d.can_eject = loc.external && !job->repository_volume.empty();
+        d.eject_when_done = jobs::eject_when_done(store_.dir(), job->repository_volume);
+    }
     // What is still unprotected.
     try {
         const std::vector<jobs::Job> all = store_.list();

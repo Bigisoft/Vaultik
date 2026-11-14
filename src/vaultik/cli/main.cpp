@@ -30,6 +30,7 @@
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/jobs/check_state.hpp"
 #include "vaultik/jobs/drive_lock.hpp"
+#include "vaultik/jobs/eject.hpp"
 #include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
@@ -376,6 +377,10 @@ Commands:
                                compare them with the newest version, to catch
                                silent damage (unless the job turned it off)
       --full                   Read all of the stored data
+  eject <job>                  Eject the job's backup drive so it can be unplugged
+                               (refused while a run uses it)
+      --when-done on|off       Instead: eject it on its own after the last job
+                               that waited for it is done
   alert-test                   Send a test message to the alert channels set up
                                in Settings (ntfy, Telegram, webhook)
   report                       Monthly report of every saved job: backups and their
@@ -3057,6 +3062,28 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
 #include "vaultik/cli/image_cmds.inc"
 #include "vaultik/cli/disk_cmds.inc"
 
+// "eject <job> [--when-done on|off]".
+int cmd_eject(const Args& a) {
+    if (a.positional.size() != 1) throw Error("usage: vaultik eject <job id or name> [--when-done on|off]");
+    const jobs::JobStore store = job_store(a);
+    const auto job = store.find(a.positional[0]);
+    if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
+    if (const auto v = a.value("--when-done")) {
+        if (*v != "on" && *v != "off") throw Error("--when-done takes on or off");
+        jobs::set_eject_when_done(store.dir(), job->repository_volume, *v == "on");
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"when_done", *v == "on"}});
+        else out(std::string("The backup drive of \"") + job->name + "\" is " + (*v == "on" ? "now" : "no longer") +
+                 " ejected once the last job using it is done.\n");
+        return kExitOk;
+    }
+    const std::string failed = jobs::eject_backup_drive(*job, store.dir());
+    if (g_json) emit({{"event", "done"}, {"status", failed.empty() ? "success" : "failed"},
+                      {"message", failed.empty() ? std::string("the drive can be unplugged now") : failed}});
+    else if (failed.empty()) out("The backup drive of \"" + job->name + "\" can be unplugged now.\n");
+    if (!failed.empty()) throw Error(failed);
+    return kExitOk;
+}
+
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
     const jobs::JobStore store = job_store(a);
@@ -3134,6 +3161,29 @@ int cmd_run_job(const Args& a) {
     record.on_connect = on_connect;
     record.trigger = trigger;
     record.started = os::now();
+    // "Eject when done": once this run let go of the drive and no other run took it up (one that
+    // waited for it does the same when it ends), the drive is ejected.
+    struct EjectWhenDone {
+        const jobs::Job& job;
+        std::string dir;
+        ~EjectWhenDone() {
+            try {
+                if (!jobs::eject_when_done(dir, job.repository_volume)) return;
+                std::this_thread::sleep_for(std::chrono::seconds(3));  // a waiting run takes the drive first
+                const std::string failed = jobs::eject_backup_drive(job, dir);
+                if (failed.empty()) {
+                    if (g_json) emit({{"event", "ejected"}, {"message", "the backup drive can be unplugged now"}});
+                    else out("The backup drive was ejected and can be unplugged now.\n");
+                } else if (!g_json) {
+                    out("The backup drive was not ejected: " + failed + "\n");
+                }
+            } catch (...) {
+            }
+        }
+    } eject_when_done{*job, store.dir()};
+    // One run at a time on this drive (also checks and prunes of other jobs there): held to the end,
+    // and let go of only once the repository is closed.
+    std::unique_ptr<jobs::DriveLock> drive_lock;
     int code = kExitError;
     std::unique_ptr<Repository> repo;
     // Once the repository is open, this computer's status there is updated last, however the run
@@ -3186,8 +3236,6 @@ int cmd_run_job(const Args& a) {
         else out("Job \"" + job->name + "\": " + waiting.message + "\n");
         return kExitWaiting;
     }
-    // One run at a time on this drive (also checks and prunes of other jobs there): held to the end.
-    std::unique_ptr<jobs::DriveLock> drive_lock;
     try {
         drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
         repo = open_job_repo(a, store, *job);
@@ -4422,6 +4470,14 @@ int cmd_restore(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik restore -r <repo> <snapshot> --target <folder>");
     const auto target = a.value("--target");
     if (!target) throw Error("restore needs --target <folder>");
+    // The backup drive is in use (so it is not ejected meanwhile); a restore never waits for a
+    // backup to let go of it, though: it then reads alongside.
+    std::unique_ptr<jobs::DriveLock> drive_claim;
+    try {
+        drive_claim = std::make_unique<jobs::DriveLock>(jobs::drive_lock_key(repo_path(a)),
+                                                        os::join(jobs::config_dir(), "locks"), std::chrono::milliseconds(0));
+    } catch (const std::exception&) {
+    }
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "restore", lock_wait(a));
     repo->reload_index();  // a prune may have finished before the lock was granted
@@ -4995,6 +5051,7 @@ int run(const std::vector<std::string>& argv) {
     if (a.command == "drives") return cmd_drives(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
+    if (a.command == "eject") return cmd_eject(a);
     if (a.command == "test-restore") return cmd_test_restore(a);
     if (a.command == "alert-test") return cmd_alert_test(a);
     if (a.command == "report") return cmd_report(a);

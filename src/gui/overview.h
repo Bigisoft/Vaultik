@@ -47,6 +47,12 @@ struct OverviewData {
         QString health_unknown;  // why it is unknown (a tooltip)
     };
     std::vector<Drive> drives;
+    // The backup drive can be ejected from here (an external drive that is connected), and
+    // whether it is ejected on its own once the last job using it is done.
+    bool can_eject = false;
+    bool eject_when_done = false;
+    // One calm note about the backup drive (its file system), empty for none.
+    QString drive_note;
 
     // What is still unprotected (see jobs/protection.hpp): one plain line each, with the fix its
     // button leads to ("edit", "kit", "test", "resume", "check"; empty: no button).
@@ -99,6 +105,8 @@ signals:
     void grew_requested();
     // A button of the "still unprotected" list (its OverviewData::Gap::fix).
     void fix_requested(const QString& fix);
+    void eject_requested();
+    void eject_when_done_changed(bool on);
 
 private:
     struct Tile {
@@ -117,6 +125,10 @@ private:
     QWidget* gaps_list_ = nullptr;  // rebuilt on each set_data
     QWidget* drives_box_ = nullptr;
     QWidget* drives_list_ = nullptr;  // rebuilt on each set_data
+    QLabel* drive_note_ = nullptr;
+    QWidget* eject_row_ = nullptr;
+    QPushButton* eject_ = nullptr;
+    class QCheckBox* eject_done_ = nullptr;
     QPushButton* check_ = nullptr;
     QPushButton* test_ = nullptr;
 };

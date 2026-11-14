@@ -311,6 +311,13 @@ struct VolumeLocation {
 VolumeLocation volume_of(const std::string& path);
 // The current mount path of a volume named by volume_of ("F:\"), or empty when it is not connected.
 std::string volume_root(const std::string& volume);
+// Prepares a backup drive for unplugging, as "Safely remove" does. Windows: flushes, locks and
+// dismounts the volume where this account may, then asks Windows to eject the device
+// (CM_Request_Device_Eject), which refuses while a program still uses it. Linux: udisksctl unmount
+// and power-off. `root` is the drive's root ("F:\", "/run/media/me/USB"). Empty on success,
+// otherwise why not, in plain words.
+std::string eject_drive(const std::string& root);
+
 // The space on the drive holding `path` (a local folder or a network share): what this user may
 // still write, and the drive's size. Empty when it cannot be told (not there, not a drive).
 struct DiskSpace {

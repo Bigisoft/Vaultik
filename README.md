@@ -571,6 +571,15 @@ between runs started by Task Scheduler or a systemd timer and runs started in th
 jobs with administrator rights). A run gives up after waiting 12 hours. Cloud storage has no
 such turns.
 
+**Eject the backup drive** (the Drives card of the Overview, for an external drive, or `vaultik
+eject <job>`) prepares the drive to be unplugged, as Windows' "Safely remove" does: it is
+flushed, locked and dismounted where your account may, then Windows is asked to eject it, which
+it refuses (naming the program) while something still uses the drive; on Linux `udisksctl
+unmount` and `power-off`. Vaultik refuses while one of its own backups, checks, cleanups or
+restores uses the drive. **Eject it on its own when the last job using it is done** (`vaultik
+eject <job> --when-done on`, per drive) ejects it after the last of the jobs that waited for it
+finishes. No administrator rights are needed for a USB drive.
+
 When a run finds the backup drive not connected, that is no failure: the drive is simply
 elsewhere. The run is recorded once as "Waiting for the drive" (grey, not red; `"status":
 "waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert and no
