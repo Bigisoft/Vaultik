@@ -1144,8 +1144,11 @@ TEST_CASE("run log: every line up to its cap, the newest logs of a job kept") {
         first = log.path();
         for (int i = 0; i < 10; ++i) log.line("warning: skipped C:\\file" + std::to_string(i) + ".txt: in use");
     }
-    std::ifstream in(fs::u8path(first));
-    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const auto read_text = [](const fs::path& p) {
+        std::ifstream in(p);  // closed again at once: Windows deletes no file that is open
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    const std::string text = read_text(fs::u8path(first));
     CHECK(text.find("file0.txt") != std::string::npos);
     CHECK(text.find("file9.txt") != std::string::npos);
     {
@@ -1156,8 +1159,7 @@ TEST_CASE("run log: every line up to its cap, the newest logs of a job kept") {
     const fs::path second = tmp.path / "logs" / "docs" / "00000000000000000200.log";
     REQUIRE(fs::exists(second));
     CHECK(size_of(second) <= 2000 + 200);  // the cap, plus the line that says it was cut short
-    std::ifstream in2(second);
-    const std::string text2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    const std::string text2 = read_text(second);
     CHECK(text2.find("cut short") != std::string::npos);
 
     // Only the newest are kept: starting a run makes room for it.
