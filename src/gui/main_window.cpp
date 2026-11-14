@@ -1795,7 +1795,8 @@ void MainWindow::refresh_overview() {
     try {
         const std::vector<jobs::Job> all = store_.list();
         for (const jobs::ProtectionGap& g :
-             jobs::protection_gaps(*job, all, records, jobs::protection_facts(store_, *job), os::now()))
+             jobs::protection_gaps(*job, all, jobs::history_with_shared_checks(store_, *job),
+                                   jobs::protection_facts(store_, *job), os::now()))
             d.gaps.push_back({qs(g.text), qs(g.fix)});
     } catch (const std::exception&) {
     }

@@ -1192,3 +1192,50 @@ TEST_CASE("drive note: one calm line for a drive without a journal") {
     fs::create_directories(tmp.path);
     CHECK_FALSE(os::file_system_of(tmp.dir()).empty());  // whatever the test machine uses
 }
+
+TEST_CASE("shared health checks: one completed check of a repository counts for every job using it") {
+    TempStore tmp;
+    fs::create_directories(tmp.path / "repo");
+    fs::create_directories(tmp.path / "other");
+    fs::create_directories(tmp.path / "src");
+    JobStore store(tmp.dir());
+    const auto make = [&](const std::string& name, const fs::path& repo) {
+        Job j;
+        j.name = name;
+        j.repository = repo.string();
+        j.sources = {(tmp.path / "src").string()};
+        store.save(j);
+        return j;
+    };
+    const Job a = make("Documents", tmp.path / "repo");
+    Job b = make("Photos", tmp.path / "repo");
+    const Job c = make("Music", tmp.path / "other");
+    CHECK(same_repository(a, b));
+    CHECK_FALSE(same_repository(a, c));
+    b.repository += "/";  // another spelling of the same folder
+    CHECK(same_repository(a, b));
+
+    const std::uint64_t now = os::now();
+    RunRecord full;
+    full.kind = RunKind::FullCheck;
+    full.started = now - 1000;
+    full.finished = now - 500;
+    store.append_history(a.id, full);
+
+    HealthPolicy h;  // weekly and monthly
+    CHECK_FALSE(due_check(h, history_with_shared_checks(store, a), now).has_value());
+    CHECK_FALSE(due_check(h, history_with_shared_checks(store, b), now).has_value());  // a's check counts
+    CHECK(due_check(h, history_with_shared_checks(store, c), now) == RunKind::FullCheck);
+    CHECK(due_check(h, store.history(b.id), now) == RunKind::FullCheck);  // on its own it would be due
+    // Only checks are shared, never another job's backups.
+    RunRecord backup;
+    backup.started = now;
+    backup.finished = now;
+    store.append_history(a.id, backup);
+    CHECK(last_backup(history_with_shared_checks(store, b)) == nullptr);
+    // A check that could not finish counts for nobody.
+    RunRecord broken = full;
+    broken.status = RunStatus::Failed;
+    store.append_history(c.id, broken);
+    CHECK(due_check(h, history_with_shared_checks(store, c), now) == RunKind::FullCheck);
+}

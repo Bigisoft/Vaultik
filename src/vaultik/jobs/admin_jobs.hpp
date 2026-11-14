@@ -50,6 +50,14 @@ void check_program_dir(const std::string& program_dir);
 // Run history from the user's store and, when there is one, the admin store, oldest first.
 std::vector<RunRecord> combined_history(const JobStore& store, const std::string& id, std::size_t limit = 100);
 
+// Whether two jobs back up to the same repository: the same recorded drive and folder on it, or
+// the same location (cloud storage, a share, a folder without a recorded drive).
+bool same_repository(const Job& a, const Job& b);
+// The job's history with the health checks of every other saved job backing up to the same
+// repository added (oldest first): one completed check of a repository counts for all its jobs
+// (see due_check). Only checks are added, never others' backups.
+std::vector<RunRecord> history_with_shared_checks(const JobStore& store, const Job& job, std::size_t limit = 500);
+
 // Whether connecting the job's drive should start a backup: the job asks for it (or a run was
 // missed while the drive was away, see missed_run_waiting), its drive is connected, and it did
 // not save a version in the last 10 minutes (Windows reports one

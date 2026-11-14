@@ -766,6 +766,10 @@ as a percentage of the data it reads this time, with the time left (smoothed ove
 minute, as for the drive cleanser); `--json` gives `"done"` and `"total"` bytes in its
 `check_progress` events.
 
+Several jobs that back up to the same repository (the same folder on the same drive, or the
+same cloud storage) share their checks: one completed check of the repository counts for all of
+them, so the repository is not read once per job, and what it read is remembered for all of them.
+
 Only a check that read what it set out to read counts as done. A check that could not finish
 (the drive was unplugged part way, say) or was cancelled does not: it stays due and runs again
 after the next backup, and one that could not finish shows a notification and sends a "health

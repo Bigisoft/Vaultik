@@ -3445,7 +3445,8 @@ int cmd_run_job(const Args& a) {
     // Then the health check, when one is due. It never changes the backup's result: a problem
     // it finds is its own entry in the history (and a notification from the tray).
     if (a.has("--no-check") || g_cancel.load()) return code;
-    const auto due = jobs::due_check(job->health, jobs::combined_history(store, job->id, 500), os::now());
+    // A check of the same repository by another job counts for this one too.
+    const auto due = jobs::due_check(job->health, jobs::history_with_shared_checks(store, *job), os::now());
     if (due) {
         jobs::RunRecord check;
         try {
