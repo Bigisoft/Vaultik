@@ -128,7 +128,11 @@ Start `vaultik-gui`, then **New backup job**:
   not need to stay open; a run missed while the computer was off starts at the next chance.
   Scheduled runs can skip while the computer runs on battery, wake the computer from sleep at
   their time, and, for cloud storage, skip over a metered connection such as mobile data (the
-  skipped run shows in the Activity tab; the next scheduled one tries again). "Back up now"
+  skipped run shows in the Activity tab; the next scheduled one tries again). While a backup,
+  health check, cleanup or restore runs, the computer does not go to sleep (the display still
+  turns off and the screen still locks): Windows lists the run under `powercfg /requests`, and on
+  Linux it holds a logind sleep inhibitor (`systemd-inhibit --list`) when logind is there. The
+  computer may sleep again as soon as the run ends, however it ends. "Back up now"
   always runs. "Only save a version when something changed" makes a run that finds every file
   and folder as in the last version (content, times, attributes, permissions, streams; a folder's
   own times aside, which Windows updates lazily) save no new version; it shows as "nothing

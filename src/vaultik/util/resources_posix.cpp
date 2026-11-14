@@ -1,7 +1,11 @@
 // POSIX (Linux) resource controls: nice value, I/O scheduling class, an address-space limit for
 // the memory cap, and a duty-cycle limiter for the CPU cap (cgroups would need root delegation).
 
+#include <fcntl.h>
 #include <malloc.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -13,8 +17,10 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "vaultik/util/error.hpp"
+#include "vaultik/util/keep_awake.hpp"
 #include "vaultik/util/resources_detail.hpp"
 
 namespace vaultik {
@@ -150,5 +156,67 @@ void cpu_cap_tick() {
 }  // namespace detail
 
 void apply_io_priority(void* /*handle*/) {}  // per process on Linux, set in apply_platform_policy
+
+namespace {
+
+// A logind sleep inhibitor, held by "systemd-inhibit --what=sleep --mode=block cat" for as long
+// as the pipe to its standard input stays open: closing it (on release, or when this process
+// ends in any way) ends cat, and with it the inhibitor. No systemd-inhibit or no logind: none.
+class LogindInhibitor : public PowerRequester {
+public:
+    bool acquire(const std::string& reason) override {
+        int fds[2];
+        if (::pipe2(fds, O_CLOEXEC) != 0) return false;
+        posix_spawn_file_actions_t actions;
+        posix_spawn_file_actions_init(&actions);
+        posix_spawn_file_actions_adddup2(&actions, fds[0], STDIN_FILENO);
+        posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+        posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+        const std::string why = "--why=" + reason;
+        std::vector<std::string> args = {"systemd-inhibit", "--what=sleep", "--mode=block", "--who=Vaultik", why, "cat"};
+        std::vector<char*> argv;
+        for (std::string& a : args) argv.push_back(a.data());
+        argv.push_back(nullptr);
+        const int rc = posix_spawnp(&pid_, "systemd-inhibit", &actions, nullptr, argv.data(), environ);
+        posix_spawn_file_actions_destroy(&actions);
+        ::close(fds[0]);
+        if (rc != 0) {
+            ::close(fds[1]);
+            pid_ = -1;
+            return false;
+        }
+        write_end_ = fds[1];
+        return true;
+    }
+    void release() override {
+        if (write_end_ >= 0) ::close(write_end_);
+        write_end_ = -1;
+        if (pid_ > 0) {
+            int status = 0;
+            // cat ends at once on the closed pipe; it is not waited for longer than that.
+            for (int i = 0; i < 50; ++i) {
+                const pid_t r = ::waitpid(pid_, &status, WNOHANG);
+                if (r == pid_ || (r < 0 && errno != EINTR)) {
+                    pid_ = -1;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            ::kill(pid_, SIGTERM);
+            ::waitpid(pid_, &status, 0);
+            pid_ = -1;
+        }
+    }
+
+private:
+    pid_t pid_ = -1;
+    int write_end_ = -1;
+};
+
+}  // namespace
+
+std::unique_ptr<PowerRequester> system_power_requester() {
+    return std::make_unique<LogindInhibitor>();
+}
 
 }  // namespace vaultik

@@ -3,6 +3,7 @@
 
 #include <windows.h>
 
+#include "vaultik/util/keep_awake.hpp"
 #include "vaultik/util/resources_detail.hpp"
 #include "vaultik/util/win.hpp"
 
@@ -76,6 +77,53 @@ void apply_io_priority(void* handle) {
     FILE_IO_PRIORITY_HINT_INFO hint{};
     hint.PriorityHint = io == IoPriority::Background ? IoPriorityHintVeryLow : IoPriorityHintLow;
     SetFileInformationByHandle(static_cast<HANDLE>(handle), FileIoPriorityHintInfo, &hint, sizeof(hint));
+}
+
+namespace {
+
+// A power request that keeps the system (not the display) awake while it is set.
+class WinPowerRequester : public PowerRequester {
+public:
+    bool acquire(const std::string& reason) override {
+        reason_ = widen(reason);
+        REASON_CONTEXT context{};
+        context.Version = POWER_REQUEST_CONTEXT_VERSION;
+        context.Flags = POWER_REQUEST_CONTEXT_SIMPLE_STRING;
+        context.Reason.SimpleReasonString = reason_.data();
+        request_ = PowerCreateRequest(&context);
+        if (request_ == INVALID_HANDLE_VALUE) {
+            request_ = nullptr;
+        } else if (!PowerSetRequest(request_, PowerRequestSystemRequired)) {
+            CloseHandle(request_);
+            request_ = nullptr;
+        }
+        if (request_ != nullptr) return true;
+        // Without a power request: the older way, for this thread (the one that runs the work).
+        using_state_ = SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED) != 0;
+        return using_state_;
+    }
+    void release() override {
+        if (request_ != nullptr) {
+            PowerClearRequest(request_, PowerRequestSystemRequired);
+            CloseHandle(request_);
+            request_ = nullptr;
+        }
+        if (using_state_) {
+            SetThreadExecutionState(ES_CONTINUOUS);
+            using_state_ = false;
+        }
+    }
+
+private:
+    std::wstring reason_;
+    HANDLE request_ = nullptr;
+    bool using_state_ = false;
+};
+
+}  // namespace
+
+std::unique_ptr<PowerRequester> system_power_requester() {
+    return std::make_unique<WinPowerRequester>();
 }
 
 }  // namespace vaultik

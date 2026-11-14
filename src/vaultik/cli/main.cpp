@@ -73,6 +73,7 @@
 #include "vaultik/ops/docker.hpp"
 #include "vaultik/ops/virt.hpp"
 #include "vaultik/util/hex.hpp"
+#include "vaultik/util/keep_awake.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
@@ -4873,6 +4874,13 @@ int run(const std::vector<std::string>& argv) {
     g_json_stdout = g_json = a.has("--json");
     if (g_json) start_cancel_watcher();
     connect_progress_channel(a);
+    // Runs that can take hours keep the computer from going to sleep until they end (however they
+    // end); the display still turns off as usual.
+    static const std::set<std::string> kLongRuns = {"run-job", "check-job", "test-restore", "copy",  "backup",
+                                                    "restore", "verify",    "prune",        "forget", "repair",
+                                                    "repair-data", "move-here", "image"};
+    std::optional<KeepAwake> awake;
+    if (kLongRuns.contains(a.command)) awake.emplace("Vaultik is running " + a.command + "; it lets the computer sleep when done");
 
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "drives") return cmd_drives(a);
