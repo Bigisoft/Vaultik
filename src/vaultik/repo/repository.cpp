@@ -25,6 +25,7 @@ constexpr char kIndexAadPrefix[] = "VKINDEX1";
 constexpr char kSnapshotAadPrefix[] = "VKSNAP01";
 constexpr char kConfigName[] = "config";
 constexpr char kParityMarker[] = "parity/percent";
+constexpr char kCompressionMarker[] = "settings/compression";
 
 // Best effort: a pack is complete without its repair data, so a failure here never fails the
 // write of the pack (a later health check adds what is missing).
@@ -112,6 +113,18 @@ std::unique_ptr<Repository> Repository::open(std::unique_ptr<Backend> backend, s
     } catch (const std::exception&) {
         // unreadable: packs are written without repair data, as before
     }
+    try {
+        if (repo->backend_->exists(kCompressionMarker)) {
+            const Bytes b = repo->backend_->get(kCompressionMarker);
+            const int v = std::atoi(std::string(b.begin(), b.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(b.size(), 8))).c_str());
+            if (v >= 1 && v <= 19) {
+                repo->zstd_level_ = v;
+                repo->compressor_.set_level(v);
+            }
+        }
+    } catch (const std::exception&) {
+        // unreadable: new data is compressed at the made-with level, as before
+    }
     return repo;
 }
 
@@ -125,6 +138,19 @@ void Repository::set_parity_percent(unsigned percent) {
         backend_->put(kParityMarker, ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
     }
     parity_percent_ = percent;
+}
+
+void Repository::set_compression_level(int level) {
+    if (level < 1 || level > 19) throw Error("the compression level must be between 1 and 19");
+    if (level == zstd_level_.load()) return;
+    if (level == config_.zstd_level) {
+        backend_->remove(kCompressionMarker);
+    } else {
+        const std::string text = std::to_string(level) + "\n";
+        backend_->put(kCompressionMarker, ByteSpan(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()));
+    }
+    zstd_level_ = level;
+    compressor_.set_level(level);
 }
 
 std::string Repository::parity_name(const Id& pack_id) {
@@ -227,7 +253,9 @@ Repository::Repository(std::unique_ptr<Backend> backend, RepoConfig config, cons
       id_hasher_(key.id),
       compressor_(config_.zstd_level),
       split_trees_(!backend_->data_class().empty()),
-      enc_key_(key.enc) {}
+      enc_key_(key.enc) {
+    zstd_level_ = config_.zstd_level;
+}
 
 // Worker threads that seal blobs and upload packs; see set_parallelism.
 struct Repository::Pipeline {
@@ -321,13 +349,13 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
     Pipeline* p = pipe_.get();
     p->threads = threads;
     p->max_uploads = uploads;
-    const int level = config_.zstd_level;
+    const std::atomic<int>* level = &zstd_level_;  // read for each blob: it may change while they run
     for (unsigned i = 0; i < threads; ++i) {
         // Each worker its own cipher, made here: no copy of the key is left in a worker (or in
         // the lambda copies std::thread makes), where nothing would wipe it.
         std::shared_ptr<const AesGcm> cipher = std::make_shared<const AesGcm>(enc_key_);
         p->workers.emplace_back([p, level, cipher] {
-            ZstdCompressor compressor(level);
+            ZstdCompressor compressor(level->load());
             const AesGcm& aead = *cipher;
             std::unique_lock lk(p->mu);
             for (;;) {
@@ -337,6 +365,7 @@ void Repository::set_parallelism(unsigned threads, unsigned uploads) {
                 p->todo.pop_front();
                 lk.unlock();
                 try {
+                    compressor.set_level(level->load());
                     job->sealed = seal_with(compressor, aead, job->plain, blob_aad(job->type, job->id), true);
                 } catch (const std::exception& e) {
                     job->error = std::string("cannot encrypt data: ") + e.what();

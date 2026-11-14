@@ -594,6 +594,15 @@ QWidget* JobDialog::build_schedule() {
                                 "backup drive can be rebuilt by Repair. Data saved before it is turned on gets it "
                                 "during the health checks."));
     form->addRow(tr("Repair data:"), repair_data_);
+    compression_ = new QComboBox;
+    compression_->addItem(tr("As the destination has it (fast, unless changed)"), 0);
+    compression_->addItem(tr("Fast (level 3)"), 3);
+    compression_->addItem(tr("Balanced (level 6)"), 6);
+    compression_->addItem(tr("Small (level 12), when the drive is slow"), 12);
+    compression_->setToolTip(tr("How hard new data is compressed. Smaller costs more CPU time and saves space and "
+                                "writes, which helps when the drive (USB 2.0, a network) is slower than compressing. "
+                                "Data already stored stays as it is, and every level reads back the same way."));
+    form->addRow(tr("Compression:"), compression_);
     form->addRow(tr("Scheduled runs:"), skip_battery_);
     form->addRow(QString(), wake_);
     form->addRow(QString(), skip_metered_);
@@ -1035,6 +1044,14 @@ void JobDialog::load(const jobs::Job& job) {
         }
         repair_data_->setCurrentIndex(at);
     }
+    {
+        int at = compression_->findData(job.compression);
+        if (at < 0) {
+            compression_->addItem(tr("Level %1").arg(job.compression), job.compression);
+            at = compression_->count() - 1;
+        }
+        compression_->setCurrentIndex(at);
+    }
     wake_->setChecked(job.schedule.wake_computer);
     skip_metered_->setChecked(job.schedule.skip_metered);
     on_idle_->setChecked(job.schedule.on_idle);
@@ -1184,6 +1201,7 @@ jobs::Job JobDialog::collect() const {
     j.download_cloud_files = download_cloud_->isChecked();
     j.record_apps = record_apps_->isChecked();
     j.repair_data = static_cast<unsigned>(repair_data_->currentData().toInt());
+    j.compression = compression_->currentData().toInt();
     j.schedule.wake_computer = wake_->isChecked();
     j.schedule.skip_metered = skip_metered_->isChecked();
     j.schedule.on_idle = on_idle_->isChecked();

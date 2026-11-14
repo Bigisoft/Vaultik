@@ -135,6 +135,7 @@ private:
     QCheckBox* download_cloud_ = nullptr;
     QCheckBox* record_apps_ = nullptr;
     QComboBox* repair_data_ = nullptr;
+    QComboBox* compression_ = nullptr;
     QCheckBox* wake_ = nullptr;
     QCheckBox* skip_metered_ = nullptr;
     QLineEdit* before_command_ = nullptr;

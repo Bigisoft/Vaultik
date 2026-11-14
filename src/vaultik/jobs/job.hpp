@@ -198,6 +198,11 @@ struct Job {
     // Repair data written with each pack, in percent of its size (0: none; see
     // Repository::set_parity_percent). A backup sets the destination's setting to this.
     unsigned repair_data = 5;
+    // The zstd level for new data (see Repository::set_compression_level): 3 fast, 6 balanced, 12
+    // small, or 0 to leave the destination's own (the level it was made with, 3), as existing jobs
+    // do. A backup sets the destination's setting to it. A higher level costs CPU time and saves
+    // space and writes, a good trade where the drive is slower than compressing.
+    int compression = 0;
     // Command lines run by run-job before and after the backup (cmd.exe on Windows): e.g. a
     // database dump before, starting a stopped program again after. A failing "before" command
     // stops the run; "after" runs whatever happened, with VAULTIK_RESULT set to the result.

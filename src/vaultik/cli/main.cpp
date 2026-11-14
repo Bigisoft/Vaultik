@@ -3333,6 +3333,14 @@ int cmd_run_job(const Args& a) {
             return store.database_secret(job->id, db.id);
         });
         add_docker_volumes(o, job->docker_volumes, job->docker_image);
+        // The job's compression level becomes the destination's, for new data (0: left as it is).
+        if (job->compression != 0 && repo->compression_level() != job->compression) {
+            try {
+                repo->set_compression_level(job->compression);
+            } catch (const std::exception& e) {
+                warning(std::string("could not change the compression level of the destination: ") + e.what());
+            }
+        }
         // The job's repair data setting becomes the destination's (every writer then follows it).
         if (repo->parity_percent() != job->repair_data) {
             try {

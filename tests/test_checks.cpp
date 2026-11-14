@@ -182,3 +182,40 @@ TEST_CASE("check progress: the bytes read so far and in all, reaching the total"
     CHECK(seen.back().first == seen.back().second);
     CHECK(seen.back().second < total);
 }
+
+TEST_CASE("compression level: kept with the repository, used for new data only, read back by any level") {
+    TempDir tmp;
+    auto repo = repo_with_packs(tmp.path, 1);
+    CHECK(repo->compression_level() == 3);  // as made
+    const std::size_t packs_before = repo->index().packs().size();
+
+    repo->set_compression_level(12);
+    CHECK(repo->compression_level() == 12);
+    CHECK_THROWS(repo->set_compression_level(0));
+    CHECK_THROWS(repo->set_compression_level(20));
+    CHECK(fs::exists(tmp.path / "repo" / "settings" / "compression"));
+
+    // New data at the new level; everything still reads back.
+    const fs::path src = tmp.path / "src";
+    {
+        std::ofstream f(src / "text.txt", std::ios::binary);
+        for (int i = 0; i < 20000; ++i) f << "line " << i % 97 << " of some text that compresses well\n";
+    }
+    BackupOptions o;
+    o.paths = {u8(src)};
+    run_backup(*repo, o);
+    CHECK(repo->index().packs().size() > packs_before);
+
+    // Reopened: the level stays, and the data reads back whole.
+    repo = Repository::open(std::make_unique<LocalBackend>(u8(tmp.path / "repo")), kPassword);
+    CHECK(repo->compression_level() == 12);
+    VerifyOptions vo;
+    vo.read_data = true;
+    CHECK(run_verify(*repo, vo).errors == 0);
+
+    // Back to the made-with level: the setting goes away, as for a repository that never had one.
+    repo->set_compression_level(3);
+    CHECK_FALSE(fs::exists(tmp.path / "repo" / "settings" / "compression"));
+    repo = Repository::open(std::make_unique<LocalBackend>(u8(tmp.path / "repo")), kPassword);
+    CHECK(repo->compression_level() == 3);
+}

@@ -437,6 +437,8 @@ void validate(const Job& job) {
         throw Error("unknown storage class " + job.cloud_storage_class);
     if (job.health.sample_percent < 1 || job.health.sample_percent > 100)
         throw Error("the weekly check must read between 1% and 100% of the data");
+    if (job.compression != 0 && (job.compression < 1 || job.compression > 19))
+        throw Error("the compression level must be between 1 and 19 (or 0 to keep the destination's)");
     if (job.health.full_check_hours < 0 || job.health.full_check_hours > 168)
         throw Error("the time limit of the full check must be between 0 (none) and 168 hours");
 }
@@ -505,6 +507,7 @@ std::string to_json(const Job& job) {
         {"docker", {{"volumes", job.docker_volumes}, {"image", job.docker_image}}},
         {"databases", databases_json(job.databases)},
         {"repair_data", job.repair_data},
+        {"compression", job.compression},
         {"before_command", job.before_command},
         {"after_command", job.after_command},
         {"second_copy",
@@ -643,6 +646,7 @@ Job job_from_json(const std::string& text) {
         // Jobs from before repair data: on for drives, where bad sectors are the risk; cloud
         // storage keeps its own copies.
         job.repair_data = std::min(50u, j.value("repair_data", is_cloud_location(job.repository) ? 0u : 5u));
+        job.compression = j.value("compression", 0);
         job.after_command = j.value("after_command", std::string());
         if (j.contains("second_copy")) {
             const json& c = j.at("second_copy");

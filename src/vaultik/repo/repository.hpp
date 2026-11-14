@@ -138,6 +138,13 @@ public:
     // ("parity/percent"), so every program writing to it (backup, prune, repair, a copy) adds it.
     // 0 when off. Writing repair data never fails a backup: a pack without it is only less safe.
     unsigned parity_percent() const { return parity_percent_.load(); }
+    // The zstd level new data is compressed with: the level the repository was made with, unless
+    // set_compression_level stored another one ("settings/compression", which versions before
+    // 0.12 ignore: they keep the made-with level). Data already stored stays as it is; every
+    // level decompresses the same way, so the format does not change.
+    int compression_level() const { return zstd_level_.load(); }
+    // 1..19; the made-with level removes the setting again. Throws Error.
+    void set_compression_level(int level);
     // Turns it on (1..50) or off (0) for packs written from now on; existing repair data stays.
     void set_parity_percent(unsigned percent);
     static std::string parity_name(const Id& pack_id);
@@ -202,6 +209,7 @@ private:
     PackWriter tree_pack_;  // folder listings, while split_trees_
     bool split_trees_ = false;
     std::atomic<unsigned> parity_percent_{0};
+    std::atomic<int> zstd_level_{kDefaultZstdLevel};
     std::unordered_map<Id, Bytes, IdHash> pack_bytes_;  // use_pack_bytes
     std::unordered_set<Id, IdHash> pack_pending_;  // blobs in the pack being built
     IndexFileContent index_pending_;               // packs written but not yet in an index file

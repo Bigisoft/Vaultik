@@ -549,6 +549,17 @@ that one and older ones. They could likewise put back an older status note: a no
 that computer's newest version is marked as such ("status record older than its newest version",
 health at least "warning").
 
+### Compression level
+
+New backups compress at zstd level 3, which keeps up with fast drives. When the drive is the
+bottleneck (a USB 2.0 hub at about 40 MiB/s, a network share), a higher level writes less and can
+make the backup faster as well as smaller. The job's **Compression** (Options tab) is "as the
+destination has it" by default, which leaves existing backups exactly as they are; **Fast** (3),
+**Balanced** (6) or **Small** (12) become the destination's setting with the next backup and
+apply to new data only. Data already stored stays as it is, and every level reads back the same
+way, also with older Vaultik versions (which keep writing at level 3). The setting is the file
+`settings/compression` in the backup (see docs/FORMAT.md).
+
 ### Files only in the cloud (OneDrive)
 
 OneDrive (and similar sync programs) can keep files only online, with a placeholder on the disk.
