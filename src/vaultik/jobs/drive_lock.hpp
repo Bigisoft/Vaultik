@@ -34,10 +34,13 @@
 // runs of every account (the user's prunes and ejects too). An account uses a file there that
 // belongs to root or to itself (its own are readable by it alone); root uses any. As any account
 // that can open a file may hold its flock, a run does not wait long for one another account owns:
-// root's runs first take a lock of their own that only root may open, and an account's runs one of
-// their own (vaultik-drive-<hash>.<uid>.lock in /run/lock, used only when it is a file the account
-// owns, else the file in the given folder), so the runs of one account still take turns, whatever
-// settings folder each uses; then each waits for the shared one only a short while
+// root's runs first take a lock of their own that only root may open, and an account's runs locks
+// of their own (vaultik-drive-<hash>.lock in the account's runtime folder /run/user/<uid>, used
+// when it is a folder of the account's alone, where no other account can make a file first, and
+// vaultik-drive-<hash>.<uid>.lock in /run/lock, used when it is a file the account owns; both
+// where both can be used, so that a run started outside a login, without the runtime folder, takes
+// turns too; else the file in the given folder), so the runs of one account still take turns,
+// whatever settings folder each uses; then each waits for the shared one only a short while
 // (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning. A run
 // of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock in
 // /run/vaultik, a folder only root may write to, so no account can put a file in its place,
@@ -162,6 +165,7 @@ public:
 private:
     void* handle_ = nullptr;  // Windows: the mutex; POSIX: the descriptor + 1
     void* shared_ = nullptr;  // POSIX, root: the shared file's descriptor + 1
+    void* own2_ = nullptr;    // POSIX, an account: its second own file's descriptor + 1
     bool waited_ = false;
     bool inherited_ = false;
     bool skipped_ = false;
@@ -186,6 +190,7 @@ public:
 private:
     void* handle_ = nullptr;  // Windows: the slot's mutex; POSIX: the descriptor + 1
     void* shared_ = nullptr;  // POSIX: the shared file's descriptor + 1, besides an own one
+    void* own2_ = nullptr;    // POSIX, an account: its second own file's descriptor + 1
     std::string hash_;
 };
 
@@ -206,6 +211,7 @@ public:
 private:
     void* handle_ = nullptr;  // Windows: the eject mutex; POSIX: the descriptor + 1
     void* shared_ = nullptr;  // POSIX: the shared file's descriptor + 1, besides an own one
+    void* own2_ = nullptr;    // POSIX, an account: its second own file's descriptor + 1
     bool busy_ = false;
     std::string hash_;
 };
@@ -221,12 +227,13 @@ namespace testing {
 // folder, not the one in /run/lock (so a process of this account with another folder stands in
 // for another account); `root_uid`: the account whose marks (see above) count as root's;
 // `other_account_wait`: instead of kOtherAccountWait when not negative; `root_dir`: instead of
-// /run/vaultik when not empty.
+// /run/vaultik when not empty; `run_user_dir`: instead of /run/user/<uid> when not empty.
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
     std::chrono::milliseconds other_account_wait{-1};
     std::string root_dir;
+    std::string run_user_dir;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

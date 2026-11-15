@@ -1253,7 +1253,8 @@ void init_test_repo(const fs::path& dir) {
 // "HOLD:inherited" for a lock it inherited, "HOLD:busy" for one that threw DriveBusy), and keeps what it holds
 // until the file VAULTIK_TEST_HOLD_UNTIL is there. POSIX: VAULTIK_TEST_HOLD_UID makes a helper
 // started as root go on as that account first; VAULTIK_TEST_HOLD_FOREIGN=1 sets the hooks of
-// ForeignFiles below, VAULTIK_TEST_HOLD_ROOT_DIR the folder of root's marks; "flock-ex" and "flock-sh" hold a flock on each of the files (made when
+// ForeignFiles below, VAULTIK_TEST_HOLD_ROOT_DIR the folder of root's marks and
+// VAULTIK_TEST_HOLD_RUN_USER the account's own runtime folder (see DriveLockHooks); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
 // missing) named in VAULTIK_TEST_HOLD_FILES, separated by ';', as another account (or root) would.
 TEST_CASE("drive lock helper: holds what another test asks for in a process of its own") {
     const std::string what = os::get_env("VAULTIK_TEST_HOLD");
@@ -1265,10 +1266,12 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
         REQUIRE(::setgid(static_cast<gid_t>(id)) == 0);
         REQUIRE(::setuid(id) == 0);
     }
+    testing::DriveLockHooks hooks;
     if (os::get_env("VAULTIK_TEST_HOLD_FOREIGN") == "1")
-        testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(300), {}});
-    if (const std::string marks = os::get_env("VAULTIK_TEST_HOLD_ROOT_DIR"); !marks.empty())
-        testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(-1), marks});
+        hooks = {true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(300), {}};
+    hooks.root_dir = os::get_env("VAULTIK_TEST_HOLD_ROOT_DIR");
+    hooks.run_user_dir = os::get_env("VAULTIK_TEST_HOLD_RUN_USER");
+    testing::set_drive_lock_hooks(hooks);
     std::vector<int> flocked;
     if (what == "flock-ex" || what == "flock-sh") {
         const std::string files = os::get_env("VAULTIK_TEST_HOLD_FILES");
@@ -2138,7 +2141,9 @@ TEST_CASE("drive lock: the runs of one account take turns, whatever settings fol
     const fs::path own_use = fs::path("/run/lock") / ("vaultik-use-" + name + "." + uid + ".lock");
     // Another account (or root) may hold the file all accounts share, which is waited for only a
     // short while (300 ms here): the account's own runs are waited for the whole wait all the same.
-    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(300), {}});
+    // Without a runtime folder of the account's own (see the test below), as outside a login.
+    const std::string no_run_user = (tmp.path / "no-run-user").string();
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(300), {}, no_run_user});
     {
         // The installed app's run, and a portable one (another settings folder).
         OtherProcess installed("lock", key, os::join(tmp.dir(), "installed"), tmp.path);
@@ -2178,6 +2183,91 @@ TEST_CASE("drive lock: the runs of one account take turns, whatever settings fol
     }
     testing::set_drive_lock_hooks({});
     for (const fs::path& f : {own, own_use, fs::path("/run/lock") / ("vaultik-drive-" + name + ".lock"),
+                              fs::path("/run/lock") / ("vaultik-use-" + name + ".lock")})
+        fs::remove(f, ec);
+}
+
+TEST_CASE("drive lock: the account's own runtime folder keeps its runs taking turns (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-run-user-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string uid = std::to_string(::geteuid());
+    const fs::path run_user = tmp.path / "run-user";  // stands in for /run/user/<uid>
+    REQUIRE(::mkdir(run_user.c_str(), 0700) == 0);
+    REQUIRE(::chmod(run_user.c_str(), 0700) == 0);
+    const fs::path in_run_lock = fs::path("/run/lock") / ("vaultik-drive-" + name + "." + uid + ".lock");
+    const fs::path use_in_run_lock = fs::path("/run/lock") / ("vaultik-use-" + name + "." + uid + ".lock");
+    const std::vector<std::pair<std::string, std::string>> with_folder = {
+        {"VAULTIK_TEST_HOLD_RUN_USER", run_user.string()}};
+    const std::vector<std::pair<std::string, std::string>> without_folder = {
+        {"VAULTIK_TEST_HOLD_RUN_USER", (tmp.path / "missing").string()}};
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(300), {}, run_user.string()});
+    std::error_code ec;
+    {
+        // Both the file in the runtime folder (readable by the account alone) and the one in
+        // /run/lock are held, nothing in the settings folder.
+        OtherProcess installed("lock", key, os::join(tmp.dir(), "installed"), tmp.path, {}, with_folder);
+        REQUIRE(installed.held());
+        struct stat st{};
+        REQUIRE(::lstat((run_user / ("vaultik-drive-" + name + ".lock")).c_str(), &st) == 0);
+        CHECK(S_ISREG(st.st_mode));
+        CHECK((st.st_mode & 0777) == 0600);
+        CHECK(fs::exists(in_run_lock));
+        CHECK_FALSE(fs::exists(tmp.path / "installed"));
+        CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(1500)), DriveBusy);
+    }
+    {
+        // A run without the runtime folder (started outside a login) still takes turns with one
+        // that has it, through /run/lock.
+        OtherProcess outside("lock", key, os::join(tmp.dir(), "outside"), tmp.path, {}, without_folder);
+        REQUIRE(outside.held());
+        CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(1500)), DriveBusy);
+    }
+    // Something in the place of the account's file in /run/lock (another account may make one of
+    // that name first; here a link): the runs still take turns through the runtime folder, and do
+    // not fall back on their settings folders, which differ.
+    fs::remove(in_run_lock, ec);
+    fs::remove(use_in_run_lock, ec);
+    fs::create_symlink(tmp.path / "elsewhere", in_run_lock);
+    fs::create_symlink(tmp.path / "elsewhere-use", use_in_run_lock);
+    {
+        OtherProcess installed("lock", key, os::join(tmp.dir(), "installed"), tmp.path, {}, with_folder);
+        REQUIRE(installed.held());
+        CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(1500)), DriveBusy);
+        CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(0), {}, {},
+                                  DriveLockMode::eject),
+                        DriveBusy);
+        CHECK_FALSE(fs::exists(tmp.path / "installed"));
+        CHECK_FALSE(fs::exists(tmp.path / "portable"));
+        CHECK_FALSE(fs::exists(tmp.path / "elsewhere"));
+    }
+    {
+        // A command of the installed app: an eject from the portable one sees it.
+        OtherProcess command("claim", key, os::join(tmp.dir(), "installed"), tmp.path, {}, with_folder);
+        REQUIRE(command.held());
+        CHECK(drive_claimed(key, os::join(tmp.dir(), "portable")));
+        CHECK_FALSE(fs::exists(tmp.path / "elsewhere-use"));
+    }
+    CHECK_FALSE(drive_claimed(key, os::join(tmp.dir(), "portable")));
+    fs::remove(in_run_lock, ec);
+    fs::remove(use_in_run_lock, ec);
+    // A runtime folder others may look into: not used (the file in /run/lock instead).
+    fs::remove_all(run_user);
+    REQUIRE(::mkdir(run_user.c_str(), 0700) == 0);
+    REQUIRE(::chmod(run_user.c_str(), 0755) == 0);
+    {
+        DriveLock run(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(0));
+        CHECK(run.held());
+        CHECK(fs::is_empty(run_user));
+        CHECK(fs::exists(in_run_lock));
+    }
+    testing::set_drive_lock_hooks({});
+    for (const fs::path& f : {in_run_lock, use_in_run_lock, fs::path("/run/lock") / ("vaultik-drive-" + name + ".lock"),
                               fs::path("/run/lock") / ("vaultik-use-" + name + ".lock")})
         fs::remove(f, ec);
 }
