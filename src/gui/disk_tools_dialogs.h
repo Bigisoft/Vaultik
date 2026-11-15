@@ -3,13 +3,16 @@
 #include <QDialog>
 
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "vaultik/image/disk.hpp"
+#include "vaultik/image/disk_tools.hpp"
 
 class QCheckBox;
 class QComboBox;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QProgressBar;
@@ -48,7 +51,9 @@ private:
 // "Drive cleanser": erases a whole disk or one volume so its data cannot be read back (one pass
 // of zeros, one of random data, or three passes), or overwrites only the free space of a drive.
 // Erasing runs with administrator rights in a window of its own, after the typed confirmation;
-// the free space is filled here, with progress, and can be cancelled.
+// the free space is filled here, with progress, and can be cancelled. A whole disk is set up
+// again for use in the same run when asked (checked by default): a partition table, one
+// partition with a file system, a name and a drive letter, so it does not stay without any.
 class DriveCleanserDialog : public QDialog {
     Q_OBJECT
 
@@ -63,6 +68,13 @@ private:
     void start();
     const vaultik::image::DiskInfo* chosen_disk() const;
     QString confirmation() const;
+    // The setup options for the disk chosen: MBR only on a disk it covers, its name and drive
+    // letter as before the erase (until the user changes them).
+    void fill_setup();
+    // The setup asked for (none when the section is not checked).
+    std::optional<vaultik::image::NewDiskOptions> setup_options() const;
+    // Sets up the disk erased by `request` after the setup in the same run failed (disk init).
+    void set_up_again(const vaultik::image::DiskInfo& erased, const vaultik::image::EraseRequest& request);
 
     std::vector<vaultik::image::DiskInfo> disks_;
     // What each listed volume was when it was listed (by its name, "E:" or "/dev/sdb1"), checked
@@ -77,6 +89,13 @@ private:
     QComboBox* method_ = nullptr;
     QCheckBox* verify_ = nullptr;
     QLabel* ssd_note_ = nullptr;
+    QGroupBox* setup_ = nullptr;
+    QComboBox* setup_style_ = nullptr;
+    QComboBox* setup_fs_ = nullptr;
+    QLineEdit* setup_label_ = nullptr;
+    QComboBox* setup_letter_ = nullptr;
+    bool setup_label_edited_ = false;
+    int setup_disk_ = -1;  // the disk the setup options were filled for
     QLabel* warning_ = nullptr;
     QLineEdit* confirm_ = nullptr;
     QPushButton* start_ = nullptr;

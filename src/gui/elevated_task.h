@@ -5,6 +5,7 @@
 #include <QStringList>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -22,23 +23,42 @@ class QLabel;
 class QProgressBar;
 class QPushButton;
 
+struct ElevatedResult {
+    int code = -1;            // the engine's exit code; -1 when it did not start
+    QString error;            // why it did not start
+    QString status;           // of the engine's "done" event (success, failed, cancelled, in_use, setup_failed)
+    QString message;          // the engine's own message with it
+    QStringList in_use;       // the drives in use it named
+    QStringList volumes;      // the drives it set up (its "done" event)
+    bool erased = false;      // its "done" event said the disk was erased completely
+    bool in_window = false;   // no progress channel: it ran in a window of its own
+    bool ended = false;       // it ended (or did not start), and `code` tells how
+    bool left_running = false;  // the window was closed (or Vaultik was) while it ran: it goes on
+    bool action = false;      // the window's ElevatedTask::action button was chosen
+};
+
+// A later part of a task, which the engine starts with a "step" event naming it ("phase").
+struct ElevatedPhase {
+    QString name;              // as the engine names it ("setup")
+    QString working;           // what the window says then, e.g. "Setting up the drive..."
+    bool can_cancel = false;   // whether it can still be stopped then
+};
+
 // What a task that needs administrator rights shows while it runs.
 struct ElevatedTask {
     QString title;            // the status window's title
     QString working;          // what it does, e.g. "Erasing disk 3..."
     QString cancel_question;  // asked before stopping it; empty: it cannot be stopped
     QString done;             // shown when it succeeded
-};
-
-struct ElevatedResult {
-    int code = -1;            // the engine's exit code; -1 when it did not start
-    QString error;            // why it did not start
-    QString status;           // of the engine's "done" event (success, failed, cancelled, in_use)
-    QString message;          // the engine's own message with it
-    QStringList in_use;       // the drives in use it named
-    bool in_window = false;   // no progress channel: it ran in a window of its own
-    bool ended = false;       // it ended (or did not start), and `code` tells how
-    bool left_running = false;  // the window was closed (or Vaultik was) while it ran: it goes on
+    std::vector<ElevatedPhase> phases{};  // its later parts, if any
+    // When it succeeded: what to show instead of `done`, from what the engine said (empty: `done`).
+    std::function<QString(const ElevatedResult&)> done_text{};
+    // When the engine ended with exit code `action_code` (not 0): the heading then, with the
+    // engine's message below it, and a button `action_label` that closes the window with
+    // ElevatedResult::action set (the caller then does it).
+    int action_code = 0;
+    QString action_heading{};
+    QString action_label{};
 };
 
 // Runs the command-line engine with `args` with administrator rights and shows its progress in
@@ -79,6 +99,7 @@ private:
     // `error`: why it did not start, or (`started`) why how it ended cannot be told.
     void on_finished(int code, const QString& error, bool started);
     void show_progress(const vaultik::TaskEvent& e);
+    void start_phase(const ElevatedPhase& p);
     void work(std::vector<std::string> argv);
     std::optional<int> follow(vaultik::os::ElevatedProcess& process);
     void post_line(const std::string& line);
@@ -101,6 +122,8 @@ private:
     std::uint64_t last_total_ = 0;
     int last_pass_ = -1;
     bool last_verifying_ = false;
+    bool can_cancel_ = true;  // false once a part of the task started that cannot be stopped
+    QPushButton* action_ = nullptr;
 
     std::unique_ptr<vaultik::os::ProgressServer> server_;
     double started_ = 0;
