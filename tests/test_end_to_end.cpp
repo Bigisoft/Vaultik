@@ -1323,6 +1323,40 @@ TEST_CASE("a file only in the cloud is counted, not read, unless the job downloa
     CHECK(second.snapshot.stats.files == 2);
     CHECK(second.snapshot.stats.bytes == 12 + 17);
 }
+
+TEST_CASE("a folder the change journal calls unchanged is read again when its cloud files are to be downloaded") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "docs" / "here.txt", text("on this disk"));
+    write_file(src / "docs" / "online.txt", text("only in the cloud"));
+    const std::wstring online = (src / "docs" / "online.txt").wstring();
+    REQUIRE(SetFileAttributesW(online.c_str(), GetFileAttributesW(online.c_str()) | FILE_ATTRIBUTE_OFFLINE));
+
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions o;
+    o.paths = {u8(src)};
+    const BackupResult first = run_backup(*repo, o);
+    CHECK(first.snapshot.stats.cloud_only == 1);
+
+    // Nothing changed since, says the journal: without downloading, the folder is taken as it was.
+    o.journal_parent = first.snapshot_id;
+    o.dir_unchanged = [](const std::string&) { return true; };
+    const BackupResult same = run_backup(*repo, o);
+    CHECK(same.snapshot.stats.cloud_only == 1);
+
+    // With downloading on, the folder holding the cloud file is read again, so the file is saved.
+    o.journal_parent = same.snapshot_id;
+    o.download_cloud_files = true;
+    const BackupResult second = run_backup(*repo, o);
+    CHECK(second.snapshot.stats.cloud_only == 0);
+    CHECK(second.snapshot.stats.files == 2);
+    Node node;
+    REQUIRE(resolve_snapshot_path(*repo, second.snapshot, snapshot_path_of(src / "docs" / "online.txt"), node));
+    CHECK(node.kind == NodeKind::File);
+    CHECK(node.size == 17);
+}
 #endif
 
 TEST_CASE("restore: an interrupted restore goes on, leaving identical files alone; its size is known first") {

@@ -1023,8 +1023,12 @@ bool BackupEngine::journal_unchanged(const std::string& dir) {
 
 std::optional<Id> BackupEngine::reuse_dir(const std::string& dir, std::uint64_t device, const Tree& parent) {
     // Everything the listing points at must still be stored (a prune may have removed data no
-    // version uses); otherwise the folder is read as usual.
+    // version uses); otherwise the folder is read as usual. So is a folder with files that were
+    // only in the cloud when the job now downloads them: unchanged, they would stay left out.
     for (const Node& n : parent.nodes) {
+        if (options_.download_cloud_files && n.kind == NodeKind::Reparse &&
+            os::is_cloud_only(os::FileInfo{os::EntryType::Other, n.attributes}))
+            return std::nullopt;
         if (n.security && !repo_.has_blob(*n.security)) return std::nullopt;
         if (n.kind == NodeKind::File && !all_present(n.content)) return std::nullopt;
         for (const DataStream& s : n.streams)

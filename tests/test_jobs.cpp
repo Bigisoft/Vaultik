@@ -1167,6 +1167,15 @@ TEST_CASE("what is still unprotected: each gap is named, and goes away once fixe
     j.health.weekly = j.health.monthly = false;
     CHECK(ids(protection_gaps(j, {j}, history, facts, now)) == std::vector<std::string>{"checks-off"});
     j.health = HealthPolicy{};
+    // Files only in the cloud that the last backup left out: named also once the job downloads
+    // them, until a backup did.
+    history[0].cloud_only = 3;
+    CHECK(ids(protection_gaps(j, {j}, history, facts, now)) == std::vector<std::string>{"cloud-only"});
+    j.download_cloud_files = true;
+    CHECK(ids(protection_gaps(j, {j}, history, facts, now)) == std::vector<std::string>{"cloud-only"});
+    history[0].cloud_only = 0;
+    CHECK(protection_gaps(j, {j}, history, facts, now).empty());
+    j.download_cloud_files = false;
     // A manual job needs no saved password.
     facts.password_saved = false;
     j.schedule.kind = Schedule::Kind::Manual;

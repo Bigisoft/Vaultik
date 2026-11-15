@@ -124,12 +124,14 @@ std::vector<ProtectionGap> protection_gaps(const Job& job, const std::vector<Job
                             "test"});
     }
 
-    // Files only in the cloud (OneDrive) that the newest backup could not save.
-    if (const RunRecord* b = last_backup(history); b != nullptr && b->cloud_only > 0 && !job.download_cloud_files)
+    // Files only in the cloud (OneDrive) that the newest backup could not save: also when the job
+    // downloads them, as one that could not be downloaded is still left out.
+    if (const RunRecord* b = last_backup(history); b != nullptr && b->cloud_only > 0)
         gaps.push_back({"cloud-only",
-                        std::to_string(b->cloud_only) +
-                            (b->cloud_only == 1 ? " file is" : " files are") +
-                            " only in the cloud and not in the backup (the job can download them for the backup).",
+                        std::to_string(b->cloud_only) + (b->cloud_only == 1 ? " file is" : " files are") +
+                            " only in the cloud and not in the backup" +
+                            (job.download_cloud_files ? std::string(" (the job now downloads them: the next backup saves them).")
+                                                      : std::string(" (the job can download them for the backup).")),
                         "edit"});
 
     // Drives: the backup on the very drive it protects, or every backup on one drive.
