@@ -28,11 +28,19 @@
 // Linux: flock on a file in /run/lock, the same for every account: root's runs take turns with
 // the runs of every account (the user's prunes and ejects too). An account uses a file there that
 // belongs to root or to itself (its own are readable by it alone); root uses any. As any account
-// that can open a file may hold its flock, root's runs first take a lock of their own that only
-// root may open, and then wait for the shared one only a short while (kOtherAccountWait): whoever
-// holds it then is not a root run, and the run goes on with a warning. Another account can delay a
-// root run, never stop it. Where /run/lock cannot be used, a file in the given folder (the user's
-// settings) instead.
+// that can open a file may hold its flock, a run does not wait long for one another account owns:
+// root's runs first take a lock of their own that only root may open, and an account's runs one
+// of their own in the given folder (the user's settings), so the runs of one account still take
+// turns; then each waits for the shared one only a short while (kOtherAccountWait) while a run of
+// another account may hold it, and goes on with a warning. A run of root marks that it uses the
+// drive with root's own lock (vaultik-drive-<hash>.root.lock, which every account can see held in
+// /proc/locks but none can take): an account's run waits for the shared lock for as long as that
+// mark is held, then only the short while. The claims (vaultik-use-<hash>.lock) work the same way
+// with vaultik-use-<hash>.root.lock: an account's claim waits only for an eject of its own or of
+// root's, and its eject counts only the claims of its own and of root's as busy. So another
+// account can delay a run by kOtherAccountWait, never stop it, and can neither delay a command of
+// an account nor keep its eject busy (root's claims and ejects still count every account's, fail
+// closed). Where /run/lock cannot be used, a file in the given folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a
@@ -63,8 +71,8 @@ std::string drive_lock_key(const Job& job);
 
 // How long a run waits for another one on its drive before it gives up.
 constexpr std::chrono::hours kDriveLockWait{12};
-// Linux, root: how long a run waits for the lock all accounts share while another account holds
-// it (see above), before it goes on without it.
+// Linux: how long a run waits for the lock all accounts share while another account may hold it
+// (see above), before it goes on without it.
 constexpr std::chrono::minutes kOtherAccountWait{5};
 // How long a command waits for its claim while an eject of the drive is under way (the eject
 // holds off new claims until the drive is gone, so the command then finds it gone).
@@ -120,8 +128,9 @@ public:
     bool held() const { return handle_ != nullptr; }
     bool waited() const { return waited_; }
     bool inherited() const { return inherited_; }
-    // Linux, root: the lock all accounts share was held by another account for kOtherAccountWait,
-    // and the run goes on without it (holding root's own lock only).
+    // Linux: the lock all accounts share was held by another account for kOtherAccountWait, and
+    // the run goes on without it (holding the lock of its own account only). An eject of an
+    // account (not root) passes such a lock by at once.
     bool other_account_skipped() const { return skipped_; }
     // Windows: the drive's lock is there but cannot be shared with this run (another account made
     // it, or this account may not open it), and the run goes on without it.
@@ -159,6 +168,7 @@ public:
 
 private:
     void* handle_ = nullptr;  // Windows: the slot's mutex; POSIX: the descriptor + 1
+    void* shared_ = nullptr;  // POSIX: the shared file's descriptor + 1, besides an own one
     std::string hash_;
 };
 
@@ -178,6 +188,7 @@ public:
 
 private:
     void* handle_ = nullptr;  // Windows: the eject mutex; POSIX: the descriptor + 1
+    void* shared_ = nullptr;  // POSIX: the shared file's descriptor + 1, besides an own one
     bool busy_ = false;
     std::string hash_;
 };
@@ -185,5 +196,21 @@ private:
 // Whether a claim on the drive behind `key` is held, by another process or any thread of this
 // one (an EjectHold that lets go at once).
 bool drive_claimed(const std::string& key, const std::string& lock_dir);
+
+namespace testing {
+
+// For tests only (Linux; no-op elsewhere): lets a test without root stand in for other accounts
+// with processes of its own. `shared_foreign`: a file of this account's in /run/lock counts as one
+// of another account (as root's does for an account); `root_uid`: the account whose marks in
+// /run/lock (see above) count as root's; `other_account_wait`: instead of kOtherAccountWait when
+// not negative.
+struct DriveLockHooks {
+    bool shared_foreign = false;
+    unsigned root_uid = 0;
+    std::chrono::milliseconds other_account_wait{-1};
+};
+void set_drive_lock_hooks(const DriveLockHooks& hooks);
+
+}  // namespace testing
 
 }  // namespace vaultik::jobs

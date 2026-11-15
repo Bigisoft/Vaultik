@@ -24,9 +24,13 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
 #endif
 
 namespace vaultik::jobs {
@@ -258,13 +262,87 @@ bool roots(const struct stat& st) {
     return st.st_uid == 0;
 }
 
+struct Hooks {
+    std::mutex mu;
+    testing::DriveLockHooks hooks;
+};
+
+Hooks& hooks_store() {
+    static Hooks* const h = new Hooks;
+    return *h;
+}
+
+testing::DriveLockHooks hooks() {
+    Hooks& h = hooks_store();
+    std::lock_guard<std::mutex> lock(h.mu);
+    return h.hooks;
+}
+
+std::chrono::milliseconds other_account_wait() {
+    const std::chrono::milliseconds set = hooks().other_account_wait;
+    return set.count() >= 0 ? set : std::chrono::duration_cast<std::chrono::milliseconds>(kOtherAccountWait);
+}
+
+// The file `name` in `dir` (the user's settings), for this account alone. -1 when it cannot be
+// opened.
+int open_in_dir(const std::string& name, const std::string& dir) {
+    (void)os::make_dir(dir);  // the user's settings folder, which is there
+    return ::open(os::join(dir, name).c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+}
+
 // The lock file `name` all accounts share (see open_in_run_lock): an account's own is readable by
 // it alone (and root), root's by all. Otherwise in `fallback_dir`. -1 when neither can be opened.
 int open_lock_file(const std::string& name, const std::string& fallback_dir) {
     const int fd = open_in_run_lock(name, ::geteuid() == 0 ? 0644 : 0600, own_or_roots);
     if (fd >= 0) return fd;
-    (void)os::make_dir(fallback_dir);  // the user's settings folder, which is there
-    return ::open(os::join(fallback_dir, name).c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    return open_in_dir(name, fallback_dir);
+}
+
+// What a run of an account (not root) locks for `name`: `own`, which only runs of this account
+// can hold; and, when the file all accounts share is not this account's own (root's, which any
+// account that can open it may hold), that one as `shared` too, which is waited for only a short
+// while. Without a shared file of another account, `own` is the shared file (or, without one, a
+// file in `lock_dir`). Either may be -1.
+struct AccountFiles {
+    int own = -1;
+    int shared = -1;
+};
+
+AccountFiles open_account_files(const std::string& name, const std::string& lock_dir) {
+    AccountFiles f;
+    const int fd = open_in_run_lock(name, 0600, own_or_roots);
+    struct stat st{};
+    if (fd >= 0 && ::fstat(fd, &st) == 0 && (st.st_uid != ::geteuid() || hooks().shared_foreign)) {
+        f.shared = fd;
+        f.own = open_in_dir(name, lock_dir);
+        return f;
+    }
+    f.own = fd >= 0 ? fd : open_in_dir(name, lock_dir);
+    return f;
+}
+
+// Whether root holds its mark `name` in /run/lock (`write_only`: holds it alone, as an eject
+// does). Only root may open such a file, so only root can hold it; every account can see in
+// /proc/locks that it is held. False when that cannot be told.
+bool root_holds(const std::string& name, bool write_only) {
+    struct stat st{};
+    if (::lstat(("/run/lock/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != hooks().root_uid)
+        return false;
+    std::ifstream in("/proc/locks");
+    std::string line;
+    while (std::getline(in, line)) {
+        // "1: FLOCK  ADVISORY  WRITE 1234 fe:00:5678 0 EOF"; "1: -> FLOCK ..." for one that waits.
+        std::istringstream words(line);
+        std::string id, kind, advisory, type, pid, where;
+        if (!(words >> id >> kind) || kind == "->" || kind != "FLOCK") continue;
+        if (!(words >> advisory >> type >> pid >> where)) continue;
+        unsigned dev_major = 0, dev_minor = 0;
+        unsigned long long inode = 0;
+        if (std::sscanf(where.c_str(), "%x:%x:%llu", &dev_major, &dev_minor, &inode) != 3) continue;
+        if (dev_major != major(st.st_dev) || dev_minor != minor(st.st_dev) || inode != st.st_ino) continue;
+        if (!write_only || type == "WRITE") return true;
+    }
+    return false;
 }
 
 int fd_of(void* handle) {
@@ -427,21 +505,33 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     }
 #else
     const std::string name = "vaultik-drive-" + hash + ".lock";
+    const std::string mark = "vaultik-drive-" + hash + ".root.lock";
     const bool root = ::geteuid() == 0;
-    // Root: its own lock first, which only root may open, then the one all accounts share.
-    int own = root ? open_in_run_lock("vaultik-drive-" + hash + ".root.lock", 0600, roots) : -1;
-    int shared = root ? open_in_run_lock(name, 0644, own_or_roots) : -1;
-    if (own < 0) {
-        own = shared >= 0 ? shared : open_lock_file(name, lock_dir);
-        shared = -1;
+    int own = -1;
+    int shared = -1;
+    if (root) {
+        // Its own lock first, which only root may open (and the mark of a root run), then the one
+        // all accounts share.
+        own = open_in_run_lock(mark, 0600, roots);
+        shared = open_in_run_lock(name, 0644, own_or_roots);
+        if (own < 0) {
+            own = shared >= 0 ? shared : open_lock_file(name, lock_dir);
+            shared = -1;
+        }
+    } else {
+        // The account's own lock first when the shared one is another account's (see
+        // open_account_files).
+        const AccountFiles files = open_account_files(name, lock_dir);
+        own = files.own;
+        shared = files.shared;
     }
     const auto close_all = [&] {
         if (own >= 0) ::close(own);
         if (shared >= 0) ::close(shared);
         own = shared = -1;
     };
-    if (own < 0) return;
-    for (;;) {
+    if (own < 0 && shared < 0) return;
+    while (own >= 0) {
         if (::flock(own, LOCK_EX | LOCK_NB) == 0) break;
         if ((errno != EWOULDBLOCK && errno != EINTR) || busy_now()) {
             close_all();
@@ -459,9 +549,14 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         pause(std::chrono::milliseconds(250));
     }
     if (shared >= 0) {
-        // Every root run took root's own lock first, so whoever holds this one now is another
-        // account: waited for only a short while (or for the whole wait, when that is shorter).
-        const auto other_deadline = std::min(deadline, std::chrono::steady_clock::now() + kOtherAccountWait);
+        // Root: every root run took root's own lock first, so whoever holds this one now is another
+        // account. An account: this account's runs took its own first, so whoever holds it is root
+        // (while root's mark is held) or another account. Another account is waited for only a
+        // short while (or for the whole wait, when that is shorter); an eject of an account passes
+        // it by at once, while root's eject counts it as busy (fail closed, root's runs take turns
+        // with every account's).
+        const auto bound = other_account_wait();
+        auto other_deadline = std::min(deadline, std::chrono::steady_clock::now() + bound);
         for (;;) {
             if (::flock(shared, LOCK_EX | LOCK_NB) == 0) break;
             if (errno != EWOULDBLOCK && errno != EINTR) {
@@ -469,7 +564,15 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 shared = -1;
                 break;
             }
-            if (std::chrono::steady_clock::now() >= other_deadline && other_deadline < deadline && !fail_closed) {
+            if (own < 0 && busy_now()) {  // the parent run holds it
+                close_all();
+                return;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            const bool by_root = !root && root_holds(mark, false);
+            if (by_root) other_deadline = std::min(deadline, now + bound);
+            const bool pass = !by_root && (fail_closed ? !root : now >= other_deadline && other_deadline < deadline);
+            if (pass) {
                 ::close(shared);
                 shared = -1;
                 skipped_ = true;
@@ -486,6 +589,11 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             }
             pause(std::chrono::milliseconds(250));
         }
+    }
+    if (own < 0) {
+        if (shared < 0) return;  // passed by, and no lock of its own (the runs then overlap)
+        own = shared;
+        shared = -1;
     }
     handle_ = handle_of(own);
     if (shared >= 0) shared_ = handle_of(shared);
@@ -554,21 +662,47 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         }
         handle_ = held;
 #else
-        const int fd = open_lock_file("vaultik-use-" + hash + ".lock", lock_dir);
-        if (fd < 0) return;
-        // Shared with every other claim; only an eject holds it alone, until the drive is gone.
-        for (;;) {
-            if (::flock(fd, LOCK_SH | LOCK_NB) == 0) {
-                handle_ = handle_of(fd);
-                break;
+        const std::string name = "vaultik-use-" + hash + ".lock";
+        const std::string mark = "vaultik-use-" + hash + ".root.lock";
+        int own = -1;
+        int shared = -1;
+        if (::geteuid() == 0) {
+            // Root's mark first (an eject of root's holds it alone), then the claims file.
+            own = open_in_run_lock(mark, 0600, roots);
+            shared = open_lock_file(name, lock_dir);
+            if (own < 0) std::swap(own, shared);
+        } else {
+            const AccountFiles files = open_account_files(name, lock_dir);
+            own = files.own;
+            shared = files.shared;
+        }
+        // Shared with every other claim; only an eject holds one alone, until the drive is gone.
+        const auto take = [&](int& fd, bool bounded) {
+            for (;;) {
+                if (::flock(fd, LOCK_SH | LOCK_NB) == 0) return;
+                // An account (bounded) waits on the file of another account only while root's eject
+                // holds its mark: another account may hold it alone for good.
+                if ((errno != EWOULDBLOCK && errno != EINTR) || std::chrono::steady_clock::now() >= until ||
+                    (bounded && !root_holds(mark, true))) {
+                    ::close(fd);
+                    fd = -1;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
-            if ((errno != EWOULDBLOCK && errno != EINTR) || std::chrono::steady_clock::now() >= until) break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        };
+        if (own >= 0) {
+            take(own, false);
+            if (own < 0) {  // an eject kept it for the whole wait
+                if (shared >= 0) ::close(shared);
+                return;
+            }
         }
-        if (handle_ == nullptr) {
-            ::close(fd);
-            return;
-        }
+        if (shared >= 0) take(shared, ::geteuid() != 0);
+        if (own < 0) std::swap(own, shared);
+        if (own < 0) return;
+        handle_ = handle_of(own);
+        if (shared >= 0) shared_ = handle_of(shared);
 #endif
         hash_ = hash;
         count(in_process().claims, hash_, 1);
@@ -582,6 +716,10 @@ DriveClaim::~DriveClaim() {
     ReleaseMutex(static_cast<HANDLE>(handle_));
     CloseHandle(static_cast<HANDLE>(handle_));
 #else
+    if (shared_ != nullptr) {
+        ::flock(fd_of(shared_), LOCK_UN);
+        ::close(fd_of(shared_));
+    }
     ::flock(fd_of(handle_), LOCK_UN);
     ::close(fd_of(handle_));
 #endif
@@ -635,17 +773,50 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
         count(in_process().ejects, hash_, 1);
     }
 #else
-    const int fd = open_lock_file("vaultik-use-" + hash + ".lock", lock_dir);
-    if (fd < 0) return;
-    // Alone on it: no claim is held, and none can be taken until this lets go.
-    if (::flock(fd, LOCK_EX | LOCK_NB) == 0) {
-        handle_ = handle_of(fd);
-        hash_ = hash;
-        count(in_process().ejects, hash_, 1);
+    const std::string name = "vaultik-use-" + hash + ".lock";
+    const std::string mark = "vaultik-use-" + hash + ".root.lock";
+    const bool root = ::geteuid() == 0;
+    int own = -1;
+    int shared = -1;
+    if (root) {
+        // Root's mark first (root's claims hold it), then the claims file of every account.
+        own = open_in_run_lock(mark, 0600, roots);
+        shared = open_lock_file(name, lock_dir);
+        if (own < 0) std::swap(own, shared);
+    } else {
+        const AccountFiles files = open_account_files(name, lock_dir);
+        own = files.own;
+        shared = files.shared;
+    }
+    const auto close_all = [&] {
+        if (own >= 0) ::close(own);
+        if (shared >= 0) ::close(shared);
+        own = shared = -1;
+    };
+    // Alone on them: no claim is held, and none can be taken until this lets go.
+    if (own >= 0 && ::flock(own, LOCK_EX | LOCK_NB) != 0) {
+        busy_ = errno == EWOULDBLOCK;
+        close_all();
         return;
     }
-    busy_ = errno == EWOULDBLOCK;
-    ::close(fd);
+    if (shared >= 0 && ::flock(shared, LOCK_EX | LOCK_NB) != 0) {
+        // Root: a claim of any account (fail closed). An account: a claim or eject of root's while
+        // root's mark is held, else one of another account, passed by.
+        const bool busy = errno == EWOULDBLOCK && (root || root_holds(mark, false));
+        ::close(shared);
+        shared = -1;
+        if (busy || own < 0) {
+            busy_ = busy;
+            close_all();
+            return;
+        }
+    }
+    if (own < 0) std::swap(own, shared);
+    if (own < 0) return;
+    handle_ = handle_of(own);
+    if (shared >= 0) shared_ = handle_of(shared);
+    hash_ = hash;
+    count(in_process().ejects, hash_, 1);
 #endif
 }
 
@@ -656,6 +827,10 @@ EjectHold::~EjectHold() {
     ReleaseMutex(static_cast<HANDLE>(handle_));
     CloseHandle(static_cast<HANDLE>(handle_));
 #else
+    if (shared_ != nullptr) {
+        ::flock(fd_of(shared_), LOCK_UN);
+        ::close(fd_of(shared_));
+    }
     ::flock(fd_of(handle_), LOCK_UN);
     ::close(fd_of(handle_));
 #endif
@@ -664,5 +839,19 @@ EjectHold::~EjectHold() {
 bool drive_claimed(const std::string& key, const std::string& lock_dir) {
     return EjectHold(key, lock_dir).busy();
 }
+
+namespace testing {
+
+void set_drive_lock_hooks(const DriveLockHooks& set) {
+#ifdef _WIN32
+    (void)set;
+#else
+    Hooks& h = hooks_store();
+    std::lock_guard<std::mutex> lock(h.mu);
+    h.hooks = set;
+#endif
+}
+
+}  // namespace testing
 
 }  // namespace vaultik::jobs

@@ -605,9 +605,11 @@ goes on with a warning instead of giving up: it can be delayed, never stopped. A
 another account made, or one your account may not open, is not waited for: the run goes on (and
 says so in its log), while an eject counts it as in use. On Linux root's runs take turns with
 the runs of every account through /run/lock, your own prune or eject too; as any account could
-hold that shared turn, a run as root waits for another account's run for 5 minutes at most and
-then goes on with a warning (both then share the drive's speed): it too can be delayed, never
-stopped. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
+hold that shared turn, a run waits for another account's run for 5 minutes at most and then goes
+on with a warning (both then share the drive's speed): it too can be delayed, never stopped. Your
+own runs still take turns with each other, and a run as root is waited for as long as it runs.
+Another account can neither make your commands wait nor keep your eject refused; a command or
+eject as root still counts. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
 all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
 go to sleep. A run started on its own that waited behind a run of the same job does nothing once
 that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a
