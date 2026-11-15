@@ -218,7 +218,7 @@ TEST_CASE("faults: a health check cut short by a failing read changes nothing, a
         vo.add_parity = 5;  // a check also writes repair data: none may be half there
         vo.pack_state = &state;
         vo.now = 100;
-        vo.fresh_ticks = 1000;
+        vo.fresh_since = 1;
         try {
             run_verify(*repo, vo);
         } catch (const std::exception&) {
@@ -232,7 +232,7 @@ TEST_CASE("faults: a health check cut short by a failing read changes nothing, a
     vo.read_data = true;
     vo.pack_state = &state;
     vo.now = 200;
-    vo.fresh_ticks = 1000;
+    vo.fresh_since = 1;
     CHECK(run_verify(*repo, vo).errors == 0);
     CHECK(state.size() == packs);
 }

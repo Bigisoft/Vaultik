@@ -5,8 +5,16 @@
 // longest ago first, so the weekly share covers the whole backup over time, and a full check that
 // stopped part way (its time limit, a cancel, an unplugged drive) goes on where it stopped.
 //
-// One file per repository, <settings dir>/checks/<repository id>.json, so jobs that back up to the
-// same repository share it.
+// One file per repository and place, <settings dir>/checks/<key>.json (see check_state_key), so
+// jobs that back up to the same repository share it, and a copy of a repository elsewhere (on
+// another drive, in another folder) starts from scratch: what was read from the original says
+// nothing about the copy's own sectors.
+//
+// The monthly full check goes in cycles: a scheduled one starts a cycle when none is going on,
+// reads (within its time limit) the packs not read since the cycle started, and the next ones go
+// on until every pack was read since then; then the cycle is complete. So every pack is read once
+// per cycle, however the reads of the cycles before were spread out. A full check started by the
+// user reads every pack.
 
 #include <cstdint>
 #include <string>
@@ -19,15 +27,33 @@ namespace vaultik::jobs {
 
 using PackTimes = std::unordered_map<Id, std::uint64_t, IdHash>;
 
-// The file's name part for a repository (its id, in hex).
-std::string check_state_key(const Repository& repo);
+struct CheckState {
+    PackTimes packs;  // when each pack was last read whole and found intact (FILETIME ticks)
+    // When the scheduled full check's cycle going on started (0: none).
+    std::uint64_t cycle_started = 0;
+};
+
+// The file's name part for a repository where it is now: from its id and its place (the drive's
+// identity and the folder on it, or the cloud location), in hex.
+std::string check_state_key(Repository& repo);
+std::string check_state_key(const Repository& repo, const std::string& location);
 // Empty when there is none yet or it cannot be read (the check then starts from scratch).
-PackTimes load_check_state(const std::string& settings_dir, const std::string& key);
+CheckState load_check_state(const std::string& settings_dir, const std::string& key);
 // Written atomically. Packs no longer in `repo`'s index (removed by a prune) are left out.
-void save_check_state(const std::string& settings_dir, const std::string& key, const PackTimes& times,
+void save_check_state(const std::string& settings_dir, const std::string& key, const CheckState& state,
                       const Repository& repo);
 
-// How many of the repository's packs were not read within `period` ticks of `now`.
-std::uint64_t packs_due(const PackTimes& times, const Repository& repo, std::uint64_t now, std::uint64_t period);
+// How many of the repository's packs that can be read (not in archive storage) were not read
+// whole at or after `since` (a time after `now`, as a clock set back leaves, counts as never).
+std::uint64_t packs_unread_since(const PackTimes& times, const Repository& repo, std::uint64_t since, std::uint64_t now);
+
+// A full check about to start: `resumable` for a scheduled one (or one asked to keep to the time
+// limit), which goes on with the cycle going on or starts one now. Returns since when packs count
+// as read for this check (VerifyOptions::fresh_since; 0: every pack is read).
+std::uint64_t plan_full_check(CheckState& state, bool resumable, std::uint64_t now);
+// After a full check (also one that stopped part way): how many packs are still to read (`since`
+// as plan_full_check returned, or for a check that read everything its own start), closing the
+// cycle once none is left.
+std::uint64_t finish_full_check(CheckState& state, const Repository& repo, std::uint64_t since, std::uint64_t now);
 
 }  // namespace vaultik::jobs

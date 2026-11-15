@@ -79,47 +79,161 @@ TEST_CASE("resumable full check: a time limit stops it, the next one goes on, al
     const std::size_t packs = repo->index().packs().size();
     REQUIRE(packs >= 5);
 
-    jobs::PackTimes state;
+    jobs::CheckState state;
     std::uint64_t now = 1000 * kDay;
     VerifyOptions o;
     o.read_data = true;
-    o.pack_state = &state;
-    o.fresh_ticks = 30 * kDay;
+    o.pack_state = &state.packs;
     o.time_budget = std::chrono::milliseconds(1);
     // Each pack takes a moment, so the budget runs out after the first one.
     o.on_progress = [](const std::string&) { std::this_thread::sleep_for(std::chrono::milliseconds(5)); };
 
     std::size_t runs = 0;
     std::uint64_t read_total = 0;
-    while (jobs::packs_due(state, *repo, now, 30 * kDay) > 0) {
+    std::uint64_t left = 1;
+    while (left > 0) {
         REQUIRE(runs < packs + 1);
         o.now = now;
+        o.fresh_since = jobs::plan_full_check(state, true, now);
+        CHECK(o.fresh_since == 1000 * kDay);  // the cycle started with the first one
         const VerifyResult r = run_verify(*repo, o);
         CHECK(r.errors == 0);
         CHECK(r.packs_read >= 1);  // every run gets somewhere
         read_total += r.packs_read;
+        left = jobs::finish_full_check(state, *repo, o.fresh_since, now);
         ++runs;
         now += kDay;
     }
     CHECK(runs > 1);              // it did stop at its limit
     CHECK(read_total == packs);   // and no pack was read twice
-    CHECK(state.size() == packs);
+    CHECK(state.packs.size() == packs);
+    CHECK(state.cycle_started == 0);  // the cycle is complete
 
-    // Remembered on disk, per repository; the next month's check reads everything again.
+    // Remembered on disk, per repository and place.
+    state.cycle_started = 5;
     jobs::save_check_state(u8(tmp.path), jobs::check_state_key(*repo), state, *repo);
-    const jobs::PackTimes back = jobs::load_check_state(u8(tmp.path), jobs::check_state_key(*repo));
-    CHECK(back == state);
-    CHECK(jobs::packs_due(back, *repo, now, 30 * kDay) == 0);
-    CHECK(jobs::packs_due(back, *repo, now + 31 * kDay, 30 * kDay) == packs);
-    CHECK(jobs::load_check_state(u8(tmp.path), "00ff").empty());
+    const jobs::CheckState back = jobs::load_check_state(u8(tmp.path), jobs::check_state_key(*repo));
+    CHECK(back.packs == state.packs);
+    CHECK(back.cycle_started == 5);
+    state.cycle_started = 0;
+    CHECK(jobs::packs_unread_since(back.packs, *repo, 1000 * kDay, now) == 0);
+    CHECK(jobs::packs_unread_since(back.packs, *repo, now, now) == packs);
+    CHECK(jobs::load_check_state(u8(tmp.path), "00ff").packs.empty());
 
-    // Without a time limit a full check reads only what is due.
+    // The next cycle reads everything again, wherever the reads of this one fell.
     o.time_budget = std::chrono::milliseconds(0);
     o.on_progress = {};
+    now += 30 * kDay;
     o.now = now;
-    CHECK(run_verify(*repo, o).packs_read == 0);
-    o.now = now + 31 * kDay;
+    o.fresh_since = jobs::plan_full_check(state, true, now);
     CHECK(run_verify(*repo, o).packs_read == packs);
+    CHECK(jobs::finish_full_check(state, *repo, o.fresh_since, now) == 0);
+}
+
+TEST_CASE("full checks: one the user starts reads every pack, a scheduled cycle covers each pack once") {
+    TempDir tmp;
+    auto repo = repo_with_packs(tmp.path, 6);
+    const std::size_t packs = repo->index().packs().size();
+    jobs::CheckState state;
+    VerifyOptions o;
+    o.read_data = true;
+    o.pack_state = &state.packs;
+
+    // Everything was read yesterday; the user asks for a full check today: all of it again.
+    o.now = 100 * kDay;
+    o.fresh_since = jobs::plan_full_check(state, false, o.now);
+    CHECK(o.fresh_since == 0);
+    CHECK(run_verify(*repo, o).packs_read == packs);
+    o.now = 101 * kDay;
+    o.fresh_since = jobs::plan_full_check(state, false, o.now);
+    CHECK(state.cycle_started == 0);  // no cycle for it
+    CHECK(run_verify(*repo, o).packs_read == packs);
+    CHECK(jobs::finish_full_check(state, *repo, o.now, o.now) == 0);
+
+    // Scheduled cycles: a pack read late in one cycle is read again in the next one, so no pack
+    // goes unread for longer than about one period.
+    state = {};
+    std::uint64_t now = 200 * kDay;
+    int seen = 0;
+    const auto stop_after = [&](int n) {
+        seen = 0;
+        o.should_cancel = [&seen, n] { return ++seen > n; };
+    };
+    // Cycle 1: half on day 200, the rest on day 225.
+    o.now = now;
+    o.fresh_since = jobs::plan_full_check(state, true, now);
+    stop_after(3);
+    CHECK_THROWS_AS(run_verify(*repo, o), Cancelled);
+    CHECK(jobs::finish_full_check(state, *repo, o.fresh_since, now) == packs - 3);
+    now = 225 * kDay;
+    o.now = now;
+    o.fresh_since = jobs::plan_full_check(state, true, now);
+    CHECK(o.fresh_since == 200 * kDay);  // the same cycle
+    o.should_cancel = {};
+    CHECK(run_verify(*repo, o).packs_read == packs - 3);
+    CHECK(jobs::finish_full_check(state, *repo, o.fresh_since, now) == 0);
+    CHECK(state.cycle_started == 0);
+    // Cycle 2 starts on day 230: every pack is read again, also those read on day 225.
+    now = 230 * kDay;
+    o.now = now;
+    o.fresh_since = jobs::plan_full_check(state, true, now);
+    CHECK(o.fresh_since == now);
+    CHECK(run_verify(*repo, o).packs_read == packs);
+    for (const auto& [pack, at] : state.packs) CHECK(at == now);
+}
+
+TEST_CASE("check state: a copy of the repository in another place starts from scratch") {
+    TempDir tmp;
+    auto repo = repo_with_packs(tmp.path, 3);
+    const std::size_t packs = repo->index().packs().size();
+    jobs::CheckState state;
+    VerifyOptions o;
+    o.read_data = true;
+    o.pack_state = &state.packs;
+    o.now = 10 * kDay;
+    run_verify(*repo, o);
+    CHECK(state.packs.size() == packs);
+    const std::string key = jobs::check_state_key(*repo);
+    jobs::save_check_state(u8(tmp.path / "settings"), key, state, *repo);
+    // The same repository under another spelling of its folder: the same state.
+    CHECK(jobs::check_state_key(*repo, u8(tmp.path / "repo") + "/") == key);
+
+    // Copied to another folder (as onto a new drive): its own state, so its first full check,
+    // also a scheduled one, reads every pack there.
+    fs::copy(tmp.path / "repo", tmp.path / "copy", fs::copy_options::recursive);
+    repo.reset();
+    auto copy = Repository::open(std::make_unique<LocalBackend>(u8(tmp.path / "copy")), kPassword);
+    const std::string copy_key = jobs::check_state_key(*copy);
+    CHECK(copy_key != key);
+    jobs::CheckState there = jobs::load_check_state(u8(tmp.path / "settings"), copy_key);
+    CHECK(there.packs.empty());
+    o.pack_state = &there.packs;
+    o.now = 11 * kDay;
+    o.fresh_since = jobs::plan_full_check(there, true, o.now);
+    CHECK(run_verify(*copy, o).packs_read == packs);
+}
+
+TEST_CASE("check state: a time from a clock that was later set back counts as never read") {
+    TempDir tmp;
+    auto repo = repo_with_packs(tmp.path, 3);
+    const std::size_t packs = repo->index().packs().size();
+    jobs::CheckState state;
+    for (const Id& p : repo->index().packs()) state.packs[p] = 900 * kDay;  // "read" in the future
+    VerifyOptions o;
+    o.read_data = true;
+    o.pack_state = &state.packs;
+    o.now = 100 * kDay;
+    o.fresh_since = 50 * kDay;
+    CHECK(run_verify(*repo, o).packs_read == packs);
+    for (const auto& [pack, at] : state.packs) CHECK(at == 100 * kDay);
+    // Also for the sampled share: such a pack comes first, and is not left fresh for good.
+    for (const Id& p : repo->index().packs()) state.packs[p] = 50 * kDay;
+    state.packs[repo->index().packs().back()] = 900 * kDay;
+    o.fresh_since = 0;
+    o.read_share = 0.01;
+    run_verify(*repo, o);
+    CHECK(state.packs[repo->index().packs().back()] == 100 * kDay);
+    CHECK(jobs::packs_unread_since(state.packs, *repo, 0, 99 * kDay) >= 1);  // 100 is after "now" 99
 }
 
 TEST_CASE("resumable check: a cancelled check keeps what it read, a weekly share covers everything over time") {
@@ -131,7 +245,7 @@ TEST_CASE("resumable check: a cancelled check keeps what it read, a weekly share
     VerifyOptions o;
     o.read_data = true;
     o.pack_state = &state;
-    o.fresh_ticks = 30 * kDay;
+    o.fresh_since = 1;
     o.now = 10 * kDay;
     int seen = 0;
     o.should_cancel = [&] { return ++seen > 3; };
@@ -143,14 +257,14 @@ TEST_CASE("resumable check: a cancelled check keeps what it read, a weekly share
 
     // The weekly share: the packs read longest ago, so a third each week covers all in three.
     state.clear();
-    o.fresh_ticks = 0;
+    o.fresh_since = 0;
     o.read_share = 0.34;
     for (int week = 0; week < 3; ++week) {
         o.now = (20 + 7 * static_cast<std::uint64_t>(week)) * kDay;
         run_verify(*repo, o);
     }
     CHECK(state.size() == packs);
-    CHECK(jobs::packs_due(state, *repo, 41 * kDay, 30 * kDay) == 0);
+    CHECK(jobs::packs_unread_since(state, *repo, 11 * kDay, 41 * kDay) == 0);
 }
 
 TEST_CASE("check progress: the bytes read so far and in all, reaching the total") {

@@ -279,7 +279,8 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
     std::uint64_t last_full = 0, last_any = 0;
     for (const RunRecord& r : history) {
-        const bool partial_full = r.kind == RunKind::FullCheck && r.status == RunStatus::Partial;
+        const bool partial_full =
+            r.kind == RunKind::FullCheck && (r.status == RunStatus::Partial || (r.packs_left > 0 && check_completed(r)));
         if (!check_completed(r) && !partial_full) continue;
         last_any = std::max(last_any, r.finished);
         if (r.kind == RunKind::FullCheck && !partial_full) last_full = std::max(last_full, r.finished);
@@ -700,6 +701,7 @@ std::string to_json(const RunRecord& r) {
     if (!r.drive.empty()) j["drive"] = r.drive;
     if (!r.reason.empty()) j["reason"] = r.reason;
     if (r.cloud_only > 0) j["cloud_only"] = r.cloud_only;
+    if (r.packs_left > 0) j["packs_left"] = r.packs_left;
     if (!r.log.empty()) j["log"] = r.log;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
@@ -731,6 +733,7 @@ RunRecord record_from_json(const std::string& text) {
         r.drive = j.value("drive", std::string());
         r.reason = j.value("reason", std::string());
         r.cloud_only = j.value("cloud_only", std::uint64_t{0});
+        r.packs_left = j.value("packs_left", std::uint64_t{0});
         r.log = j.value("log", std::string());
         r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.free_space = j.value("free_space", std::uint64_t{0});

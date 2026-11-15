@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "vaultik/jobs/check_state.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/ops/prune.hpp"
@@ -309,4 +310,53 @@ TEST_CASE("archive storage: file data goes cold, listings stay readable") {
     CHECK_NOTHROW(pr = run_prune(*repo, po));
     CHECK(pr.blobs_unused > 0);
     for (const Id& id : all) CHECK(repo->backend().exists(Repository::pack_name(id)));
+}
+
+TEST_CASE("archive storage: archived packs take no place of a check's share and never keep a full check open") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    {
+        LocalBackend backend(u8(repo_dir), true);
+        InitOptions options;
+        options.kdf_iterations = 1000;
+        Repository::init(backend, kPassword, options);
+    }
+    auto repo = Repository::open(std::make_unique<ColdBackend>(u8(repo_dir)), kPassword);
+    BackupOptions bo;
+    bo.paths = {u8(src)};
+    for (int i = 0; i < 4; ++i) {
+        write_file(src / ("f" + std::to_string(i) + ".bin"), seeded_bytes(1u << 20, 20 + static_cast<std::uint32_t>(i)));
+        run_backup(*repo, bo);
+    }
+    const std::vector<bool> archived = repo->archived_packs();
+    const auto cold = static_cast<std::size_t>(std::count(archived.begin(), archived.end(), true));
+    const std::size_t readable = archived.size() - cold;
+    REQUIRE(cold >= 4);
+    REQUIRE(readable >= 1);
+
+    // A weekly share of a third: never read archived packs come first by age, yet the share goes
+    // to packs it can read.
+    constexpr std::uint64_t kDay = 864'000'000'000ull;
+    jobs::CheckState state;
+    VerifyOptions vo;
+    vo.read_data = true;
+    vo.pack_state = &state.packs;
+    vo.now = 10 * kDay;
+    vo.read_share = 0.34;
+    VerifyResult r = run_verify(*repo, vo);
+    CHECK(r.errors == 0);
+    CHECK(r.packs_read == std::max<std::size_t>(1, static_cast<std::size_t>(0.34 * static_cast<double>(readable) + 0.999999)));
+    CHECK(r.packs_archived == cold);
+
+    // A full check reads what it can and is complete: archived packs are not "still due".
+    vo.read_share = 1.0;
+    vo.now = 11 * kDay;
+    vo.fresh_since = jobs::plan_full_check(state, true, vo.now);
+    r = run_verify(*repo, vo);
+    CHECK(r.errors == 0);
+    CHECK(r.packs_left == 0);
+    CHECK(jobs::finish_full_check(state, *repo, vo.fresh_since, vo.now) == 0);
+    CHECK(state.cycle_started == 0);
+    CHECK(jobs::packs_unread_since(state.packs, *repo, vo.fresh_since, vo.now) == 0);
 }

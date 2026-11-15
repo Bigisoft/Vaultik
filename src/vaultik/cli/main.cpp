@@ -382,6 +382,10 @@ Commands:
                                compare them with the newest version, to catch
                                silent damage (unless the job turned it off)
       --full                   Read all of the stored data
+      --budget                 With --full: stop at the job's time limit and go
+                               on where it stopped next time (as the scheduled
+                               monthly check does)
+      --no-budget              With --scheduled: no time limit
   eject <job>                  Eject the job's backup drive so it can be unplugged
                                (refused while a run uses it)
       --when-done on|off       Instead: eject it on its own after the last job
@@ -589,7 +593,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands", "--force-dismount", "--skip-identical", "--ignore-space"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands", "--force-dismount", "--skip-identical", "--ignore-space", "--budget", "--no-budget"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -2189,28 +2193,43 @@ std::string rot_check(Repository& repo, const jobs::Job& job, jobs::RunRecord& r
            "a failing drive?): " + record.rot + "; the version of " + when + " holds the earlier copy";
 }
 
-constexpr std::uint64_t kFullCheckPeriod = 30ull * 864'000'000'000ull;  // 30 days in FILETIME ticks
+// How a health check runs. A scheduled full check (after a backup, or check-job --scheduled)
+// goes on with the cycle going on and keeps to the job's time limit; one the user started reads
+// everything, without a limit unless asked for one (--budget; --no-budget lifts it for a
+// scheduled one).
+struct CheckHow {
+    bool scheduled = false;
+    bool budgeted = false;
+};
+
+CheckHow check_how(const Args& a, bool scheduled) {
+    CheckHow how;
+    how.scheduled = scheduled || a.has("--budget");
+    how.budgeted = a.has("--budget") || (scheduled && !a.has("--no-budget"));
+    return how;
+}
 
 int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record,
-                 const std::string& settings_dir) {
+                 const std::string& settings_dir, CheckHow how) {
     record.kind = kind;
     record.started = os::now();
     const bool full = kind == jobs::RunKind::FullCheck;
     std::vector<std::string> problems;
     VerifyResult r;
     std::string rot;
-    // What earlier checks of this repository read (see jobs/check_state.hpp): read longest ago
-    // first, and kept however this check ends, so the next one goes on from there.
+    // What earlier checks of this repository, where it is now, read (see jobs/check_state.hpp):
+    // read longest ago first, and kept however this check ends, so the next one goes on from there.
     const std::string state_key = jobs::check_state_key(repo);
-    jobs::PackTimes state = jobs::load_check_state(settings_dir, state_key);
+    jobs::CheckState state = jobs::load_check_state(settings_dir, state_key);
+    const std::uint64_t fresh_since = full ? jobs::plan_full_check(state, how.scheduled, record.started) : 0;
     struct SaveState {
         const std::string& dir;
         const std::string& key;
-        const jobs::PackTimes& times;
+        const jobs::CheckState& state;
         const Repository& repo;
         ~SaveState() {
             try {
-                jobs::save_check_state(dir, key, times, repo);
+                jobs::save_check_state(dir, key, state, repo);
             } catch (const std::exception& e) {
                 warning(std::string("could not remember which data the check read: ") + e.what());
             }
@@ -2224,10 +2243,10 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         o.read_share = full ? 1.0 : job.health.sample_percent / 100.0;
         o.add_parity = repo.parity_percent();  // data from before repair data gets it over time
         o.sample_seed = record.started;
-        o.pack_state = &state;
+        o.pack_state = &state.packs;
         o.now = record.started;
-        o.fresh_ticks = full ? kFullCheckPeriod : 0;
-        if (full) o.time_budget = std::chrono::hours(job.health.full_check_hours);
+        o.fresh_since = fresh_since;
+        if (full && how.budgeted) o.time_budget = std::chrono::hours(job.health.full_check_hours);
         o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
         o.on_progress = [](const std::string& msg) {
             if (g_json) emit({{"event", "check_progress"}, {"current", msg}});
@@ -2267,15 +2286,21 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     record.files = r.packs_read;
     record.bytes = r.bytes_read;
     record.errors = r.errors;
-    // A full check is complete once every pack was read within the period, by this check or the
-    // ones before it; one that stopped at its time limit goes on after the next backup.
-    const std::uint64_t still_due = full ? jobs::packs_due(state, repo, record.started, kFullCheckPeriod) : 0;
+    // A full check is complete once every pack was read in its cycle, by this check or the ones
+    // before it; one that stopped at its time limit goes on after the next backup. One that found
+    // damage and stopped at its limit is a failure and not complete either.
+    const std::uint64_t still_due =
+        full ? jobs::finish_full_check(state, repo, fresh_since != 0 ? fresh_since : record.started, record.started) : 0;
+    record.packs_left = r.errors > 0 ? r.packs_left : still_due;
     record.status = r.errors > 0 ? jobs::RunStatus::Failed
                     : still_due > 0 ? jobs::RunStatus::Partial
                                     : jobs::RunStatus::Success;
     if (r.errors > 0) {
         record.message = std::to_string(r.errors) + " problem(s) found: ";
         for (std::size_t i = 0; i < problems.size(); ++i) record.message += (i ? "; " : "") + problems[i];
+        if (record.packs_left > 0)
+            record.message += "; " + std::to_string(record.packs_left) +
+                              " pack(s) were not read yet (time limit), so the full check is not complete";
     } else {
         record.message = "read " + format_bytes(r.bytes_read) + " in " + std::to_string(r.packs_read) + " of " +
                          std::to_string(r.packs) + " pack(s), checked " + std::to_string(r.snapshots) +
@@ -2283,8 +2308,8 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         if (still_due > 0)
             record.message += "; " + std::to_string(still_due) + " pack(s) are left for the next check (time limit of " +
                               std::to_string(job.health.full_check_hours) + " hour(s)), which goes on where this one stopped";
-        else if (full && r.packs_read < r.packs)
-            record.message += "; the other packs were read by the checks of the last 30 days";
+        else if (full && r.packs_read + r.packs_archived < r.packs)
+            record.message += "; the other packs were read by the checks before it in this cycle";
     }
     if (r.packs_repairable > 0)
         record.message += "; " + std::to_string(r.packs_repairable) +
@@ -2889,7 +2914,7 @@ int cmd_check_job(const Args& a) {
     try {
         drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
         repo = open_job_repo(a, store, *job);
-        code = health_check(*repo, *job, record.kind, record, store.dir());
+        code = health_check(*repo, *job, record.kind, record, store.dir(), check_how(a, a.has("--scheduled")));
     } catch (const LockedError&) {
         throw;  // nothing was checked; not a result for the history
     } catch (const std::exception& e) {
@@ -3458,7 +3483,7 @@ int cmd_run_job(const Args& a) {
     if (due) {
         jobs::RunRecord check;
         try {
-            health_check(*repo, *job, *due, check, store.dir());
+            health_check(*repo, *job, *due, check, store.dir(), check_how(a, true));
         } catch (const LockedError&) {
             // Another run is using the repository: try again after the next backup.
             if (!g_json) clear_status();

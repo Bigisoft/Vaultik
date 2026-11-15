@@ -278,6 +278,9 @@ struct RunRecord {
     std::uint64_t errors = 0;
     // A backup: files that are only in the cloud and so were not backed up (SnapshotStats::cloud_only).
     std::uint64_t cloud_only = 0;
+    // A full check: packs it was to read but left for the next one (its time limit). Such a check
+    // is not complete, also when it found damage (see due_check).
+    std::uint64_t packs_left = 0;
     std::string message;  // error text for Failed, summary otherwise
     // The run's log file, with every warning in full (see jobs/run_log.hpp); empty for none.
     std::string log;
@@ -364,8 +367,8 @@ const char* to_string(Schedule::Kind kind);
 // The health check due now (FILETIME ticks), judged from the job's history (oldest first): a full
 // check when the monthly one is on and no full check finished in the last 30 days, otherwise a
 // sampled check when the weekly one is on and no check of either kind finished in the last 7
-// days. A full check that stopped at its time limit (status Partial) counts as a weekly check,
-// and the full one stays due until one completes. Only a completed check counts (check_completed): one that was cancelled, could not run
+// days. A full check that stopped at its time limit (status Partial, or one that found damage
+// with packs left) counts as a weekly check, and the full one stays due until one completes. Only a completed check counts (check_completed): one that was cancelled, could not run
 // or stopped part way is tried again after the next backup.
 std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
                                  std::uint64_t now);

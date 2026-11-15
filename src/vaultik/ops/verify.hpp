@@ -31,11 +31,12 @@ struct VerifyOptions {
     // and the check updates it as it goes, also when it stops early. Packs are then read oldest
     // first (never read ones before all others) instead of by the seed: a sampled check reads
     // the read_share of packs read longest ago, so over time every pack is read; a full check
-    // (read_share 1) skips packs read within `fresh_ticks` of `now`, so a check that stopped
-    // part way goes on where it stopped.
+    // (read_share 1) skips packs read at or after `fresh_since` (0: reads every pack), so a check
+    // that stopped part way goes on where it stopped. A time after `now` (a clock that was set
+    // back) counts as never read. Packs in archive storage are never among the packs to read.
     std::unordered_map<Id, std::uint64_t, IdHash>* pack_state = nullptr;
     std::uint64_t now = 0;
-    std::uint64_t fresh_ticks = 0;
+    std::uint64_t fresh_since = 0;
     // With pack_state: no further pack is read once this much time went by (0: no limit), though
     // every check reads at least one; the packs left get the cheap header check and are counted
     // in VerifyResult::packs_left.

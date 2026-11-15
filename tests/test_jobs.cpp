@@ -179,6 +179,21 @@ TEST_CASE("health checks: settings and when they are due") {
     h.monthly = false;
     CHECK_FALSE(due_check(h, history, now).has_value());
     h.monthly = true;
+    // One that found damage and also stopped at its time limit: a failure that is alerted, and
+    // not a complete full check (the rest was never read).
+    RunRecord damaged_part = run(RunKind::FullCheck, now - day, RunStatus::Failed);
+    damaged_part.errors = 2;
+    damaged_part.packs_left = 7;
+    history = {run(RunKind::FullCheck, now - 40 * day), damaged_part};
+    CHECK(due_check(h, history, now) == RunKind::FullCheck);
+    CHECK(record_from_json(to_json(damaged_part)).packs_left == 7);
+    {
+        AlertSettings alerts;
+        alerts.webhook_url = "https://example.com/hook";
+        const auto a = alert_for_run(alerts, "Docs", damaged_part, "pc");
+        REQUIRE(a.has_value());
+        CHECK(a->event == "damage");
+    }
     // A sampled check that failed leaves the weekly one due.
     h.monthly = false;
     history = {run(RunKind::Check, now - 8 * day), run(RunKind::Check, now - day, RunStatus::Failed)};

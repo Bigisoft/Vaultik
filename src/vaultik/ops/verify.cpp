@@ -65,20 +65,30 @@ void VerifyEngine::check_packs() {
     std::iota(order.begin(), order.end(), std::size_t{0});
     std::vector<bool> to_read(count, false);
     auto* state = options_.pack_state;
+    // When the pack was last read whole; a time still to come (the clock was set back since)
+    // would keep it fresh for good, so it counts as never.
     const auto last_read = [&](std::size_t p) -> std::uint64_t {
         const auto it = state->find(index.packs()[p]);
-        return it == state->end() ? 0 : it->second;
+        return it == state->end() || it->second > options_.now ? 0 : it->second;
     };
     if (options_.read_data && state != nullptr) {
         std::stable_sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) { return last_read(x) < last_read(y); });
         if (options_.read_share >= 1.0) {
             for (std::size_t p = 0; p < count; ++p)
-                to_read[p] = options_.fresh_ticks == 0 || last_read(p) == 0 ||
-                             last_read(p) + options_.fresh_ticks <= options_.now;
+                to_read[p] = !archived[p] &&
+                             (options_.fresh_since == 0 || last_read(p) == 0 || last_read(p) < options_.fresh_since);
         } else {
+            // The share of the packs that can be read: archived ones (only checked to be there)
+            // never take a place of the sample.
+            const auto readable = static_cast<std::size_t>(std::count(archived.begin(), archived.end(), false));
             const auto n = std::max<std::size_t>(
-                count == 0 ? 0 : 1, static_cast<std::size_t>(options_.read_share * static_cast<double>(count) + 0.999999));
-            for (std::size_t i = 0; i < n && i < count; ++i) to_read[order[i]] = true;
+                readable == 0 ? 0 : 1, static_cast<std::size_t>(options_.read_share * static_cast<double>(readable) + 0.999999));
+            std::size_t picked = 0;
+            for (std::size_t i = 0; i < count && picked < n; ++i) {
+                if (archived[order[i]]) continue;
+                to_read[order[i]] = true;
+                ++picked;
+            }
         }
     } else if (options_.read_data) {
         for (std::size_t p = 0; p < count; ++p) to_read[p] = in_sample(index.packs()[p], p, count);
