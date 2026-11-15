@@ -43,12 +43,13 @@
 // /run/vaultik, a folder only root may write to, so no account can put a file in its place;
 // /run/lock where that folder cannot be used; every account can see it held in /proc/locks but none
 // can take it): an account's run waits for the shared lock for as long as that mark is held, then
-// only the short while. The claims (vaultik-use-<hash>.lock) work the same way with
-// vaultik-use-<hash>.root.lock: an account's claim waits only for an eject of its own or of root's,
-// and its eject counts only the claims of its own and of root's as busy. So another account can
-// delay a run by kOtherAccountWait, never stop it, and can neither delay a command of an account
-// nor keep its eject busy (root's claims and ejects still count every account's, fail closed).
-// Where /run/lock cannot be used, a file in the given folder instead.
+// only the short while, and while the mark is held it counts the shared lock as busy even when it
+// is free (root's run may have passed it by). The claims (vaultik-use-<hash>.lock) work the same
+// way with vaultik-use-<hash>.root.lock: an account's claim waits only for an eject of its own or
+// of root's, and its eject counts only the claims of its own and of root's as busy. So another
+// account can delay a run by kOtherAccountWait, never stop it, and can neither delay a command of
+// an account nor keep its eject busy (root's claims and ejects still count every account's, fail
+// closed). Where /run/lock cannot be used, a file in the given folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a

@@ -618,12 +618,15 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         // (while root's mark is held) or another account. Another account is waited for only a
         // short while (or for the whole wait, when that is shorter); an eject of an account passes
         // it by at once, while root's eject counts it as busy (fail closed, root's runs take turns
-        // with every account's).
+        // with every account's). An account also waits while root's mark is held with this one
+        // free: a run of root's that passed by an account's run on it is still under way.
         const auto bound = other_account_wait();
         auto other_deadline = std::min(deadline, std::chrono::steady_clock::now() + bound);
         for (;;) {
-            if (::flock(shared, LOCK_EX | LOCK_NB) == 0) break;
-            if (errno != EWOULDBLOCK && errno != EINTR) {
+            if (::flock(shared, LOCK_EX | LOCK_NB) == 0) {
+                if (root || !root_holds(mark, false)) break;
+                ::flock(shared, LOCK_UN);
+            } else if (errno != EWOULDBLOCK && errno != EINTR) {
                 ::close(shared);
                 shared = -1;
                 break;

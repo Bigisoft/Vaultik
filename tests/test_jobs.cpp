@@ -2313,6 +2313,25 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
         OtherProcess other("lock", key, os::join(tmp.dir(), "other"), tmp.path);
         CHECK_FALSE(other.held());
     }
+    {
+        // A run of root's holds its mark but not the shared lock, which it passed by while a run of
+        // the account held it: once that run ends and the shared lock is free, the account's next
+        // run still waits for root's, and its eject counts it as busy.
+        OtherProcess root_run("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.drive_mark()));
+        REQUIRE(root_run.held());
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(1500)), DriveBusy);
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+        std::thread later([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            root_run.release();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        DriveLock run(key, mine, std::chrono::milliseconds(20000));
+        later.join();
+        CHECK(run.held());
+        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
+        CHECK_FALSE(run.other_account_skipped());
+    }
 }
 
 TEST_CASE("drive claims: another account can neither delay a command nor keep an eject busy (Linux)") {
