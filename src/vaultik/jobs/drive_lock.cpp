@@ -631,7 +631,10 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 shared = -1;
                 break;
             }
-            if (own < 0 && busy_now()) {  // the parent run holds it
+            // Named by the parent run, which holds it (or holds root's mark): whatever its own
+            // lock, the run inherits the drive (a command with root rights that an account's run
+            // started, or the other way round) instead of waiting for its own parent.
+            if (busy_now()) {
                 close_all();
                 return;
             }

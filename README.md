@@ -620,8 +620,9 @@ eject as root still counts. Any other run gives up after waiting 12 hours, and a
 all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
 go to sleep. A run started on its own that waited behind a run of the same job does nothing once
 that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a
-job's before or after command (a prune of the same drive, say) does not wait for the run that
-started it; one that outlives that run takes the turn as usual. Cloud storage has no such turns.
+job's before or after command (a prune of the same drive, say), also one started there with
+`sudo`, does not wait for the run that started it; one that outlives that run takes the turn as
+usual. Cloud storage has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
 Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows

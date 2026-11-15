@@ -124,8 +124,10 @@ public:
     // asked about once a second while waiting (true: throws Error "cancelled"). Throws DriveBusy
     // when the wait ends without the lock. When kHeldDrivesVariable names this drive, the lock is
     // tried without waiting: free (the run that passed it on has ended), it is taken as usual;
-    // busy, the parent run holds it, and nothing waits (inherited()). Another DriveLock of this
-    // process on the drive (any thread) counts as busy. `lock_dir`: see above. `mode`: see
+    // busy, the parent run holds it, and nothing waits (inherited()), also when the parent has
+    // other rights (Linux: root's command started by an account's run, or the other way round) and
+    // holds only the lock all accounts share. Another DriveLock of this process on the drive (any
+    // thread) counts as busy. `lock_dir`: see above. `mode`: see
     // DriveLockMode.
     DriveLock(const std::string& key, const std::string& lock_dir, std::chrono::milliseconds wait,
               const std::function<void()>& on_wait = {}, const std::function<bool()>& cancelled = {},

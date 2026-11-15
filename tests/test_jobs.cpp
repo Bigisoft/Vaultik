@@ -2209,6 +2209,21 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         testing::set_drive_lock_hooks({});
         fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock"));
     }
+    {
+        // A command with root rights that a run of the account started (sudo vaultik in its after
+        // command): it inherits the drive at once instead of waiting for its own parent.
+        OtherProcess parent("lock", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
+        REQUIRE(parent.held());
+        os::set_env(kHeldDrivesVariable, name + ":parent");
+        const auto started = std::chrono::steady_clock::now();
+        {
+            DriveLock child(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(60000));
+            CHECK(child.inherited());
+            CHECK_FALSE(child.held());
+        }
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
+        os::set_env(kHeldDrivesVariable, "");
+    }
     std::error_code ec;
     fs::remove(file, ec);
     fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".lock"), ec);
@@ -2331,6 +2346,24 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
         CHECK(run.held());
         CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
         CHECK_FALSE(run.other_account_skipped());
+    }
+    {
+        // A command with other rights that a run started (its parent, which holds the shared lock):
+        // it inherits the drive at once, with a lock of its own free or not, instead of waiting the
+        // short while for its own parent (20 s here).
+        OtherProcess parent("lock", key, os::join(tmp.dir(), "other"), tmp.path);
+        REQUIRE(parent.held());
+        testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(20000), {}});
+        os::set_env(kHeldDrivesVariable, name + ":parent");
+        const auto started = std::chrono::steady_clock::now();
+        {
+            DriveLock child(key, mine, std::chrono::milliseconds(60000));
+            CHECK(child.inherited());
+            CHECK_FALSE(child.held());
+            CHECK_FALSE(child.other_account_skipped());
+        }
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
+        os::set_env(kHeldDrivesVariable, "");
     }
 }
 
