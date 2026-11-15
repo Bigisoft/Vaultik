@@ -1432,6 +1432,8 @@ TEST_CASE("restore: one damaged folder listing leaves the estimate and the rest 
     init_repo(repo_dir);
     Id bad_tree{};
     Id snapshot_id{};
+    fs::path pack;
+    std::uint64_t at = 0;
     {
         auto repo = open_repo(repo_dir);
         BackupOptions bo;
@@ -1444,10 +1446,15 @@ TEST_CASE("restore: one damaged folder listing leaves the estimate and the rest 
         // stored more than once; the index names the copy that is read).
         const BlobLocation* loc = repo->index().find(bad_tree);
         REQUIRE(loc != nullptr);
-        const fs::path pack = repo_dir / from_u8(Repository::pack_name(repo->index().packs()[loc->pack]));
-        const std::uint64_t at = loc->offset + loc->length / 2;
+        pack = repo_dir / from_u8(Repository::pack_name(repo->index().packs()[loc->pack]));
+        at = loc->offset + loc->length / 2;
         REQUIRE(fs::exists(pack));
+    }
+    {
+        // Once the repository is closed (Windows lets no other handle write to a pack it reads).
+        fs::permissions(pack, fs::perms::owner_write, fs::perm_options::add);
         std::fstream f(pack, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(f.is_open());
         f.seekg(static_cast<std::streamoff>(at));
         char c = 0;
         f.read(&c, 1);
