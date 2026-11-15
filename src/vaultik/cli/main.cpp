@@ -5333,12 +5333,10 @@ int run(const std::vector<std::string>& argv) {
     connect_progress_channel(a);
     // Runs that can take hours keep the computer from going to sleep until they end (however they
     // end); the display still turns off as usual.
-    static const std::set<std::string> kLongRuns = {"run-job", "check-job", "test-restore", "copy",  "backup",
-                                                    "restore", "verify",    "prune",        "forget", "repair",
-                                                    "repair-data", "move-here", "image"};
     std::optional<KeepAwake> awake;
-    if (kLongRuns.contains(a.command)) {
-        g_awake_reason = "Vaultik is running " + a.command + "; it lets the computer sleep when done";
+    if (command_keeps_awake(a.command, a.positional.empty() ? std::string() : a.positional[0])) {
+        const std::string what = a.command == "disk" ? "disk " + a.positional[0] : a.command;
+        g_awake_reason = "Vaultik is running " + what + "; it lets the computer sleep when done";
         awake.emplace(g_awake_reason);
     }
     g_awake = &awake;

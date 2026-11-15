@@ -136,7 +136,8 @@ Start `vaultik-gui`, then **New backup job**:
   Scheduled runs can skip while the computer runs on battery, wake the computer from sleep at
   their time, and, for cloud storage, skip over a metered connection such as mobile data (the
   skipped run shows in the Activity tab; the next scheduled one tries again). While a backup,
-  health check, cleanup or restore runs, the computer does not go to sleep (the display still
+  health check, cleanup, restore, disk image or an erase of a disk or of free space runs, the
+  computer does not go to sleep (the display still
   turns off and the screen still locks): Windows lists the run under `powercfg /requests`, and on
   Linux it holds a logind sleep inhibitor (`systemd-inhibit --list`) when logind is there. The
   computer may sleep again as soon as the run ends, however it ends. "Back up now"
