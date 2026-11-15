@@ -1015,7 +1015,7 @@ DiskInfo listed_disk() {
     d.model = "Fake Drive";
     d.serial = "SER-1";
     d.bus = "USB";
-    d.size = 4 * kMiB;
+    d.size = 64 * kMiB;  // room for the 16 MiB reserved partition Windows puts first on GPT
     d.sector_size = 512;
     d.style = "GPT";
     d.id = "gpt-11111111-2222-3333-4444-555555555555";
@@ -1101,7 +1101,7 @@ TEST_CASE("erase then set up: the disk is set up only after an erase that finish
         REQUIRE(f.inits.size() == 1);
         CHECK(f.inits[0].first.number == 7);
         CHECK(f.inits[0].second.serial == "SER-1");
-        CHECK(f.inits[0].second.size == 4 * kMiB);
+        CHECK(f.inits[0].second.size == 64 * kMiB);
         CHECK(f.inits[0].second.id.empty());  // the erase removed the partition table
         CHECK(r.setup.volumes == std::vector<std::string>{"F:\\"});
         CHECK(all_zero(f.device.data.data(), f.device.data.size()));
@@ -1272,7 +1272,7 @@ TEST_CASE("erase then set up: what the app passes to the engine") {
     r.confirm = "ERASE DISK 7";
     r.method = "random";
     r.verify = true;
-    const std::vector<std::string> plain{"disk", "wipe", "7", "--expect-size", std::to_string(4 * kMiB), "--expect-serial", "SER-1",
+    const std::vector<std::string> plain{"disk", "wipe", "7", "--expect-size", std::to_string(64 * kMiB), "--expect-serial", "SER-1",
                                          "--expect-id", d.id, "--method", "random", "--confirm", "ERASE DISK 7", "--verify"};
     CHECK(erase_disk_args(r) == plain);
     NewDiskOptions o;
@@ -1286,7 +1286,7 @@ TEST_CASE("erase then set up: what the app passes to the engine") {
     CHECK(erase_disk_args(r) == with);
     // Set up again after a failed setup: disk init, pinned to the erased disk without a partition table.
     const std::vector<std::string> again{"disk", "init", "7", "--mbr", "--fs", "exfat", "--label", "Backup", "--letter", "F",
-                                         "--confirm", "ERASE DISK 7", "--expect-size", std::to_string(4 * kMiB),
+                                         "--confirm", "ERASE DISK 7", "--expect-size", std::to_string(64 * kMiB),
                                          "--expect-serial", "SER-1"};
     CHECK(setup_again_args(r) == again);
     r.setup->style = TableStyle::Gpt;
@@ -1294,7 +1294,7 @@ TEST_CASE("erase then set up: what the app passes to the engine") {
     r.setup->letter = 0;
     r.shown.serial.clear();
     CHECK(setup_again_args(r) == std::vector<std::string>{"disk", "init", "7", "--gpt", "--fs", "exfat", "--confirm", "ERASE DISK 7",
-                                                          "--expect-size", std::to_string(4 * kMiB)});
+                                                          "--expect-size", std::to_string(64 * kMiB)});
 
     // The events the status window reads for the two parts and the end.
     TaskEvent e = parse_task_event(R"({"event":"step","phase":"setup","message":"Setting up the drive"})");
