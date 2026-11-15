@@ -2260,6 +2260,8 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         o.add_parity = repo.parity_percent();  // data from before repair data gets it over time
         o.sample_seed = record.started;
         o.pack_state = &state.packs;
+        o.damaged_state = &state.damaged;
+        o.archived_state = &state.archived;
         o.now = record.started;
         o.fresh_since = fresh_since;
         if (full && how.budgeted) o.time_budget = std::chrono::hours(job.health.full_check_hours);
@@ -2333,7 +2335,8 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     if (r.parity_added > 0) record.message += "; repair data added to " + std::to_string(r.parity_added) + " pack(s)";
     if (r.packs_archived > 0)
         record.message += "; " + std::to_string(r.packs_archived) +
-                          " pack(s) in archive storage were only checked to be there (reading them needs a thaw)";
+                          " pack(s) are in archive storage and could not be read (only checked to be there; reading "
+                          "them needs a thaw)";
     if (!rot.empty()) record.message += "; " + rot;
     if (g_json) {
         emit({{"event", "check"},

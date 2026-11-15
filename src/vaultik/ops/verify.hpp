@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "vaultik/repo/repository.hpp"
 
@@ -35,6 +36,15 @@ struct VerifyOptions {
     // that stopped part way goes on where it stopped. A time after `now` (a clock that was set
     // back) counts as never read. Packs in archive storage are never among the packs to read.
     std::unordered_map<Id, std::uint64_t, IdHash>* pack_state = nullptr;
+    // With pack_state, both optional. `damaged_state`: when each pack was last checked and found
+    // damaged or could not be checked (it gets `now`; a pack read intact again leaves it), so a
+    // full check's round can count it as visited. `archived_state`: packs found in archive
+    // storage although the backend does not say it keeps data there (an S3 lifecycle rule moved
+    // them, say). Such packs are left out of the packs to read, like ones the backend says are
+    // archived, but each check still looks at their header: one that can be read again (thawed,
+    // moved back) leaves the set and is read by the next check.
+    std::unordered_map<Id, std::uint64_t, IdHash>* damaged_state = nullptr;
+    std::unordered_set<Id, IdHash>* archived_state = nullptr;
     std::uint64_t now = 0;
     std::uint64_t fresh_since = 0;
     // With pack_state: no further pack is read once this much time went by (0: no limit), though
@@ -60,8 +70,8 @@ struct VerifyResult {
     std::uint64_t errors = 0;
     std::uint64_t packs_repairable = 0;  // damaged, but their repair data can rebuild them
     std::uint64_t parity_added = 0;      // packs that got repair data (add_parity)
-    // Packs in archive storage (Backend::data_needs_thaw): only checked to be there, neither their
-    // header nor their data can be read without a thaw.
+    // Packs in archive storage (Backend::data_needs_thaw, or found there, see archived_state):
+    // only checked to be there, neither their header nor their data can be read without a thaw.
     std::uint64_t packs_archived = 0;
     // With pack_state: packs this check was to read but left for the next one (time_budget).
     std::uint64_t packs_left = 0;

@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/repo/repository.hpp"
@@ -27,8 +28,17 @@ namespace vaultik::jobs {
 
 using PackTimes = std::unordered_map<Id, std::uint64_t, IdHash>;
 
+using PackSet = std::unordered_set<Id, IdHash>;
+
 struct CheckState {
     PackTimes packs;  // when each pack was last read whole and found intact (FILETIME ticks)
+    // When each pack was last checked and found damaged, or could not be checked
+    // (VerifyOptions::damaged_state): visited for the cycle, which a damaged pack would otherwise
+    // keep open for good.
+    PackTimes damaged;
+    // Packs found in archive storage although the job does not say it keeps data there
+    // (VerifyOptions::archived_state): a check cannot read them.
+    PackSet archived;
     // When the scheduled full check's cycle going on started (0: none).
     std::uint64_t cycle_started = 0;
 };
@@ -39,13 +49,19 @@ std::string check_state_key(Repository& repo);
 std::string check_state_key(const Repository& repo, const std::string& location);
 // Empty when there is none yet or it cannot be read (the check then starts from scratch).
 CheckState load_check_state(const std::string& settings_dir, const std::string& key);
-// Written atomically. Packs no longer in `repo`'s index (removed by a prune) are left out.
+// Written atomically. Packs no longer in `repo`'s index (removed by a prune) are left out. The
+// file an earlier version kept under the repository's id alone (checks/<repo id>.json) is
+// removed: it may belong to a copy elsewhere, and is not used any more.
 void save_check_state(const std::string& settings_dir, const std::string& key, const CheckState& state,
                       const Repository& repo);
 
 // How many of the repository's packs that can be read (not in archive storage) were not read
 // whole at or after `since` (a time after `now`, as a clock set back leaves, counts as never).
 std::uint64_t packs_unread_since(const PackTimes& times, const Repository& repo, std::uint64_t since, std::uint64_t now);
+// The same for a check's state: a pack found damaged at or after `since` counts as visited, and
+// one found in archive storage (CheckState::archived) as one that cannot be read.
+std::uint64_t packs_unread_since(const CheckState& state, const Repository& repo, std::uint64_t since,
+                                 std::uint64_t now);
 
 // A full check about to start: `resumable` for a scheduled one (or one asked to keep to the time
 // limit), which goes on with the cycle going on or starts one now. Returns since when packs count
@@ -53,7 +69,8 @@ std::uint64_t packs_unread_since(const PackTimes& times, const Repository& repo,
 std::uint64_t plan_full_check(CheckState& state, bool resumable, std::uint64_t now);
 // After a full check (also one that stopped part way): how many packs are still to read (`since`
 // as plan_full_check returned, or for a check that read everything its own start), closing the
-// cycle once none is left.
+// cycle once none is left (see packs_unread_since for the state: damaged and archived packs do
+// not keep it open).
 std::uint64_t finish_full_check(CheckState& state, const Repository& repo, std::uint64_t since, std::uint64_t now);
 
 }  // namespace vaultik::jobs

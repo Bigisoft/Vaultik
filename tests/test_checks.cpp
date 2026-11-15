@@ -333,3 +333,83 @@ TEST_CASE("compression level: kept with the repository, used for new data only, 
     repo = Repository::open(std::make_unique<LocalBackend>(u8(tmp.path / "repo")), kPassword);
     CHECK(repo->compression_level() == 3);
 }
+
+TEST_CASE("full check: a pack that stays damaged does not keep the round open for good") {
+    TempDir tmp;
+    auto repo = repo_with_packs(tmp.path, 4);
+    const std::size_t packs = repo->index().packs().size();
+    REQUIRE(packs >= 4);
+    // One pack is damaged on the drive (a byte flipped in the middle), and stays so.
+    const Id bad = repo->index().packs().front();
+    const fs::path file = tmp.path / "repo" / fs::u8path(Repository::pack_name(bad));
+    REQUIRE(fs::exists(file));
+    {
+        std::fstream f(file, std::ios::binary | std::ios::in | std::ios::out);
+        f.seekg(static_cast<std::streamoff>(fs::file_size(file) / 2));
+        char c = 0;
+        f.get(c);
+        f.seekp(static_cast<std::streamoff>(fs::file_size(file) / 2));
+        f.put(static_cast<char>(c ^ 0x5A));
+    }
+    jobs::CheckState state;
+    VerifyOptions o;
+    o.read_data = true;
+    o.pack_state = &state.packs;
+    o.damaged_state = &state.damaged;
+    o.archived_state = &state.archived;
+
+    // The round's first check reads every pack and finds the damage: the round is complete
+    // nonetheless (the damage is alerted), so the next round starts afresh.
+    std::uint64_t now = 100 * kDay;
+    o.now = now;
+    o.fresh_since = jobs::plan_full_check(state, true, now);
+    VerifyResult r = run_verify(*repo, o);
+    CHECK(r.errors > 0);
+    CHECK(r.packs_read == packs);
+    CHECK(state.damaged.contains(bad));
+    CHECK(jobs::finish_full_check(state, *repo, o.fresh_since, now) == 0);
+    CHECK(state.cycle_started == 0);
+    // Remembered on disk too (older versions read only the rest).
+    jobs::save_check_state(u8(tmp.path), "0a0b", state, *repo);
+    CHECK(jobs::load_check_state(u8(tmp.path), "0a0b").damaged == state.damaged);
+
+    // A month later: every pack is read again, not just the damaged one and new ones.
+    now = 131 * kDay;
+    o.now = now;
+    o.fresh_since = jobs::plan_full_check(state, true, now);
+    CHECK(o.fresh_since == now);
+    r = run_verify(*repo, o);
+    CHECK(r.packs_read == packs);
+    CHECK(r.errors > 0);
+    CHECK(jobs::finish_full_check(state, *repo, o.fresh_since, now) == 0);
+
+    // Repaired (here: the pack put back as it was): read intact, no longer damaged.
+    {
+        std::fstream f(file, std::ios::binary | std::ios::in | std::ios::out);
+        f.seekg(static_cast<std::streamoff>(fs::file_size(file) / 2));
+        char c = 0;
+        f.get(c);
+        f.seekp(static_cast<std::streamoff>(fs::file_size(file) / 2));
+        f.put(static_cast<char>(c ^ 0x5A));
+    }
+    now = 162 * kDay;
+    o.now = now;
+    o.fresh_since = jobs::plan_full_check(state, true, now);
+    r = run_verify(*repo, o);
+    CHECK(r.errors == 0);
+    CHECK_FALSE(state.damaged.contains(bad));
+}
+
+TEST_CASE("check state: the file of an earlier version, named by the repository id alone, is removed") {
+    TempDir tmp;
+    auto repo = repo_with_packs(tmp.path, 1);
+    const auto& id = repo->config().repo_id;
+    const fs::path old = tmp.path / "checks" / (to_hex(ByteSpan(id.data(), id.size())) + ".json");
+    fs::create_directories(old.parent_path());
+    std::ofstream(old) << R"({"packs":{}})";
+    jobs::CheckState state;
+    const std::string key = jobs::check_state_key(*repo);
+    jobs::save_check_state(u8(tmp.path), key, state, *repo);
+    CHECK_FALSE(fs::exists(old));
+    CHECK(fs::exists(tmp.path / "checks" / (key + ".json")));
+}
