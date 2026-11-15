@@ -1,6 +1,8 @@
 #include "vaultik/jobs/run_log.hpp"
 
 #include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <vector>
 
 #include "vaultik/platform/os.hpp"
@@ -18,6 +20,29 @@ void write(const std::string& path, const std::string& text) {
 }
 
 }  // namespace
+
+bool is_run_log_of(const std::string& dir, const std::string& job_id, const std::string& path) {
+    namespace fs = std::filesystem;
+    if (dir.empty() || job_id.empty() || path.empty()) return false;
+    if (job_id.find_first_of("/\\:") != std::string::npos || job_id == "." || job_id == "..") return false;
+    const auto native = [](const std::string& utf8) { return fs::path(std::u8string(utf8.begin(), utf8.end())); };
+    std::error_code ec;
+    const fs::path file = fs::canonical(native(path), ec);
+    if (ec || !fs::is_regular_file(file, ec) || ec) return false;
+    const fs::path folder = fs::canonical(native(logs_dir(dir, job_id)), ec);
+    if (ec) return false;
+    if (file.extension() != ".log") return false;
+#ifdef _WIN32
+    // The file system ignores case; canonical paths may still be spelled differently.
+    const auto folded = [](const fs::path& p) {
+        const std::u8string s = p.u8string();
+        return os::fold_case(std::string(s.begin(), s.end()));
+    };
+    return folded(file.parent_path()) == folded(folder);
+#else
+    return file.parent_path() == folder;
+#endif
+}
 
 void prune_run_logs(const std::string& dir, const std::string& job_id, std::size_t keep) {
     const std::string folder = logs_dir(dir, job_id);

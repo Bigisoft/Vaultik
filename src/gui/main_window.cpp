@@ -69,6 +69,7 @@
 #include "versions_view.h"
 #include "vaultik/jobs/forecast.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/run_log.hpp"
 #include "vaultik/jobs/alerts.hpp"
 #include "vaultik/jobs/eject.hpp"
 #include "vaultik/jobs/protection.hpp"
@@ -1228,6 +1229,23 @@ QWidget* MainWindow::build_job_page() {
         const QString path = item != nullptr ? item->data(0, Qt::UserRole).toString() : QString();
         if (path.isEmpty() || !QFileInfo::exists(path)) {
             status_->showMessage(tr("This run has no log file (older runs, or it was removed)."), 8000);
+            return;
+        }
+        // Only a log in the job's own logs folder: a history record could name any file, and
+        // opening a program would run it.
+        const jobs::Job* job = current_job();
+        bool ours = false;
+        if (job != nullptr) {
+            ours = jobs::is_run_log_of(store_.dir(), job->id, path.toStdString());
+#ifdef _WIN32
+            try {
+                ours = ours || jobs::is_run_log_of(jobs::admin_store_dir(), job->id, path.toStdString());
+            } catch (const std::exception&) {
+            }
+#endif
+        }
+        if (!ours) {
+            status_->showMessage(tr("This run's log is not in Vaultik's logs folder, so it is not opened."), 8000);
             return;
         }
         QDesktopServices::openUrl(QUrl::fromLocalFile(path));

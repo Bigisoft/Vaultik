@@ -41,6 +41,12 @@ private:
     bool full_ = false;
 };
 
+// Whether `path` (as a history record names it, RunRecord::log) is a run log of `job_id` in
+// `settings_dir`: an existing regular file ending in .log right in <settings dir>/logs/<job id>/,
+// after following every link. Only such a file is opened from the history: a record could name
+// any file (a program, say), which opening would run.
+bool is_run_log_of(const std::string& settings_dir, const std::string& job_id, const std::string& path);
+
 // Removes the oldest logs of a job beyond `keep`.
 void prune_run_logs(const std::string& settings_dir, const std::string& job_id, std::size_t keep = kRunLogsKept);
 
