@@ -1917,9 +1917,16 @@ TEST_CASE("drive lock: one the account may not open is passed by, its eject coun
         UserProcess claimed("claimed", key, tmp.path);
         CHECK(claimed.answer() == "held");
     }
-    // An administrator's own run uses it.
-    DriveLock admin(key, os::join(tmp.dir(), "admin-store"), std::chrono::milliseconds(0));
-    CHECK(admin.held());
+    // An administrator's own run uses it (only with administrator rights: without them the
+    // administrators' entry does not count for this process either, which then may not open it).
+    if (os::process_elevated()) {
+        DriveLock admin(key, os::join(tmp.dir(), "admin-store"), std::chrono::milliseconds(0));
+        CHECK(admin.held());
+    } else {
+        DriveLock run(key, os::join(tmp.dir(), "admin-store"), std::chrono::milliseconds(0));
+        CHECK_FALSE(run.held());
+        CHECK(run.not_shared());
+    }
     CloseHandle(slot);
     CloseHandle(lock);
 }
