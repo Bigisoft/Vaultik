@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cctype>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -8,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <utility>
 
@@ -982,6 +984,347 @@ TEST_CASE("disk tools: the --force-dismount option of the command-line program")
     }
 }
 
+// ---- erasing a whole disk, then setting it up again ----------------------------------------------
+
+namespace {
+
+// A device of the test (a MemoryDevice it keeps), as erase_and_set_up opens and closes it.
+class BorrowedDevice : public WipeDevice {
+public:
+    explicit BorrowedDevice(MemoryDevice& d, bool fail_writes = false) : d_(d), fail_(fail_writes) {}
+    std::uint64_t size() const override { return d_.size(); }
+    std::uint32_t block_size() const override { return d_.block_size(); }
+    void write_at(std::uint64_t offset, ByteSpan data) override {
+        if (fail_) throw Error("the drive did not take the write");
+        d_.write_at(offset, data);
+    }
+    void read_at(std::uint64_t offset, std::uint8_t* dst, std::size_t length) override { d_.read_at(offset, dst, length); }
+    void flush() override { d_.flush(); }
+    void forget_partition_table() override { ++forgot; }
+    static inline int forgot = 0;
+
+private:
+    MemoryDevice& d_;
+    bool fail_;
+};
+
+// A disk as listed before the erase: GPT, one volume named "Old" on F:.
+DiskInfo listed_disk() {
+    DiskInfo d;
+    d.number = 7;
+    d.model = "Fake Drive";
+    d.serial = "SER-1";
+    d.bus = "USB";
+    d.size = 4 * kMiB;
+    d.sector_size = 512;
+    d.style = "GPT";
+    d.id = "gpt-11111111-2222-3333-4444-555555555555";
+    d.partitions = 1;
+    d.path = "/dev/fake";
+    DiskVolume v;
+    v.name = "\\\\?\\Volume{fake}\\";
+    v.mount = "F:\\";
+    v.label = "Old";
+    v.offset = kMiB;
+    v.length = 2 * kMiB;
+    d.volumes.push_back(v);
+    return d;
+}
+
+// The same disk after the erase: blank.
+DiskInfo blank_of(DiskInfo d) {
+    d.style = "RAW";
+    d.id.clear();
+    d.partitions = 0;
+    d.volumes.clear();
+    return d;
+}
+
+struct FakeSetup {
+    MemoryDevice device{static_cast<std::size_t>(4 * kMiB)};
+    std::vector<DiskInfo> after;  // what the listing shows after the erase
+    bool fail_writes = false;
+    bool stop = false;
+    int opened = 0;
+    int listed = 0;
+    std::vector<std::pair<DiskInfo, DiskIdentity>> inits;
+    std::string init_fails;  // init throws this when set
+    EraseSetupSteps steps() {
+        EraseSetupSteps s;
+        s.open = [this] {
+            ++opened;
+            return std::unique_ptr<WipeDevice>(std::make_unique<BorrowedDevice>(device, fail_writes));
+        };
+        s.list = [this] {
+            ++listed;
+            return after;
+        };
+        s.init = [this](const DiskInfo& d, const DiskIdentity& id, const NewDiskOptions& o) {
+            CHECK_FALSE(o.force_dismount);
+            if (!init_fails.empty()) throw Error(init_fails);
+            inits.emplace_back(d, id);
+            NewDiskResult r;
+            r.volumes.push_back("F:\\");
+            return r;
+        };
+        s.stop_asked = [this] { return stop; };
+        s.tries = 2;
+        s.wait = std::chrono::milliseconds(1);
+        return s;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("erase then set up: the disk is set up only after an erase that finished completely") {
+    const DiskInfo d = listed_disk();
+    const DiskIdentity pinned = identity_of(d);
+    NewDiskOptions setup;
+    setup.label = "Backup";
+    setup.force_dismount = true;  // never passed on: a blank disk has nothing to force closed
+
+    SUBCASE("a complete erase, then the setup on the disk erased, pinned to its serial number and size") {
+        FakeSetup f;
+        f.after = {blank_of(d)};
+        BorrowedDevice::forgot = 0;
+        bool announced = false;
+        EraseSetupSteps steps = f.steps();
+        steps.on_setup = [&] { announced = true; };
+        WipeOptions w;
+        w.verify = true;
+        const EraseSetupResult r = erase_and_set_up(d, pinned, w, setup, steps);
+        CHECK(r.wipe.verified);
+        CHECK(r.set_up);
+        CHECK(r.setup_error.empty());
+        CHECK(announced);
+        CHECK(BorrowedDevice::forgot == 1);
+        REQUIRE(f.inits.size() == 1);
+        CHECK(f.inits[0].first.number == 7);
+        CHECK(f.inits[0].second.serial == "SER-1");
+        CHECK(f.inits[0].second.size == 4 * kMiB);
+        CHECK(f.inits[0].second.id.empty());  // the erase removed the partition table
+        CHECK(r.setup.volumes == std::vector<std::string>{"F:\\"});
+        CHECK(all_zero(f.device.data.data(), f.device.data.size()));
+    }
+    SUBCASE("a cancelled erase is never set up") {
+        FakeSetup f;
+        f.after = {blank_of(d)};
+        BorrowedDevice::forgot = 0;
+        WipeOptions w;
+        w.should_cancel = [] { return true; };
+        CHECK_THROWS_AS(erase_and_set_up(d, pinned, w, setup, f.steps()), Cancelled);
+        CHECK(f.inits.empty());
+        CHECK(f.listed == 0);
+        CHECK(BorrowedDevice::forgot == 0);
+    }
+    SUBCASE("a failed erase is never set up") {
+        FakeSetup f;
+        f.after = {blank_of(d)};
+        f.fail_writes = true;
+        WipeOptions w;
+        CHECK_THROWS_AS(erase_and_set_up(d, pinned, w, setup, f.steps()), Error);
+        CHECK(f.inits.empty());
+        CHECK(f.listed == 0);
+    }
+    SUBCASE("an erase whose check finds other data is never set up") {
+        FakeSetup f;
+        f.after = {blank_of(d)};
+        f.device.flip_at = 3 * kMiB + 5;
+        WipeOptions w;
+        w.verify = true;
+        CHECK_THROWS_AS(erase_and_set_up(d, pinned, w, setup, f.steps()), Error);
+        CHECK(f.inits.empty());
+    }
+    SUBCASE("a stop asked as the erase ended: erased, not set up") {
+        FakeSetup f;
+        f.after = {blank_of(d)};
+        f.stop = true;
+        WipeOptions w;
+        const EraseSetupResult r = erase_and_set_up(d, pinned, w, setup, f.steps());
+        CHECK(r.stopped);
+        CHECK_FALSE(r.set_up);
+        CHECK(f.inits.empty());
+    }
+    SUBCASE("only the disk erased is set up") {
+        WipeOptions w;
+        std::vector<DiskInfo> others;
+        DiskInfo serial = blank_of(d);
+        serial.serial = "SER-2";
+        DiskInfo size = blank_of(d);
+        size.size += kMiB;
+        DiskInfo model = blank_of(d);
+        model.model = "Another Drive";
+        DiskInfo bus = blank_of(d);
+        bus.bus = "SATA";
+        DiskInfo path = blank_of(d);
+        path.path = "/dev/other";
+        DiskInfo table = blank_of(d);  // got a partition table again since
+        table.style = "GPT";
+        table.id = "gpt-99999999-2222-3333-4444-555555555555";
+        DiskInfo parts = blank_of(d);
+        parts.partitions = 1;
+        DiskInfo number = blank_of(d);
+        number.number = 8;
+        for (const DiskInfo& now : {serial, size, model, bus, path, table, parts, number}) {
+            FakeSetup f;
+            f.after = {now};
+            const EraseSetupResult r = erase_and_set_up(d, pinned, w, setup, f.steps());
+            CAPTURE(r.setup_error);
+            CHECK_FALSE(r.set_up);
+            CHECK_FALSE(r.setup_error.empty());
+            CHECK(f.inits.empty());
+            CHECK(f.listed == 2);  // looked for again, in case the system had not caught up yet
+        }
+        CHECK(erased_disk_mismatch(blank_of(d), d, pinned).empty());
+        CHECK_FALSE(erased_disk_mismatch(d, d, pinned).empty());  // not blank
+    }
+    SUBCASE("a setup that fails after a complete erase is told, and nothing throws") {
+        FakeSetup f;
+        f.after = {blank_of(d)};
+        f.init_fails = "format.com failed";
+        WipeOptions w;
+        const EraseSetupResult r = erase_and_set_up(d, pinned, w, setup, f.steps());
+        CHECK_FALSE(r.set_up);
+        CHECK(r.setup_error == "format.com failed");
+    }
+    SUBCASE("without a setup it erases as before") {
+        FakeSetup f;
+        BorrowedDevice::forgot = 0;
+        WipeOptions w;
+        const EraseSetupResult r = erase_and_set_up(d, pinned, w, std::nullopt, f.steps());
+        CHECK_FALSE(r.set_up);
+        CHECK(f.listed == 0);
+        CHECK(BorrowedDevice::forgot == 1);
+        CHECK(all_zero(f.device.data.data(), f.device.data.size()));
+    }
+}
+
+TEST_CASE("erase then set up: MBR is refused on a disk over 2 TiB before anything is erased") {
+    DiskInfo big = listed_disk();
+    big.size = 3ull << 40;
+    CHECK_FALSE(mbr_fits(big));
+    DiskInfo two = listed_disk();
+    two.size = (2ull << 40) - 512;
+    CHECK(mbr_fits(two));
+    two.size = 2ull << 40;  // 2^32 sectors: one more than an MBR entry can count
+    CHECK_FALSE(mbr_fits(two));
+    DiskInfo big_sectors = big;  // 4096-byte sectors: MBR reaches 16 TiB
+    big_sectors.sector_size = 4096;
+    CHECK(mbr_fits(big_sectors));
+
+    NewDiskOptions mbr;
+    mbr.style = TableStyle::Mbr;
+    CHECK_THROWS_AS(check_setup_after_erase(big, mbr), Error);
+    FakeSetup f;
+    f.after = {blank_of(big)};
+    WipeOptions w;
+    CHECK_THROWS_AS(erase_and_set_up(big, identity_of(big), w, mbr, f.steps()), Error);
+    CHECK(f.opened == 0);  // nothing was opened, so nothing was erased
+    NewDiskOptions gpt;
+    CHECK_NOTHROW(check_setup_after_erase(big, gpt));
+    NewDiskOptions bad_label;
+    bad_label.filesystem = "exfat";
+    bad_label.label = "a name too long for exfat";
+    CHECK_THROWS_AS(check_setup_after_erase(listed_disk(), bad_label), Error);
+#ifdef _WIN32
+    // A letter in use is refused, unless the disk erased has it (the erase frees it).
+    for (char c = 'D'; c <= 'Z'; ++c) {
+        if (!os::exists(std::string(1, c) + ":\\")) continue;
+        NewDiskOptions taken;
+        taken.letter = c;
+        DiskInfo other = listed_disk();
+        other.volumes[0].mount = "Q:\\";
+        if (c == 'Q') continue;
+        CHECK_THROWS_AS(check_setup_after_erase(other, taken), Error);
+        DiskInfo own = listed_disk();
+        own.volumes[0].mount = std::string(1, c) + ":\\";
+        CHECK_NOTHROW(check_setup_after_erase(own, taken));
+        break;
+    }
+#else
+    NewDiskOptions letter;
+    letter.letter = 'F';
+    CHECK_THROWS_AS(check_setup_after_erase(listed_disk(), letter), Error);  // no drive letters here
+#endif
+}
+
+TEST_CASE("erase then set up: what the app passes to the engine") {
+    const DiskInfo d = listed_disk();
+    SetupDefaults s = setup_defaults(d, "GHK");
+    CHECK(s.label == "Old");
+    DiskInfo unnamed = listed_disk();
+    unnamed.volumes[0].label.clear();
+    CHECK(setup_defaults(unnamed, "GHK").label == "Backup");
+    CHECK(setup_letters(d, "GFHk") == "FGHK");  // its own first, each once
+#ifdef _WIN32
+    CHECK(s.letter == 'F');
+    DiskInfo no_letter = listed_disk();
+    no_letter.volumes[0].mount.clear();
+    CHECK(setup_defaults(no_letter, "GHK").letter == 'G');
+    CHECK(setup_defaults(no_letter, "").letter == 0);
+#else
+    CHECK(s.letter == 0);
+#endif
+
+    EraseRequest r;
+    r.disk = "7";
+    r.shown = identity_of(d);
+    r.confirm = "ERASE DISK 7";
+    r.method = "random";
+    r.verify = true;
+    const std::vector<std::string> plain{"disk", "wipe", "7", "--expect-size", std::to_string(4 * kMiB), "--expect-serial", "SER-1",
+                                         "--expect-id", d.id, "--method", "random", "--confirm", "ERASE DISK 7", "--verify"};
+    CHECK(erase_disk_args(r) == plain);
+    NewDiskOptions o;
+    o.style = TableStyle::Mbr;
+    o.filesystem = "exfat";
+    o.label = "Backup";
+    o.letter = 'F';
+    r.setup = o;
+    std::vector<std::string> with = plain;
+    with.insert(with.end(), {"--then-init", "mbr", "--fs", "exfat", "--label", "Backup", "--letter", "F"});
+    CHECK(erase_disk_args(r) == with);
+    // Set up again after a failed setup: disk init, pinned to the erased disk without a partition table.
+    const std::vector<std::string> again{"disk", "init", "7", "--mbr", "--fs", "exfat", "--label", "Backup", "--letter", "F",
+                                         "--confirm", "ERASE DISK 7", "--expect-size", std::to_string(4 * kMiB),
+                                         "--expect-serial", "SER-1"};
+    CHECK(setup_again_args(r) == again);
+    r.setup->style = TableStyle::Gpt;
+    r.setup->label.clear();
+    r.setup->letter = 0;
+    r.shown.serial.clear();
+    CHECK(setup_again_args(r) == std::vector<std::string>{"disk", "init", "7", "--gpt", "--fs", "exfat", "--confirm", "ERASE DISK 7",
+                                                          "--expect-size", std::to_string(4 * kMiB)});
+
+    // The events the status window reads for the two parts and the end.
+    TaskEvent e = parse_task_event(R"({"event":"step","phase":"setup","message":"Setting up the drive"})");
+    CHECK(e.type == TaskEvent::Type::Step);
+    CHECK(e.phase == "setup");
+    e = parse_task_event(R"({"event":"done","status":"setup_failed","erased":true,"message":"Erased, but setting it up failed: x"})");
+    CHECK(e.status == "setup_failed");
+    CHECK(e.erased);
+    e = parse_task_event(R"({"event":"done","status":"success","volumes":["F:"]})");
+    CHECK_FALSE(e.erased);
+    CHECK(e.volumes == std::vector<std::string>{"F:"});
+}
+
+TEST_CASE("erase then set up: the --then-init option of the command-line program") {
+    std::string output;
+    CHECK(run_cli({"--help"}, output) == 0);
+    CHECK(output.find("--then-init") != std::string::npos);
+    CHECK(run_cli({"disk", "wipe", "99999", "--then-init", "apm", "--confirm", "ERASE DISK 99999"}, output) == 1);
+    CHECK(output.find("--then-init takes gpt or mbr") != std::string::npos);
+    CHECK(run_cli({"disk", "wipe", "99999", "--fs", "exfat", "--confirm", "ERASE DISK 99999"}, output) == 1);
+    CHECK(output.find("goes with --then-init") != std::string::npos);
+    CHECK(run_cli({"disk", "wipe", "--volume", "Q:", "--then-init", "gpt", "--confirm", "ERASE Q:"}, output) == 1);
+    CHECK(output.find("does not go with --volume") != std::string::npos);
+    // Known; the disk does not exist (or no rights): stops there, and says it was not set up.
+    CHECK(run_cli({"disk", "wipe", "99999", "--then-init", "gpt", "--label", "Backup", "--confirm", "ERASE DISK 99999"}, output) == 1);
+    CAPTURE(output);
+    CHECK(output.find("unknown option") == std::string::npos);
+    CHECK(output.find("error:") != std::string::npos);
+}
+
 // ---- on a real (virtual) disk, only where it is safe ---------------------------------------------
 
 #ifdef _WIN32
@@ -1271,6 +1614,92 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
         CHECK(last.status == "cancelled");
         MESSAGE("ran: disk wipe cancelled through the progress channel");
     }
+
+    // Erased and set up again in the same run (--then-init), as the drive cleanser asks for it:
+    // a stopped erase is never set up; a complete one goes on to the setup (its own part, after
+    // the erase), and the disk ends up with one volume of the name and file system asked for.
+    {
+        const auto wipe_args = [&](const std::vector<std::string>& more) {
+            disks = list_tool_disks();
+            it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+            REQUIRE(it != disks.end());
+            const DiskInfo on = *it;
+            REQUIRE(on.size == size);
+            std::vector<std::string> args{"disk", "wipe", std::to_string(number), "--confirm", erase_text(on),
+                                          "--expect-size", std::to_string(on.size)};
+            if (!on.serial.empty()) args.insert(args.end(), {"--expect-serial", on.serial});
+            if (!on.id.empty()) args.insert(args.end(), {"--expect-id", on.id});
+            args.insert(args.end(), more.begin(), more.end());
+            return args;
+        };
+        const auto volume_named = [&](const std::string& label) -> std::optional<DiskVolume> {
+            disks = list_tool_disks();
+            it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+            if (it == disks.end()) return std::nullopt;
+            for (const DiskVolume& v : it->volumes)
+                if (v.label == label) return v;
+            return std::nullopt;
+        };
+
+        bool cancel_sent = false;
+        const test::EngineRun stopped = test::run_engine_with_channel(
+            wipe_args({"--method", "dod3", "--verify", "--then-init", "gpt", "--fs", "ntfs", "--label", "VTNever"}),
+            [&](const std::string& line, os::ProgressServer& server) {
+                if (!cancel_sent && parse_task_event(line).type == TaskEvent::Type::Progress) cancel_sent = server.send_line("cancel");
+            });
+        CAPTURE(stopped.output);
+        CHECK(cancel_sent);
+        CHECK(stopped.code == 4);
+        TaskEvent last;
+        bool setup_started = false;
+        for (const std::string& line : stopped.lines) {
+            const TaskEvent e = parse_task_event(line);
+            if (e.type == TaskEvent::Type::Step && e.phase == "setup") setup_started = true;
+            if (e.type != TaskEvent::Type::Unknown) last = e;
+        }
+        CHECK_FALSE(setup_started);
+        CHECK(last.status == "cancelled");
+        CHECK(last.text.find("not set up") != std::string::npos);
+        CHECK_FALSE(volume_named("VTNever").has_value());
+
+        const auto upper_ascii = [](std::string text) {
+            for (char& c : text) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            return text;
+        };
+        struct Setup {
+            std::string style, fs, label, want_style, want_fs;
+        };
+        for (const Setup& one : std::vector<Setup>{{"gpt", "ntfs", "VTReady", "GPT", "NTFS"}, {"mbr", "exfat", "VTReadyEx", "MBR", "exFAT"}}) {
+            const std::string style = one.style, fs = one.fs, label = one.label, want_style = one.want_style, want_fs = one.want_fs;
+            CAPTURE(label);
+            const test::EngineRun full = test::run_engine_with_channel(
+                wipe_args({"--then-init", style, "--fs", fs, "--label", label}), [](const std::string&, os::ProgressServer&) {});
+            CAPTURE(full.output);
+            CHECK(full.connected);
+            CHECK(full.code == 0);
+            bool erased_fully = false;
+            bool setup_after = false;
+            TaskEvent done;
+            for (const std::string& line : full.lines) {
+                const TaskEvent e = parse_task_event(line);
+                if (e.type == TaskEvent::Type::Progress && e.has_total && e.done == e.total) erased_fully = true;
+                if (e.type == TaskEvent::Type::Step && e.phase == "setup") setup_after = setup_after || erased_fully;
+                if (e.type == TaskEvent::Type::Done) done = e;
+            }
+            CHECK(setup_after);  // the setup came once the erase had reached its end
+            CHECK(done.status == "success");
+            REQUIRE(done.volumes.size() == 1);
+            CHECK(done.text == "Disk erased and ready as " + done.volumes[0] + " (" + label + ", " + want_fs + ").");
+            const std::optional<DiskVolume> v = volume_named(label);
+            REQUIRE(v.has_value());
+            CHECK(v->filesystem == want_fs);
+            CHECK(upper_ascii(v->mount.substr(0, 2)) == upper_ascii(done.volumes[0]));
+            REQUIRE(it != disks.end());
+            CHECK(it->style == want_style);
+            CHECK(os::is_directory(v->mount));
+            MESSAGE("ran: disk wipe --then-init " << style << " --fs " << fs << " on the test's virtual disk");
+        }
+    }
     attached.reset();
 }
 #else
@@ -1366,6 +1795,32 @@ TEST_CASE("disk tools on a loop device (Linux, root, VAULTIK_TEST_VIRTUAL_DISKS=
     const Bytes start = os::read_file(file, 256u << 20);
     CHECK(all_zero(start.data(), kMiB));
     CHECK(all_zero(start.data() + start.size() - kMiB, kMiB));
+
+    // Erased and set up again in the same run (--then-init): one partition with the name and file
+    // system asked for, on this loop device.
+    disks = list_tool_disks();
+    it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.path == dev; });
+    REQUIRE(it != disks.end());
+    const DiskInfo blank = *it;
+    std::vector<std::string> args{"disk", "wipe", dev, "--confirm", erase_text(blank), "--expect-size", std::to_string(blank.size),
+                                  "--then-init", "gpt", "--fs", "ext4", "--label", "vready"};
+    if (!blank.serial.empty()) args.insert(args.end(), {"--expect-serial", blank.serial});
+    if (!blank.id.empty()) args.insert(args.end(), {"--expect-id", blank.id});
+    std::vector<std::string> argv{VAULTIK_TEST_CLI};
+    argv.insert(argv.end(), args.begin(), args.end());
+    std::string cli_output;
+    CHECK(os::run_command(argv, &cli_output) == 0);
+    CAPTURE(cli_output);
+    CHECK(cli_output.find("Disk erased and ready as " + dev + "p1 (vready, ext4).") != std::string::npos);
+    disks = list_tool_disks();
+    it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.path == dev; });
+    REQUIRE(it != disks.end());
+    CHECK(it->style == "GPT");
+    CHECK(it->partitions == 1);
+    bool ready = false;
+    for (const DiskVolume& v : it->volumes)
+        if (v.name == dev + "p1" && v.label == "vready" && v.filesystem == "ext4") ready = true;
+    CHECK(ready);
 }
 #endif
 

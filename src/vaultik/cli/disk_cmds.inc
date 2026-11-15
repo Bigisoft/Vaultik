@@ -119,12 +119,11 @@ const image::DiskInfo& tool_target(const Args& a, const std::vector<image::DiskI
     return d;
 }
 
-int cmd_disk_init(const Args& a) {
-    if (a.positional.size() < 2)
-        throw Error("usage: vaultik disk init <disk> [--gpt|--mbr] [--fs ntfs|exfat|ext4] [--label <name>] [--letter <X>]");
-    if (a.has("--gpt") && a.has("--mbr")) throw Error("give --gpt or --mbr, not both");
+// The file system, label, letter and mount point of a disk to set up (disk init, and disk wipe
+// with --then-init), as given; checked later.
+image::NewDiskOptions new_disk_options(const Args& a, image::TableStyle style) {
     image::NewDiskOptions o;
-    o.style = a.has("--mbr") ? image::TableStyle::Mbr : image::TableStyle::Gpt;
+    o.style = style;
     o.filesystem = a.value("--fs").value_or(std::string());
     std::transform(o.filesystem.begin(), o.filesystem.end(), o.filesystem.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -136,6 +135,14 @@ int cmd_disk_init(const Args& a) {
         o.letter = static_cast<char>(std::toupper(static_cast<unsigned char>(l[0])));
     }
     if (auto v = a.value("--mount")) o.mount = os::absolute_path(*v);
+    return o;
+}
+
+int cmd_disk_init(const Args& a) {
+    if (a.positional.size() < 2)
+        throw Error("usage: vaultik disk init <disk> [--gpt|--mbr] [--fs ntfs|exfat|ext4] [--label <name>] [--letter <X>]");
+    if (a.has("--gpt") && a.has("--mbr")) throw Error("give --gpt or --mbr, not both");
+    image::NewDiskOptions o = new_disk_options(a, a.has("--mbr") ? image::TableStyle::Mbr : image::TableStyle::Gpt);
     for (const std::string& s : a.all("--size")) o.sizes.push_back(s == "rest" ? 0 : parse_size(s));
     image::check_init_options(o);
 #ifdef _WIN32
@@ -193,11 +200,44 @@ std::function<void(const image::WipeProgress&)> wipe_progress() {
     };
 }
 
+// "F:" for "F:\" (Windows); a device or folder as it is (Linux).
+std::string volume_name(const std::string& v) {
+#ifdef _WIN32
+    if (v.size() == 3 && v[1] == ':') return v.substr(0, 2);
+#endif
+    return v;
+}
+
+// "NTFS", "exFAT", "ext4".
+std::string filesystem_title(const std::string& fs) {
+    if (fs == "ntfs") return "NTFS";
+    if (fs == "exfat") return "exFAT";
+    return fs;
+}
+
+// The setup asked for with --then-init (none without it). --fs, --label, --letter and --mount
+// go with it only.
+std::optional<image::NewDiskOptions> setup_after_wipe(const Args& a) {
+    const auto style = a.value("--then-init");
+    if (!style) {
+        for (const char* o : {"--fs", "--label", "--letter", "--mount"})
+            if (a.value(o)) throw Error(std::string(o) + " goes with --then-init (disk wipe), or with disk init");
+        return std::nullopt;
+    }
+    std::string s = *style;
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (s != "gpt" && s != "mbr") throw Error("--then-init takes gpt or mbr");
+    image::NewDiskOptions o = new_disk_options(a, s == "mbr" ? image::TableStyle::Mbr : image::TableStyle::Gpt);
+    if (o.filesystem.empty()) o.filesystem = kDefaultFs;
+    return o;
+}
+
 int cmd_disk_wipe(const Args& a) {
     const auto volume = a.value("--volume");
     if ((a.positional.size() < 2) == !volume.has_value() || (a.positional.size() >= 2 && volume))
         throw Error("usage: vaultik disk wipe <disk> | --volume <X:> [--method zeros|random|dod3] [--verify] "
-                    "[--expect-size <bytes> --expect-serial <s> --expect-id <id>] [--force-dismount]");
+                    "[--expect-size <bytes> --expect-serial <s> --expect-id <id>] [--force-dismount] "
+                    "[--then-init gpt|mbr [--fs <type>] [--label <name>] [--letter <X>]]");
     image::WipeOptions o;
     if (auto m = a.value("--method")) {
         const auto parsed = image::parse_wipe_method(*m);
@@ -206,6 +246,8 @@ int cmd_disk_wipe(const Args& a) {
     }
     o.verify = a.has("--verify");
     const bool force = a.has("--force-dismount");
+    const std::optional<image::NewDiskOptions> setup = setup_after_wipe(a);
+    if (setup && volume) throw Error("--then-init sets up a whole disk; it does not go with --volume");
     o.should_cancel = [] { return stop_requested(); };
     o.on_progress = wipe_progress();
 #ifdef _WIN32
@@ -214,7 +256,9 @@ int cmd_disk_wipe(const Args& a) {
     if (::geteuid() != 0) throw Error("erasing a disk needs root (sudo)");
 #endif
     const std::string method = std::string(image::to_string(o.method)) + (o.verify ? ", then checked" : "");
+    const std::string not_set_up = setup ? "; the drive was not set up" : "";
     image::WipeResult r;
+    image::EraseSetupResult whole;
     std::string erased;
     try {
         if (volume) {
@@ -240,38 +284,109 @@ int cmd_disk_wipe(const Args& a) {
             const std::vector<image::DiskInfo> disks = image::list_tool_disks();
             image::DiskIdentity confirmed;
             const image::DiskInfo& d = tool_target(a, disks, a.positional[1], confirmed);
+            // A setup that cannot work (a file system or letter that cannot be used, MBR on a
+            // disk over 2 TiB) stops before the question, so nothing is erased for nothing.
+            if (setup) image::check_setup_after_erase(d, *setup);
             std::string what = "Everything on this disk is overwritten (" + method + ") and cannot be brought back:\n  " +
                                tool_disk_title(d);
             const std::string vols = disk_volumes_text(d);
             if (!vols.empty()) what += "\n  It holds now: " + vols;
+            if (setup) {
+                what += "\n  Then it is set up again: " + std::string(setup->style == image::TableStyle::Gpt ? "GPT" : "MBR") +
+                        ", " + filesystem_title(setup->filesystem);
+                if (!setup->label.empty()) what += " \"" + setup->label + "\"";
+                if (setup->letter != 0) what += ", " + std::string(1, setup->letter) + ":";
+            }
             if (image::solid_state(d))
                 what += "\n  This is a solid-state drive: overwriting reaches every block the system can see, but not\n"
                         "  the spare blocks the drive keeps for itself. For those, use the drive maker's secure\n"
                         "  erase tool (or the computer's firmware setup) as well.";
             confirm_typed(a, image::erase_text(d), what);
-            o.clear_partition_table = true;
-            {
-                auto dev = image::open_wipe_disk(d, confirmed, image::protected_tool_disks(), force);
-                r = image::wipe_device(*dev, o);
-                dev->forget_partition_table();
-            }
+            image::EraseSetupSteps steps;
+            const std::vector<int> keep = image::protected_tool_disks();
+            steps.open = [&] { return image::open_wipe_disk(d, confirmed, keep, force); };
+            steps.list = [] { return image::list_tool_disks(); };
+            steps.init = [&](const image::DiskInfo& found, const image::DiskIdentity& pinned, const image::NewDiskOptions& n) {
+                image::NewDiskOptions with_steps = n;
+#ifdef _WIN32
+                // The letter the erased volume had is free once Windows has let go of that volume,
+                // which may take a moment after the disk was seen blank.
+                for (int i = 0; i < 40 && n.letter != 0 && os::exists(std::string(1, n.letter) + ":\\"); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+#endif
+                with_steps.on_step = [](const std::string& s) {
+                    if (g_json) emit({{"event", "step"}, {"phase", "setup"}, {"message", s}});
+                    else out(s + "...\n");
+                };
+                // The protected-disk rules and identity checks of disk init, on the disk erased.
+                return image::init_disk(found, pinned, image::protected_tool_disks(), with_steps);
+            };
+            steps.stop_asked = [] { return stop_requested(); };
+            steps.on_setup = [] {
+                if (g_json) emit({{"event", "step"}, {"phase", "setup"}, {"message", "Setting up the drive"}});
+                else {
+                    clear_status();
+                    out("Erased. Setting up the drive...\n");
+                }
+            };
+            whole = image::erase_and_set_up(d, confirmed, o, setup, steps);
+            r = whole.wipe;
             erased = tool_disk_title(d);
         }
     } catch (const vaultik::Cancelled&) {
-        const std::string msg = "cancelled; what was written so far stays overwritten, the rest is as it was";
+        const std::string msg = "cancelled; what was written so far stays overwritten, the rest is as it was" + not_set_up;
         if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", msg}});
         else {
             clear_status();
             err(msg + "\n");
         }
         return kExitCancelled;
+    } catch (const image::VolumesInUse&) {
+        throw;  // nothing was written: the caller may run it again with --force-dismount
+    } catch (const Error& e) {
+        if (setup) throw Error(e.what() + not_set_up);
+        throw;
     }
     const std::string msg = "Erased " + erased + ": " + format_bytes(r.bytes) + " written in " + format_duration(r.seconds) +
                             (r.verified ? ", checked" : "") + ".";
-    if (g_json) emit({{"event", "done"}, {"status", "success"}, {"message", msg}});
-    else {
+    if (!setup) {
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"message", msg}});
+        else {
+            clear_status();
+            out(msg + "\n");
+        }
+        return kExitOk;
+    }
+    if (whole.stopped) {
+        const std::string stopped = msg + " It was stopped before it was set up; the drive was not set up.";
+        if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"erased", true}, {"message", stopped}});
+        else {
+            clear_status();
+            err(stopped + "\n");
+        }
+        return kExitCancelled;
+    }
+    if (!whole.set_up) {
+        const std::string failed = "Erased, but setting it up failed: " + whole.setup_error;
+        if (g_json) emit({{"event", "done"}, {"status", "setup_failed"}, {"erased", true}, {"message", failed}});
+        else {
+            clear_status();
+            err(msg + "\n" + failed + "\n");
+        }
+        return kExitSetupFailed;
+    }
+    std::string list;
+    for (const std::string& v : whole.setup.volumes) list += (list.empty() ? "" : ", ") + volume_name(v);
+    const std::string ready = "Disk erased and ready as " + list + " (" + (setup->label.empty() ? "" : setup->label + ", ") +
+                              filesystem_title(setup->filesystem) + ").";
+    if (g_json) {
+        nlohmann::json vj = nlohmann::json::array();
+        for (const std::string& v : whole.setup.volumes) vj.push_back(volume_name(v));
+        emit({{"event", "done"}, {"status", "success"}, {"volumes", vj}, {"label", setup->label},
+              {"filesystem", filesystem_title(setup->filesystem)}, {"message", ready}});
+    } else {
         clear_status();
-        out(msg + "\n");
+        out(msg + "\n" + ready + "\n");
     }
     return kExitOk;
 }

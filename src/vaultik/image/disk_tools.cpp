@@ -859,6 +859,193 @@ std::vector<NewPartition> plan_partitions(std::uint64_t disk_size, std::uint32_t
     return out;
 }
 
+// ---- erasing a whole disk, then setting it up again ------------------------------------------
+
+namespace {
+
+#ifdef _WIN32
+constexpr bool kMsrOnGpt = true;  // Windows puts a reserved partition first on a GPT disk (see init_disk)
+#else
+constexpr bool kMsrOnGpt = false;
+#endif
+
+std::string trimmed_upper(const std::string& s) {
+    std::size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    std::string out = s.substr(b, e - b);
+    for (char& c : out) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    return out;
+}
+
+}  // namespace
+
+bool mbr_fits(const DiskInfo& d) {
+    const std::uint32_t sector = d.sector_size == 0 ? 512 : d.sector_size;
+    return d.size / sector <= 0xFFFFFFFFull;
+}
+
+void check_setup_after_erase(const DiskInfo& d, const NewDiskOptions& o) {
+    NewDiskOptions now = o;
+#ifdef _WIN32
+    if (o.letter != 0) {
+        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(o.letter)));
+        // One of the disk's own letters is in use until the erase frees it; its range is still
+        // checked (one that is not of this disk is checked to be free by check_init_options).
+        for (const DiskVolume& v : d.volumes)
+            if (v.mount.size() >= 2 && v.mount.size() <= 3 && v.mount[1] == ':' &&
+                std::toupper(static_cast<unsigned char>(v.mount[0])) == c) {
+                if (c < 'D' || c > 'Z') throw Error("the drive letter must be one of D to Z");
+                now.letter = 0;
+            }
+    }
+#endif
+    check_init_options(now);
+    if (o.style == TableStyle::Mbr && !mbr_fits(d))
+        throw Error("an MBR partition table cannot use more than 2 TiB of this disk; use GPT");
+    plan_partitions(d.size, d.sector_size, o.style, o.sizes, o.style == TableStyle::Gpt && kMsrOnGpt);
+}
+
+DiskIdentity erased_identity(const DiskIdentity& erased) {
+    DiskIdentity id = erased;
+    id.id.clear();
+    return id;
+}
+
+std::string erased_disk_mismatch(const DiskInfo& now, const DiskInfo& erased, const DiskIdentity& pinned) {
+    const std::string name = "disk " + std::to_string(erased.number);
+    if (now.number != erased.number) return name + " is not connected any more";
+    const std::string other = identity_mismatch(now, erased_identity(pinned));
+    if (!other.empty()) return other;
+    if (now.size != erased.size || trimmed_upper(now.serial) != trimmed_upper(erased.serial) ||
+        now.sector_size != erased.sector_size || trimmed_upper(now.model) != trimmed_upper(erased.model) ||
+        trimmed_upper(now.bus) != trimmed_upper(erased.bus) || now.path != erased.path)
+        return name + " is not the disk that was erased any more";
+    if (now.style != "RAW" || now.partitions != 0) return name + " is not blank after the erase (it has a partition table)";
+    return {};
+}
+
+EraseSetupResult erase_and_set_up(const DiskInfo& d, const DiskIdentity& confirmed, const WipeOptions& wipe,
+                                  const std::optional<NewDiskOptions>& setup, const EraseSetupSteps& steps) {
+    // A setup that cannot work stops here, before the disk is even opened.
+    if (setup) check_setup_after_erase(d, *setup);
+    WipeOptions w = wipe;
+    w.clear_partition_table = true;
+    EraseSetupResult r;
+    std::uint64_t size = 0;
+    {
+        // A cancel (Cancelled) or a failed write or check (Error) leaves through here: no setup.
+        std::unique_ptr<WipeDevice> dev = steps.open();
+        size = dev->size();
+        r.wipe = wipe_device(*dev, w);
+        dev->forget_partition_table();
+    }  // closed: the setup opens the disk again, checked again
+    if (!setup) return r;
+    const std::uint64_t written = size * wipe_passes(w.method).size();
+    if (r.wipe.bytes != written || (w.verify && !r.wipe.verified))
+        throw Error("the erase did not finish completely; the drive was not set up");
+    if (steps.stop_asked && steps.stop_asked()) {
+        r.stopped = true;
+        return r;
+    }
+    if (steps.on_setup) steps.on_setup();
+    try {
+        // The disk at its number now, once the system shows it blank: the disk erased, or no setup.
+        std::string why;
+        std::optional<DiskInfo> found;
+        for (int i = 0; i < std::max(1, steps.tries) && !found; ++i) {
+            if (i > 0) std::this_thread::sleep_for(steps.wait);
+            const std::vector<DiskInfo> disks = steps.list();
+            auto it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& x) { return x.number == d.number; });
+            why = it == disks.end() ? "disk " + std::to_string(d.number) + " is not connected any more"
+                                    : erased_disk_mismatch(*it, d, confirmed);
+            if (why.empty()) found = *it;
+        }
+        if (!found) throw Error(why);
+        NewDiskOptions o = *setup;
+        o.force_dismount = false;  // a blank disk has no volume to take away from anyone
+        r.setup = steps.init(*found, erased_identity(confirmed), o);
+        r.set_up = true;
+    } catch (const std::exception& e) {
+        // Also a volume in use (VolumesInUse): the erase is done, so it is never run again.
+        r.setup_error = e.what();
+    }
+    return r;
+}
+
+// ---- what the app asks the engine for -----------------------------------------------------------
+
+namespace {
+
+// The letters of disk `d`'s volumes ("F:\" gives F), D to Z only, in order.
+std::string own_letters(const DiskInfo& d) {
+    std::string out;
+    for (const DiskVolume& v : d.volumes) {
+        if (v.mount.size() < 2 || v.mount.size() > 3 || v.mount[1] != ':') continue;
+        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(v.mount[0])));
+        if (c >= 'D' && c <= 'Z' && out.find(c) == std::string::npos) out.push_back(c);
+    }
+    return out;
+}
+
+void add_setup(std::vector<std::string>& args, const NewDiskOptions& o) {
+    if (!o.filesystem.empty()) args.insert(args.end(), {"--fs", o.filesystem});
+    if (!o.label.empty()) args.insert(args.end(), {"--label", o.label});
+    if (o.letter != 0) args.insert(args.end(), {"--letter", std::string(1, o.letter)});
+}
+
+void add_identity(std::vector<std::string>& args, const DiskIdentity& id) {
+    args.insert(args.end(), {"--expect-size", std::to_string(id.size)});
+    if (!id.serial.empty()) args.insert(args.end(), {"--expect-serial", id.serial});
+    if (!id.id.empty()) args.insert(args.end(), {"--expect-id", id.id});
+}
+
+}  // namespace
+
+SetupDefaults setup_defaults(const DiskInfo& d, const std::string& free_letters) {
+    SetupDefaults s;
+    for (const DiskVolume& v : d.volumes)
+        if (s.label.empty() && !v.label.empty()) s.label = v.label;
+    if (s.label.empty()) s.label = "Backup";
+#ifdef _WIN32
+    const std::string letters = setup_letters(d, free_letters);
+    if (!letters.empty()) s.letter = letters[0];
+#else
+    (void)free_letters;  // no drive letters
+#endif
+    return s;
+}
+
+std::string setup_letters(const DiskInfo& d, const std::string& free_letters) {
+    std::string out = own_letters(d);
+    for (const char l : free_letters) {
+        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(l)));
+        if (c >= 'D' && c <= 'Z' && out.find(c) == std::string::npos) out.push_back(c);
+    }
+    return out;
+}
+
+std::vector<std::string> erase_disk_args(const EraseRequest& r) {
+    std::vector<std::string> args{"disk", "wipe", r.disk};
+    add_identity(args, r.shown);
+    args.insert(args.end(), {"--method", r.method, "--confirm", r.confirm});
+    if (r.verify) args.push_back("--verify");
+    if (r.setup) {
+        args.insert(args.end(), {"--then-init", r.setup->style == TableStyle::Gpt ? "gpt" : "mbr"});
+        add_setup(args, *r.setup);
+    }
+    return args;
+}
+
+std::vector<std::string> setup_again_args(const EraseRequest& r) {
+    const NewDiskOptions o = r.setup.value_or(NewDiskOptions{});
+    std::vector<std::string> args{"disk", "init", r.disk, o.style == TableStyle::Gpt ? "--gpt" : "--mbr"};
+    add_setup(args, o);
+    args.insert(args.end(), {"--confirm", r.confirm});
+    add_identity(args, erased_identity(r.shown));
+    return args;
+}
+
 std::string sfdisk_script(TableStyle style, const std::vector<NewPartition>& parts, std::uint32_t sector_size,
                           const std::string& filesystem) {
     const bool gpt = style == TableStyle::Gpt;

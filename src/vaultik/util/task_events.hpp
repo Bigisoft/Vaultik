@@ -8,7 +8,8 @@
 // The engine's --json event lines as the app shows them for a task that runs with administrator
 // rights (erasing, setting up a disk, restoring a disk image, making a recovery drive). The
 // fields are the ones the engine writes and the app's Runner reads: "progress" (done, total,
-// speed, seconds_left, pass, passes, verifying, current), "step" (message), "warning",
+// speed, seconds_left, pass, passes, verifying, current), "step" (message, and phase when a
+// task of several parts starts its next one, such as "setup" after an erase), "warning",
 // "in_use" (volumes) and "done" (status, message, volumes).
 
 namespace vaultik {
@@ -26,8 +27,10 @@ struct TaskEvent {
     int passes = 0;
     bool verifying = false;
     std::string text;    // progress: "current"; step, warning, in_use, done: "message"
-    std::string status;  // done: success, failed, cancelled or in_use
-    std::vector<std::string> volumes;  // in_use and done with status in_use
+    std::string status;  // done: success, failed, cancelled, in_use or setup_failed
+    std::string phase;   // step: the part of the task it belongs to ("setup"); empty when not given
+    bool erased = false;  // done: a whole disk was erased completely (also when its setup did not run or failed)
+    std::vector<std::string> volumes;  // in_use; done: the drives in use (in_use), or the ones set up
 };
 
 // Never throws: a line that is not such an event comes back as Type::Unknown.

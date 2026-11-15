@@ -366,6 +366,100 @@ struct NewDiskResult {
 NewDiskResult init_disk(const DiskInfo& d, const DiskIdentity& expected, const std::vector<int>& protected_disks,
                      const NewDiskOptions& options);
 
+// ---- erasing a whole disk, then setting it up again ------------------------------------------
+
+// Whether an MBR partition table can cover all of disk `d` (up to 2 TiB with 512-byte sectors);
+// plan_partitions refuses MBR on a larger disk.
+bool mbr_fits(const DiskInfo& d);
+
+// Checks, before whole disk `d` is erased, that it can be set up with `o` afterwards
+// (check_init_options and plan_partitions), so a setup that cannot work stops before anything is
+// written. A drive letter one of the disk's own volumes has now counts as free: the erase frees
+// it. Throws Error.
+void check_setup_after_erase(const DiskInfo& d, const NewDiskOptions& o);
+
+// What the disk set up after an erase must be: the identity the erase was pinned to (its serial
+// number and size), with no partition table any more (the erase removed it, so its id is gone).
+DiskIdentity erased_identity(const DiskIdentity& erased);
+
+// Why `now` (the disk at the erased disk's number, listed after the erase) is not disk `erased`
+// as it was erased, pinned to `pinned`: another number, serial number, size, sector size,
+// model, bus or device, or it is not blank (it has a partition table or partitions). Empty when
+// it is that disk, blank.
+std::string erased_disk_mismatch(const DiskInfo& now, const DiskInfo& erased, const DiskIdentity& pinned);
+
+// What erase_and_set_up does to the system, faked in tests.
+struct EraseSetupSteps {
+    // Opens the disk for erasing, checked (open_wipe_disk).
+    std::function<std::unique_ptr<WipeDevice>()> open;
+    // The disks now (list_tool_disks).
+    std::function<std::vector<DiskInfo>()> list;
+    // Sets up the disk found again after the erase, pinned to the identity given (init_disk with
+    // the protected disks, which checks everything again on its own).
+    std::function<NewDiskResult(const DiskInfo&, const DiskIdentity&, const NewDiskOptions&)> init;
+    // Whether a stop was asked for (checked once the erase ended, before the setup starts).
+    std::function<bool()> stop_asked;
+    // Called when the setup starts.
+    std::function<void()> on_setup;
+    // How often the disk is looked for again after the erase while the system has not caught up
+    // with it yet (not listed, or still with its old partition table), and how long between.
+    int tries = 10;
+    std::chrono::milliseconds wait{500};
+};
+
+struct EraseSetupResult {
+    WipeResult wipe;
+    bool set_up = false;      // the setup ran and finished
+    bool stopped = false;     // erased completely, but a stop was asked before the setup started
+    NewDiskResult setup;      // its volumes, when set_up
+    std::string setup_error;  // the disk was erased completely, but setting it up failed: why
+};
+
+// Erases whole disk `d` (pinned to `confirmed`) with `wipe`, then removes what the system knew of
+// its partition table, and with `setup` sets it up again on the same disk:
+//   - `setup` is checked first (check_setup_after_erase); nothing is opened when it cannot work;
+//   - the setup starts only after an erase that ended completely: every pass written in full,
+//     checked when wipe.verify asked for it, and no stop asked meanwhile. A cancelled erase
+//     throws Cancelled and a failed one Error, as wipe_device does (nothing is set up then); a
+//     stop asked just after the erase ended sets `stopped` and nothing is set up;
+//   - the disk set up is found again by its number and must be the disk erased
+//     (erased_disk_mismatch), then init is pinned to erased_identity(confirmed);
+//   - when the setup fails (also when the disk found is not the one erased), its reason is in
+//     setup_error and nothing throws: the erase itself succeeded.
+EraseSetupResult erase_and_set_up(const DiskInfo& d, const DiskIdentity& confirmed, const WipeOptions& wipe,
+                                  const std::optional<NewDiskOptions>& setup, const EraseSetupSteps& steps);
+
+// ---- what the app asks the engine for (kept here, without Qt, so it can be tested) ------------
+
+// The setup the app offers after erasing disk `d`: the name its volume had (the first label
+// found on it), else "Backup"; the drive letter it had (Windows, D to Z), else the first of
+// `free_letters` (letters no drive uses now, in order), else 0 (any free one).
+struct SetupDefaults {
+    std::string label;
+    char letter = 0;
+};
+SetupDefaults setup_defaults(const DiskInfo& d, const std::string& free_letters);
+
+// The drive letters the app offers for the disk set up after erasing `d`: the ones it has now
+// (the erase frees them), then `free_letters`, in order and each once.
+std::string setup_letters(const DiskInfo& d, const std::string& free_letters);
+
+// A whole disk erase as the app starts it.
+struct EraseRequest {
+    std::string disk;      // the engine's disk argument: its number (Windows) or device (Linux)
+    DiskIdentity shown;    // what the user saw (--expect-*)
+    std::string confirm;   // what the user typed (erase_text)
+    std::string method;    // zeros, random or dod3
+    bool verify = false;
+    std::optional<NewDiskOptions> setup;  // set it up again afterwards (--then-init)
+};
+// "disk wipe <disk> --expect-size ... --method ... --confirm ... [--verify] [--then-init ...]".
+std::vector<std::string> erase_disk_args(const EraseRequest& r);
+// "disk init <disk> ...": setting up the disk erased by `r` when the setup after the erase
+// failed, pinned to the erased disk (erased_identity: no partition table, so a disk that got one
+// meanwhile is refused); the confirmation is the one typed for the erase.
+std::vector<std::string> setup_again_args(const EraseRequest& r);
+
 // The sfdisk script for a new partition table (Linux; exposed for tests).
 std::string sfdisk_script(TableStyle style, const std::vector<NewPartition>& parts, std::uint32_t sector_size,
                           const std::string& filesystem);
