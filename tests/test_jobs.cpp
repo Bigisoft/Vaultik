@@ -1994,3 +1994,47 @@ TEST_CASE("shared health checks: one completed check of a repository counts for 
     no_rot.rot_check = false;
     CHECK_FALSE(rot_check_due(no_rot, {}, now));
 }
+
+TEST_CASE("the files-only check runs only when the job's own schedule calls for a check") {
+    constexpr std::uint64_t day = 864'000'000'000ull;
+    const std::uint64_t now = 1000 * day;
+    const auto check = [](RunKind kind, std::uint64_t at, bool rot_only = false) {
+        RunRecord r;
+        r.kind = kind;
+        r.started = at - 100;
+        r.finished = at;
+        r.rot_only = rot_only;
+        return r;
+    };
+    // Another job backing up to the same place did the full check 2 days ago.
+    const RunRecord others = check(RunKind::FullCheck, now - 2 * day);
+
+    // Only the monthly check on: between two of them nothing is due on its own, so no weekly
+    // files-only check with its "checked by another job" message either.
+    HealthPolicy monthly;
+    monthly.weekly = false;
+    const RunRecord own_full = check(RunKind::FullCheck, now - 10 * day);
+    CHECK_FALSE(due_check(monthly, {own_full}, now).has_value());
+    CHECK_FALSE(files_check_due(monthly, {own_full}, {own_full, others}, now));
+    // Its own check is a month old, another job's is recent: the files-only check stands in for
+    // it, once a month.
+    const RunRecord old_full = check(RunKind::FullCheck, now - 40 * day);
+    CHECK(due_check(monthly, {old_full}, now) == RunKind::FullCheck);
+    CHECK(files_check_due(monthly, {old_full}, {old_full, others}, now));
+    const RunRecord files = check(RunKind::Check, now - 8 * day, true);
+    CHECK_FALSE(files_check_due(monthly, {old_full, files}, {old_full, others}, now));
+    CHECK(files_check_due(monthly, {old_full, files}, {old_full, others}, now + 23 * day));
+    // The shared history is due too: the repository check itself runs instead.
+    CHECK_FALSE(files_check_due(monthly, {old_full}, {old_full}, now));
+
+    // Weekly and monthly on: the files-only check every week while another job checks.
+    HealthPolicy both;
+    CHECK(files_check_due(both, {old_full, files}, {old_full, others}, now));
+    CHECK_FALSE(files_check_due(both, {old_full, check(RunKind::Check, now - day, true)}, {old_full, others}, now));
+    // Its own check is recent: nothing due, nothing stands in for it.
+    CHECK_FALSE(files_check_due(both, {check(RunKind::FullCheck, now - day)}, {others}, now));
+    // Off: never.
+    HealthPolicy no_rot;
+    no_rot.rot_check = false;
+    CHECK_FALSE(files_check_due(no_rot, {old_full}, {old_full, others}, now));
+}

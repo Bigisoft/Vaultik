@@ -299,7 +299,14 @@ bool rot_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own
     for (const RunRecord& r : own_history)
         if (check_completed(r) || (r.kind == RunKind::FullCheck && r.status == RunStatus::Partial))
             last = std::max(last, r.finished);
-    return last == 0 || last + 7 * kDay <= now;
+    const std::uint64_t every = (policy.weekly ? 7 : 30) * kDay;
+    return last == 0 || last + every <= now;
+}
+
+bool files_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history,
+                     const std::vector<RunRecord>& shared_history, std::uint64_t now) {
+    return due_check(policy, own_history, now) && !due_check(policy, shared_history, now) &&
+           rot_check_due(policy, own_history, now);
 }
 
 namespace {

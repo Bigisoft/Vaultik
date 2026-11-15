@@ -383,9 +383,15 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
                                  std::uint64_t now);
 // Whether the silent damage check of this job's own files is due (FILETIME ticks), from the job's
 // own history (oldest first): when it is on and no check of this job, of the repository or of the
-// files alone, finished in the last 7 days. Asked when the repository check is not due because
-// another job using the same repository did it: that check compared that job's files, not these.
+// files alone, finished in the last 7 days (30 when only the monthly check is on).
 bool rot_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history, std::uint64_t now);
+// Whether a run checks this job's own files alone (the silent damage part of a check): when the
+// job's own history calls for a check of the repository, the history with the checks of the
+// other jobs backing up there (history_with_shared_checks) does not, because one of them checked
+// it (comparing its own files, not these), and rot_check_due says so. Never when the job's own
+// schedule asks for no check now (a job with only the monthly check, between two of them).
+bool files_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history,
+                     const std::vector<RunRecord>& shared_history, std::uint64_t now);
 // "Daily at 02:00", "Mon, Wed at 21:30", "Every 4 hours at :15", "Manual"; a paused job's in
 // brackets after "Paused": "Paused (Daily at 02:00)".
 std::string describe(const Schedule& schedule);

@@ -3614,7 +3614,8 @@ int cmd_run_job(const Args& a) {
     // it finds is its own entry in the history (and a notification from the tray).
     if (a.has("--no-check") || g_cancel.load()) return code;
     // A check of the same repository by another job counts for this one too.
-    const auto due = jobs::due_check(job->health, jobs::history_with_shared_checks(store, *job), os::now());
+    const std::vector<jobs::RunRecord> shared_history = jobs::history_with_shared_checks(store, *job);
+    const auto due = jobs::due_check(job->health, shared_history, os::now());
     if (due) {
         jobs::RunRecord check;
         try {
@@ -3633,10 +3634,11 @@ int cmd_run_job(const Args& a) {
             warning(std::string("could not record the health check: ") + e.what());
         }
         alert_for(*job, check, store.dir());
-    } else if (jobs::rot_check_due(job->health, jobs::combined_history(store, job->id, 500), os::now()) &&
-               job->image_disks.empty()) {
+    } else if (job->image_disks.empty() &&
+               jobs::files_check_due(job->health, jobs::combined_history(store, job->id, 500), shared_history, os::now())) {
         // Another job's check of this repository counts for the repository, but it compared that
-        // job's files on this computer: this job's own files get their silent damage check.
+        // job's files on this computer: this job's own files get their silent damage check, when
+        // its own schedule calls for a check now.
         jobs::RunRecord check;
         try {
             files_check(*repo, *job, check);
