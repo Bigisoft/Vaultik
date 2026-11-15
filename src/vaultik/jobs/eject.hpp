@@ -15,8 +15,10 @@ namespace vaultik::jobs {
 // storage, a network share or a drive that is not connected.
 std::string backup_drive_root(const Job& job);
 
-// Ejects the job's backup drive, holding its lock meanwhile so no run starts on it. Empty on
-// success, otherwise why not (in use by a run, not removable, refused by the system).
+// Ejects the job's backup drive, holding its lock and holding off new claims on it meanwhile
+// (see EjectHold), so no run or command starts on it. Empty on success, otherwise why not (in use
+// by a run or a command, also one with administrator rights, not removable, refused by the
+// system).
 std::string eject_backup_drive(const Job& job, const std::string& settings_dir);
 
 // "Eject when done" for the drive with this volume id (Job::repository_volume).

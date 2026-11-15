@@ -44,9 +44,13 @@ std::string eject_backup_drive(const Job& job, const std::string& settings_dir) 
         const std::string key = drive_lock_key(job);
         if (key.empty()) return "the backup of this job is not on a drive";
         const std::string lock_dir = os::join(settings_dir, "locks");
-        const DriveLock lock(key, lock_dir, std::chrono::milliseconds(0));
-        // Any command that has the repository or the drive open (a restore, a verify, a copy...).
-        if (drive_claimed(key, lock_dir)) throw DriveBusy("in use");
+        // No run may hold the drive, also not one with administrator rights this account cannot
+        // see into (fail closed)...
+        const DriveLock lock(key, lock_dir, std::chrono::milliseconds(0), {}, {}, true);
+        // ...nor may any command have the repository or the drive open (a restore, a verify, a
+        // copy...). Held until the drive is gone: a command that starts meanwhile waits for it.
+        const EjectHold hold(key, lock_dir);
+        if (hold.busy()) throw DriveBusy("in use");
         const std::string root = backup_drive_root(job);
         if (root.empty()) return "the backup of this job is not on a drive that is connected";
         const os::VolumeLocation where = os::volume_of(root);
