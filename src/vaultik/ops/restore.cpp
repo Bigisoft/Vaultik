@@ -564,9 +564,11 @@ void estimate_file(const Node& n, const std::string& path, const RestoreOptions&
     os::FileInfo info;
     os::ErrorCode err = 0;
     const bool exists = os::stat(path, info, err);
-    const bool file = exists && info.type == os::EntryType::File;
-    if (!(file && info.size == n.size)) e.needed += n.size;
-    if (options.overwrite && file) e.temporary = std::max(e.temporary, n.size);
+    const bool there = exists && info.type == os::EntryType::File && info.size == n.size;
+    // A file of another size (or no file) is counted in full in `needed` already; only one that is
+    // there with the same size and is replaced needs room for its new copy on top.
+    if (!there) e.needed += n.size;
+    else if (options.overwrite) e.temporary = std::max(e.temporary, n.size);
 }
 
 void estimate_dir(Repository& repo, const Id& tree_id, const std::string& dir, const RestoreOptions& options,

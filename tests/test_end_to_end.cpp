@@ -1522,7 +1522,9 @@ TEST_CASE("restore estimate: only a regular file of the same size is there alrea
     e = estimate_restore(*repo, snap, o);
     CHECK(e.temporary == 50000);
 
-    // Everything with overwrite: room for the largest file it replaces, on top of what is new.
+    // Everything with overwrite: room for the largest file of the same size it replaces, on top of
+    // what is new. The replaced file of another size (two.bin) is in `needed` in full, and is not
+    // counted twice.
     o.subpath.clear();
     write_file(restored_location(tmp.path / "all", src) / "two.bin", seeded_bytes(100, 1));
     write_file(restored_location(tmp.path / "all", src) / "one.bin", seeded_bytes(50000, 1));
@@ -1530,6 +1532,11 @@ TEST_CASE("restore estimate: only a regular file of the same size is there alrea
     e = estimate_restore(*repo, snap, o);
     CHECK(e.files == 2);
     CHECK(e.needed == 80000);
-    CHECK(e.temporary == 80000);
+    CHECK(e.temporary == 50000);
     CHECK(e.unknown_dirs == 0);
+    // Only files of another size are replaced: nothing on top.
+    fs::remove(restored_location(tmp.path / "all", src) / "one.bin");
+    e = estimate_restore(*repo, snap, o);
+    CHECK(e.needed == 130000);
+    CHECK(e.temporary == 0);
 }
