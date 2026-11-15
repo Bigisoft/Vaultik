@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/crypto/hash.hpp"
@@ -18,8 +19,6 @@
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
-
-#include <vector>
 #else
 #include <fcntl.h>
 #include <sys/file.h>
@@ -227,6 +226,9 @@ std::wstring eject_name(const std::string& hash) {
     return L"Global\\Vaultik-eject-" + wide(hash);
 }
 #else
+// Root's own folder for its marks (see open_root_mark).
+constexpr char kRootMarkDir[] = "/run/vaultik";
+
 // The file `name` in /run/lock, shared by every account: the one there when `usable` accepts it,
 // or a new one with `mode` (made at most once, also when several runs start at once). Root
 // removes one it cannot use and makes its own. -1 when there is none to use.
@@ -341,13 +343,50 @@ AccountFiles open_account_files(const std::string& name, const std::string& lock
     return f;
 }
 
-// Whether root holds its mark `name` in /run/lock (`write_only`: holds it alone, as an eject
-// does). Only root may open such a file, so only root can hold it; every account can see in
-// /proc/locks that it is held. False when that cannot be told.
-bool root_holds(const std::string& name, bool write_only) {
+// The folder of root's marks (see open_root_mark).
+std::string root_dir() {
+    const std::string set = hooks().root_dir;
+    return set.empty() ? std::string(kRootMarkDir) : set;
+}
+
+// Whether `dir` may hold root's marks: a folder (not a link) that root owns and nobody else may
+// write to, so that no account can put a file in a mark's place. `make`: made first (0755) when
+// missing.
+bool usable_root_dir(const std::string& dir, bool make) {
+    if (make && ::mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) return false;
     struct stat st{};
-    if (::lstat(("/run/lock/" + name).c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != hooks().root_uid)
-        return false;
+    return ::lstat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == 0 && (st.st_mode & 022) == 0;
+}
+
+// Root's mark `name` (root only; see the header): in root's own folder, where no account can make
+// a file in its place (in sticky /run/lock, an account that kept making one there could keep root
+// from its mark). Where that folder cannot be used, in /run/lock as before. -1 when neither can.
+int open_root_mark(const std::string& name) {
+    const std::string dir = root_dir();
+    if (usable_root_dir(dir, true)) {
+        const int fd = ::open((dir + "/" + name).c_str(), O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+        struct stat st{};
+        if (fd >= 0 && ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0) {
+            (void)::fchmod(fd, 0600);
+            return fd;
+        }
+        if (fd >= 0) ::close(fd);
+    }
+    return open_in_run_lock(name, 0600, roots);
+}
+
+// Whether root holds its mark `name` (`write_only`: holds it alone, as an eject does), in root's
+// folder or, as earlier versions kept it, in /run/lock. Only root may open such a file, so only
+// root can hold it; every account can see in /proc/locks that it is held. False when that cannot
+// be told.
+bool root_holds(const std::string& name, bool write_only) {
+    std::vector<std::pair<dev_t, ino_t>> files;
+    for (const std::string& dir : {root_dir(), std::string("/run/lock")}) {
+        struct stat st{};
+        if (::lstat((dir + "/" + name).c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == hooks().root_uid)
+            files.emplace_back(st.st_dev, st.st_ino);
+    }
+    if (files.empty()) return false;
     std::ifstream in("/proc/locks");
     std::string line;
     while (std::getline(in, line)) {
@@ -359,8 +398,9 @@ bool root_holds(const std::string& name, bool write_only) {
         unsigned dev_major = 0, dev_minor = 0;
         unsigned long long inode = 0;
         if (std::sscanf(where.c_str(), "%x:%x:%llu", &dev_major, &dev_minor, &inode) != 3) continue;
-        if (dev_major != major(st.st_dev) || dev_minor != minor(st.st_dev) || inode != st.st_ino) continue;
-        if (!write_only || type == "WRITE") return true;
+        for (const auto& [dev, ino] : files)
+            if (dev_major == major(dev) && dev_minor == minor(dev) && inode == ino && (!write_only || type == "WRITE"))
+                return true;
     }
     return false;
 }
@@ -537,7 +577,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     if (root) {
         // Its own lock first, which only root may open (and the mark of a root run), then the one
         // all accounts share.
-        own = open_in_run_lock(mark, 0600, roots);
+        own = open_root_mark(mark);
         shared = open_in_run_lock(name, 0644, own_or_roots);
         if (own < 0) {
             own = shared >= 0 ? shared : open_lock_file(name, lock_dir);
@@ -694,7 +734,7 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         int shared = -1;
         if (::geteuid() == 0) {
             // Root's mark first (an eject of root's holds it alone), then the claims file.
-            own = open_in_run_lock(mark, 0600, roots);
+            own = open_root_mark(mark);
             shared = open_lock_file(name, lock_dir);
             if (own < 0) std::swap(own, shared);
         } else {
@@ -814,7 +854,7 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     int shared = -1;
     if (root) {
         // Root's mark first (root's claims hold it), then the claims file of every account.
-        own = open_in_run_lock(mark, 0600, roots);
+        own = open_root_mark(mark);
         shared = open_lock_file(name, lock_dir);
         if (own < 0) std::swap(own, shared);
     } else {

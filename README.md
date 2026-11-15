@@ -612,7 +612,8 @@ the runs of every account through /run/lock, your own prune or eject too; as any
 hold that shared turn, a run waits for another account's run for 5 minutes at most and then goes
 on with a warning (both then share the drive's speed): it too can be delayed, never stopped. Your
 own runs still take turns with each other, whatever settings folder each uses (the installed app
-and a portable copy, say), and a run as root is waited for as long as it runs.
+and a portable copy, say), and a run as root is waited for as long as it runs. Root keeps its
+own marks in /run/vaultik, where no other account can put files.
 Another account can neither make your commands wait nor keep your eject refused; a command or
 eject as root still counts. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
 all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may

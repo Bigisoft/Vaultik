@@ -1323,7 +1323,7 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
         REQUIRE(::setuid(id) == 0);
     }
     if (os::get_env("VAULTIK_TEST_HOLD_FOREIGN") == "1")
-        testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(300)});
+        testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(300), {}});
     std::vector<int> flocked;
     if (what == "flock-ex" || what == "flock-sh") {
         const std::string files = os::get_env("VAULTIK_TEST_HOLD_FILES");
@@ -2073,6 +2073,7 @@ TEST_CASE("drive lock: the files in /run/lock are shared, opened without being m
     for (const std::string& k : {key, race, piped}) {
         const std::string uid = std::to_string(::geteuid());
         fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + drive_lock_name(k) + "." + uid + ".lock"), ec);
+        fs::remove(fs::path("/run/vaultik") / ("vaultik-drive-" + drive_lock_name(k) + ".root.lock"), ec);
     }
 }
 
@@ -2090,7 +2091,7 @@ TEST_CASE("drive lock: the runs of one account take turns, whatever settings fol
     const fs::path own_use = fs::path("/run/lock") / ("vaultik-use-" + name + "." + uid + ".lock");
     // Another account (or root) may hold the file all accounts share, which is waited for only a
     // short while (300 ms here): the account's own runs are waited for the whole wait all the same.
-    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(300)});
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(300), {}});
     {
         // The installed app's run, and a portable one (another settings folder).
         OtherProcess installed("lock", key, os::join(tmp.dir(), "installed"), tmp.path);
@@ -2166,14 +2167,55 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         REQUIRE(claim.held());
         OtherProcess eject("claimed", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
         CHECK(eject.held());
+        // Root's marks are in root's own folder, which no other account may write to, never in
+        // /run/lock, where another account could keep making files in their place.
+        struct stat st{};
+        REQUIRE(::lstat("/run/vaultik", &st) == 0);
+        CHECK(S_ISDIR(st.st_mode));
+        CHECK(st.st_uid == 0);
+        CHECK((st.st_mode & 0777) == 0755);
+        const fs::path mark = fs::path("/run/vaultik") / ("vaultik-drive-" + name + ".root.lock");
+        REQUIRE(::lstat(mark.c_str(), &st) == 0);
+        CHECK(S_ISREG(st.st_mode));
+        CHECK((st.st_mode & 0777) == 0600);
+        CHECK_FALSE(fs::exists(fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock")));
+        CHECK(fs::exists(fs::path("/run/vaultik") / ("vaultik-use-" + name + ".root.lock")));
+    }
+    {
+        // A file another account made where earlier versions kept root's mark, and holds: no
+        // matter, root's run holds its mark in its own folder and the other account sees it.
+        const fs::path squat = fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock");
+        OtherProcess squatter("flock-ex", {}, {}, tmp.path, "65534",
+                              {{"VAULTIK_TEST_HOLD_FILES", squat.string()}});
+        REQUIRE(squatter.held());
+        DriveLock run(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(0));
+        CHECK(run.held());
+        OtherProcess user("lock", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
+        CHECK_FALSE(user.held());
+        CHECK(squatter.release() == 0);
+        fs::remove(squat);
+    }
+    {
+        // Root's folder as a link (or not root's): not used, the marks go to /run/lock as before.
+        fs::create_directories(tmp.path / "real");
+        fs::create_directory_symlink(tmp.path / "real", tmp.path / "link");
+        testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(-1), (tmp.path / "link").string()});
+        {
+            DriveLock run(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(0));
+            CHECK(run.held());
+            CHECK(fs::is_empty(tmp.path / "real"));
+            CHECK(fs::exists(fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock")));
+        }
+        testing::set_drive_lock_hooks({});
+        fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock"));
     }
     std::error_code ec;
     fs::remove(file, ec);
     fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".lock"), ec);
     fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + name + ".65534.lock"), ec);
     fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".65534.lock"), ec);
-    fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock"), ec);
-    fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".root.lock"), ec);
+    fs::remove(fs::path("/run/vaultik") / ("vaultik-drive-" + name + ".root.lock"), ec);
+    fs::remove(fs::path("/run/vaultik") / ("vaultik-use-" + name + ".root.lock"), ec);
 }
 
 namespace {
@@ -2194,7 +2236,7 @@ struct ForeignFiles {
             file.replace(file.find('%'), 1, name);
             files.push_back(fs::path("/run/lock") / file);
         }
-        testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(300)});
+        testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(300), {}});
     }
     ~ForeignFiles() {
         testing::set_drive_lock_hooks({});

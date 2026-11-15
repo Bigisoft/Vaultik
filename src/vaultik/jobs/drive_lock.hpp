@@ -30,24 +30,25 @@
 // (the claim's wait). As the account's own programs can hold the turn, a job with administrator
 // rights that waited the whole wait goes on with a warning instead of giving up: such a program
 // can delay it, never stop it.
-// Linux: flock on a file in /run/lock, the same for every account: root's runs take turns with
-// the runs of every account (the user's prunes and ejects too). An account uses a file there that
+// Linux: flock on a file in /run/lock, the same for every account: root's runs take turns with the
+// runs of every account (the user's prunes and ejects too). An account uses a file there that
 // belongs to root or to itself (its own are readable by it alone); root uses any. As any account
 // that can open a file may hold its flock, a run does not wait long for one another account owns:
-// root's runs first take a lock of their own that only root may open, and an account's runs one
-// of their own (vaultik-drive-<hash>.<uid>.lock in /run/lock, used only when it is a file the
-// account owns, else the file in the given folder), so the runs of one account still take turns,
-// whatever settings folder each uses; then each waits for the shared one only a short while
-// (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning. A
-// run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock,
-// which every account can see held in /proc/locks but none can take): an account's run waits for
-// the shared lock for as long as that mark is held, then only the short while. The claims
-// (vaultik-use-<hash>.lock) work the same way with vaultik-use-<hash>.root.lock: an account's
-// claim waits only for an eject of its own or of root's, and its eject counts only the claims of
-// its own and of root's as busy. So another account can delay a run by kOtherAccountWait, never
-// stop it, and can neither delay a command of an account nor keep its eject busy (root's claims
-// and ejects still count every account's, fail closed). Where /run/lock cannot be used, a file in
-// the given folder instead.
+// root's runs first take a lock of their own that only root may open, and an account's runs one of
+// their own (vaultik-drive-<hash>.<uid>.lock in /run/lock, used only when it is a file the account
+// owns, else the file in the given folder), so the runs of one account still take turns, whatever
+// settings folder each uses; then each waits for the shared one only a short while
+// (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning. A run
+// of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock in
+// /run/vaultik, a folder only root may write to, so no account can put a file in its place;
+// /run/lock where that folder cannot be used; every account can see it held in /proc/locks but none
+// can take it): an account's run waits for the shared lock for as long as that mark is held, then
+// only the short while. The claims (vaultik-use-<hash>.lock) work the same way with
+// vaultik-use-<hash>.root.lock: an account's claim waits only for an eject of its own or of root's,
+// and its eject counts only the claims of its own and of root's as busy. So another account can
+// delay a run by kOtherAccountWait, never stop it, and can neither delay a command of an account
+// nor keep its eject busy (root's claims and ejects still count every account's, fail closed).
+// Where /run/lock cannot be used, a file in the given folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a
@@ -209,12 +210,14 @@ namespace testing {
 // For tests only (Linux; no-op elsewhere): lets a test without root stand in for other accounts
 // with processes of its own. `own_in_folder`: the account's own lock is the file in the given
 // folder, not the one in /run/lock (so a process of this account with another folder stands in
-// for another account); `root_uid`: the account whose marks in /run/lock (see above) count as
-// root's; `other_account_wait`: instead of kOtherAccountWait when not negative.
+// for another account); `root_uid`: the account whose marks (see above) count as root's;
+// `other_account_wait`: instead of kOtherAccountWait when not negative; `root_dir`: instead of
+// /run/vaultik when not empty.
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
     std::chrono::milliseconds other_account_wait{-1};
+    std::string root_dir;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 
