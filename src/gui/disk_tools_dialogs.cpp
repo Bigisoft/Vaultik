@@ -29,6 +29,7 @@
 #include "runner.h"
 #include "vaultik/image/disk_tools.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/util/exit_codes.hpp"
 
 using namespace vaultik;
 
@@ -112,9 +113,6 @@ QString filesystem_title(const std::string& fs) {
     return qs(fs);
 }
 
-// The engine's exit code when a disk was erased completely but setting it up failed.
-constexpr int kEngineSetupFailed = 9;
-
 // The disks, each with why it cannot be erased (empty when it can). A mounted partition (Linux)
 // is no reason: the user is asked whether to unmount it when the job starts.
 std::vector<std::pair<image::DiskInfo, std::string>> tool_disks() {
@@ -152,9 +150,6 @@ ElevatedResult run_disk_engine(QWidget* parent, const ElevatedTask& task, const 
 #endif
     return run_elevated_task(parent, task, args);
 }
-
-// The engine's exit code when a drive is in use by another program (see --force-dismount).
-constexpr int kEngineInUse = 6;
 
 // The drives of disk `d` a program may be using, as the user knows them. Windows: its drive
 // letters (or the disk itself), any of which may be the one in use (named when the engine did
@@ -197,14 +192,14 @@ bool ask_force_close(QWidget* parent, const QStringList& drives, const QString& 
 // The engine finds out when it locks the drives and names the ones in use (an "in_use" event;
 // in a window of its own, in a file: --in-use-file); the question names those, or `drives` (the
 // ones that may be in use) when it named none. Linux: `drives` are mounted, so the question
-// comes before it starts. Returns code kEngineInUse when the user did not agree.
+// comes before it starts. Returns code kExitInUse when the user did not agree.
 ElevatedResult run_disk_engine_forcing(QWidget* parent, const ElevatedTask& task, QStringList args,
                                        const QStringList& drives, const QString& yes) {
 #ifndef _WIN32
     if (!drives.isEmpty()) {
         if (!ask_force_close(parent, drives, yes)) {
             ElevatedResult r;
-            r.code = kEngineInUse;
+            r.code = kExitInUse;
             return r;
         }
         args << "--force-dismount";
@@ -218,14 +213,14 @@ ElevatedResult run_disk_engine_forcing(QWidget* parent, const ElevatedTask& task
         const QString file = dir.isValid() ? QDir::toNativeSeparators(dir.filePath(QStringLiteral("in-use.txt"))) : QString();
         if (!file.isEmpty()) first << "--in-use-file" << file;
         r = run_disk_engine(parent, task, first);
-        if (r.code == kEngineInUse && r.in_use.isEmpty() && !file.isEmpty()) {
+        if (r.code == kExitInUse && r.in_use.isEmpty() && !file.isEmpty()) {
             QFile f(file);
             if (f.open(QIODevice::ReadOnly | QIODevice::Text))
                 for (const QString& line : QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts))
                     if (!line.trimmed().isEmpty()) r.in_use << line.trimmed();
         }
     }
-    if (r.code != kEngineInUse || !r.error.isEmpty()) return r;
+    if (r.code != kExitInUse || !r.error.isEmpty()) return r;
     if (!ask_force_close(parent, r.in_use.isEmpty() ? drives : r.in_use, yes)) return r;
     args << "--force-dismount";
     return run_disk_engine(parent, task, args);
@@ -236,8 +231,8 @@ ElevatedResult run_disk_engine_forcing(QWidget* parent, const ElevatedTask& task
 QString outcome_text(const ElevatedResult& r, const QString& ok, const QString& in_use, const QString& not_done) {
     if (r.left_running) return QObject::tr("It goes on without Vaultik.");
     if (!r.error.isEmpty()) return QObject::tr("It did not start: %1").arg(r.error);
-    if (r.code == kEngineInUse) return in_use;
-    if (r.code == 0) return ok;
+    if (r.code == kExitInUse) return in_use;
+    if (r.code == kExitOk) return ok;
     if (!r.message.isEmpty()) return QObject::tr("%1: %2").arg(not_done, r.message);
     if (r.in_window) return QObject::tr("%1; its window showed why.").arg(not_done);
     return QObject::tr("%1 (the engine ended with code %2).").arg(not_done).arg(r.code);
@@ -804,7 +799,7 @@ void DriveCleanserDialog::start() {
             return label.isEmpty() ? QObject::tr("Disk erased and ready as %1 (%2)").arg(where, fs)
                                    : QObject::tr("Disk erased and ready as %1 (%2, %3)").arg(where, label, fs);
         };
-        task.action_code = kEngineSetupFailed;
+        task.action_code = kExitSetupFailed;
         task.action_heading = tr("Erased, but setting the drive up failed.");
         task.action_label = tr("Set up the drive");
     } else if (erased) {
@@ -821,13 +816,13 @@ void DriveCleanserDialog::start() {
     if (r.code == -2) return;
     const bool with_setup = erased && request.setup;
     const QString not_set_up = with_setup ? " " + tr("The drive was not set up.") : QString();
-    if (r.code == 4) {
+    if (r.code == kExitCancelled) {
         status_->setText(with_setup && r.erased
                              ? tr("Erased completely, but stopped before the drive was set up. The drive was not set up.")
                              : tr("Stopped before the end: what was erased so far stays erased.") + not_set_up);
-    } else if (with_setup && r.code == kEngineSetupFailed) {
+    } else if (with_setup && r.code == kExitSetupFailed) {
         status_->setText(r.message.isEmpty() ? tr("Erased, but setting the drive up failed.") : r.message);
-    } else if (with_setup && r.code == 0) {
+    } else if (with_setup && r.code == kExitOk) {
         const QString done = task.done_text(r);
         status_->setText(done.isEmpty() ? task.done : done);
     } else {

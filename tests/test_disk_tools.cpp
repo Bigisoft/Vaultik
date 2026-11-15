@@ -19,6 +19,7 @@
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/util/exit_codes.hpp"
 #include "vaultik/util/hex.hpp"
 #include "vaultik/util/task_events.hpp"
 
@@ -1947,7 +1948,7 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
                                             "--expect-size", std::to_string(id.size), "--expect-serial", id.serial,
                                             "--expect-id", id.id, "--json"};
         std::string output;
-        CHECK(run_cli(args, output) == 6);
+        CHECK(run_cli(args, output) == kExitInUse);
         CAPTURE(output);
         CHECK(output.find("\"event\":\"in_use\"") != std::string::npos);
         CHECK(output.find("\"status\":\"in_use\"") != std::string::npos);
@@ -2023,7 +2024,7 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
         auto held = std::make_unique<std::ifstream>(fs::path(std::u8string(root3.begin(), root3.end())) / "note.txt", std::ios::binary);
         REQUIRE(held->is_open());
         std::string output;
-        CHECK(run_cli(args, output) == 6);
+        CHECK(run_cli(args, output) == kExitInUse);
         CAPTURE(output);
         CHECK(read_all(os::join(root3, "note.txt")) == Bytes{'z'});
         const Bytes named = read_all(in_use_file);
@@ -2584,4 +2585,20 @@ TEST_CASE("drive cleanser: throughput (measured and logged, not checked)") {
     }
     attached.reset();
 #endif
+}
+
+TEST_CASE("exit codes: the values scripts rely on, each one in the help") {
+    // Never changed, only added to: scripts and the app read them.
+    static_assert(kExitOk == 0 && kExitError == 1 && kExitAuth == 2 && kExitPartial == 3 && kExitCancelled == 4);
+    static_assert(kExitLocked == 5 && kExitInUse == 6 && kExitNoChannel == 7 && kExitWaiting == 8);
+    static_assert(kExitSetupFailed == 9);
+    std::string output;
+    REQUIRE(run_cli({"--help"}, output) == kExitOk);
+    const std::size_t at = output.find("Exit codes:");
+    REQUIRE(at != std::string::npos);
+    std::string codes = output.substr(at);
+    for (char& c : codes)
+        if (c == '\n' || c == '\r') c = ' ';
+    for (int code = kExitOk; code <= kExitSetupFailed; ++code)
+        CHECK_MESSAGE(codes.find(" " + std::to_string(code) + " ") != std::string::npos, "exit code ", code);
 }

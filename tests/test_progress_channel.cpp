@@ -13,6 +13,7 @@
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/progress_channel.hpp"
 #include "vaultik/util/error.hpp"
+#include "vaultik/util/exit_codes.hpp"
 #include "vaultik/util/hex.hpp"
 #include "vaultik/util/task_events.hpp"
 
@@ -567,7 +568,7 @@ TEST_CASE("progress channel: the engine refuses a name that is not a channel and
 #ifdef _WIN32
     CHECK(code == 1);  // it ran without the channel (disk 99999 is not there)
 #else
-    CHECK(code == 7);  // it stopped at once
+    CHECK(code == kExitNoChannel);  // it stopped at once
 #endif
     CHECK(output.find("not a Vaultik progress channel") != std::string::npos);
 }
@@ -589,7 +590,7 @@ TEST_CASE("progress channel: a root engine that cannot use its channel stops at 
     const int code = os::run_command({VAULTIK_TEST_CLI, "init", "--repo", (dir / "repo").string(), "--progress-pipe", missing}, &output);
     os::set_env("VAULTIK_PASSWORD", saved);
     CAPTURE(output);
-    CHECK(code == 7);
+    CHECK(code == kExitNoChannel);
     CHECK(output.find("cannot use the app's progress channel") != std::string::npos);
     CHECK(output.find("nothing was done") != std::string::npos);
     CHECK_FALSE(fs::exists(dir));  // no repository was made

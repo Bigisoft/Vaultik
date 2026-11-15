@@ -14,16 +14,11 @@
 #include "runner.h"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/platform/progress_channel.hpp"
+#include "vaultik/util/exit_codes.hpp"
 
 using namespace vaultik;
 
 namespace {
-
-constexpr int kExitCancelled = 4;
-constexpr int kExitInUse = 6;  // the engine's exit code when a drive is in use
-#ifndef _WIN32
-constexpr int kExitNoChannel = 7;  // it could not use the progress channel and did nothing
-#endif
 
 // Windows: how long the engine may take to connect after it started (after the approval
 // prompt) before the window says the progress cannot be shown here; an engine that connects
@@ -386,7 +381,7 @@ void ElevatedTaskDialog::on_finished(int code, const QString& error, bool starte
         return;
     }
     bar_->setRange(0, 1000);
-    if (result_.code == 0) {
+    if (result_.code == kExitOk) {
         bar_->setValue(1000);
         const QString done = task_.done_text ? task_.done_text(result_) : QString();
         heading_->setText(done.isEmpty() ? task_.done : done);

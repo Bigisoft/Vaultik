@@ -471,7 +471,8 @@ Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished 
 were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
 tools) a drive is in use by another program (see [Drives in use](#drives-in-use)), `7` (Linux)
 the progress channel given with `--progress-pipe` cannot be used, so nothing was done, `8`
-(`run-job`) the backup drive is not connected, so the run waits for it (see below), `9`
+(`run-job`, `copy`) the backup drive is not connected, so the run waits for it (see below;
+`copy` returns it when the drive of the job's second copy is not connected), `9`
 (`disk wipe --then-init`) the disk was erased, but setting it up again failed.
 
 ### Old snapshots and space

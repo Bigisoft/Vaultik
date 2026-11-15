@@ -40,6 +40,7 @@
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/repo/local_backend.hpp"
 #include "vaultik/repo/repository.hpp"
+#include "vaultik/util/exit_codes.hpp"
 #include "vaultik/util/hex.hpp"
 
 using namespace vaultik;
@@ -602,9 +603,9 @@ TEST_CASE("a run whose backup drive is away waits quietly: recorded once, not al
     o.output = &output;
     o.timeout = std::chrono::seconds(60);
     o.extra_environment = {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "not used here"}};
-    CHECK(os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o) == 8);
+    CHECK(os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o) == kExitWaiting);
     CHECK(output.find("waiting for the backup drive") != std::string::npos);
-    CHECK(os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o) == 8);
+    CHECK(os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o) == kExitWaiting);
     const std::vector<RunRecord> recorded = store.history(j.id);
     REQUIRE(recorded.size() == 1);
     CHECK(recorded[0].status == RunStatus::Waiting);
