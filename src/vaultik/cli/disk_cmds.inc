@@ -144,7 +144,12 @@ int cmd_disk_init(const Args& a) {
     if (a.has("--gpt") && a.has("--mbr")) throw Error("give --gpt or --mbr, not both");
     image::NewDiskOptions o = new_disk_options(a, a.has("--mbr") ? image::TableStyle::Mbr : image::TableStyle::Gpt);
     for (const std::string& s : a.all("--size")) o.sizes.push_back(s == "rest" ? 0 : parse_size(s));
-    image::check_init_options(o);
+    {
+        // The letter is checked once the disk is known: one of its own volumes' letters is free.
+        image::NewDiskOptions no_letter = o;
+        no_letter.letter = 0;
+        image::check_init_options(no_letter);
+    }
 #ifdef _WIN32
     if (!os::process_elevated()) throw Error("setting up a disk needs administrator rights");
 #else
@@ -154,6 +159,8 @@ int cmd_disk_init(const Args& a) {
     const std::vector<image::DiskInfo> disks = image::list_tool_disks();
     image::DiskIdentity confirmed;
     const image::DiskInfo& d = tool_target(a, disks, a.positional[1], confirmed);
+    // Such as the letter a setup that failed after giving it left on the disk's own new volume.
+    image::check_init_options(o, d);
     const bool with_msr = o.style == image::TableStyle::Gpt && kMsrOnGpt;
     // Planned before the question, so a plan that cannot fit stops before anything is asked.
     const std::vector<image::NewPartition> plan = image::plan_partitions(d.size, d.sector_size, o.style, o.sizes, with_msr);
@@ -310,15 +317,19 @@ int cmd_disk_wipe(const Args& a) {
             const std::vector<int> keep = image::protected_tool_disks();
             steps.open = [&] { return image::open_wipe_disk(d, confirmed, keep, force); };
             steps.list = [] { return image::list_tool_disks(); };
-            steps.settle = [](const image::DiskInfo&, const image::NewDiskOptions& n) {
+            steps.settle = [](const image::DiskInfo& found, const image::NewDiskOptions& n) {
 #ifdef _WIN32
                 // The letter the erased volume had is free once Windows has let go of that volume,
                 // which may take a moment after the disk was seen blank. Asked of the drive
-                // letters Windows has given (not whether something can be read there).
-                const auto taken = [&] { return !image::letter_problem(n.letter, image::used_drive_letters()).empty(); };
+                // letters Windows has given (not whether something can be read there); a letter
+                // of the disk's own volume (a removable-media device keeps one) is free already.
+                const auto taken = [&] {
+                    return !image::letter_problem(found, n.letter, image::used_drive_letters()).empty();
+                };
                 for (int i = 0; i < 40 && n.letter != 0 && taken(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 #else
+                (void)found;
                 (void)n;
 #endif
             };
@@ -379,8 +390,12 @@ int cmd_disk_wipe(const Args& a) {
     if (!whole.set_up) {
         // Whether the setup had written the new partition table, and its id: setting it up
         // again is pinned to that table then, and to a blank disk otherwise.
-        const std::string failed = "Erased, but setting it up failed: " + whole.setup_error +
-                                   (whole.table_written ? " (a new partition table was written, id " + whole.table_id + ")" : "");
+        // An id without table_written: it failed while writing that table, which may be there.
+        const std::string failed =
+            "Erased, but setting it up failed: " + whole.setup_error +
+            (whole.table_written    ? " (a new partition table was written, id " + whole.table_id + ")"
+             : !whole.table_id.empty() ? " (it failed while writing a new partition table, id " + whole.table_id + ")"
+                                       : "");
         if (g_json)
             emit({{"event", "done"}, {"status", "setup_failed"}, {"erased", true}, {"table_written", whole.table_written},
                   {"table_id", whole.table_id}, {"message", failed}});

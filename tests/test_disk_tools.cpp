@@ -1050,6 +1050,9 @@ struct FakeSetup {
     std::vector<std::pair<DiskInfo, DiskIdentity>> inits;
     std::string init_fails;  // init throws this when set
     std::string table_id;    // init writes a partition table with this id first, when set
+    std::string planned_id;  // init is about to write a partition table with this id, when set
+    std::optional<std::uint32_t> used;  // the drive letters given now (the system's when not set)
+    std::vector<NewDiskOptions> options;  // what each init was asked for
     std::string missing_tool;  // the setup program the fake lookup does not find
     int settled = 0;
     bool stop_while_settling = false;
@@ -1065,6 +1068,8 @@ struct FakeSetup {
         };
         s.init = [this](const DiskInfo& d, const DiskIdentity& id, const NewDiskOptions& o) {
             CHECK_FALSE(o.force_dismount);
+            options.push_back(o);
+            if (!planned_id.empty() && o.on_table_planned) o.on_table_planned(planned_id);
             if (!table_id.empty() && o.on_table) o.on_table(table_id);
             if (!init_fails.empty()) throw Error(init_fails);
             inits.emplace_back(d, id);
@@ -1078,6 +1083,7 @@ struct FakeSetup {
             if (stop_while_settling) stop = true;
         };
         s.find_tool = [this](const std::string& name) { return name == missing_tool ? std::string() : "/fake/bin/" + name; };
+        if (used) s.used_letters = [this] { return *used; };
         s.tries = 2;
         s.wait = std::chrono::milliseconds(1);
         return s;
@@ -1416,6 +1422,218 @@ TEST_CASE("erase then set up: setting the drive up again is pinned to the table 
     again.id = "gpt-99999999-2222-3333-4444-555555555555";
     CHECK_FALSE(identity_mismatch(written, again).empty());
     CHECK_FALSE(identity_mismatch(written, erased_identity(pinned)).empty());
+}
+
+namespace {
+
+// A USB stick or SD card as Windows lists it once erased: no partition table, but the one volume
+// Windows keeps of a removable-media device, RAW (no file system), over the whole disk, with
+// its drive letter.
+DiskInfo erased_stick(const DiskInfo& d) {
+    DiskInfo s = blank_of(d);
+    s.removable = true;
+    s.bus = d.bus;
+    DiskVolume v;
+    v.name = "\\\\?\\Volume{stick}\\";
+    v.mount = "F:\\";
+    v.offset = 0;
+    v.length = d.size;
+    s.volumes.push_back(v);
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("erase then set up: what belongs to the disk being set up itself") {
+    DiskInfo d = listed_disk();
+    d.removable = true;
+    const DiskIdentity pinned = identity_of(d);
+    // Its own letters (F:, of its volume), D to Z only.
+    CHECK(own_letter(d, 'F'));
+    CHECK(own_letter(d, 'f'));
+    CHECK_FALSE(own_letter(d, 'G'));
+    CHECK_FALSE(own_letter(blank_of(d), 'F'));
+    DiskInfo on_c = d;
+    on_c.volumes[0].mount = "C:\\";
+    CHECK_FALSE(own_letter(on_c, 'C'));
+    DiskInfo in_folder = d;
+    in_folder.volumes[0].mount = "C:\\mnt\\F\\";
+    CHECK_FALSE(own_letter(in_folder, 'C'));
+    const auto bit = [](char c) { return 1u << (c - 'A'); };
+    const std::uint32_t used = bit('C') | bit('F') | bit('G');
+    CHECK(letter_problem(d, 'F', used).empty());  // its own: free once it is set up
+    CHECK(letter_problem(d, 'G', used) == "G: is in use already");  // another drive's: never
+    CHECK(letter_problem(d, 'H', used).empty());
+    CHECK(letter_problem(on_c, 'C', used) == "the drive letter must be one of D to Z");
+    CHECK(letter_problem(blank_of(d), 'F', used) == "F: is in use already");
+
+    // The volume Windows keeps of an erased removable-media device.
+    const DiskInfo stick = erased_stick(d);
+    CHECK(only_whole_disk_raw_volume(stick));
+    DiskInfo labelled_raw = stick;
+    labelled_raw.volumes[0].filesystem = "RAW";
+    CHECK(only_whole_disk_raw_volume(labelled_raw));
+    // Anything else is not: a fixed disk, a file system, not from the start, longer than the disk,
+    // a part of a volume on several disks, two volumes, a partition table.
+    DiskInfo fixed = stick;
+    fixed.removable = false;
+    DiskInfo with_fs = stick;
+    with_fs.volumes[0].filesystem = "FAT32";
+    DiskInfo later = stick;
+    later.volumes[0].offset = kMiB;
+    later.volumes[0].length = d.size - kMiB;
+    DiskInfo longer = stick;
+    longer.volumes[0].length = d.size + 512;
+    DiskInfo empty = stick;
+    empty.volumes[0].length = 0;
+    DiskInfo spans = stick;
+    spans.volumes[0].spans = true;
+    DiskInfo two = stick;
+    two.volumes.push_back(stick.volumes[0]);
+    DiskInfo table = stick;
+    table.style = "MBR";
+    table.id = "mbr-12345678";
+    DiskInfo parts = stick;
+    parts.partitions = 1;
+    for (const DiskInfo& no : {fixed, with_fs, later, longer, empty, spans, two, table, parts}) {
+        CHECK_FALSE(only_whole_disk_raw_volume(no));
+        CHECK_FALSE(erased_disk_mismatch(no, d, pinned).empty());
+    }
+    CHECK_FALSE(only_whole_disk_raw_volume(blank_of(d)));
+#ifdef _WIN32
+    // Blank as Windows shows an erased stick: set up, with the letter of its own volume.
+    CHECK(erased_disk_mismatch(stick, d, pinned).empty());
+#else
+    // Linux keeps its rule: no volume at all, and nothing on the whole disk.
+    CHECK_FALSE(erased_disk_mismatch(stick, d, pinned).empty());
+#endif
+    DiskInfo whole_fs = stick;
+    whole_fs.filesystem = "vfat";
+    CHECK_FALSE(erased_disk_mismatch(whole_fs, d, pinned).empty());
+    DiskInfo other_serial = stick;
+    other_serial.serial = "SER-2";
+    CHECK_FALSE(erased_disk_mismatch(other_serial, d, pinned).empty());
+
+    NewDiskOptions setup;
+    setup.label = "Stick";
+    WipeOptions w;
+#ifdef _WIN32
+    SUBCASE("an erased stick is set up, with the letter its own volume has") {
+        setup.letter = 'F';
+        FakeSetup f;
+        f.after = {stick};
+        f.used = bit('C') | bit('F');  // F: is the stick's own volume
+        const EraseSetupResult r = erase_and_set_up(d, pinned, w, setup, f.steps());
+        CAPTURE(r.setup_error);
+        CHECK(r.set_up);
+        REQUIRE(f.options.size() == 1);
+        CHECK(f.options[0].letter == 'F');
+        CHECK(r.setup.warnings.empty());
+        CHECK_NOTHROW(check_init_options(setup, stick));
+    }
+    SUBCASE("a letter another drive took while the disk was erased is not taken from it") {
+        setup.letter = 'F';
+        FakeSetup f;
+        f.after = {blank_of(d)};  // F: is not the disk's any more
+        f.used = bit('C') | bit('F');
+        const EraseSetupResult r = erase_and_set_up(d, pinned, w, setup, f.steps());
+        CAPTURE(r.setup_error);
+        CHECK(r.set_up);
+        REQUIRE(f.options.size() == 1);
+        CHECK(f.options[0].letter == 0);  // the letter Windows gives it
+        REQUIRE(r.setup.warnings.size() == 1);
+        CHECK(r.setup.warnings[0].starts_with("F: was in use by another drive"));
+        // Free still: the one asked for, no warning.
+        FakeSetup free;
+        free.after = {blank_of(d)};
+        free.used = bit('C');
+        const EraseSetupResult kept = erase_and_set_up(d, pinned, w, setup, free.steps());
+        CHECK(kept.set_up);
+        REQUIRE(free.options.size() == 1);
+        CHECK(free.options[0].letter == 'F');
+        CHECK(kept.setup.warnings.empty());
+    }
+#endif
+    SUBCASE("a setup that fails while writing the partition table tells the id it was writing") {
+        FakeSetup f;
+        f.after = {blank_of(d)};
+        f.planned_id = "gpt-ABCDEF01-2222-3333-4444-555555555555";
+        f.init_fails = "writing a new partition table on disk 7: the device is not ready";
+        const EraseSetupResult r = erase_and_set_up(d, pinned, w, setup, f.steps());
+        CHECK_FALSE(r.set_up);
+        CHECK_FALSE(r.table_written);
+        CHECK(r.table_id == f.planned_id);
+        // Written after all: both are told.
+        FakeSetup g;
+        g.after = {blank_of(d)};
+        g.planned_id = g.table_id = f.planned_id;
+        g.init_fails = "format.com failed";
+        const EraseSetupResult w2 = erase_and_set_up(d, pinned, w, setup, g.steps());
+        CHECK(w2.table_written);
+        CHECK(w2.table_id == f.planned_id);
+    }
+}
+
+TEST_CASE("erase then set up: setting the drive up again accepts only the disk as the failed setup left it") {
+    const DiskInfo d = listed_disk();
+    const DiskIdentity pinned = identity_of(d);
+    const std::string table = "gpt-ABCDEF01-2222-3333-4444-555555555555";
+    CHECK(valid_table_id(table));
+    CHECK(valid_table_id("gpt-abcdef01-2222-3333-4444-555555555555"));
+    CHECK(valid_table_id("mbr-0A1B2C3D"));
+    for (const char* bad : {"", "gpt-", "mbr-", "gpt-AB", "mbr-0A1B2C3", "mbr-0A1B2C3D4", "mbr-0A1B2C3G",
+                                  "MBR-0A1B2C3D", "gpt-ABCDEF01-2222-3333-4444-55555555555", "gpt-ABCDEF01-2222-3333-4444-5555555555555",
+                                  "gpt-ABCDEF0122222-3333-4444-555555555555", "gpt-ABCDEF01-2222-3333-4444-55555555555X",
+                                  "gpt-ABCDEF01-2222-3333-4444-555555555555 --force-dismount", "--force-dismount",
+                                  "mbr-0A1B2C3D\n--x", "gpt-{ABCDEF01-2222-3333-4444-555555555555}"})
+        CHECK_FALSE(valid_table_id(bad));
+
+    DiskInfo written = blank_of(d);
+    written.style = "GPT";
+    written.id = table;
+    written.partitions = 2;
+    const DiskInfo blank = blank_of(d);
+    SUBCASE("nothing written: blank only") {
+        SetupAgainPin p = setup_again_pin(&blank, d, pinned, false, {});
+        CHECK(p.ok);
+        CHECK(p.table_id.empty());
+        p = setup_again_pin(&written, d, pinned, false, {});
+        CHECK_FALSE(p.ok);
+        CHECK_FALSE(p.why.empty());
+    }
+    SUBCASE("written: exactly that table") {
+        SetupAgainPin p = setup_again_pin(&written, d, pinned, true, table);
+        CHECK(p.ok);
+        CHECK(p.table_id == table);
+        CHECK_FALSE(setup_again_pin(&blank, d, pinned, true, table).ok);
+        CHECK_FALSE(setup_again_pin(&written, d, pinned, true, {}).ok);  // which one is not known
+        CHECK_FALSE(setup_again_pin(&written, d, pinned, true, "gpt-99999999-2222-3333-4444-555555555555").ok);
+    }
+    SUBCASE("failed while writing it: blank, or exactly that table") {
+        SetupAgainPin p = setup_again_pin(&blank, d, pinned, false, table);
+        CHECK(p.ok);
+        CHECK(p.table_id.empty());
+        p = setup_again_pin(&written, d, pinned, false, table);
+        CHECK(p.ok);
+        CHECK(p.table_id == table);
+        DiskInfo other_table = written;
+        other_table.id = "gpt-99999999-2222-3333-4444-555555555555";
+        CHECK_FALSE(setup_again_pin(&other_table, d, pinned, false, table).ok);
+        DiskInfo other_disk = written;
+        other_disk.serial = "SER-2";
+        CHECK_FALSE(setup_again_pin(&other_disk, d, pinned, false, table).ok);
+    }
+    SUBCASE("an id that is not one the engine writes is never passed on") {
+        DiskInfo odd = written;
+        odd.id = "gpt-AB --force-dismount";
+        const SetupAgainPin p = setup_again_pin(&odd, d, pinned, true, odd.id);
+        CHECK_FALSE(p.ok);
+        CHECK(p.table_id.empty());
+        CHECK_FALSE(setup_again_pin(&blank, d, pinned, false, "--letter").ok);
+    }
+    SUBCASE("a disk that is not connected any more") {
+        CHECK_FALSE(setup_again_pin(nullptr, d, pinned, false, {}).ok);
+    }
 }
 
 TEST_CASE("new disk: drive letters are known by the letters Windows gave, not by whether they can be read") {
@@ -1971,6 +2189,133 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
             CHECK(it->style == want_style);
             CHECK(os::is_directory(v->mount));
             MESSAGE("ran: disk wipe --then-init " << style << " --fs " << fs << " on the test's virtual disk");
+        }
+
+        // The letter the disk's own drive has, asked for again (what the app offers by default):
+        // free once the erase took that drive away.
+        const auto done_of = [](const test::EngineRun& run) {
+            TaskEvent done;
+            for (const std::string& line : run.lines)
+                if (parse_task_event(line).type == TaskEvent::Type::Done) done = parse_task_event(line);
+            return done;
+        };
+        const auto warnings_of = [](const test::EngineRun& run) {
+            std::vector<std::string> out;
+            for (const std::string& line : run.lines) {
+                const TaskEvent e = parse_task_event(line);
+                if (e.type == TaskEvent::Type::Warning) out.push_back(e.text);
+            }
+            return out;
+        };
+        std::string own;
+        {
+            const std::optional<DiskVolume> ex = volume_named("VTReadyEx");
+            REQUIRE(ex.has_value());
+            REQUIRE(ex->mount.size() == 3);
+            own = upper_ascii(ex->mount.substr(0, 1));
+        }
+        CAPTURE(own);
+        {
+            const test::EngineRun run = test::run_engine_with_channel(
+                wipe_args({"--then-init", "gpt", "--fs", "ntfs", "--label", "VTOwn", "--letter", own}),
+                [](const std::string&, os::ProgressServer&) {});
+            CAPTURE(run.output);
+            CHECK(run.code == 0);
+            const TaskEvent done = done_of(run);
+            CHECK(done.status == "success");
+            REQUIRE(done.volumes.size() == 1);
+            CHECK(upper_ascii(done.volumes[0]) == own + ":");
+            CHECK(warnings_of(run).empty());
+            const std::optional<DiskVolume> v = volume_named("VTOwn");
+            REQUIRE(v.has_value());
+            CHECK(upper_ascii(v->mount.substr(0, 2)) == own + ":");
+            MESSAGE("ran: disk wipe --then-init with the disk's own drive letter");
+        }
+
+        // Set up the drive again after a setup that failed once it had written its partition
+        // table and given the drive its letter: pinned to that table (--expect-id), with that
+        // letter, which the disk's own new drive has now.
+        {
+            disks = list_tool_disks();
+            it = std::find_if(disks.begin(), disks.end(), [&](const DiskInfo& d) { return d.number == number; });
+            REQUIRE(it != disks.end());
+            const DiskInfo left = *it;
+            REQUIRE(left.style == "GPT");
+            REQUIRE(own_letter(left, own[0]));
+            const SetupAgainPin pin = setup_again_pin(&left, left, identity_of(left), true, left.id);
+            CAPTURE(pin.why);
+            REQUIRE(pin.ok);
+            CHECK(pin.table_id == left.id);
+            EraseRequest req;
+            req.disk = std::to_string(number);
+            req.shown = identity_of(left);
+            req.confirm = erase_text(left);
+            NewDiskOptions again;
+            again.filesystem = "exfat";
+            again.label = "VTAgain";
+            again.letter = own[0];
+            req.setup = again;
+            std::vector<std::string> args = setup_again_args(req, pin.table_id);
+            CHECK(std::find(args.begin(), args.end(), "--expect-id") != args.end());
+            args.push_back("--json");
+            std::string output;
+            CHECK(run_cli(args, output) == 0);
+            CAPTURE(output);
+            CHECK(output.find("\"status\":\"success\"") != std::string::npos);
+            const std::optional<DiskVolume> v = volume_named("VTAgain");
+            REQUIRE(v.has_value());
+            CHECK(v->filesystem == "exFAT");
+            CHECK(upper_ascii(v->mount.substr(0, 2)) == own + ":");
+            // Pinned to that table: once it is another one, nothing is written.
+            std::string refused;
+            CHECK(run_cli(args, refused) != 0);
+            CHECK(volume_named("VTAgain").has_value());
+            MESSAGE("ran: disk init --expect-id with the letter the disk's own drive has");
+        }
+
+        // A letter another drive takes while the disk is erased stays with that drive: the new
+        // drive keeps the one Windows gives it, and a warning says so.
+        {
+            const std::string free = free_letters(used_drive_letters());
+            std::string taken;
+            for (const char c : free)
+                if (std::string(1, c) != own) taken = std::string(1, c);
+            REQUIRE_FALSE(taken.empty());
+            CAPTURE(taken);
+            const std::string subst = os::get_env("SystemRoot") + "\\System32\\subst.exe";
+            const std::string folder = t.file("subst");
+            fs::create_directories(fs::path(std::u8string(folder.begin(), folder.end())));
+            struct Unsubst {
+                std::string tool, drive;
+                ~Unsubst() {
+                    std::string ignored;
+                    os::run_command({tool, drive, "/D"}, &ignored);
+                }
+            } unsubst{subst, taken + ":"};
+            bool took = false;
+            const test::EngineRun run = test::run_engine_with_channel(
+                wipe_args({"--method", "dod3", "--verify", "--then-init", "gpt", "--fs", "ntfs", "--label", "VTTaken", "--letter",
+                           taken}),
+                [&](const std::string& line, os::ProgressServer&) {
+                    if (took || parse_task_event(line).type != TaskEvent::Type::Progress) return;
+                    std::string out;
+                    took = os::run_command({subst, taken + ":", folder}, &out) == 0;
+                });
+            CAPTURE(run.output);
+            REQUIRE(took);
+            CHECK(run.code == 0);
+            const TaskEvent done = done_of(run);
+            CHECK(done.status == "success");
+            REQUIRE(done.volumes.size() == 1);
+            CHECK(upper_ascii(done.volumes[0]) != taken + ":");
+            const std::vector<std::string> warned = warnings_of(run);
+            REQUIRE(warned.size() == 1);
+            CHECK(warned[0].starts_with(taken + ": was in use by another drive"));
+            CHECK(os::is_directory(taken + ":\\"));  // still the other drive's
+            const std::optional<DiskVolume> v = volume_named("VTTaken");
+            REQUIRE(v.has_value());
+            CHECK(upper_ascii(v->mount.substr(0, 2)) == upper_ascii(done.volumes[0]));
+            MESSAGE("ran: disk wipe --then-init with a letter another drive took during the erase");
         }
     }
     attached.reset();

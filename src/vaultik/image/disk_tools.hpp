@@ -348,6 +348,9 @@ struct NewDiskOptions {
     std::string mount;        // Linux: mount the first partition here (empty: not mounted)
     std::vector<std::uint64_t> sizes;  // empty: one partition over the whole disk
     std::function<void(const std::string&)> on_step;  // what it does now, for the progress
+    // Called just before the new partition table is written, with the id it gets: a write that
+    // fails part way may leave the disk with that table (or a part of it).
+    std::function<void(const std::string& table_id)> on_table_planned;
     // Called once the new partition table is on the disk, with its id (DiskInfo::id, such as
     // "gpt-<GUID>"): from then on the disk is not blank any more, also when a later step fails.
     std::function<void(const std::string& table_id)> on_table;
@@ -365,6 +368,25 @@ std::string free_letters(std::uint32_t used);
 // Why letter `letter` cannot be given to a new volume when `used` letters are taken: not one of
 // D to Z, or in use already. Empty when it can.
 std::string letter_problem(char letter, std::uint32_t used);
+
+// ---- what belongs to the disk being set up itself ------------------------------------------------
+// Setting a disk up (also after erasing it) removes its own volumes, so a drive letter one of them
+// has is not in the way of its new volume, and the volume Windows keeps of a removable-media disk
+// without a partition table does not make that disk "not blank". Everything else (a letter another
+// drive has, a volume with a file system) is kept exactly as strict.
+
+// Whether `letter` (D to Z, any case) is the drive letter of one of disk `d`'s own volumes
+// ("F:\" gives F).
+bool own_letter(const DiskInfo& d, char letter);
+// letter_problem for the first new volume of disk `d`: a letter of one of its own volumes
+// (own_letter) counts as free, any other must not be in `used`; the range is always checked.
+std::string letter_problem(const DiskInfo& d, char letter, std::uint32_t used);
+// Whether all disk `d` shows besides "no partition table" is what Windows keeps of a
+// removable-media device without one: a single volume of that disk itself, with no file system
+// (RAW), from the disk's first byte and no longer than the disk. Windows makes it for such a
+// device, gives it the drive letter, and never takes it away, so it says nothing about what is
+// on the disk. False for anything else (a partition table, two volumes, a file system, a fixed disk).
+bool only_whole_disk_raw_volume(const DiskInfo& d);
 
 // How the new volume gets its drive letter (Windows; faked in tests).
 struct LetterSteps {
@@ -393,6 +415,11 @@ LetterResult give_letter(char wanted, const std::string& automatic, const Letter
 // label fits it (NTFS 32 characters, exFAT 11, ext4 16; no characters the file system refuses),
 // the letter is a free one (letter_problem with used_drive_letters()). Throws Error.
 void check_init_options(const NewDiskOptions& o);
+// The same for setting up disk `target`: a letter one of its own volumes has counts as free
+// (letter_problem(target, ...)), as setting it up removes that volume. disk init, the setup after
+// an erase and init_disk all check this way, so a letter that went to the disk's own new volume
+// (a setup that failed after giving it) does not stop setting it up again.
+void check_init_options(const NewDiskOptions& o, const DiskInfo& target);
 
 // The programs setting up a disk with file system `filesystem` runs, each with the package that
 // has it: on Linux sfdisk, the mkfs tool of that file system, and mount when `mount` is set;
@@ -423,7 +450,7 @@ bool mbr_fits(const DiskInfo& d);
 // (check_init_options, plan_partitions, and on Linux the programs of setup_tools, looked for
 // with `find`, find_setup_tool when not given), so a setup that cannot work stops before
 // anything is written. A drive letter one of the disk's own volumes has now counts as free: the
-// erase frees it. Throws Error.
+// erase frees it (check_init_options with the disk). Throws Error.
 void check_setup_after_erase(const DiskInfo& d, const NewDiskOptions& o,
                              const std::function<std::string(const std::string&)>& find = {});
 
@@ -434,9 +461,11 @@ DiskIdentity erased_identity(const DiskIdentity& erased);
 // Why `now` (the disk at the erased disk's number, listed after the erase) is not disk `erased`
 // as it was erased, pinned to `pinned`: another number, serial number, size, sector size,
 // model, bus or device, or it is not blank (a partition table, partitions, volumes, or on the
-// whole disk a file system or encryption the system knows). With `table_id` (the id of the
-// partition table a setup that failed later had written), it must have exactly that partition
-// table instead of being blank. Empty when it is that disk, as it must be.
+// whole disk a file system or encryption the system knows). On Windows the one volume it keeps
+// of a removable-media device without a partition table (only_whole_disk_raw_volume) does not
+// count; on Linux any volume does. With `table_id` (the id of the partition table a setup that
+// failed later had written), it must have exactly that partition table instead of being blank.
+// Empty when it is that disk, as it must be.
 std::string erased_disk_mismatch(const DiskInfo& now, const DiskInfo& erased, const DiskIdentity& pinned,
                                  const std::string& table_id = {});
 
@@ -457,6 +486,9 @@ struct EraseSetupSteps {
     std::function<void(const DiskInfo&, const NewDiskOptions&)> settle;
     // How setup programs are found (see check_setup_after_erase); find_setup_tool when not given.
     std::function<std::string(const std::string&)> find_tool;
+    // The drive letters given now (used_drive_letters when not given): a letter asked for that
+    // another drive took while the disk was erased is not taken from it (see erase_and_set_up).
+    std::function<std::uint32_t()> used_letters;
     // Called when the setup starts.
     std::function<void()> on_setup;
     // How often the disk is looked for again after the erase while the system has not caught up
@@ -472,8 +504,11 @@ struct EraseSetupResult {
     bool stopped = false;     // erased completely, but a stop was asked before the setup started
     NewDiskResult setup;      // its volumes, when set_up
     std::string setup_error;  // the disk was erased completely, but setting it up failed: why
-    // The setup wrote a new partition table (also when a later step failed), and its id: the
-    // disk is not blank any more, and setting it up again must be pinned to that table.
+    // The setup wrote a new partition table (also when a later step failed): the disk is not
+    // blank any more, and setting it up again must be pinned to that table. table_id is its id;
+    // it is set already when the setup was about to write it (table_written false then): a write
+    // that failed part way may have left that table, so setting it up again accepts the disk
+    // blank or with exactly that table (setup_again_pin).
     bool table_written = false;
     std::string table_id;
 };
@@ -487,6 +522,9 @@ struct EraseSetupResult {
 //     stop asked just after the erase ended sets `stopped` and nothing is set up;
 //   - the disk set up is found again by its number and must be the disk erased
 //     (erased_disk_mismatch), then init is pinned to erased_identity(confirmed);
+//   - a drive letter asked for that another drive has once the system let go of the erased
+//     volumes (steps.settle) is not taken from it: the new volume keeps the letter Windows gives
+//     it, and a warning in setup.warnings says so;
 //   - when the setup fails (also when the disk found is not the one erased), its reason is in
 //     setup_error and nothing throws: the erase itself succeeded. table_written and table_id
 //     tell whether it had written the new partition table by then.
@@ -524,6 +562,25 @@ std::vector<std::string> erase_disk_args(const EraseRequest& r);
 // got one meanwhile is refused), or with exactly `table_id` when the failed setup had written
 // that table (--expect-id). The confirmation is the one typed for the erase.
 std::vector<std::string> setup_again_args(const EraseRequest& r, const std::string& table_id = {});
+
+// Whether `id` is a partition table id as the engine writes one: "gpt-" and a GUID
+// (8-4-4-4-12 hex digits) or "mbr-" and 8 hex digits. Anything else (from the engine's done
+// event) is never passed on as --expect-id.
+bool valid_table_id(const std::string& id);
+
+// What setting the drive up again after a failed setup is pinned to, for disk `now` as it is
+// listed now (the disk at the number of `erased`, or none): the setup's done event said
+// `table_written` and `table_id`. `ok` false with `why` when it must not be offered: a table id
+// that is missing (written) or not valid (valid_table_id), or a disk that is not the erased one,
+// blank (erased_disk_mismatch). Written: exactly that table. Only planned (table_id without
+// table_written): blank, or exactly that table (a write that failed part way). Neither: blank.
+struct SetupAgainPin {
+    bool ok = false;
+    std::string table_id;  // --expect-id for setup_again_args; empty: blank
+    std::string why;
+};
+SetupAgainPin setup_again_pin(const DiskInfo* now, const DiskInfo& erased, const DiskIdentity& shown, bool table_written,
+                              const std::string& table_id);
 
 // The sfdisk script for a new partition table (Linux; exposed for tests).
 // With `label_id` ("gpt-<UUID>" or "mbr-<8 hex digits>", as DiskInfo::id), the table gets

@@ -603,7 +603,7 @@ std::unique_ptr<FillFile> create_fill_file(const std::string& path) {
 
 NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, const std::vector<int>& protected_disks,
                      const NewDiskOptions& o) {
-    check_init_options(o);
+    check_init_options(o, chosen);
     const std::string fs = o.filesystem.empty() ? std::string("ext4") : o.filesystem;
     // Every program it runs, found before anything is written.
     const std::vector<std::pair<std::string, std::string>> tools = setup_tools(fs, !o.mount.empty());
@@ -649,6 +649,8 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
     }
     const std::string new_id = std::string(o.style == TableStyle::Gpt ? "gpt-" : "mbr-") + text;
     const std::string script = sfdisk_script(o.style, parts, sector, fs, new_id);
+    // An sfdisk that fails part way may leave this table: the caller knows its id already.
+    if (o.on_table_planned) o.on_table_planned(new_id);
     run_tool({"/bin/sh", "-c", "printf '%s' \"$3\" | exec \"$1\" --wipe always --wipe-partitions always --no-reread -- \"$2\"",
               "sh", sfdisk, held, script},
              "sfdisk");

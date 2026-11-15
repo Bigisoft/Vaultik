@@ -841,9 +841,10 @@ void DriveCleanserDialog::start() {
 void DriveCleanserDialog::set_up_again(const image::DiskInfo& erased, const image::EraseRequest& request,
                                        const ElevatedResult& failed) {
     // Only the disk that was erased: still blank, or (when the failed setup had written a new
-    // partition table) with exactly that table. The setup's own confirmation is the one typed
-    // for the erase, and the engine refuses a disk that is not as pinned.
-    const std::string table_id = failed.table_written ? u8(failed.table_id) : std::string();
+    // partition table, or failed while writing it) with exactly that table, whose id must be one
+    // the engine writes (never anything else as --expect-id). The setup's own confirmation is
+    // the one typed for the erase, and the engine refuses a disk that is not as pinned.
+    const std::string table_id = u8(failed.table_id);
     if (failed.table_written && table_id.empty()) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The drive was not set up: a partition table was written, but which one is not known. "
@@ -852,11 +853,11 @@ void DriveCleanserDialog::set_up_again(const image::DiskInfo& erased, const imag
     }
     const std::vector<image::DiskInfo> now = image::list_tool_disks();
     auto current = std::find_if(now.begin(), now.end(), [&](const image::DiskInfo& x) { return x.number == erased.number; });
-    const std::string other = current == now.end() ? "the disk is not connected any more"
-                                                   : image::erased_disk_mismatch(*current, erased, request.shown, table_id);
-    if (!other.empty()) {
+    const image::SetupAgainPin pin =
+        image::setup_again_pin(current == now.end() ? nullptr : &*current, erased, request.shown, failed.table_written, table_id);
+    if (!pin.ok) {
         QMessageBox::warning(this, windowTitle(),
-                             tr("The drive was not set up: %1. Use Set up a new disk to set it up.").arg(qs(other)));
+                             tr("The drive was not set up: %1. Use Set up a new disk to set it up.").arg(qs(pin.why)));
         return;
     }
     // A card reader without a serial number tells one card from another of the same size only by
@@ -871,7 +872,7 @@ void DriveCleanserDialog::set_up_again(const image::DiskInfo& erased, const imag
     ask.exec();
     if (ask.clickedButton() != yes) return;
     ElevatedTask task{windowTitle(), tr("Setting up the drive..."), QString(), tr("The disk is ready to use.")};
-    const ElevatedResult r = run_disk_engine_forcing(this, task, qt_args(image::setup_again_args(request, table_id)), {},
+    const ElevatedResult r = run_disk_engine_forcing(this, task, qt_args(image::setup_again_args(request, pin.table_id)), {},
                                                      tr("Force close and set up"));
     if (r.code == -2) return;
     status_->setText(outcome_text(r, tr("The disk is ready to use."), tr("The disk was not set up: it is in use."),

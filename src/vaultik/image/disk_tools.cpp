@@ -887,21 +887,8 @@ bool mbr_fits(const DiskInfo& d) {
 
 void check_setup_after_erase(const DiskInfo& d, const NewDiskOptions& o,
                              const std::function<std::string(const std::string&)>& find) {
-    NewDiskOptions now = o;
-#ifdef _WIN32
-    if (o.letter != 0) {
-        const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(o.letter)));
-        // One of the disk's own letters is in use until the erase frees it; its range is still
-        // checked (one that is not of this disk is checked to be free by check_init_options).
-        for (const DiskVolume& v : d.volumes)
-            if (v.mount.size() >= 2 && v.mount.size() <= 3 && v.mount[1] == ':' &&
-                std::toupper(static_cast<unsigned char>(v.mount[0])) == c) {
-                if (c < 'D' || c > 'Z') throw Error("the drive letter must be one of D to Z");
-                now.letter = 0;
-            }
-    }
-#endif
-    check_init_options(now);
+    // One of the disk's own letters is in use until the erase frees it (own_letter).
+    check_init_options(o, d);
     if (o.style == TableStyle::Mbr && !mbr_fits(d))
         throw Error("an MBR partition table cannot use more than 2 TiB of this disk; use GPT");
     plan_partitions(d.size, d.sector_size, o.style, o.sizes, o.style == TableStyle::Gpt && kMsrOnGpt);
@@ -932,8 +919,15 @@ std::string erased_disk_mismatch(const DiskInfo& now, const DiskInfo& erased, co
     if (!table_id.empty()) return {};  // the partition table the setup wrote, exactly (identity_mismatch)
     if (now.style != "RAW" || now.partitions != 0 || !now.id.empty())
         return name + " is not blank after the erase (it has a partition table)";
+#ifdef _WIN32
+    // The volume Windows keeps of a removable-media device (a USB stick, an SD card) without a
+    // partition table stays, with its letter, also once the disk is blank.
+    const bool kept_by_windows = only_whole_disk_raw_volume(now);
+#else
+    const bool kept_by_windows = false;
+#endif
     // A whole disk with a file system or encryption of its own (Linux) has no partition table either.
-    if (!now.volumes.empty() || !now.filesystem.empty())
+    if ((!now.volumes.empty() && !kept_by_windows) || !now.filesystem.empty())
         return name + " is not blank after the erase (it holds " +
                (now.filesystem.empty() ? std::string("a volume") : now.filesystem) + ")";
     return {};
@@ -984,6 +978,24 @@ EraseSetupResult erase_and_set_up(const DiskInfo& d, const DiskIdentity& confirm
         }
         NewDiskOptions o = *setup;
         o.force_dismount = false;  // a blank disk has no volume to take away from anyone
+        // A letter another drive got while the disk was erased (hours, maybe) stays with that
+        // drive: the new volume keeps the one Windows gives it, and the warning says so.
+        std::string letter_warning;
+        if (o.letter != 0) {
+            const std::uint32_t used = steps.used_letters ? steps.used_letters() : used_drive_letters();
+            if (!letter_problem(*found, o.letter, used).empty()) {
+                const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(o.letter)));
+                letter_warning = std::string(1, c) +
+                                 ": was in use by another drive by the time the disk was erased, so the drive keeps the "
+                                 "letter Windows gave it";
+                o.letter = 0;
+            }
+        }
+        const auto planned = o.on_table_planned;
+        o.on_table_planned = [&r, planned](const std::string& id) {
+            r.table_id = id;  // a write that fails part way may leave it
+            if (planned) planned(id);
+        };
         const auto told = o.on_table;
         o.on_table = [&r, told](const std::string& id) {
             r.table_written = true;
@@ -991,6 +1003,7 @@ EraseSetupResult erase_and_set_up(const DiskInfo& d, const DiskIdentity& confirm
             if (told) told(id);
         };
         r.setup = steps.init(*found, erased_identity(confirmed), o);
+        if (!letter_warning.empty()) r.setup.warnings.insert(r.setup.warnings.begin(), letter_warning);
         r.set_up = true;
     } catch (const std::exception& e) {
         // Also a volume in use (VolumesInUse): the erase is done, so it is never run again.
@@ -1074,6 +1087,49 @@ std::vector<std::string> setup_again_args(const EraseRequest& r, const std::stri
     return args;
 }
 
+bool valid_table_id(const std::string& id) {
+    const auto hex = [&](std::size_t from, std::size_t n) {
+        for (std::size_t i = from; i < from + n; ++i)
+            if (!std::isxdigit(static_cast<unsigned char>(id[i]))) return false;
+        return true;
+    };
+    if (id.size() == 12 && id.starts_with("mbr-")) return hex(4, 8);
+    if (id.size() != 40 || !id.starts_with("gpt-")) return false;
+    for (const std::size_t dash : {12u, 17u, 22u, 27u})
+        if (id[dash] != '-') return false;
+    return hex(4, 8) && hex(13, 4) && hex(18, 4) && hex(23, 4) && hex(28, 12);
+}
+
+SetupAgainPin setup_again_pin(const DiskInfo* now, const DiskInfo& erased, const DiskIdentity& shown, bool table_written,
+                              const std::string& table_id) {
+    SetupAgainPin p;
+    if (table_written && table_id.empty()) {
+        p.why = "a partition table was written, but which one is not known";
+        return p;
+    }
+    if (!table_id.empty() && !valid_table_id(table_id)) {
+        p.why = "the id of the partition table the setup wrote is not one it writes";
+        return p;
+    }
+    if (now == nullptr) {
+        p.why = "the disk is not connected any more";
+        return p;
+    }
+    if (table_written) {
+        p.table_id = table_id;
+        p.why = erased_disk_mismatch(*now, erased, shown, table_id);
+    } else {
+        p.why = erased_disk_mismatch(*now, erased, shown);
+        // The table it was about to write when it failed may be there (or a part of it).
+        if (!p.why.empty() && !table_id.empty() && erased_disk_mismatch(*now, erased, shown, table_id).empty()) {
+            p.why.clear();
+            p.table_id = table_id;
+        }
+    }
+    p.ok = p.why.empty();
+    return p;
+}
+
 std::string sfdisk_script(TableStyle style, const std::vector<NewPartition>& parts, std::uint32_t sector_size,
                           const std::string& filesystem, const std::string& label_id) {
     const bool gpt = style == TableStyle::Gpt;
@@ -1111,6 +1167,24 @@ std::string letter_problem(char letter, std::uint32_t used) {
     // BitLocker drive): Windows has given it, so it cannot be given again.
     if ((used & (1u << (c - 'A'))) != 0) return std::string(1, c) + ": is in use already";
     return {};
+}
+
+bool own_letter(const DiskInfo& d, char letter) {
+    const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(letter)));
+    return c >= 'D' && c <= 'Z' && own_letters(d).find(c) != std::string::npos;
+}
+
+std::string letter_problem(const DiskInfo& d, char letter, std::uint32_t used) {
+    // Its own volume goes when the disk is set up, and its letter with it.
+    if (own_letter(d, letter)) return {};
+    return letter_problem(letter, used);
+}
+
+bool only_whole_disk_raw_volume(const DiskInfo& d) {
+    if (!d.removable || d.style != "RAW" || d.partitions != 0 || !d.id.empty() || d.volumes.size() != 1) return false;
+    const DiskVolume& v = d.volumes[0];
+    const std::string fs = trimmed_upper(v.filesystem);
+    return !v.spans && v.offset == 0 && v.length > 0 && v.length <= d.size && (fs.empty() || fs == "RAW");
 }
 
 LetterResult give_letter(char wanted, const std::string& automatic, const LetterSteps& steps) {
@@ -1202,16 +1276,21 @@ std::vector<std::pair<std::string, std::string>> setup_tools(const std::string& 
 #endif
 }
 
-void check_init_options(const NewDiskOptions& o) {
+namespace {
+
+// check_init_options, for disk `target` when given (its own letters count as free).
+void check_options(const NewDiskOptions& o, const DiskInfo* target) {
     std::string fs = o.filesystem;
 #ifdef _WIN32
     if (fs.empty()) fs = "ntfs";
     if (fs != "ntfs" && fs != "exfat") throw Error("Windows can format a new disk as ntfs or exfat (not " + fs + ")");
     if (o.letter != 0) {
-        const std::string why = letter_problem(o.letter, used_drive_letters());
+        const std::uint32_t used = used_drive_letters();
+        const std::string why = target != nullptr ? letter_problem(*target, o.letter, used) : letter_problem(o.letter, used);
         if (!why.empty()) throw Error(why);
     }
 #else
+    (void)target;
     if (fs.empty()) fs = "ext4";
     if (fs != "ntfs" && fs != "exfat" && fs != "ext4") throw Error("the file system must be ext4, ntfs or exfat");
     if (o.letter != 0) throw Error("drive letters are a Windows thing; give --mount <folder> instead");
@@ -1228,6 +1307,16 @@ void check_init_options(const NewDiskOptions& o) {
         if (fs == "exfat" && std::strchr("*?/\\|,;:+=[]<>", c) != nullptr)
             throw Error(std::string("an exFAT label cannot hold ") + c);
     }
+}
+
+}  // namespace
+
+void check_init_options(const NewDiskOptions& o) {
+    check_options(o, nullptr);
+}
+
+void check_init_options(const NewDiskOptions& o, const DiskInfo& target) {
+    check_options(o, &target);
 }
 
 }  // namespace vaultik::image

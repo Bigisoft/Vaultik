@@ -1507,13 +1507,19 @@ std::unique_ptr<FillFile> create_fill_file(const std::string& path) {
 
 NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, const std::vector<int>& protected_disks,
                      const NewDiskOptions& o) {
-    check_init_options(o);
+    {
+        NewDiskOptions no_letter = o;  // the letter is checked below, against the disk as it is now
+        no_letter.letter = 0;
+        check_init_options(no_letter);
+    }
     const std::string fs = o.filesystem.empty() ? std::string("ntfs") : o.filesystem;
     const bool gpt = o.style == TableStyle::Gpt;
     const auto step = [&](const std::string& s) {
         if (o.on_step) o.on_step(s);
     };
     const DiskInfo d = recheck(chosen, expected, protected_disks);
+    // A letter of one of its own volumes counts as free: they are removed below.
+    check_init_options(o, d);
     const std::vector<NewPartition> parts = plan_partitions(d.size, d.sector_size, o.style, o.sizes, gpt);
     const std::string disk_name = "disk " + std::to_string(d.number);
     const std::string format = system_tool("format.com");
@@ -1545,6 +1551,8 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
             cd.PartitionStyle = PARTITION_STYLE_MBR;
             cd.Mbr.Signature = signature;
         }
+        // A write that fails part way may leave this table: the caller knows its id already.
+        if (o.on_table_planned) o.on_table_planned(new_id);
         if (!DeviceIoControl(h, IOCTL_DISK_CREATE_DISK, &cd, sizeof cd, nullptr, 0, &got, nullptr))
             throw_last_error("writing a new partition table on " + disk_name);
         // From here on the disk is not blank any more, whatever fails later.
