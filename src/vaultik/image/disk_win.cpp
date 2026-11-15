@@ -1641,6 +1641,16 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
         const std::string root = given.root;
         step("Formatting " + root.substr(0, 2) + " as " + (fs == "ntfs" ? std::string("NTFS") : std::string("exFAT")));
         const std::string label = o.label.empty() ? std::string("New Volume") : o.label;
+        // format.com goes by the letter: checked once more, right before, to be bound to the
+        // volume just made on this disk (a letter given to another drive meanwhile is never
+        // formatted).
+        {
+            wchar_t bound[MAX_PATH + 1] = {};
+            const std::string now =
+                GetVolumeNameForVolumeMountPointW(widen(root).c_str(), bound, MAX_PATH) ? narrow(bound) : std::string();
+            const std::string problem = format_letter_problem(root, vol->name, now);
+            if (!problem.empty()) throw Error(problem);
+        }
         std::string output;
         const int code = os::run_command({format, root.substr(0, 2), fs == "ntfs" ? "/FS:NTFS" : "/FS:exFAT", "/Q",
                                           "/V:" + label, "/Y"},

@@ -1760,6 +1760,21 @@ struct FakeLetters {
 
 }  // namespace
 
+TEST_CASE("new disk: a volume is formatted only while its letter is still bound to it") {
+    const std::string vol = "\\\\?\\Volume{1b2c3d4e-0000-0000-0000-100000000000}\\";
+    // Still bound: whatever the case, with or without the closing backslash.
+    CHECK(format_letter_problem("F:\\", vol, vol).empty());
+    CHECK(format_letter_problem("F:\\", vol, "\\\\?\\volume{1B2C3D4E-0000-0000-0000-100000000000}").empty());
+    // The letter was given to another drive meanwhile, or it cannot be told: nothing is formatted.
+    const std::string other = "\\\\?\\Volume{99999999-0000-0000-0000-100000000000}\\";
+    const std::string why = format_letter_problem("F:\\", vol, other);
+    CHECK(why.find("F:") != std::string::npos);
+    CHECK(why.find("nothing was formatted") != std::string::npos);
+    CHECK_FALSE(format_letter_problem("F:\\", vol, "").empty());
+    CHECK_FALSE(format_letter_problem("F:\\", "", "").empty());
+    CHECK_FALSE(format_letter_problem("F:\\", "", other).empty());
+}
+
 TEST_CASE("new disk: the automatic drive letter stays when the one asked for cannot be given") {
     for (const bool one_only : {false, true}) {
         CAPTURE(one_only);

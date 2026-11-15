@@ -411,6 +411,12 @@ struct LetterResult {
 // letter. Throws Error only when it ends up without any letter.
 LetterResult give_letter(char wanted, const std::string& automatic, const LetterSteps& steps);
 
+// Right before a new volume is formatted (format.com takes a drive letter, not the volume): empty
+// when the letter `root` ("F:\") is still bound to the volume set up, `expected`
+// ("\\?\Volume{GUID}\"), as `bound` shows (what Windows says the letter is bound to now; empty
+// when it cannot tell, which counts as another volume); otherwise why nothing is formatted.
+std::string format_letter_problem(const std::string& root, const std::string& expected, const std::string& bound);
+
 // Checks the options before anything is written: the file system exists on this system, the
 // label fits it (NTFS 32 characters, exFAT 11, ext4 16; no characters the file system refuses),
 // the letter is a free one (letter_problem with used_drive_letters()). Throws Error.

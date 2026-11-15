@@ -1244,7 +1244,9 @@ how far it is in a status window of Vaultik (see
 [Tasks with administrator rights](#tasks-with-administrator-rights)).
 Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
 `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` after locking and dismounting the disk's volumes, and formats
-with `format.com` (from the Windows system folder); Linux uses `sfdisk` (through the disk opened
+with `format.com` (from the Windows system folder), which takes a drive letter: right before it
+runs, the letter is checked to still belong to the new volume, and nothing is formatted when
+another drive has it now; Linux uses `sfdisk` (through the disk opened
 exclusively and checked) and `mkfs.ext4` (`mkfs.ntfs`, `mkfs.exfat`).
 
 ```
