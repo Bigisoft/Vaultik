@@ -433,7 +433,8 @@ a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses th
 Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished but some files
 were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
 tools) a drive is in use by another program (see [Drives in use](#drives-in-use)), `7` (Linux)
-the progress channel given with `--progress-pipe` cannot be used, so nothing was done.
+the progress channel given with `--progress-pipe` cannot be used, so nothing was done, `8`
+(`disk wipe --then-init`) the disk was erased, but setting it up again failed.
 
 ### Old snapshots and space
 
@@ -1104,7 +1105,18 @@ sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
 
 - **A whole disk:** every byte of it, then its partition table goes too, so Windows shows it as
   not initialised (Linux: no partitions). The same guards and typed `ERASE DISK <number>` as
-  above.
+  above. A disk without a partition table has no drive, so File Explorer does not show it; that
+  is why **When done, set the drive up again** is checked: right after the erase the disk is set
+  up for use again, in the same run and with the same approval prompt, so it comes back ready
+  (for example as `F:` named `Backup`, NTFS). You choose the partition table (GPT, or MBR on a
+  disk of 2 TB or less), the file system (NTFS or exFAT; on Linux ext4, NTFS or exFAT), the name
+  (the one the drive had, or `Backup`) and the drive letter (the one it had, when that is still
+  free). This is the same setup as **Set up a new disk...**, on the very disk that was erased: it
+  is checked again to be that disk (serial number, size, model and connection, and blank now)
+  before anything is written. The setup runs only after an erase that went through to the end
+  (and passed its check, with **Read the last pass back**); after an erase that was stopped or
+  failed, the drive is not set up, and the window says so. When the erase worked but the setup
+  failed, the window says why and offers **Set up the drive** to try the setup again.
 - **One drive (volume):** only that partition (`ERASE E:`, Linux `ERASE sdb1`); never the one
   Windows or Vaultik runs from, nor one with a page or hibernation file, nor an EFI system,
   reserved, recovery or active partition, nor a volume on a dynamic disk or over several disks.
@@ -1132,8 +1144,13 @@ command line `--confirm` gives the confirmation beforehand, for scripts, and `--
 `--expect-serial` and `--expect-id` (which the Vaultik window passes along) make it stop when the
 disk or drive is another one by then.
 
+On the command line, `--then-init gpt` (or `mbr`) does the same after erasing a whole disk,
+with `--fs`, `--label` and `--letter` (Linux: `--mount`) as for `disk init`. It ends with exit
+code 8 when the disk was erased but setting it up failed.
+
 ```
 vaultik disk wipe 2 --method dod3 --verify
+vaultik disk wipe 2 --then-init gpt --fs ntfs --label Backup --letter F
 vaultik disk wipe --volume E: --confirm "ERASE E:"
 vaultik disk wipe-free D:
 ```
