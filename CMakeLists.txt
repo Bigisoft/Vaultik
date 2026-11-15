@@ -86,6 +86,7 @@ add_library(vaultik_core STATIC
     src/vaultik/util/qr.cpp
     src/vaultik/util/ttf.cpp
     src/vaultik/util/resources.cpp
+    src/vaultik/util/keep_awake.cpp
     src/vaultik/crypto/hash.cpp
     src/vaultik/crypto/md5.cpp
     src/vaultik/chunker/fastcdc.cpp
@@ -131,6 +132,11 @@ add_library(vaultik_core STATIC
     src/vaultik/repo/backends.cpp
     src/vaultik/repo/sftp_location.cpp
     src/vaultik/jobs/job.cpp
+    src/vaultik/jobs/drive_lock.cpp
+    src/vaultik/jobs/check_state.cpp
+    src/vaultik/jobs/protection.cpp
+    src/vaultik/jobs/eject.cpp
+    src/vaultik/jobs/run_log.cpp
     src/vaultik/jobs/drive_history.cpp
     src/vaultik/jobs/alerts.cpp
     src/vaultik/jobs/report.cpp
@@ -185,6 +191,7 @@ if(WIN32)
         src/vaultik/util/resources_win.cpp
         src/vaultik/crypto/crypto_win.cpp
         src/vaultik/platform/os_win.cpp
+        src/vaultik/platform/eject_win.cpp
         src/vaultik/ops/mount_win.cpp
         src/vaultik/ops/apps_win.cpp
         src/vaultik/platform/drive_health_win.cpp
@@ -201,12 +208,14 @@ if(WIN32)
         $<$<CONFIG:Release>:/O2 /Gy /Gw>)
     target_link_libraries(vaultik_core PUBLIC ${VAULTIK_ZSTD} BLAKE3::blake3 nlohmann_json::nlohmann_json
                           bcrypt advapi32 crypt32 ole32 vssapi winhttp ws2_32 shell32 ProjectedFSLib wbemuuid oleaut32 netapi32 virtdisk
+                          setupapi cfgmgr32
                           libssh2::libssh2)
 else()
     target_sources(vaultik_core PRIVATE
         src/vaultik/util/resources_posix.cpp
         src/vaultik/crypto/crypto_openssl.cpp
         src/vaultik/platform/os_posix.cpp
+        src/vaultik/platform/eject_posix.cpp
         src/vaultik/ops/mount_posix.cpp
         src/vaultik/ops/apps_posix.cpp
         src/vaultik/platform/drive_health_posix.cpp
@@ -366,6 +375,8 @@ add_executable(vaultik_tests
     tests/test_formats.cpp
     tests/test_end_to_end.cpp
     tests/test_jobs.cpp
+    tests/test_checks.cpp
+    tests/test_faults.cpp
     tests/test_report.cpp
     tests/test_forecast.cpp
     tests/test_kit.cpp

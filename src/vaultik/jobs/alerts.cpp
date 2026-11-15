@@ -2,7 +2,9 @@
 
 #include "vaultik/jobs/admin_jobs.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <thread>
 
 #include <nlohmann/json.hpp>
@@ -55,7 +57,186 @@ void expect_ok(const http::Response& r, const std::string& what) {
     throw Error(what + ": HTTP " + std::to_string(r.status) + (body.empty() ? "" : " " + body));
 }
 
+// "1.50 GiB", as the command line writes sizes.
+std::string size_text(std::uint64_t bytes) {
+    static constexpr const char* kUnits[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB"};
+    double v = static_cast<double>(bytes);
+    int unit = 0;
+    while (v >= 1024.0 && unit < 5) {
+        v /= 1024.0;
+        ++unit;
+    }
+    char buf[32];
+    if (unit == 0) std::snprintf(buf, sizeof buf, "%llu B", static_cast<unsigned long long>(bytes));
+    else std::snprintf(buf, sizeof buf, "%.2f %s", v, kUnits[unit]);
+    return buf;
+}
+
 }  // namespace
+
+std::optional<Alert> alert_for_run(const AlertSettings& s, const std::string& job_name, const RunRecord& r,
+                                   const std::string& computer) {
+    // Nothing to tell: no channel, or a run that only waited for its drive (drive_missing_alert
+    // speaks up when that goes on too long).
+    if (!s.any() || r.status == RunStatus::Waiting) return std::nullopt;
+    Alert a;
+    a.job = job_name;
+    const std::string where = " Open Vaultik on " + computer + " for the details.";
+    const bool check = is_check(r.kind) || r.kind == RunKind::RestoreTest;
+    if (check && s.on_damage && r.rot_files > 0 && !(r.status == RunStatus::Failed && r.errors > 0)) {
+        // Files on this computer that changed by themselves: the backup is fine, the drive is not.
+        a.level = Alert::Level::Critical;
+        a.event = "rot";
+        a.title = "Health check of " + job_name + " found files that changed by themselves";
+        a.message = std::to_string(r.rot_files) +
+                    " file(s) on the computer changed although nothing wrote to them, which a failing drive does. "
+                    "The backup holds the earlier copy." + where;
+    } else if (check_not_finished(r)) {
+        // A health check that could not run or stopped part way (the drive was unplugged, say): it
+        // does not count as done, and nobody would know the backup went unchecked.
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Warning;
+        a.event = "check-failed";
+        a.title = "Health check of " + job_name + " could not finish";
+        a.message = "The backup was not fully checked; the check runs again after the next backup." + where;
+    } else if (check) {
+        // Damage found.
+        if (!s.on_damage || r.status != RunStatus::Failed || r.errors == 0) return std::nullopt;
+        a.level = Alert::Level::Critical;
+        a.event = "damage";
+        a.title = (r.kind == RunKind::RestoreTest ? "Test restore of " : "Health check of ") + job_name + " found damage";
+        a.message = "Some backed-up data could not be read back or restored (" + std::to_string(r.errors) +
+                    " problem(s))." + where;
+    } else if (!r.alert.empty()) {
+        a.level = Alert::Level::Critical;
+        a.event = "ransomware";
+        a.title = job_name + ": files may be encrypted by ransomware";
+        a.message = "Many files changed the way ransomware changes them. Disconnect the backup drive." + where;
+    } else if (r.status == RunStatus::Failed && r.reason == "password") {
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Critical;
+        a.event = "password";
+        a.title = "Backup of " + job_name + " cannot run: its password is not saved on this PC";
+        a.message = "Scheduled backups of this job do not run until the password is saved in the job." + where;
+    } else if (r.status == RunStatus::Failed) {
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Critical;
+        a.event = "failed";
+        a.title = "Backup of " + job_name + " failed";
+        a.message = "No version was saved." + where;
+    } else if (!r.drive.empty() && s.on_damage) {
+        a.level = Alert::Level::Warning;
+        a.event = "drive";
+        a.title = "The backup drive of " + job_name + " reports a problem";
+        a.message = "Copy the backup to another drive soon, before it fails." + where;
+    } else if (r.status == RunStatus::Partial) {
+        if (!s.on_failure) return std::nullopt;
+        a.level = Alert::Level::Warning;
+        a.event = "partial";
+        a.title = "Backup of " + job_name + " skipped " + std::to_string(r.errors) + " item(s)";
+        a.message = "A version was saved without them." + where;
+    } else if (r.status == RunStatus::Success && r.kind == RunKind::Backup && s.on_success) {
+        a.level = Alert::Level::Info;
+        a.event = "success";
+        a.title = "Backup of " + job_name + " completed";
+        a.message = std::to_string(r.files) + " files, " + size_text(r.new_bytes) + " new";
+    } else {
+        return std::nullopt;
+    }
+    a.title += " (" + computer + ")";
+    return a;
+}
+
+std::optional<std::uint64_t> waiting_since(const std::vector<RunRecord>& history, RunKind kind) {
+    std::optional<std::uint64_t> since;
+    for (auto it = history.rbegin(); it != history.rend(); ++it) {
+        if (it->kind != kind) continue;
+        if (it->status != RunStatus::Waiting) break;  // the wait began after this run
+        since = it->started;
+    }
+    return since;
+}
+
+int drive_wait_alert_days(const Job& job) {
+    int days = 3;
+    if (job.schedule.kind == Schedule::Kind::Weekly) {
+        // The longest gap between the chosen weekdays, plus a day.
+        int gap = 0, longest = 0;
+        for (int i = 0; i < 14; ++i) {
+            if (job.schedule.weekdays & (1u << (i % 7))) {
+                longest = std::max(longest, gap);
+                gap = 1;
+            } else {
+                ++gap;
+            }
+        }
+        days = std::max(days, std::max(1, longest) + 1);
+    }
+    return days;
+}
+
+std::optional<Alert> drive_missing_alert(const AlertSettings& s, const Job& job, const std::vector<RunRecord>& history,
+                                         RunKind kind, std::uint64_t now, const std::string& computer) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
+    if (!s.any() || !s.on_failure || job.schedule.paused) return std::nullopt;
+    const std::optional<std::uint64_t> since = waiting_since(history, kind);
+    if (!since || *since > now) return std::nullopt;
+    const std::uint64_t days = (now - *since) / kDay;
+    if (days < static_cast<std::uint64_t>(drive_wait_alert_days(job))) return std::nullopt;
+    Alert a;
+    a.job = job.name;
+    a.level = Alert::Level::Critical;
+    a.event = "drive-missing";
+    const std::string where = " Open Vaultik on " + computer + " for the details.";
+    if (kind == RunKind::Copy) {
+        a.title = "The drive of the second copy of " + job.name + " has been missing for " + std::to_string(days) + " days";
+        a.message = "The second copy is not up to date. Connect its drive so it can catch up." + where;
+    } else {
+        a.title = "The backup drive of " + job.name + " has been missing for " + std::to_string(days) + " days";
+        a.message = "No backup was saved since. Connect the drive, or check that it still works." + where;
+    }
+    a.title += " (" + computer + ")";
+    return a;
+}
+
+bool alert_repeats(const std::string& event) {
+    return event == "password" || event == "check-failed" || event == "drive-missing";
+}
+
+bool alert_once_a_day(const std::string& dir, const std::string& job_id, const std::string& event, std::uint64_t now,
+                      const std::function<bool()>& send) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;
+    const std::string path = os::join(dir, "alerts-sent.json");
+    const auto load = [&path] {
+        nlohmann::json j = nlohmann::json::object();
+        try {
+            const Bytes b = os::read_file(path, 1 << 20);
+            j = nlohmann::json::parse(std::string(b.begin(), b.end()));
+            if (!j.is_object()) j = nlohmann::json::object();
+        } catch (const std::exception&) {
+            j = nlohmann::json::object();
+        }
+        return j;
+    };
+    const std::string key = job_id + "/" + event;
+    {
+        const nlohmann::json j = load();
+        const auto it = j.find(key);
+        if (it != j.end() && it->is_number_unsigned()) {
+            const std::uint64_t last = it->get<std::uint64_t>();
+            if (last <= now && now - last < kDay) return false;
+        }
+    }
+    if (send && !send()) return false;  // no channel took it: not noted, so the next run tries again
+    nlohmann::json j = load();  // again: sending can take a while, and other runs note theirs meanwhile
+    j[key] = now;
+    try {
+        os::write_file_atomic(path, bytes_of(j.dump() + "\n"), 0600);
+    } catch (const std::exception&) {
+        // Not remembered: the next one may go out again, which beats sending none.
+    }
+    return true;
+}
 
 AlertSettings load_alerts(const std::string& dir) {
     AlertSettings s;

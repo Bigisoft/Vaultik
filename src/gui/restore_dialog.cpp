@@ -86,6 +86,10 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     target_->setText(QDir::toNativeSeparators(QDir::homePath() + "/Restored"));
     browse_ = new QPushButton(tr("Browse..."));
     overwrite_ = new QCheckBox(tr("Replace files that already exist"));
+    skip_identical_ = new QCheckBox(tr("Skip files that are already identical (to go on with a restore that stopped)"));
+    skip_identical_->setChecked(true);
+    skip_identical_->setToolTip(tr("Files in the target with the same size, date and content as in the backup are "
+                                   "left as they are, so a restore that was interrupted goes on where it stopped."));
     permissions_ = new QCheckBox(tr("Restore permissions (who may open or change each item)"));
     permissions_->setToolTip(tr("Gives each file and folder the owner and access list it had when it was backed "
                                 "up. On by itself for the original location; restored elsewhere, another "
@@ -139,6 +143,7 @@ RestoreDialog::RestoreDialog(const jobs::Job& job, std::shared_ptr<Repository> r
     layout->addLayout(target_row);
     layout->addWidget(to_original_);
     layout->addWidget(overwrite_);
+    layout->addWidget(skip_identical_);
     layout->addWidget(permissions_);
     layout->addWidget(bar_);
     layout->addWidget(status_);
@@ -469,6 +474,7 @@ void RestoreDialog::start_restore() {
     args << qs(id_hex(snap.id)) << "--target" << target;
     if (!path.isEmpty()) args << "--path" << path;
     if (overwrite_->isChecked()) args << "--overwrite";
+    if (skip_identical_->isChecked()) args << "--skip-identical";
     if (permissions_->isChecked()) args << "--permissions";
     warnings_ = 0;
     bar_->show();

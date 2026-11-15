@@ -411,6 +411,7 @@ QColor status_color(vaultik::jobs::RunStatus status) {
         case vaultik::jobs::RunStatus::Partial: return g_theme.warning;
         case vaultik::jobs::RunStatus::Failed: return g_theme.danger;
         case vaultik::jobs::RunStatus::Cancelled: return g_theme.neutral;
+        case vaultik::jobs::RunStatus::Waiting: return g_theme.neutral;
     }
     return g_theme.neutral;
 }
@@ -421,6 +422,7 @@ QIcon status_icon(vaultik::jobs::RunStatus status) {
         case vaultik::jobs::RunStatus::Partial: return icon(QStringLiteral("warning_20_filled"), g_theme.warning);
         case vaultik::jobs::RunStatus::Failed: return icon(QStringLiteral("dismiss_circle_20_filled"), g_theme.danger);
         case vaultik::jobs::RunStatus::Cancelled: return icon(QStringLiteral("subtract_circle_20_filled"), g_theme.neutral);
+        case vaultik::jobs::RunStatus::Waiting: return icon(QStringLiteral("clock_20_regular"), g_theme.neutral);
     }
     return {};
 }

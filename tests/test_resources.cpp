@@ -1,8 +1,12 @@
 #include <doctest/doctest.h>
 
 #include <chrono>
+#include <memory>
+#include <stdexcept>
+#include <string>
 
 #include "vaultik/util/error.hpp"
+#include "vaultik/util/keep_awake.hpp"
 #include "vaultik/util/resources.hpp"
 #include "vaultik/util/resources_detail.hpp"
 
@@ -88,4 +92,69 @@ TEST_CASE("CPU cap duty cycle counts every thread, also above one core") {
     CHECK(cpu_cap_delay(2.0, 1.0, 2.0) == 0.0);    // exactly at the cap
     CHECK(cpu_cap_delay(0.5, 2.0, 0.5) == 0.0);    // below it
     CHECK(cpu_cap_delay(0.5, 1.0, 0.501) == 0.0);  // under 5 ms is not worth a sleep
+}
+
+namespace {
+
+// Counts what KeepAwake asks of the system.
+struct FakeRequester : vaultik::PowerRequester {
+    int* acquired;
+    int* released;
+    bool works;
+    std::string* reason;
+    FakeRequester(int* a, int* r, bool w, std::string* why) : acquired(a), released(r), works(w), reason(why) {}
+    bool acquire(const std::string& why) override {
+        ++*acquired;
+        *reason = why;
+        return works;
+    }
+    void release() override { ++*released; }
+};
+
+}  // namespace
+
+TEST_CASE("keep awake: the power request is released on every way out of a run") {
+    int acquired = 0, released = 0;
+    std::string reason;
+    const auto fake = [&](bool works = true) {
+        return std::make_unique<FakeRequester>(&acquired, &released, works, &reason);
+    };
+    {
+        vaultik::KeepAwake awake("backup of Docs", fake());
+        CHECK(awake.active());
+        CHECK(acquired == 1);
+        CHECK(released == 0);
+    }
+    CHECK(released == 1);
+    CHECK(reason == "backup of Docs");
+
+    // An exception out of the run.
+    try {
+        vaultik::KeepAwake awake("check", fake());
+        throw std::runtime_error("the drive went away");
+    } catch (const std::runtime_error&) {
+    }
+    CHECK(acquired == 2);
+    CHECK(released == 2);
+
+    // An early return.
+    const auto run = [&](bool early) {
+        vaultik::KeepAwake awake("prune", fake());
+        if (early) return 1;
+        return 0;
+    };
+    CHECK(run(true) == 1);
+    CHECK(run(false) == 0);
+    CHECK(released == 4);
+
+    // A system without a way to keep awake: nothing to release, the run goes on.
+    {
+        vaultik::KeepAwake awake("restore", fake(false));
+        CHECK_FALSE(awake.active());
+    }
+    CHECK(acquired == 5);
+    CHECK(released == 4);
+
+    // The real one never throws, whether or not the system offers one.
+    { vaultik::KeepAwake awake("Vaultik test"); }
 }

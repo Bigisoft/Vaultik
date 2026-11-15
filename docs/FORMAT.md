@@ -21,7 +21,13 @@ in file names.
   status/requests/<computer-id>  optional: sealed request to that computer to back up now
   parity/percent            optional: repair data is on, at this percentage ("5\n"), see below
   parity/<xx>/<pack-id>     optional: the repair data of a pack (see "Recovery data")
+  settings/compression      optional: the zstd level for new data ("12\n", 1 to 19), see below
 ```
+
+`settings/compression` (Vaultik 0.12 and later) overrides the zstd level stored in `config` for
+data written from now on. Every zstd level decompresses the same way, so nothing else changes:
+versions before it ignore the file and keep compressing at the level in `config`, and read all
+data as before. Removing the file returns to the level in `config`.
 
 Files are written to a temporary name and renamed into place, so a reader never sees a partial
 file. In S3-compatible cloud storage (`s3:https://<endpoint>/<bucket>[/<folder>]`) each file is

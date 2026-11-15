@@ -71,6 +71,10 @@ struct HealthPolicy {
     // change since the newest version, and compares their content with the stored one (see
     // ops/rot_check.hpp), to notice data a failing drive changed by itself.
     bool rot_check = true;
+    // The monthly full check reads for at most this many hours per run (0: no limit) and goes on
+    // where it stopped after the next backup, until every pack was read within 30 days (see
+    // jobs/check_state.hpp). Three hours read about 400 GiB from a drive behind USB 2.0.
+    int full_check_hours = 3;
 };
 
 // Lower speed limits while people work: on the given days (bit 0 = Monday) from start_minute to
@@ -163,6 +167,9 @@ struct Job {
     // Ask every file for its real size and times instead of trusting the folder listing (see
     // BackupOptions::check_every_file): for folders with hard links, such as package stores.
     bool check_every_file = false;
+    // Windows: download files that are only in the cloud (OneDrive placeholders) and back up their
+    // content (see BackupOptions::download_cloud_files); otherwise they are counted, not backed up.
+    bool download_cloud_files = false;
     // Keep the list of programs installed on this computer with each version (see ops/apps.hpp),
     // so they can be installed again on a new one.
     bool record_apps = true;
@@ -191,6 +198,11 @@ struct Job {
     // Repair data written with each pack, in percent of its size (0: none; see
     // Repository::set_parity_percent). A backup sets the destination's setting to this.
     unsigned repair_data = 5;
+    // The zstd level for new data (see Repository::set_compression_level): 3 fast, 6 balanced, 12
+    // small, or 0 to leave the destination's own (the level it was made with, 3), as existing jobs
+    // do. A backup sets the destination's setting to it. A higher level costs CPU time and saves
+    // space and writes, a good trade where the drive is slower than compressing.
+    int compression = 0;
     // Command lines run by run-job before and after the backup (cmd.exe on Windows): e.g. a
     // database dump before, starting a stopped program again after. A failing "before" command
     // stops the run; "after" runs whatever happened, with VAULTIK_RESULT set to the result.
@@ -224,7 +236,11 @@ const std::vector<ExclusionPreset>& exclusion_presets();
 // check only for a folder (a full check of cloud storage downloads everything).
 HealthPolicy default_health(std::string_view repository);
 
-enum class RunStatus { Success, Partial, Failed, Cancelled };
+// Waiting: a run that found its backup drive not connected and did nothing. It is no failure (the
+// drive is simply elsewhere): recorded quietly, shown neutrally, not alerted as a failure; the run
+// happens once the drive is back (see missed_run_waiting). A wait of several days is alerted
+// (see drive_missing_alert in alerts.hpp), as is an overdue backup by the app's reminder.
+enum class RunStatus { Success, Partial, Failed, Cancelled, Waiting };
 
 // What a run did: a backup, a health check that read a sample of the data or all of it, or the
 // second copy after a backup.
@@ -261,7 +277,22 @@ struct RunRecord {
     std::uint64_t new_bytes = 0;
     std::uint64_t stored_bytes = 0;
     std::uint64_t errors = 0;
+    // A backup: files that are only in the cloud and so were not backed up (SnapshotStats::cloud_only).
+    std::uint64_t cloud_only = 0;
+    // A full check: packs it was to read but left for the next one (its time limit). Such a check
+    // is not complete, also when it found damage (see due_check).
+    std::uint64_t packs_left = 0;
+    // A health check of this job that only compared files on this computer with the backup (the
+    // silent damage part, see rot_check_due): the repository itself was checked by another job
+    // backing up to it. It never counts as a check of the repository.
+    bool rot_only = false;
     std::string message;  // error text for Failed, summary otherwise
+    // The run's log file, with every warning in full (see jobs/run_log.hpp); empty for none.
+    std::string log;
+    // Why a run could not run, in a fixed word the alerts and the app can tell apart: "password"
+    // (an unattended run of a job whose password is not saved on this computer), "drive" (its
+    // backup drive was not connected, status Waiting); empty otherwise.
+    std::string reason;
     // Set when the backup saw signs of ransomware (see ChangeAlarm in ops/backup.hpp); the version
     // before it was pinned and old versions were not removed.
     std::string alert;
@@ -285,6 +316,10 @@ struct RunRecord {
     std::uint64_t rot_version = 0;
 };
 
+// What an unattended run (scheduled, or started by an event) records, without asking anything,
+// when the job's password is not saved on this computer (or was saved for another account).
+RunRecord password_not_saved_record(std::uint64_t now);
+
 // Per-user config directory; VAULTIK_CONFIG_DIR overrides it (tests). A portable copy (a file
 // named "portable" next to the programs) keeps it in "Settings" there. Otherwise Windows:
 // %LOCALAPPDATA%\Vaultik; Linux: $XDG_CONFIG_HOME/vaultik or ~/.config/vaultik.
@@ -302,16 +337,36 @@ Job job_from_json(const std::string& text);
 std::string to_json(const RunRecord& record);
 RunRecord record_from_json(const std::string& text);
 
-// The newest backup run, or the newest health check, in a history (oldest first); null if none.
+// The newest backup run (one that was not just waiting for its drive), or the newest health
+// check, in a history (oldest first); null if none.
 const RunRecord* last_backup(const std::vector<RunRecord>& history);
 const RunRecord* last_check(const std::vector<RunRecord>& history);
 const RunRecord* last_copy(const std::vector<RunRecord>& history);
 const RunRecord* last_restore_test(const std::vector<RunRecord>& history);
+// The newest record of a backup that waited for its drive, when no backup ran after it (so a run
+// was missed while the drive was away); null otherwise.
+const RunRecord* missed_run_waiting(const std::vector<RunRecord>& history);
+// Whether a backup of the job saved a version (it succeeded, also with skipped items or nothing
+// changed) that ended at or after `since` (FILETIME ticks): a run that waited for the drive while
+// another run of the same job used it has then nothing left to do.
+bool saved_since(const std::vector<RunRecord>& history, std::uint64_t since);
+// What a run that finds its backup drive not connected records (`what`: the destination).
+RunRecord waiting_for_drive_record(RunKind kind, std::uint64_t now, const std::string& what);
 // Whether the monthly test restore is on and none finished (not cancelled) in the last 30 days.
 bool restore_test_due(const HealthPolicy& policy, const std::vector<RunRecord>& history, std::uint64_t now);
 // A health check that found damaged or missing data (not one that could not run).
 inline bool found_damage(const RunRecord& r) {
     return is_check(r.kind) && r.status == RunStatus::Failed && r.errors > 0;
+}
+// A health check that read what it set out to read: one without problems, or one that found
+// damage. A check that could not run or stopped part way (the drive was unplugged, say) or was
+// cancelled did not, so it does not count as done (see due_check) and is alerted.
+inline bool check_completed(const RunRecord& r) {
+    return is_check(r.kind) && (r.status == RunStatus::Success || found_damage(r));
+}
+// A health check that could not run or could not finish (not one that found damage).
+inline bool check_not_finished(const RunRecord& r) {
+    return is_check(r.kind) && r.status == RunStatus::Failed && r.errors == 0;
 }
 
 const char* to_string(RunStatus status);
@@ -321,9 +376,22 @@ const char* to_string(Schedule::Kind kind);
 // The health check due now (FILETIME ticks), judged from the job's history (oldest first): a full
 // check when the monthly one is on and no full check finished in the last 30 days, otherwise a
 // sampled check when the weekly one is on and no check of either kind finished in the last 7
-// days. A cancelled check does not count, so it is tried again after the next backup.
+// days. A full check that stopped at its time limit (status Partial, or one that found damage
+// with packs left) counts as a weekly check, and the full one stays due until one completes. Only a completed check counts (check_completed): one that was cancelled, could not run
+// or stopped part way is tried again after the next backup.
 std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
                                  std::uint64_t now);
+// Whether the silent damage check of this job's own files is due (FILETIME ticks), from the job's
+// own history (oldest first): when it is on and no check of this job, of the repository or of the
+// files alone, finished in the last 7 days (30 when only the monthly check is on).
+bool rot_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history, std::uint64_t now);
+// Whether a run checks this job's own files alone (the silent damage part of a check): when the
+// job's own history calls for a check of the repository, the history with the checks of the
+// other jobs backing up there (history_with_shared_checks) does not, because one of them checked
+// it (comparing its own files, not these), and rot_check_due says so. Never when the job's own
+// schedule asks for no check now (a job with only the monthly check, between two of them).
+bool files_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history,
+                     const std::vector<RunRecord>& shared_history, std::uint64_t now);
 // "Daily at 02:00", "Mon, Wed at 21:30", "Every 4 hours at :15", "Manual"; a paused job's in
 // brackets after "Paused": "Paused (Daily at 02:00)".
 std::string describe(const Schedule& schedule);
@@ -365,6 +433,10 @@ public:
     void append_history(const std::string& id, const RunRecord& record) const;
     // Most recent last; at most `limit` records.
     std::vector<RunRecord> history(const std::string& id, std::size_t limit = 100) const;
+    // Only the records of one kind of run, however many of other kinds came after them (most
+    // recent last; at most `limit`): the last copy of a job whose copies wait while its hourly
+    // backups go on, say.
+    std::vector<RunRecord> history_of(const std::string& id, RunKind kind, std::size_t limit = 100) const;
 
 private:
     std::string dir_;

@@ -27,6 +27,7 @@ std::string admin_store_dir(const std::string& sid = {});
 // is that account's. Throws Error unless this process runs as the system account and `sid` is an
 // account's SID. No-op on POSIX.
 // Also throws when that account is no longer an administrator of this computer, or is disabled.
+// The run then takes turns on a drive with that account's runs (set_drive_lock_account).
 void act_for_account(const std::string& sid);
 
 // Whether `sid` names an enabled account that is an administrator of this computer, directly or
@@ -49,9 +50,21 @@ void check_program_dir(const std::string& program_dir);
 
 // Run history from the user's store and, when there is one, the admin store, oldest first.
 std::vector<RunRecord> combined_history(const JobStore& store, const std::string& id, std::size_t limit = 100);
+// The same for one kind of run only (see JobStore::history_of).
+std::vector<RunRecord> combined_history_of(const JobStore& store, const std::string& id, RunKind kind,
+                                           std::size_t limit = 100);
 
-// Whether connecting the job's drive should start a backup: the job asks for it, its drive is
-// connected, and it did not save a version in the last 10 minutes (Windows reports one
+// Whether two jobs back up to the same repository: the same recorded drive and folder on it, or
+// the same location (cloud storage, a share, a folder without a recorded drive).
+bool same_repository(const Job& a, const Job& b);
+// The job's history with the health checks of every other saved job backing up to the same
+// repository added (oldest first): one completed check of a repository counts for all its jobs
+// (see due_check). Only checks are added, never others' backups.
+std::vector<RunRecord> history_with_shared_checks(const JobStore& store, const Job& job, std::size_t limit = 500);
+
+// Whether connecting the job's drive should start a backup: the job asks for it (or a run was
+// missed while the drive was away, see missed_run_waiting), its drive is connected, and it did
+// not save a version in the last 10 minutes (Windows reports one
 // connection several times, and the drive may have been plugged straight back in).
 bool connect_backup_due(const JobStore& store, const Job& job);
 // Whether a backup started by an event (the computer idle or locked, the user signing out) should

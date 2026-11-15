@@ -39,6 +39,7 @@ RunStatus status_from(const std::string& s) {
     if (s == "partial") return RunStatus::Partial;
     if (s == "failed") return RunStatus::Failed;
     if (s == "cancelled") return RunStatus::Cancelled;
+    if (s == "waiting") return RunStatus::Waiting;
     throw Error("unknown run status \"" + s + "\"");
 }
 
@@ -278,14 +279,34 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
     std::uint64_t last_full = 0, last_any = 0;
     for (const RunRecord& r : history) {
-        if (!is_check(r.kind) || r.status == RunStatus::Cancelled) continue;
+        if (r.rot_only) continue;  // only this computer's files were compared
+        const bool partial_full =
+            r.kind == RunKind::FullCheck && (r.status == RunStatus::Partial || (r.packs_left > 0 && check_completed(r)));
+        if (!check_completed(r) && !partial_full) continue;
         last_any = std::max(last_any, r.finished);
-        if (r.kind == RunKind::FullCheck) last_full = std::max(last_full, r.finished);
+        if (r.kind == RunKind::FullCheck && !partial_full) last_full = std::max(last_full, r.finished);
     }
     const auto older_than = [now](std::uint64_t at, std::uint64_t age) { return at == 0 || at + age <= now; };
     if (policy.monthly && older_than(last_full, 30 * kDay)) return RunKind::FullCheck;
     if (policy.weekly && older_than(last_any, 7 * kDay)) return RunKind::Check;
     return std::nullopt;
+}
+
+bool rot_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history, std::uint64_t now) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
+    if (!policy.rot_check || (!policy.weekly && !policy.monthly)) return false;
+    std::uint64_t last = 0;
+    for (const RunRecord& r : own_history)
+        if (check_completed(r) || (r.kind == RunKind::FullCheck && r.status == RunStatus::Partial))
+            last = std::max(last, r.finished);
+    const std::uint64_t every = (policy.weekly ? 7 : 30) * kDay;
+    return last == 0 || last + every <= now;
+}
+
+bool files_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history,
+                     const std::vector<RunRecord>& shared_history, std::uint64_t now) {
+    return due_check(policy, own_history, now) && !due_check(policy, shared_history, now) &&
+           rot_check_due(policy, own_history, now);
 }
 
 namespace {
@@ -435,6 +456,10 @@ void validate(const Job& job) {
         throw Error("unknown storage class " + job.cloud_storage_class);
     if (job.health.sample_percent < 1 || job.health.sample_percent > 100)
         throw Error("the weekly check must read between 1% and 100% of the data");
+    if (job.compression != 0 && (job.compression < 1 || job.compression > 19))
+        throw Error("the compression level must be between 1 and 19 (or 0 to keep the destination's)");
+    if (job.health.full_check_hours < 0 || job.health.full_check_hours > 168)
+        throw Error("the time limit of the full check must be between 0 (none) and 168 hours");
 }
 
 std::string to_json(const Job& job) {
@@ -494,12 +519,14 @@ std::string to_json(const Job& job) {
         {"continuous_minutes", job.continuous_minutes},
         {"skip_unchanged", job.skip_unchanged},
         {"check_every_file", job.check_every_file},
+        {"download_cloud_files", job.download_cloud_files},
         {"record_apps", job.record_apps},
         {"wsl", {{"distros", job.wsl_distros}, {"when_running", job.wsl_when_running}}},
         {"hyperv", {{"machines", job.hyperv_vms}, {"staging", job.hyperv_staging}}},
         {"docker", {{"volumes", job.docker_volumes}, {"image", job.docker_image}}},
         {"databases", databases_json(job.databases)},
         {"repair_data", job.repair_data},
+        {"compression", job.compression},
         {"before_command", job.before_command},
         {"after_command", job.after_command},
         {"second_copy",
@@ -523,7 +550,8 @@ std::string to_json(const Job& job) {
           {"sample_percent", job.health.sample_percent},
           {"monthly", job.health.monthly},
           {"restore_test", job.health.restore_test},
-          {"rot_check", job.health.rot_check}}},
+          {"rot_check", job.health.rot_check},
+          {"full_check_hours", job.health.full_check_hours}}},
     };
     try {
         return j.dump(2) + "\n";
@@ -604,6 +632,7 @@ Job job_from_json(const std::string& text) {
         job.before_command = j.value("before_command", std::string());
         job.skip_unchanged = j.value("skip_unchanged", false);
         job.check_every_file = j.value("check_every_file", false);
+        job.download_cloud_files = j.value("download_cloud_files", false);
         job.record_apps = j.value("record_apps", true);
         if (j.contains("wsl")) {  // missing in jobs saved before virtual machines were backed up
             const json& w = j.at("wsl");
@@ -636,6 +665,7 @@ Job job_from_json(const std::string& text) {
         // Jobs from before repair data: on for drives, where bad sectors are the risk; cloud
         // storage keeps its own copies.
         job.repair_data = std::min(50u, j.value("repair_data", is_cloud_location(job.repository) ? 0u : 5u));
+        job.compression = j.value("compression", 0);
         job.after_command = j.value("after_command", std::string());
         if (j.contains("second_copy")) {
             const json& c = j.at("second_copy");
@@ -665,6 +695,7 @@ Job job_from_json(const std::string& text) {
             job.health.monthly = h.value("monthly", job.health.monthly);
             job.health.restore_test = h.value("restore_test", job.health.restore_test);
             job.health.rot_check = h.value("rot_check", job.health.rot_check);
+            job.health.full_check_hours = h.value("full_check_hours", job.health.full_check_hours);
         }
         validate(job);
         return job;
@@ -686,6 +717,11 @@ std::string to_json(const RunRecord& r) {
     if (!r.alert.empty()) j["alert"] = r.alert;
     if (!r.hold.empty()) j["hold"] = r.hold;
     if (!r.drive.empty()) j["drive"] = r.drive;
+    if (!r.reason.empty()) j["reason"] = r.reason;
+    if (r.cloud_only > 0) j["cloud_only"] = r.cloud_only;
+    if (r.packs_left > 0) j["packs_left"] = r.packs_left;
+    if (r.rot_only) j["rot_only"] = true;
+    if (!r.log.empty()) j["log"] = r.log;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
     if (r.rot_files > 0) {
@@ -714,6 +750,11 @@ RunRecord record_from_json(const std::string& text) {
         r.alert = j.value("alert", std::string());
         r.hold = j.value("hold", std::string());
         r.drive = j.value("drive", std::string());
+        r.reason = j.value("reason", std::string());
+        r.cloud_only = j.value("cloud_only", std::uint64_t{0});
+        r.packs_left = j.value("packs_left", std::uint64_t{0});
+        r.rot_only = j.value("rot_only", false);
+        r.log = j.value("log", std::string());
         r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.free_space = j.value("free_space", std::uint64_t{0});
         r.rot_files = j.value("rot_files", std::uint64_t{0});
@@ -735,10 +776,48 @@ RunRecord record_from_json(const std::string& text) {
     }
 }
 
+RunRecord password_not_saved_record(std::uint64_t now) {
+    RunRecord r;
+    r.started = now;
+    r.finished = now;
+    r.status = RunStatus::Failed;
+    r.reason = "password";
+    r.message = "the password of this backup is not saved on this PC, so it cannot run on its own: open "
+                "Vaultik, edit the job and enter its password, or start it with Back up now";
+    return r;
+}
+
 const RunRecord* last_backup(const std::vector<RunRecord>& history) {
     for (auto it = history.rbegin(); it != history.rend(); ++it)
-        if (it->kind == RunKind::Backup) return &*it;
+        if (it->kind == RunKind::Backup && it->status != RunStatus::Waiting) return &*it;
     return nullptr;
+}
+
+const RunRecord* missed_run_waiting(const std::vector<RunRecord>& history) {
+    for (auto it = history.rbegin(); it != history.rend(); ++it) {
+        if (it->kind != RunKind::Backup) continue;
+        return it->status == RunStatus::Waiting ? &*it : nullptr;
+    }
+    return nullptr;
+}
+
+bool saved_since(const std::vector<RunRecord>& history, std::uint64_t since) {
+    return std::any_of(history.begin(), history.end(), [since](const RunRecord& r) {
+        return r.kind == RunKind::Backup && (r.status == RunStatus::Success || r.status == RunStatus::Partial) &&
+               r.finished >= since;
+    });
+}
+
+RunRecord waiting_for_drive_record(RunKind kind, std::uint64_t now, const std::string& what) {
+    RunRecord r;
+    r.kind = kind;
+    r.started = now;
+    r.finished = now;
+    r.status = RunStatus::Waiting;
+    r.reason = "drive";
+    r.message = "waiting for the backup drive: it is not connected (" + what +
+                "); the backup runs when it is connected while Vaultik is open, or at the next scheduled time";
+    return r;
 }
 
 const RunRecord* last_check(const std::vector<RunRecord>& history) {
@@ -785,6 +864,7 @@ const char* to_string(RunStatus status) {
         case RunStatus::Partial: return "partial";
         case RunStatus::Failed: return "failed";
         case RunStatus::Cancelled: return "cancelled";
+        case RunStatus::Waiting: return "waiting";
     }
     return "failed";
 }
@@ -1106,7 +1186,7 @@ void log_runs_to_system(bool on) {
 }
 
 // Event ids: 100s a backup, 200s a health check, 300s the second copy, 400s a test restore; the
-// last digit the result (0 success, 1 partial, 2 failed, 3 cancelled), +5 when it succeeded but
+// last digit the result (0 success, 1 partial, 2 failed, 3 cancelled, 4 waiting for the drive), +5 when it succeeded but
 // warns (ransomware signs, old versions kept, the drive's health, silent damage on this computer).
 // Monitoring tools filter by them.
 // Every account of the computer can read the Application log, so an entry holds only what the run
@@ -1129,6 +1209,7 @@ SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name,
         case RunStatus::Partial: result = 1; break;
         case RunStatus::Failed: result = 2; break;
         case RunStatus::Cancelled: result = 3; break;
+        case RunStatus::Waiting: result = 4; break;
     }
     e.id = base + result;
     e.level = r.status == RunStatus::Failed ? 2 : (r.status == RunStatus::Partial || warns) ? 1 : 0;
@@ -1136,7 +1217,8 @@ SystemLogEntry system_log_entry(const RunRecord& r, const std::string& job_name,
     for (char& c : name)
         if (static_cast<unsigned char>(c) < 0x20) c = ' ';
     e.text = what + " of the Vaultik job \"" + name + "\" (" + job_id + "): " + to_string(r.status);
-    if (r.kind == RunKind::Backup && r.status != RunStatus::Failed && r.status != RunStatus::Cancelled)
+    if (r.kind == RunKind::Backup && r.status != RunStatus::Failed && r.status != RunStatus::Cancelled &&
+        r.status != RunStatus::Waiting)
         e.text += "\nFiles: " + std::to_string(r.files) + ", new data: " + std::to_string(r.new_bytes) + " bytes";
     if (r.errors > 0) e.text += "\nErrors: " + std::to_string(r.errors);
     if (!r.alert.empty()) e.text += "\nWarning: it saw signs of ransomware";
@@ -1208,6 +1290,33 @@ std::vector<RunRecord> JobStore::history(const std::string& id, std::size_t limi
             // a torn last line after a crash; skip it
         }
     }
+    return out;
+}
+
+std::vector<RunRecord> JobStore::history_of(const std::string& id, RunKind kind, std::size_t limit) const {
+    check_id(id);
+    std::string text;
+    try {
+        text = text_of(os::read_file(history_path(dir_, id)));
+    } catch (const os::OsError& e) {
+        if (os::is_not_found(e.code())) return {};
+        throw;
+    }
+    const std::vector<std::string> lines = lines_of(text);
+    // A record of another kind names its kind; a backup's names none (see to_json). A quote within
+    // a text is escaped, so this never matches inside one.
+    const std::string named = std::string("\"kind\":\"") + to_string(kind) + "\"";
+    std::vector<RunRecord> out;
+    for (auto it = lines.rbegin(); it != lines.rend() && out.size() < limit; ++it) {
+        if (kind != RunKind::Backup && it->find(named) == std::string::npos) continue;
+        try {
+            RunRecord r = record_from_json(*it);
+            if (r.kind == kind) out.push_back(std::move(r));
+        } catch (const Error&) {
+            // a torn last line after a crash; skip it
+        }
+    }
+    std::reverse(out.begin(), out.end());
     return out;
 }
 

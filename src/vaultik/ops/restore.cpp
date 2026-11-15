@@ -1,9 +1,11 @@
 #include "vaultik/ops/restore.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <optional>
 
+#include "vaultik/chunker/fastcdc.hpp"
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
@@ -82,6 +84,8 @@ private:
     void restore_streams(const Node& node, const std::string& path, const std::optional<os::FileId>& id);
     void restore_security(const Node& node, const std::string& path, const std::optional<os::FileId>& id);
     void restore_link(const Node& node, const std::string& path);
+    // Whether `path` already holds this file as stored (skip_identical).
+    bool identical(const Node& node, const std::string& path);
     void ensure_dir(const std::string& path);
     void ensure_dir_chain(const std::string& path);
     // Whether a real path (File::final_path) lies in the target folder; true when it cannot be
@@ -108,6 +112,32 @@ private:
     RestoreProgress progress_;
     std::chrono::steady_clock::time_point last_report_{};
 };
+
+bool RestoreEngine::identical(const Node& node, const std::string& path) {
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    if (!os::stat(path, info, err) || info.type != os::EntryType::File || info.size != node.size ||
+        info.mtime != node.mtime)
+        return false;
+    os::File file = os::File::open_source(path, err);
+    if (!file.valid() || !inside(file.final_path())) return false;
+    // The content, chunk by chunk as the backup stored it (no chunk is read from the backup).
+    Bytes buffer;
+    ChunkReader reader(repo_.chunker(), [&file](std::uint8_t* dst, std::size_t max) { return file.read(dst, max); },
+                       buffer);
+    std::size_t i = 0;
+    try {
+        ByteSpan chunk;
+        while (reader.next(chunk)) {
+            check_cancel();
+            if (i >= node.content.size() || repo_.blob_id(BlobType::Data, chunk) != node.content[i]) return false;
+            ++i;
+        }
+    } catch (const os::OsError&) {
+        return false;
+    }
+    return i == node.content.size();
+}
 
 bool RestoreEngine::inside(const std::string& final) const {
     if (final.empty() || root_.empty()) return true;
@@ -183,6 +213,11 @@ void RestoreEngine::ensure_dir_chain(const std::string& path) {
 }
 
 void RestoreEngine::restore_file(const Node& node, const std::string& path) {
+    if (options_.skip_identical && identical(node, path)) {
+        ++result_.identical;
+        report();
+        return;
+    }
     if (options_.overwrite) {
         // Replace only regular files. A link is removed rather than written through (it could
         // point anywhere); a folder is left alone.
@@ -518,6 +553,59 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
 }
 
 }  // namespace
+
+namespace {
+
+// One file of the estimate, restored to `path`: only a regular file of the same size counts as
+// there already.
+void estimate_file(const Node& n, const std::string& path, const RestoreOptions& options, RestoreEstimate& e) {
+    ++e.files;
+    e.bytes += n.size;
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    const bool exists = os::stat(path, info, err);
+    const bool there = exists && info.type == os::EntryType::File && info.size == n.size;
+    // A file of another size (or no file) is counted in full in `needed` already; only one that is
+    // there with the same size and is replaced needs room for its new copy on top.
+    if (!there) e.needed += n.size;
+    else if (options.overwrite) e.temporary = std::max(e.temporary, n.size);
+}
+
+void estimate_dir(Repository& repo, const Id& tree_id, const std::string& dir, const RestoreOptions& options,
+                  RestoreEstimate& e) {
+    Tree tree;
+    try {
+        tree = parse_tree(repo.load_blob(BlobType::Tree, tree_id));
+    } catch (const Error&) {
+        // Unreadable (damaged, or in archive storage): its size is not known. The restore skips
+        // it with a warning and restores the rest, so the estimate goes on as well.
+        ++e.unknown_dirs;
+        return;
+    }
+    for (const Node& n : tree.nodes) {
+        const std::string path = os::join(dir, n.name);
+        if (n.kind == NodeKind::Dir) estimate_dir(repo, n.subtree, path, options, e);
+        else if (n.kind == NodeKind::File) estimate_file(n, path, options, e);
+    }
+}
+
+}  // namespace
+
+RestoreEstimate estimate_restore(Repository& repo, const Snapshot& snapshot, const RestoreOptions& options) {
+    RestoreEstimate e;
+    Node start;
+    if (!resolve_snapshot_path(repo, snapshot, options.subpath, start))
+        throw Error("path not found in snapshot: " + options.subpath);
+    const std::string root = os::absolute_path(options.target);
+    if (options.subpath.empty() || (options.contents_only && start.kind == NodeKind::Dir)) {
+        estimate_dir(repo, start.subtree, root, options, e);
+    } else if (start.kind == NodeKind::Dir) {
+        estimate_dir(repo, start.subtree, os::join(root, start.name), options, e);
+    } else if (start.kind == NodeKind::File) {
+        estimate_file(start, os::join(root, start.name), options, e);
+    }
+    return e;
+}
 
 bool resolve_snapshot_path(Repository& repo, const Snapshot& snapshot, const std::string& path, Node& out) {
     Node cur;

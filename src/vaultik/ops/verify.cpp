@@ -1,6 +1,8 @@
 #include "vaultik/ops/verify.hpp"
 
+#include <algorithm>
 #include <map>
+#include <numeric>
 #include <unordered_set>
 #include <vector>
 
@@ -56,16 +58,77 @@ void VerifyEngine::check_packs() {
     std::vector<std::map<Id, BlobLocation>> expected(index.packs().size());
     index.for_each([&](const Id& id, const BlobLocation& loc) { expected[loc.pack].emplace(id, loc); });
     const std::vector<bool> archived = repo_.archived_packs();
+    const std::size_t count = index.packs().size();
+    // What cannot be read: those, and the packs earlier checks found in archive storage although
+    // the backend does not say so (their header is still looked at below).
+    auto* found_archived = options_.pack_state != nullptr ? options_.archived_state : nullptr;
+    std::vector<bool> unreadable = archived;
+    unreadable.resize(count, false);
+    if (found_archived != nullptr)
+        for (std::size_t p = 0; p < count; ++p)
+            if (found_archived->contains(index.packs()[p])) unreadable[p] = true;
 
-    for (std::size_t p = 0; p < index.packs().size(); ++p) {
+    // Which packs to read, and in which order: by the seed, or (resumable) read longest ago first.
+    std::vector<std::size_t> order(count);
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    std::vector<bool> to_read(count, false);
+    auto* state = options_.pack_state;
+    // When the pack was last read whole; a time still to come (the clock was set back since)
+    // would keep it fresh for good, so it counts as never.
+    const auto last_read = [&](std::size_t p) -> std::uint64_t {
+        const auto it = state->find(index.packs()[p]);
+        return it == state->end() || it->second > options_.now ? 0 : it->second;
+    };
+    if (options_.read_data && state != nullptr) {
+        std::stable_sort(order.begin(), order.end(), [&](std::size_t x, std::size_t y) { return last_read(x) < last_read(y); });
+        if (options_.read_share >= 1.0) {
+            for (std::size_t p = 0; p < count; ++p)
+                to_read[p] = !unreadable[p] &&
+                             (options_.fresh_since == 0 || last_read(p) == 0 || last_read(p) < options_.fresh_since);
+        } else {
+            // The share of the packs that can be read: archived ones (only checked to be there)
+            // never take a place of the sample.
+            const auto readable = static_cast<std::size_t>(std::count(unreadable.begin(), unreadable.end(), false));
+            const auto n = std::max<std::size_t>(
+                readable == 0 ? 0 : 1, static_cast<std::size_t>(options_.read_share * static_cast<double>(readable) + 0.999999));
+            std::size_t picked = 0;
+            for (std::size_t i = 0; i < count && picked < n; ++i) {
+                if (unreadable[order[i]]) continue;
+                to_read[order[i]] = true;
+                ++picked;
+            }
+        }
+    } else if (options_.read_data) {
+        for (std::size_t p = 0; p < count; ++p) to_read[p] = in_sample(index.packs()[p], p, count);
+    }
+    const auto deadline = std::chrono::steady_clock::now() + options_.time_budget;
+    const bool budgeted = state != nullptr && options_.time_budget.count() > 0;
+    // The stored size of each pack, for the progress in bytes.
+    std::vector<std::uint64_t> pack_bytes(count, 0);
+    for (std::size_t p = 0; p < count; ++p)
+        for (const auto& [id, loc] : expected[p]) pack_bytes[p] += loc.length;
+    std::uint64_t total_bytes = 0, done_bytes = 0;
+    for (std::size_t p = 0; p < count; ++p)
+        if (to_read[p] && !unreadable[p]) total_bytes += pack_bytes[p];
+    if (options_.on_bytes) options_.on_bytes(0, total_bytes);
+
+    for (std::size_t step = 0; step < count; ++step) {
+        const std::size_t p = order[step];
         const Id& pack_id = index.packs()[p];
         const std::string name = Repository::pack_name(pack_id);
-        progress("pack " + std::to_string(p + 1) + "/" + std::to_string(index.packs().size()));
+        progress("pack " + std::to_string(step + 1) + "/" + std::to_string(count));
         if (options_.should_cancel && options_.should_cancel()) throw Cancelled();
         ++result_.packs;
+        const std::uint64_t errors_before = result_.errors;
+        // A pack with a problem is remembered as checked this time (see damaged_state).
+        const auto note_damage = [&] {
+            if (state != nullptr && options_.damaged_state != nullptr && result_.errors > errors_before)
+                (*options_.damaged_state)[pack_id] = options_.now;
+        };
         try {
             if (!repo_.backend().exists(name)) {
                 error("missing pack " + name);
+                note_damage();
                 continue;
             }
             if (archived[p]) {
@@ -76,11 +139,19 @@ void VerifyEngine::check_packs() {
             }
             std::vector<BlobEntry> entries;
             Bytes pack;
-            const bool read = options_.read_data && in_sample(pack_id, p, index.packs().size());
+            bool read = to_read[p];
+            if (read && budgeted && result_.packs_read > 0 && std::chrono::steady_clock::now() >= deadline) {
+                read = false;  // the time is up: the next check goes on from here
+                ++result_.packs_left;
+                total_bytes -= std::min(total_bytes, pack_bytes[p]);
+                if (options_.on_bytes) options_.on_bytes(done_bytes, total_bytes);
+            }
             if (read) {
                 pack = repo_.backend().get(name);
                 result_.bytes_read += pack.size();
                 ++result_.packs_read;
+                done_bytes += pack_bytes[p];
+                if (options_.on_bytes) options_.on_bytes(done_bytes, total_bytes);
                 if (blake3(pack) != pack_id) {
                     Bytes copy = pack;
                     if (repo_.rebuild_pack(pack_id, copy)) {
@@ -90,6 +161,7 @@ void VerifyEngine::check_packs() {
                     } else {
                         error("pack content does not match its id: " + name);
                     }
+                    note_damage();
                     continue;
                 }
                 if (options_.add_parity > 0) {
@@ -129,10 +201,22 @@ void VerifyEngine::check_packs() {
             for (const auto& [id, loc] : expected[p]) {
                 if (!in_pack.contains(id)) error("indexed blob " + id_hex(id) + " is not in pack " + name);
             }
+            // Read whole and intact: remembered, so it is read again only once its turn comes.
+            if (read && state != nullptr && result_.errors == errors_before) {
+                (*state)[pack_id] = options_.now;
+                if (options_.damaged_state != nullptr) options_.damaged_state->erase(pack_id);
+            }
+            note_damage();
+            // Its header could be read: not (or no longer) in archive storage.
+            if (found_archived != nullptr) found_archived->erase(pack_id);
         } catch (const ArchivedError&) {
-            ++result_.packs_archived;  // archived without the job saying so: not damage
+            // Archived without the job saying so: not damage. Remembered, so it takes no place of
+            // the packs to read and keeps no full check open.
+            ++result_.packs_archived;
+            if (found_archived != nullptr) found_archived->insert(pack_id);
         } catch (const Error& ex) {
             error("cannot check pack " + name + ": " + ex.what());
+            note_damage();
         }
     }
 }

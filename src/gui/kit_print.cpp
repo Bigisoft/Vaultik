@@ -17,6 +17,7 @@
 
 #include "common.h"
 #include "vaultik/crypto/crypto.hpp"
+#include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/recovery_kit.hpp"
 
 using namespace vaultik;
@@ -86,6 +87,10 @@ void print_recovery_kit(QWidget* parent, const QString& key, const QString& loca
     if (!ok) {
         plain_warning(parent, title, QObject::tr("Cannot write %1.").arg(QDir::toNativeSeparators(path)));
         return;
+    }
+    try {
+        jobs::note_recovery_kit(jobs::config_dir(), u8(location));  // no longer "still unprotected"
+    } catch (const std::exception&) {
     }
     QMessageBox box(QMessageBox::Question, title, QString(), QMessageBox::Yes | QMessageBox::No, parent);
     box.setTextFormat(Qt::PlainText);

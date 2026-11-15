@@ -69,7 +69,10 @@
 #include "versions_view.h"
 #include "vaultik/jobs/forecast.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
+#include "vaultik/jobs/run_log.hpp"
 #include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/eject.hpp"
+#include "vaultik/jobs/protection.hpp"
 #include "vaultik/jobs/report.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/jobs/scheduler.hpp"
@@ -88,6 +91,7 @@ QString status_text(jobs::RunStatus s) {
         case jobs::RunStatus::Partial: return QObject::tr("Completed, some files skipped");
         case jobs::RunStatus::Failed: return QObject::tr("Failed");
         case jobs::RunStatus::Cancelled: return QObject::tr("Cancelled");
+        case jobs::RunStatus::Waiting: return QObject::tr("Waiting for the drive");
     }
     return {};
 }
@@ -233,6 +237,13 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             log_->appendPlainText(check_result_);
             return;
         }
+        if (type == "drive_wait") {
+            running_label_->setText(tr("Waiting for another job on this drive..."));
+            bar_->setRange(0, 0);
+            progress_text_->setText(tr("One job at a time uses a backup drive; this one starts when the other is done."));
+            current_file_->clear();
+            return;
+        }
         if (type == "restore_test") {
             const bool bad = !ev.value("problems").toArray().isEmpty();
             check_result_ = bad ? tr("The test restore found problems: %1").arg(ev.value("message").toString())
@@ -264,6 +275,24 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             current_file_->setText(ev.value("current").toString());
             return;
         }
+        if (type == "check_progress" && ev.contains("total")) {
+            // How far the reading is: a percentage and the time left (smoothed as for the cleanser).
+            running_label_->setText(tr("Checking the backup..."));
+            const auto done = static_cast<std::uint64_t>(ev.value("done").toInteger());
+            const auto total = static_cast<std::uint64_t>(ev.value("total").toInteger());
+            if (total == 0) return;
+            check_rate_.add(done, total,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count());
+            bar_->setRange(0, 1000);
+            bar_->setValue(static_cast<int>(std::min<std::uint64_t>(done * 1000 / total, 1000)));
+            const QString left = time_left_text(check_rate_.seconds_left());
+            progress_text_->setText(tr("Reading stored data back: %1% (%2 of %3)")
+                                        .arg(done * 100 / total)
+                                        .arg(format_bytes(done), format_bytes(total)) +
+                                    (left.isEmpty() ? QString() : QStringLiteral("  ·  ") + left));
+            current_file_->clear();
+            return;
+        }
         if (type == "check_progress") {
             running_label_->setText(tr("Checking the backup..."));
             // "pack 3/120" while the stored data is read, then the versions' structure.
@@ -271,9 +300,11 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
             static const QRegularExpression packs(QStringLiteral("^pack (\\d+)/(\\d+)$"));
             const QRegularExpressionMatch m = packs.match(current);
             if (m.hasMatch()) {
-                bar_->setRange(0, m.captured(2).toInt());
-                bar_->setValue(m.captured(1).toInt());
-                progress_text_->setText(tr("Reading stored data back: part %1 of %2").arg(m.captured(1), m.captured(2)));
+                if (bar_->maximum() != 1000) {  // (without the bytes: by parts)
+                    bar_->setRange(0, m.captured(2).toInt());
+                    bar_->setValue(m.captured(1).toInt());
+                    progress_text_->setText(tr("Reading stored data back: part %1 of %2").arg(m.captured(1), m.captured(2)));
+                }
                 current_file_->clear();
             } else {
                 bar_->setRange(0, 0);
@@ -338,6 +369,7 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
         }
         if (check) {
             msg = result == "success"   ? tr("Health check: no problems.")
+                  : result == "partial"   ? tr("Health check: %1").arg(ev.value("message").toString())
                   : result == "cancelled" ? tr("Health check cancelled.")
                                           : tr("Health check failed: %1").arg(ev.value("message").toString());
             log_->appendPlainText(msg);
@@ -355,6 +387,9 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
                       .arg(format_bytes(static_cast<std::uint64_t>(ev.value("new_bytes").toInteger())))
                       .arg(format_bytes(static_cast<std::uint64_t>(ev.value("stored_bytes").toInteger())));
             if (result == "partial") msg += " " + tr("(%1 skipped, see Log)").arg(ev.value("errors").toInteger());
+            if (const qint64 cloud = ev.value("cloud_only").toInteger(); cloud > 0)
+                msg += " " + tr("%1 only in the cloud and not backed up.")
+                                 .arg(count_of(static_cast<std::uint64_t>(cloud), tr("file is"), tr("files are")));
         } else if (result == "cancelled") {
             msg = tr("Backup cancelled; no version was saved.");
         } else {
@@ -1130,6 +1165,45 @@ QWidget* MainWindow::build_job_page() {
     versions_ = new VersionsView;
     connect(overview_, &OverviewView::versions_requested, this, [this] { tabs_->setCurrentWidget(versions_); });
     connect(overview_, &OverviewView::grew_requested, this, &MainWindow::show_grew);
+    connect(overview_, &OverviewView::eject_requested, this, [this] {
+        const jobs::Job* job = current_job();
+        if (!job) return;
+        if (runner_->running()) {
+            QMessageBox::information(this, tr("Eject the backup drive"),
+                                     tr("Vaultik is still working. Eject the drive once it is done."));
+            return;
+        }
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        repos_.erase(job->id);  // nothing of the backup stays open on the drive
+        const std::string failed = jobs::eject_backup_drive(*job, store_.dir());
+        QApplication::restoreOverrideCursor();
+        if (failed.empty()) {
+            status_->showMessage(tr("The backup drive can be unplugged now."), 15000);
+            if (tray_ != nullptr) tray_->notify(tr("The backup drive can be unplugged"), qs(job->name));
+        } else {
+            QMessageBox box(QMessageBox::Information, tr("Eject the backup drive"), QString(), QMessageBox::Ok, this);
+            box.setTextFormat(Qt::PlainText);
+            box.setText(tr("The drive was not ejected: %1").arg(qs(failed)));
+            box.exec();
+        }
+        refresh_overview();
+    });
+    connect(overview_, &OverviewView::eject_when_done_changed, this, [this](bool on) {
+        const jobs::Job* job = current_job();
+        if (!job) return;
+        try {
+            jobs::set_eject_when_done(store_.dir(), job->repository_volume, on);
+        } catch (const std::exception& e) {
+            QMessageBox::warning(this, windowTitle(), QString::fromUtf8(e.what()));
+        }
+    });
+    connect(overview_, &OverviewView::fix_requested, this, [this](const QString& fix) {
+        if (fix == "edit") edit_job();
+        else if (fix == "kit") open_keys();
+        else if (fix == "test") test_restore();
+        else if (fix == "resume") set_job_paused(false);
+        else if (fix == "check") check_job(false);
+    });
     connect(versions_, &VersionsView::restore_requested, this, [this](int i) { open_restore(i); });
     connect(versions_, &VersionsView::pin_requested, this, [this](int i, bool pin) { change_version(i, pin, false); });
     connect(versions_, &VersionsView::note_requested, this, [this](int i) { change_version(i, false, true); });
@@ -1149,6 +1223,41 @@ QWidget* MainWindow::build_job_page() {
     history_->setHeaderLabels({tr("Started"), tr("What"), tr("Result"), tr("Files"), tr("Size"), tr("New"),
                                tr("Stored"), tr("Duration"), tr("Details")});
     history_->header()->setStretchLastSection(true);
+    // A run's log: every warning in full (double-click, or the menu).
+    history_->setContextMenuPolicy(Qt::CustomContextMenu);
+    const auto open_log = [this](QTreeWidgetItem* item) {
+        const QString path = item != nullptr ? item->data(0, Qt::UserRole).toString() : QString();
+        if (path.isEmpty() || !QFileInfo::exists(path)) {
+            status_->showMessage(tr("This run has no log file (older runs, or it was removed)."), 8000);
+            return;
+        }
+        // Only a log in the job's own logs folder: a history record could name any file, and
+        // opening a program would run it.
+        const jobs::Job* job = current_job();
+        bool ours = false;
+        if (job != nullptr) {
+            ours = jobs::is_run_log_of(store_.dir(), job->id, path.toStdString());
+#ifdef _WIN32
+            try {
+                ours = ours || jobs::is_run_log_of(jobs::admin_store_dir(), job->id, path.toStdString());
+            } catch (const std::exception&) {
+            }
+#endif
+        }
+        if (!ours) {
+            status_->showMessage(tr("This run's log is not in Vaultik's logs folder, so it is not opened."), 8000);
+            return;
+        }
+        QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+    };
+    connect(history_, &QTreeWidget::itemDoubleClicked, this, [open_log](QTreeWidgetItem* item, int) { open_log(item); });
+    connect(history_, &QTreeWidget::customContextMenuRequested, this, [this, open_log](const QPoint& pos) {
+        QTreeWidgetItem* item = history_->itemAt(pos);
+        if (item == nullptr || item->data(0, Qt::UserRole).toString().isEmpty()) return;
+        QMenu menu(this);
+        menu.addAction(tr("Open the run's log"), this, [item, open_log] { open_log(item); });
+        menu.exec(history_->viewport()->mapToGlobal(pos));
+    });
     auto* activity = new QWidget;
     auto* al = new QVBoxLayout(activity);
     al->setContentsMargins(0, 8, 0, 0);
@@ -1275,6 +1384,10 @@ void MainWindow::refresh_history() {
         const bool backup = r.kind == jobs::RunKind::Backup;
         auto* item = new QTreeWidgetItem(history_);
         item->setText(0, format_time(r.started));
+        if (!r.log.empty()) {
+            item->setData(0, Qt::UserRole, qs(r.log));
+            item->setToolTip(0, tr("Double-click to open the run's log, with every warning"));
+        }
         item->setText(1, backup                                 ? tr("Backup")
                          : r.kind == jobs::RunKind::FullCheck ? tr("Full check")
                          : r.kind == jobs::RunKind::Copy      ? tr("Second copy")
@@ -1322,7 +1435,9 @@ void MainWindow::refresh_history() {
                                    damage                                        ? tr("problems found")
                                    : check->rot_files > 0                        ? tr("files on this PC changed by themselves")
                                    : check->status == jobs::RunStatus::Success ? tr("no problems")
-                                                                                 : status_text(check->status).toLower());
+                                   : check->status == jobs::RunStatus::Partial
+                                       ? tr("no problems so far, the rest after the next backup")
+                                       : status_text(check->status).toLower());
     }
     status_text_->setText(text + "  ·  " + tr("Schedule: %1").arg(next));
     refresh_overview();
@@ -1478,6 +1593,10 @@ void MainWindow::refresh_overview() {
                                                    format_bytes(backup->new_bytes)) +
                               (backup->status == jobs::RunStatus::Partial
                                    ? "\n" + tr("%1 could not be read").arg(count_of(backup->errors, tr("item"), tr("items")))
+                                   : QString()) +
+                              (backup->cloud_only > 0
+                                   ? "\n" + tr("%1 only in the cloud and not backed up")
+                                                .arg(count_of(backup->cloud_only, tr("file is"), tr("files are")))
                                    : QString());
     }
 
@@ -1497,6 +1616,11 @@ void MainWindow::refresh_overview() {
         d.next_run = tr("When you start it");
         d.next_detail = tr("This job has no schedule.");
     }
+    // A scheduled run found the drive away: said calmly, it runs when the drive is back.
+    if (const jobs::RunRecord* waiting = jobs::missed_run_waiting(records); waiting != nullptr && !job->schedule.paused)
+        d.next_detail = tr("Waiting for the backup drive since %1: connect it and the missed backup runs while "
+                           "Vaultik is open, or at the next scheduled time.")
+                            .arg(when_text(waiting->started));
     if (job->schedule.paused) {
         // The triggers below do not start a paused job either.
     } else if (job->backup_on_connect) d.next_detail += "\n" + tr("Also when its drive is connected.");
@@ -1661,7 +1785,9 @@ void MainWindow::refresh_overview() {
 
     // Backup days.
     for (const jobs::RunRecord& r : records) {
-        if (r.kind != jobs::RunKind::Backup || r.status == jobs::RunStatus::Cancelled) continue;
+        if (r.kind != jobs::RunKind::Backup || r.status == jobs::RunStatus::Cancelled ||
+            r.status == jobs::RunStatus::Waiting)
+            continue;
         const QDate day = to_datetime(r.started).date();
         const OverviewData::Day kind = r.status == jobs::RunStatus::Success   ? OverviewData::Day::Saved
                                        : r.status == jobs::RunStatus::Partial ? OverviewData::Day::Partial
@@ -1675,6 +1801,23 @@ void MainWindow::refresh_overview() {
             auto& cur = d.days[to_datetime(e.snapshot.time).date()];
             if (cur == OverviewData::Day::None || cur == OverviewData::Day::Failed) cur = OverviewData::Day::Saved;
         }
+    // Ejecting the backup drive: an external drive that is connected now. And one calm note about
+    // its file system.
+    if (const std::string root = jobs::backup_drive_root(*job); !root.empty()) {
+        d.drive_note = qs(jobs::drive_note(os::file_system_of(root)));
+        const os::VolumeLocation loc = os::volume_of(root);
+        d.can_eject = loc.external && !job->repository_volume.empty();
+        d.eject_when_done = jobs::eject_when_done(store_.dir(), job->repository_volume);
+    }
+    // What is still unprotected.
+    try {
+        const std::vector<jobs::Job> all = store_.list();
+        for (const jobs::ProtectionGap& g :
+             jobs::protection_gaps(*job, all, jobs::history_with_shared_checks(store_, *job),
+                                   jobs::protection_facts(store_, *job), os::now()))
+            d.gaps.push_back({qs(g.text), qs(g.fix)});
+    } catch (const std::exception&) {
+    }
     overview_->set_data(d);
 }
 

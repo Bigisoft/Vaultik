@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "repo_handle.h"
+#include "vaultik/util/task_events.hpp"
 #include "vaultik/jobs/drive_history.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/platform/drive_health.hpp"
@@ -223,5 +224,6 @@ private:
         std::vector<SnapshotEntry> snapshots;
     };
     std::map<std::string, OpenRepo> repos_;
+    vaultik::RateEstimator check_rate_;  // the time left of a health check
     std::string loading_job_;
 };

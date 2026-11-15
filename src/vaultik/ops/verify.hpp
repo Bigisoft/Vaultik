@@ -1,8 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "vaultik/repo/repository.hpp"
 
@@ -24,8 +27,37 @@ struct VerifyOptions {
     // Stops the check early (throws Cancelled).
     std::function<bool()> should_cancel;
 
+    // Resumable checks, with read_data. When given, this map holds when each pack was last read
+    // whole and found intact (FILETIME ticks, kept on this computer, never in the repository),
+    // and the check updates it as it goes, also when it stops early. Packs are then read oldest
+    // first (never read ones before all others) instead of by the seed: a sampled check reads
+    // the read_share of packs read longest ago, so over time every pack is read; a full check
+    // (read_share 1) skips packs read at or after `fresh_since` (0: reads every pack), so a check
+    // that stopped part way goes on where it stopped. A time after `now` (a clock that was set
+    // back) counts as never read. Packs in archive storage are never among the packs to read.
+    std::unordered_map<Id, std::uint64_t, IdHash>* pack_state = nullptr;
+    // With pack_state, both optional. `damaged_state`: when each pack was last checked and found
+    // damaged or could not be checked (it gets `now`; a pack read intact again leaves it), so a
+    // full check's round can count it as visited. `archived_state`: packs found in archive
+    // storage although the backend does not say it keeps data there (an S3 lifecycle rule moved
+    // them, say). Such packs are left out of the packs to read, like ones the backend says are
+    // archived, but each check still looks at their header: one that can be read again (thawed,
+    // moved back) leaves the set and is read by the next check.
+    std::unordered_map<Id, std::uint64_t, IdHash>* damaged_state = nullptr;
+    std::unordered_set<Id, IdHash>* archived_state = nullptr;
+    std::uint64_t now = 0;
+    std::uint64_t fresh_since = 0;
+    // With pack_state: no further pack is read once this much time went by (0: no limit), though
+    // every check reads at least one; the packs left get the cheap header check and are counted
+    // in VerifyResult::packs_left.
+    std::chrono::milliseconds time_budget{0};
+
     std::function<void(const std::string&)> on_progress;
     std::function<void(const std::string&)> on_error;
+    // How far the reading is: the stored bytes of the packs read so far and of all packs this
+    // check reads (both from the index, so `done` reaches `total` when every one was read).
+    // Called once before the first pack and after each pack read.
+    std::function<void(std::uint64_t done, std::uint64_t total)> on_bytes;
 };
 
 struct VerifyResult {
@@ -38,9 +70,11 @@ struct VerifyResult {
     std::uint64_t errors = 0;
     std::uint64_t packs_repairable = 0;  // damaged, but their repair data can rebuild them
     std::uint64_t parity_added = 0;      // packs that got repair data (add_parity)
-    // Packs in archive storage (Backend::data_needs_thaw): only checked to be there, neither their
-    // header nor their data can be read without a thaw.
+    // Packs in archive storage (Backend::data_needs_thaw, or found there, see archived_state):
+    // only checked to be there, neither their header nor their data can be read without a thaw.
     std::uint64_t packs_archived = 0;
+    // With pack_state: packs this check was to read but left for the next one (time_budget).
+    std::uint64_t packs_left = 0;
 };
 
 VerifyResult run_verify(Repository& repo, const VerifyOptions& options);

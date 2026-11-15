@@ -56,6 +56,10 @@ struct BackupOptions {
     // latest snapshot from this computer with the same paths is used.
     std::optional<Id> parent;
     bool use_parent = true;
+    // Windows: download cloud files whose content is only online (OneDrive placeholders) and back
+    // up their content. Without it they are stored as metadata only and counted in
+    // SnapshotStats::cloud_only. Downloading them fills the disk with their content.
+    bool download_cloud_files = false;
     // Save no new snapshot when nothing changed since the parent (the same tree: every file,
     // folder and their metadata as before). The result then says so (unchanged).
     bool skip_unchanged = false;

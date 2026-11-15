@@ -98,6 +98,13 @@ release 1.5.4 and checks its SHA-256. `./build.sh vcpkg release test` builds wit
 (`VCPKG_ROOT`). Configure with `-DVAULTIK_BUILD_GUI=OFF` for a command-line-only build (servers).
 Until the Linux port is verified, the Linux notes in this README describe the intended behavior.
 
+Every push builds and tests on Windows and Linux, and once more on Linux with AddressSanitizer
+and UndefinedBehaviorSanitizer (memory errors, leaks, undefined behavior). The tests include runs
+cut short by a failing drive (a write that fails, a pack cut short, a rename that does not
+happen, a failed delete or read, through a test storage that fails on purpose): a backup, a
+cleanup or a health check stopped that way must leave every version readable, and the next run
+must finish and leave the backup whole.
+
 ## Using the frontend
 
 Start `vaultik-gui`, then **New backup job**:
@@ -128,7 +135,11 @@ Start `vaultik-gui`, then **New backup job**:
   not need to stay open; a run missed while the computer was off starts at the next chance.
   Scheduled runs can skip while the computer runs on battery, wake the computer from sleep at
   their time, and, for cloud storage, skip over a metered connection such as mobile data (the
-  skipped run shows in the Activity tab; the next scheduled one tries again). "Back up now"
+  skipped run shows in the Activity tab; the next scheduled one tries again). While a backup,
+  health check, cleanup or restore runs, the computer does not go to sleep (the display still
+  turns off and the screen still locks): Windows lists the run under `powercfg /requests`, and on
+  Linux it holds a logind sleep inhibitor (`systemd-inhibit --list`) when logind is there. The
+  computer may sleep again as soon as the run ends, however it ends. "Back up now"
   always runs. "Only save a version when something changed" makes a run that finds every file
   and folder as in the last version (content, times, attributes, permissions, streams; a folder's
   own times aside, which Windows updates lazily) save no new version; it shows as "nothing
@@ -187,7 +198,17 @@ jobs with their last result; the job page shows live progress and four tabs:
 
 **Restore** opens a version browser: pick a file or folder (or nothing, for everything) and
 restore it to another folder or to its original location; right-click an item for all its
-versions. A **preview** beside the browser (and **Preview** in Find a file) shows a file of any
+versions. Before it writes anything, a restore works out how much it will write and stops
+with a clear message when the target drive does not have room for it ("the restore needs about
+40 GiB but only 12 GiB is free"; `--ignore-space` restores anyway). With **Overwrite**, it also
+counts room for the largest file of the same size it replaces (a file of another size is counted
+in full already). The estimate is only a help: when it cannot be made
+(a damaged folder listing, say), the restore says so and goes on, restoring everything it can
+read. **Skip files that are already
+identical** (on by default; `--skip-identical`) leaves files in the target that have the same
+size, date and content as in the backup as they are, so a restore that was interrupted (the drive
+was unplugged, the computer went off) simply goes on where it stopped when run again; a file it
+left half written is restored again (with **Replace files that already exist**). A **preview** beside the browser (and **Preview** in Find a file) shows a file of any
 version without restoring it, decrypted into memory only:
 
 - Pictures (JPEG, PNG, GIF, BMP, TIFF, ICO, and HEIC or WebP where Windows has the codecs), fitted
@@ -225,6 +246,12 @@ that can read your account's files can read it there, but a portable copy's sett
 drive do not carry the key, so the drive alone does not give the password away). Job files live in `%LOCALAPPDATA%\Vaultik`
 or `~/.config/vaultik` (override with `VAULTIK_CONFIG_DIR`).
 
+A run that starts on its own (the schedule, a connected drive, an idle or locked computer, changed
+files) never asks for anything. When the job's password is not saved on this PC (or was saved by
+another account), it fails at once with "the password of this backup is not saved on this PC",
+records that in the job's history and sends a "password" alert (at most one a day per job, however
+often the job is started), instead of waiting for an answer nobody can give. Edit the job and enter its password, or start it with **Back up now**.
+
 **Keep the password safe elsewhere too.** Without it the backups cannot be decrypted, and nobody
 can reset it. What helps is the **recovery key**: a new backup shows one once (8 groups of 4
 characters, with buttons to copy it or save it to a file). Keep it apart from the computer. If
@@ -244,6 +271,15 @@ storage key. The file is readable by your account only; once the page is printed
 command line, for the recovery key it asks for (or `--new` for a new one); its PDF uses the
 PDF's built-in fonts, so letters outside Western European ones show as `?` there (the web page
 and the frontend's PDF have them all).
+
+**Still unprotected** on a job's Overview lists, in plain words, what would still leave the
+backup at risk, each with a button to the fix where there is one: the password is not saved on
+this PC (so scheduled runs cannot run), there is no second copy, the recovery kit was never saved
+or printed on this PC, a test restore never ran, the schedule is paused, the last health check
+found damage, could not finish or is overdue (or checks are off), the backup is on the same drive
+as files it backs up, or every job saves to one drive and none has a second copy. Saving or
+printing a recovery kit leaves a marker in `kits` in the settings folder (it holds nothing of
+the key). The card is hidden once nothing is left.
 
 ## Packages
 
@@ -433,7 +469,8 @@ a line `cancel` on stdin stops a backup or restore cleanly. The frontend uses th
 Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished but some files
 were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
 tools) a drive is in use by another program (see [Drives in use](#drives-in-use)), `7` (Linux)
-the progress channel given with `--progress-pipe` cannot be used, so nothing was done.
+the progress channel given with `--progress-pipe` cannot be used, so nothing was done, `8`
+(`run-job`) the backup drive is not connected, so the run waits for it (see below).
 
 ### Old snapshots and space
 
@@ -523,6 +560,30 @@ that one and older ones. They could likewise put back an older status note: a no
 that computer's newest version is marked as such ("status record older than its newest version",
 health at least "warning").
 
+### Compression level
+
+New backups compress at zstd level 3, which keeps up with fast drives. When the drive is the
+bottleneck (a USB 2.0 hub at about 40 MiB/s, a network share), a higher level writes less and can
+make the backup faster as well as smaller. The job's **Compression** (Options tab) is "as the
+destination has it" by default, which leaves existing backups exactly as they are; **Fast** (3),
+**Balanced** (6) or **Small** (12) become the destination's setting with the next backup and
+apply to new data only. Data already stored stays as it is, and every level reads back the same
+way, also with older Vaultik versions (which keep writing at level 3). The setting is the file
+`settings/compression` in the backup (see docs/FORMAT.md).
+
+### Files only in the cloud (OneDrive)
+
+OneDrive (and similar sync programs) can keep files only online, with a placeholder on the disk.
+Reading such a file makes OneDrive download it, so a backup does not read them by default: it
+keeps their name, size and dates, and counts them on their own. The run's result, the
+Overview's last backup and **Still unprotected** then say "N files are only in the cloud and not
+backed up" (`"cloud_only"` in the history and the `--json` result; the version keeps the count).
+Turn on **Download files that are only in the cloud** in the job's Options to have the backup
+download them first and save their content; that takes time and fills the disk with them (OneDrive
+can free the space again later). With it on, folders the change journal says are unchanged are read
+again when they hold such files, so they are downloaded too, and **Still unprotected** keeps naming
+the files until a backup saved them.
+
 ### External drives
 
 A job saving to a folder on a drive records the drive's volume ID (`"volume"` in the job
@@ -531,6 +592,61 @@ comes back as `G:` instead of `F:` still works. With "Also back up when the dest
 connected" (Schedule tab), the running frontend or tray icon starts the job as soon as the drive
 is plugged in (`run-job <job> --on-connect`, which does nothing when the job just saved a
 version or is already running), then says when the drive can be unplugged.
+
+Jobs that back up to the same drive take turns: a backup, health check, test restore or cleanup
+waits while another job uses that drive ("Waiting for another job on this drive" in the app),
+and starts when it is done, so three jobs on one USB drive do not share its speed and each take
+as long as all three together. The turn follows the drive's volume ID, not its letter, and holds
+between runs started by Task Scheduler or a systemd timer and runs started in the app. On Windows
+jobs with administrator rights take turns with the runs of the account that set them up; other
+accounts cannot take or hold the turn, so they cannot hold up your backups. As a program of your
+own account could hold the turn, a job with administrator rights that waited the whole 12 hours
+goes on with a warning instead of giving up: it can be delayed, never stopped. A turn that
+another account made, or one your account may not open, is not waited for: the run goes on (and
+says so in its log), while an eject counts it as in use, as it does when another program took the
+turn's name for something else. On Linux root's runs take turns with
+the runs of every account through /run/lock, your own prune or eject too; as any account could
+hold that shared turn, a run waits for another account's run for 5 minutes at most and then goes
+on with a warning (both then share the drive's speed): it too can be delayed, never stopped. Your
+own runs still take turns with each other, and a run as root is waited for as long as it runs.
+Another account can neither make your commands wait nor keep your eject refused; a command or
+eject as root still counts. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
+all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
+go to sleep. A run started on its own that waited behind a run of the same job does nothing once
+that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a
+job's before or after command (a prune of the same drive, say) does not wait for the run that
+started it; one that outlives that run takes the turn as usual. Cloud storage has no such turns.
+
+A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
+Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows
+one calm note: "This drive uses exFAT: always eject it before unplugging, or reformat it to NTFS
+for more safety."
+
+**Eject the backup drive** (the Drives card of the Overview, for an external drive, or `vaultik
+eject <job>`) prepares the drive to be unplugged, as Windows' "Safely remove" does: it is
+flushed, locked and dismounted where your account may, then Windows is asked to eject it, which
+it refuses (naming the program) while something still uses the drive; on Linux `udisksctl
+unmount` and `power-off`. Vaultik refuses while any of its own commands has the drive open (a
+backup, check, cleanup, restore, copy, repair or any other command that opened the backup), also
+one with administrator rights, and a command that starts while the drive is being ejected waits
+for the eject (at most a minute) and then finds the drive gone. **Eject it on its own when the last job using it is done** (`vaultik
+eject <job> --when-done on`, per drive) ejects it after the last of the jobs that waited for it
+finishes. No administrator rights are needed for a USB drive.
+
+When a run finds the backup drive not connected, that is no failure: the drive is simply
+elsewhere. The run is recorded once as "Waiting for the drive" (grey, not red; `"status":
+"waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert or
+failure notification at first, and the Overview says since when it waits. As soon as the drive is plugged
+in while Vaultik is open (or in the notification area), the missed backup runs, also for jobs
+without "Also back up when the destination drive is connected"; otherwise the next scheduled run
+does it. If the drive stays away too long, the overdue reminder ("not backed up for N days")
+speaks up as before, and so does an alert (below). A second copy whose drive is away waits the same way and catches up after
+the next backup with its drive connected. Once the backups of a job, or its second copy, have
+waited for their drive for 3 days (for a weekly job: the longest gap between its days, plus one),
+each run sends a "backup drive missing for N days" alert, at most one a day, also for a job that
+never saved a version or backs up every hour, and without the app running. (Windows has no Task Scheduler trigger for a drive
+being plugged in that works without turning on an extra event log first, so the catch-up is done
+by Vaultik itself.)
 
 ### Backing up when something happens
 
@@ -683,6 +799,39 @@ files point at data that exists. A check is its own entry in the job's history (
 notification. `check-job <job> [--full]` runs one now; `verify --read-data --read-share 10` does
 the same on any repository. New cloud jobs skip the monthly full check, since it downloads the
 whole backup.
+
+Vaultik remembers on this PC (in `checks` in its settings folder, never in the backup) when each
+stored pack was last read back intact, for the backup where it is: a copy of the backup on
+another drive or in another folder starts from scratch. The weekly check reads the share read
+longest ago, so over the weeks every part of the backup is read (packs in archive storage, which
+cannot be read without a thaw, take no part of it). The scheduled monthly full check reads for at
+most 3 hours per run by default (the job's Schedule tab: "at most ... per run", or no limit); when
+the time is up it stops calmly ("the rest after the next backup"), and the next check goes on
+where it stopped, also after a cancel or an unplugged drive. A full check is complete once every
+pack was read since that monthly round began, so each pack is read once every round. One that found
+damage is alerted at once, and the round is not complete; a damaged pack counts as visited, so a
+pack that stays damaged does not keep the round open: the next round reads every pack again.
+Packs found in archive storage although the job does not say it keeps data there (an S3 lifecycle
+rule moved them) are remembered, take no part of the checks' reading and keep no full check open;
+the check says how many are in archive storage and could not be read. A full check you start yourself (the app,
+or `check-job <job> --full`) reads everything, without a time limit; `--budget` makes it keep to
+the job's limit and go on where it stopped next time. While a check reads, the app shows how far it is
+as a percentage of the data it reads this time, with the time left (smoothed over the last half
+minute, as for the drive cleanser); `--json` gives `"done"` and `"total"` bytes in its
+`check_progress` events.
+
+Several jobs that back up to the same repository (the same folder on the same drive, or the
+same cloud storage) share their checks: one completed check of the repository counts for all of
+them, so the repository is not read once per job, and what it read is remembered for all of them. The check of each job's
+own files on this PC (below) is not shared: when another job checked the repository and the job's
+own schedule calls for a check, a job whose files were not compared in the last 7 days (30 with
+only the monthly check on) still gets that comparison after its backup.
+
+Only a check that read what it set out to read counts as done. A check that could not finish
+(the drive was unplugged part way, say) or was cancelled does not: it stays due and runs again
+after the next backup, and one that could not finish shows a notification and sends a "health
+check could not finish" alert (with "failure" alerts on, at most one a day per job; one that no
+channel took, with no network yet, say, goes out with the next run instead of a day later).
 
 Each check also looks for silent damage on this computer ("bit rot"): it reads up to 20 files back
 from this PC (at most 256 MB, for at most 2 minutes, within the job's resource limits) whose size,
@@ -885,7 +1034,7 @@ pack on one core.
 
 Windows notifications only reach someone at the computer. **Settings > Alerts when you are
 away** sets up alerts that the backup sends itself (so Vaultik need not be open), when a backup
-fails or skips files, when a check or test restore finds damage, when a check finds files on the
+fails or skips files, when a check or test restore finds damage or a check could not finish, when a check finds files on the
 computer that changed by themselves, or the backup drive is failing,
 and optionally after every backup:
 
@@ -1220,6 +1369,16 @@ Format with Secure Erase, ATA SECURE ERASE): done wrong it can leave a drive loc
 and many computers block it. Use the drive maker's tool or the computer's firmware setup for that,
 or keep the data on an encrypted drive (BitLocker, LUKS) from the start. Wiping free space does
 not reach small files NTFS keeps inside its file table, nor the slack at the end of files.
+
+### Run logs
+
+Each run of a job (backup, second copy, health check, test restore) writes every warning in full
+to a log file of its own: each file that was skipped and why, each problem a check found, what a
+command printed when it failed, and the result at the end. The history keeps only counts and the
+first few, so the log is where to look for the whole list. Logs are in `logs/<job>` in Vaultik's
+settings folder, at most 4 MiB each (a longer one says where it was cut short), and the newest 30
+of each job are kept. The run's history entry names its log (`"log"`), and in the Activity tab a
+double-click (or the menu) opens it.
 
 ### Event Log
 

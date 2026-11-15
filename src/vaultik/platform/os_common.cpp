@@ -8,6 +8,24 @@
 
 namespace vaultik::os {
 
+namespace {
+
+constexpr std::uint32_t kAttrDirectory = 0x10;            // FILE_ATTRIBUTE_DIRECTORY
+constexpr std::uint32_t kCloudOnly = 0x1000 | 0x40000 | 0x400000;  // _OFFLINE, _RECALL_ON_OPEN, _RECALL_ON_DATA_ACCESS
+
+}  // namespace
+
+bool is_cloud_only(const FileInfo& info) {
+    return info.type == EntryType::Other && (info.attributes & kCloudOnly) != 0;
+}
+
+FileInfo downloaded_form(const FileInfo& info) {
+    FileInfo f = info;
+    f.type = (info.attributes & kAttrDirectory) != 0 ? EntryType::Dir : EntryType::File;
+    if (f.type == EntryType::Dir) f.size = 0;
+    return f;
+}
+
 void make_dirs(const std::string& path) {
     if (path.empty() || is_directory(path)) return;
     const std::string parent = parent_of(path);

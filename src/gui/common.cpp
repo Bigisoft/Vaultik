@@ -16,6 +16,7 @@
 #include <atomic>
 #include <exception>
 
+#include "vaultik/util/task_events.hpp"
 #include "vaultik/jobs/forecast.hpp"
 #include "vaultik/ops/prune.hpp"
 #include "vaultik/platform/os.hpp"
@@ -79,6 +80,14 @@ QString format_bytes(std::uint64_t bytes) {
     }
     if (unit == 0) return QStringLiteral("%1 B").arg(bytes);
     return QStringLiteral("%1 %2").arg(v, 0, 'f', v < 10 ? 2 : (v < 100 ? 1 : 0)).arg(kUnits[unit]);
+}
+
+QString time_left_text(double seconds) {
+    const vaultik::TimeLeft t = vaultik::split_time_left(seconds);
+    if (!t.known) return {};
+    if (t.under_a_minute) return QObject::tr("less than a minute left");
+    if (t.hours == 0) return QObject::tr("%1 min left").arg(t.minutes);
+    return QObject::tr("%1 h %2 min left").arg(t.hours).arg(t.minutes, 2, 10, QChar('0'));
 }
 
 QString count_of(std::uint64_t n, const QString& one, const QString& many) {

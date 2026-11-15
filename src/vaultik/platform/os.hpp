@@ -100,6 +100,13 @@ struct FileInfo {
     std::uint64_t device = 0;  // POSIX st_dev, to notice mount points (0 on Windows)
 };
 
+// Windows: a cloud file or folder (OneDrive and similar) whose content is only in the cloud, not
+// on this disk (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, _RECALL_ON_OPEN or _OFFLINE): stat reports
+// it as Other, since reading it downloads it. Always false on POSIX, which has no such attributes.
+bool is_cloud_only(const FileInfo& info);
+// The type such an entry has once it is downloaded: Dir or File (with its size).
+FileInfo downloaded_form(const FileInfo& info);
+
 // Metadata of `path` itself (links are not followed). Returns false and sets `err` on failure.
 bool stat(const std::string& path, FileInfo& info, ErrorCode& err);
 // Windows: the NTFS change time of `path` itself (FILETIME UTC): the time of the last change of any
@@ -304,6 +311,17 @@ struct VolumeLocation {
 VolumeLocation volume_of(const std::string& path);
 // The current mount path of a volume named by volume_of ("F:\"), or empty when it is not connected.
 std::string volume_root(const std::string& volume);
+// The file system of the drive holding `path`, as the system names it: "NTFS", "exFAT", "FAT32",
+// "ReFS" (Windows), "ext4", "exfat", "vfat", "ntfs3", "btrfs" (Linux); empty when not known.
+std::string file_system_of(const std::string& path);
+
+// Prepares a backup drive for unplugging, as "Safely remove" does. Windows: flushes, locks and
+// dismounts the volume where this account may, then asks Windows to eject the device
+// (CM_Request_Device_Eject), which refuses while a program still uses it. Linux: udisksctl unmount
+// and power-off. `root` is the drive's root ("F:\", "/run/media/me/USB"). Empty on success,
+// otherwise why not, in plain words.
+std::string eject_drive(const std::string& root);
+
 // The space on the drive holding `path` (a local folder or a network share): what this user may
 // still write, and the drive's size. Empty when it cannot be told (not there, not a drive).
 struct DiskSpace {

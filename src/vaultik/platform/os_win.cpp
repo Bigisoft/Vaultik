@@ -57,7 +57,10 @@ FileInfo info_from(DWORD attrs, DWORD reparse_tag, const FILETIME& created, cons
     info.attributes = attrs;
     info.ctime = filetime_to_u64(created);
     info.mtime = filetime_to_u64(written);
-    info.size = info.type == EntryType::File ? (static_cast<std::uint64_t>(size_high) << 32) | size_low : 0;
+    // A cloud placeholder keeps its size: what downloading it for the backup would read.
+    const bool sized = info.type == EntryType::File ||
+                       (is_cloud_placeholder(attrs) && (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0);
+    info.size = sized ? (static_cast<std::uint64_t>(size_high) << 32) | size_low : 0;
     return info;
 }
 
@@ -576,6 +579,14 @@ void File::preallocate(std::uint64_t size) {
     FILE_ALLOCATION_INFO alloc{};
     alloc.AllocationSize.QuadPart = static_cast<LONGLONG>(size);
     SetFileInformationByHandle(as_handle(h_), FileAllocationInfo, &alloc, sizeof alloc);
+}
+
+std::string file_system_of(const std::string& path) {
+    wchar_t root[MAX_PATH + 1] = {};
+    if (!GetVolumePathNameW(native(path).c_str(), root, MAX_PATH)) return {};
+    wchar_t name[MAX_PATH + 1] = {};
+    if (!GetVolumeInformationW(root, nullptr, 0, nullptr, nullptr, nullptr, name, MAX_PATH)) return {};
+    return narrow(name);
 }
 
 ErrorCode make_dir(const std::string& path) {

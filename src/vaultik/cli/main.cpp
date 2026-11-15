@@ -28,6 +28,11 @@
 
 #include "vaultik/cli/console.hpp"
 #include "vaultik/crypto/hash.hpp"
+#include "vaultik/jobs/check_state.hpp"
+#include "vaultik/jobs/drive_lock.hpp"
+#include "vaultik/jobs/eject.hpp"
+#include "vaultik/jobs/protection.hpp"
+#include "vaultik/jobs/run_log.hpp"
 #include "vaultik/jobs/job.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/jobs/settings_transfer.hpp"
@@ -73,6 +78,7 @@
 #include "vaultik/ops/docker.hpp"
 #include "vaultik/ops/virt.hpp"
 #include "vaultik/util/hex.hpp"
+#include "vaultik/util/keep_awake.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
 
@@ -107,6 +113,7 @@ constexpr int kExitCancelled = 4;
 constexpr int kExitLocked = 5;  // another run holds a conflicting repository lock
 constexpr int kExitInUse = 6;   // disk tools: a volume is in use by another program (--force-dismount forces it)
 constexpr int kExitNoChannel = 7;  // POSIX: --progress-pipe was given but cannot be used; nothing was done
+constexpr int kExitWaiting = 8;    // run-job: the backup drive is not connected; nothing was done
 
 // In pieces (the ")" R"(" joins below): Visual Studio 2022 refuses a single string literal over
 // 16 KB (error C2026); adjacent literals are joined into one string.
@@ -231,6 +238,10 @@ Commands:
       --target <folder>        Where to restore (required)
       --path <path>            Only this file or folder, e.g. C/Users/me/Documents
       --overwrite              Replace existing files in the target
+      --skip-identical         Leave files that are already identical (size, time
+                               and content) as they are: run an interrupted
+                               restore again with this to go on where it stopped
+      --ignore-space           Restore even when the target seems too small
       --permissions            Windows: give items their stored owner and access
                                list (needs administrator rights for other owners)
       --no-links               Windows: skip symlinks and junctions
@@ -371,6 +382,14 @@ Commands:
                                compare them with the newest version, to catch
                                silent damage (unless the job turned it off)
       --full                   Read all of the stored data
+      --budget                 With --full: stop at the job's time limit and go
+                               on where it stopped next time (as the scheduled
+                               monthly check does)
+      --no-budget              With --scheduled: no time limit
+  eject <job>                  Eject the job's backup drive so it can be unplugged
+                               (refused while a run uses it)
+      --when-done on|off       Instead: eject it on its own after the last job
+                               that waited for it is done
   alert-test                   Send a test message to the alert channels set up
                                in Settings (ntfy, Telegram, webhook)
   report                       Monthly report of every saved job: backups and their
@@ -540,7 +559,8 @@ Options:
   --version                    Show the version
 
 Exit codes: 0 ok, 1 error, 2 wrong password or damaged data, 3 finished with skipped files,
-4 cancelled, 5 repository in use by another run.
+4 cancelled, 5 repository in use by another run, 8 (run-job) the backup drive is not
+connected, so the run waits for it.
 )";
 
 struct Args {
@@ -573,7 +593,7 @@ const std::set<std::string> kValueOptions = {
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",
-                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands", "--force-dismount"};
+                                              "--full", "--no-check", "--on-connect", "--on-event", "--on-sign-out", "--on-change", "--smart", "--history", "--quick", "--permissions", "--no-links", "--scheduled", "--skip-unchanged", "--check-every-file", "--status", "--deliver", "--apps", "--missing", "--on-request", "--poll", "--cloud", "--replace", "--new-ids", "--boot", "--pause", "--accept-missing-packs", "--new", "--gpt", "--mbr", "--verify", "--with-secrets", "--alerts", "--keep-commands", "--force-dismount", "--skip-identical", "--ignore-space", "--budget", "--no-budget"};
 
 Args parse_args(const std::vector<std::string>& argv) {
     Args a;
@@ -648,7 +668,24 @@ void emit(const nlohmann::json& event) {
     if (g_json_stdout) out(line + "\n");
 }
 
+// The log file of the job's run going on (see jobs/run_log.hpp), if any: every warning goes there too.
+std::atomic<vaultik::jobs::RunLog*> g_run_log{nullptr};
+
+// Keeps the run's log for as long as it lives.
+struct RunLogScope {
+    std::unique_ptr<vaultik::jobs::RunLog> log;
+    RunLogScope(const std::string& dir, const std::string& job_id, std::uint64_t started) {
+        try {
+            log = std::make_unique<vaultik::jobs::RunLog>(dir, job_id, started);
+            g_run_log = log.get();
+        } catch (const std::exception&) {
+        }
+    }
+    ~RunLogScope() { g_run_log = nullptr; }
+};
+
 void warning(const std::string& msg) {
+    if (vaultik::jobs::RunLog* log = g_run_log.load()) log->line("warning: " + msg);
     if (g_json) {
         emit({{"event", "warning"}, {"message", msg}});
     } else {
@@ -852,9 +889,25 @@ CloudCredentials cloud_credentials(const Args& a) {
     return {};
 }
 
+// Shared claims on the backup drives this command opens (see jobs/drive_lock.hpp), held until it
+// ends, so the drive is never ejected under it. Best effort: a claim that cannot be had is none.
+std::vector<std::unique_ptr<jobs::DriveClaim>> g_drive_claims;
+
+void claim_drive(const std::string& location) {
+    try {
+        const std::string key = jobs::drive_lock_key(location);
+        if (key.empty()) return;
+        auto claim = std::make_unique<jobs::DriveClaim>(key, os::join(jobs::config_dir(), "locks"));
+        if (claim->held()) g_drive_claims.push_back(std::move(claim));
+    } catch (const std::exception&) {
+    }
+}
+
 std::unique_ptr<Backend> backend_for(const Args& a, bool create = false) {
     const CloudCredentials cloud = cloud_credentials(a);
-    return open_backend(repo_path(a), &cloud, create);
+    const std::string location = repo_path(a);
+    claim_drive(location);
+    return open_backend(location, &cloud, create);
 }
 
 std::unique_ptr<Repository> open_repo(const Args& a, bool load_index = true) {
@@ -1160,6 +1213,14 @@ std::function<std::optional<std::string>()> app_list_in_background() {
 // The message of a run that found nothing changed (and so saved no version).
 constexpr const char* kUnchanged = "nothing changed since the last version, so no new one was saved";
 
+// "3 files (1.20 GiB) are only in the cloud and were not backed up ...".
+std::string cloud_only_text(std::uint64_t files, std::uint64_t bytes) {
+    return std::to_string(files) + (files == 1 ? " file (" : " files (") + format_bytes(bytes) + ") " +
+           (files == 1 ? "is" : "are") +
+           " only in the cloud and were not backed up (the job's \"Download files that are only in the cloud\" "
+           "backs them up)";
+}
+
 int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo_location, jobs::RunRecord& record,
                       RepoLock& lock, VssMode vss, bool pause_sql_server, ChangeJournal* journal = nullptr) {
     // Never back up the repository into itself.
@@ -1235,6 +1296,9 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
     record.message = s.errors > 0 ? std::to_string(s.errors) + " item(s) could not be read" : "";
     if (r.unchanged)
         record.message = std::string(kUnchanged) + (record.message.empty() ? "" : "; " + record.message);
+    record.cloud_only = s.cloud_only;
+    if (s.cloud_only > 0)
+        record.message += (record.message.empty() ? "" : "; ") + cloud_only_text(s.cloud_only, s.cloud_only_bytes);
     if (r.alarm.raised()) raise_alarm(repo, r, record);
     // A source that is gone (a detached disk, a locked volume, an unreachable share) or a sharp
     // drop in files makes a near-empty version; removing old versions by count or by day would
@@ -1259,6 +1323,8 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
               {"new_bytes", s.new_bytes},
               {"stored_bytes", s.stored_bytes},
               {"skipped", s.skipped},
+              {"cloud_only", s.cloud_only},
+              {"cloud_only_bytes", s.cloud_only_bytes},
               {"errors", s.errors},
               {"alert", record.alert},
               {"unchanged", r.unchanged},
@@ -1274,7 +1340,8 @@ int backup_and_report(Repository& repo, BackupOptions o, const std::string& repo
         format_bytes(s.bytes) + "\n");
     out("  new data: " + format_bytes(s.new_bytes) + ", stored " + format_bytes(s.stored_bytes) +
         " after compression and encryption\n");
-    if (s.skipped > 0) out("  links/placeholders kept without content: " + std::to_string(s.skipped) + "\n");
+    if (s.skipped > 0) out("  links kept without content: " + std::to_string(s.skipped) + "\n");
+    if (s.cloud_only > 0) out("  " + cloud_only_text(s.cloud_only, s.cloud_only_bytes) + "\n");
     out("  time:     " + format_duration(seconds_since(start)) +
         (r.snapshot.parent ? " (compared with " + short_id(*r.snapshot.parent) + ")" : std::string(" (full)")) +
         "\n");
@@ -2142,13 +2209,48 @@ std::string rot_check(Repository& repo, const jobs::Job& job, jobs::RunRecord& r
            "a failing drive?): " + record.rot + "; the version of " + when + " holds the earlier copy";
 }
 
-int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record) {
+// How a health check runs. A scheduled full check (after a backup, or check-job --scheduled)
+// goes on with the cycle going on and keeps to the job's time limit; one the user started reads
+// everything, without a limit unless asked for one (--budget; --no-budget lifts it for a
+// scheduled one).
+struct CheckHow {
+    bool scheduled = false;
+    bool budgeted = false;
+};
+
+CheckHow check_how(const Args& a, bool scheduled) {
+    CheckHow how;
+    how.scheduled = scheduled || a.has("--budget");
+    how.budgeted = a.has("--budget") || (scheduled && !a.has("--no-budget"));
+    return how;
+}
+
+int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, jobs::RunRecord& record,
+                 const std::string& settings_dir, CheckHow how) {
     record.kind = kind;
     record.started = os::now();
     const bool full = kind == jobs::RunKind::FullCheck;
     std::vector<std::string> problems;
     VerifyResult r;
     std::string rot;
+    // What earlier checks of this repository, where it is now, read (see jobs/check_state.hpp):
+    // read longest ago first, and kept however this check ends, so the next one goes on from there.
+    const std::string state_key = jobs::check_state_key(repo);
+    jobs::CheckState state = jobs::load_check_state(settings_dir, state_key);
+    const std::uint64_t fresh_since = full ? jobs::plan_full_check(state, how.scheduled, record.started) : 0;
+    struct SaveState {
+        const std::string& dir;
+        const std::string& key;
+        const jobs::CheckState& state;
+        const Repository& repo;
+        ~SaveState() {
+            try {
+                jobs::save_check_state(dir, key, state, repo);
+            } catch (const std::exception& e) {
+                warning(std::string("could not remember which data the check read: ") + e.what());
+            }
+        }
+    } save_state{settings_dir, state_key, state, repo};
     try {
         RepoLock lock(repo, RepoLock::Mode::Shared, "check (job " + job.id + ")");
         repo.reload_index();  // a prune may have finished before the lock was granted
@@ -2156,7 +2258,13 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         o.read_data = true;
         o.read_share = full ? 1.0 : job.health.sample_percent / 100.0;
         o.add_parity = repo.parity_percent();  // data from before repair data gets it over time
-        o.sample_seed = record.started;  // a different share each time
+        o.sample_seed = record.started;
+        o.pack_state = &state.packs;
+        o.damaged_state = &state.damaged;
+        o.archived_state = &state.archived;
+        o.now = record.started;
+        o.fresh_since = fresh_since;
+        if (full && how.budgeted) o.time_budget = std::chrono::hours(job.health.full_check_hours);
         o.should_cancel = [&lock] { return stop_requested() || lock.lost(); };
         o.on_progress = [](const std::string& msg) {
             if (g_json) emit({{"event", "check_progress"}, {"current", msg}});
@@ -2165,6 +2273,13 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
         o.on_error = [&problems](const std::string& msg) {
             if (problems.size() < 3) problems.push_back(msg);
             warning(msg);
+        };
+        // How far the reading is, in bytes, for a percentage and the time left.
+        o.on_bytes = [](std::uint64_t done, std::uint64_t total) {
+            if (g_json) emit({{"event", "check_progress"}, {"done", done}, {"total", total}});
+            else if (total > 0)
+                status("Checking: " + std::to_string(done * 100 / total) + "% (" + format_bytes(done) + " of " +
+                       format_bytes(total) + ")");
         };
         if (!g_json)
             out(std::string(full ? "Full health check: reading all stored data back...\n"
@@ -2189,14 +2304,30 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     record.files = r.packs_read;
     record.bytes = r.bytes_read;
     record.errors = r.errors;
-    record.status = r.errors > 0 ? jobs::RunStatus::Failed : jobs::RunStatus::Success;
+    // A full check is complete once every pack was read in its cycle, by this check or the ones
+    // before it; one that stopped at its time limit goes on after the next backup. One that found
+    // damage and stopped at its limit is a failure and not complete either.
+    const std::uint64_t still_due =
+        full ? jobs::finish_full_check(state, repo, fresh_since != 0 ? fresh_since : record.started, record.started) : 0;
+    record.packs_left = r.errors > 0 ? r.packs_left : still_due;
+    record.status = r.errors > 0 ? jobs::RunStatus::Failed
+                    : still_due > 0 ? jobs::RunStatus::Partial
+                                    : jobs::RunStatus::Success;
     if (r.errors > 0) {
         record.message = std::to_string(r.errors) + " problem(s) found: ";
         for (std::size_t i = 0; i < problems.size(); ++i) record.message += (i ? "; " : "") + problems[i];
+        if (record.packs_left > 0)
+            record.message += "; " + std::to_string(record.packs_left) +
+                              " pack(s) were not read yet (time limit), so the full check is not complete";
     } else {
         record.message = "read " + format_bytes(r.bytes_read) + " in " + std::to_string(r.packs_read) + " of " +
                          std::to_string(r.packs) + " pack(s), checked " + std::to_string(r.snapshots) +
                          " version(s); no problems";
+        if (still_due > 0)
+            record.message += "; " + std::to_string(still_due) + " pack(s) are left for the next check (time limit of " +
+                              std::to_string(job.health.full_check_hours) + " hour(s)), which goes on where this one stopped";
+        else if (full && r.packs_read + r.packs_archived < r.packs)
+            record.message += "; the other packs were read by the checks before it in this cycle";
     }
     if (r.packs_repairable > 0)
         record.message += "; " + std::to_string(r.packs_repairable) +
@@ -2204,7 +2335,8 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     if (r.parity_added > 0) record.message += "; repair data added to " + std::to_string(r.parity_added) + " pack(s)";
     if (r.packs_archived > 0)
         record.message += "; " + std::to_string(r.packs_archived) +
-                          " pack(s) in archive storage were only checked to be there (reading them needs a thaw)";
+                          " pack(s) are in archive storage and could not be read (only checked to be there; reading "
+                          "them needs a thaw)";
     if (!rot.empty()) record.message += "; " + rot;
     if (g_json) {
         emit({{"event", "check"},
@@ -2227,6 +2359,54 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
                 " <version> --path <file> --target <folder>), then check the drive.\n");
     }
     return r.errors > 0 ? kExitAuth : kExitOk;
+}
+
+// The silent damage part of a health check alone, for a job whose repository another job
+// checked (see jobs::rot_check_due): fills `record` as a check with rot_only set. Throws on cancel
+// or when it could not run, after filling the record.
+void files_check(Repository& repo, const jobs::Job& job, jobs::RunRecord& record) {
+    record.kind = jobs::RunKind::Check;
+    record.rot_only = true;
+    record.started = os::now();
+    std::string rot;
+    try {
+        RepoLock lock(repo, RepoLock::Mode::Shared, "check (job " + job.id + ")");
+        repo.reload_index();
+        if (!g_json) out("Health check: comparing unchanged files on this PC with the backup...\n");
+        rot = rot_check(repo, job, record, [&lock] { return stop_requested() || lock.lost(); });
+    } catch (const Cancelled&) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Cancelled;
+        record.message = "cancelled";
+        throw;
+    } catch (const std::exception& e) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Failed;
+        record.message = std::string("the check could not run: ") + e.what();
+        throw;
+    }
+    record.finished = os::now();
+    record.status = jobs::RunStatus::Success;
+    record.message = "the backup itself was checked by another job that backs up to the same place";
+    if (!rot.empty()) record.message += "; " + rot;
+    if (g_json) {
+        emit({{"event", "check"},
+              {"kind", jobs::to_string(record.kind)},
+              {"status", jobs::to_string(record.status)},
+              {"rot_only", true},
+              {"rot_files", record.rot_files},
+              {"message", record.message}});
+    } else {
+        clear_status();
+        out("Health check: " + record.message + "\n");
+        if (record.rot_files > 0)
+            out("WARNING: files on this PC changed although nothing wrote to them, which a failing drive does. "
+                "The backup holds the earlier copy: restore them from the version of " +
+                os::format_time_local(record.rot_version).substr(0, 16) + " (vaultik restore --job " + job.id +
+                " <version> --path <file> --target <folder>), then check the drive.\n");
+    }
 }
 
 // A test restore of the job's newest version (see ops/restore_test.hpp), recorded in `record`.
@@ -2326,6 +2506,7 @@ std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& s
     std::unique_ptr<Repository> repo;
     try {
         const CloudCredentials cloud = store.cloud_credentials(job);
+        claim_drive(job.repository);
         repo = Repository::open(open_backend(job.repository, &cloud), pw);
     } catch (...) {
         secure_wipe(pw.data(), pw.size());
@@ -2335,6 +2516,65 @@ std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& s
     secure_wipe(pw.data(), pw.size());
     clear_status();
     return repo;
+}
+
+// Adds a run to the job's history, naming the run's log (with the result as its last line).
+void append_run(const jobs::JobStore& store, const std::string& id, jobs::RunRecord record) {
+    if (jobs::RunLog* log = g_run_log.load()) {
+        record.log = log->path();
+        log->line(std::string(jobs::to_string(record.kind)) + ": " + jobs::to_string(record.status) +
+                  (record.message.empty() ? std::string() : ": " + record.message));
+        log->flush();
+    }
+    store.append_history(id, record);
+}
+
+// The request that keeps the computer awake during a long run (see run()), and why; let go of
+// while the run only waits for its drive, so a computer with nothing to do may sleep meanwhile.
+std::optional<KeepAwake>* g_awake = nullptr;
+std::string g_awake_reason;
+
+// What the commands this run starts (its before and after commands) get to know of the drive lock
+// it holds (see jobs::kHeldDrivesVariable): a vaultik command among them for the same drive does
+// not wait for this run, which waits for it.
+std::pair<std::string, std::string> g_held_drive_env;
+
+// Takes the lock of the backup drive behind `key` (see jobs/drive_lock.hpp) for this run, waiting
+// while another run uses the drive and saying so. Stopping the run stops the wait. `admin` (a job
+// with administrator rights, --admin): when the wait ends it goes on without the lock, with a
+// warning, instead of giving up, since a program of the account it shares the turn with may hold
+// it.
+std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::string& settings_dir, bool admin = false) {
+    auto lock = std::make_unique<jobs::DriveLock>(
+        key, os::join(settings_dir, "locks"), std::chrono::duration_cast<std::chrono::milliseconds>(jobs::kDriveLockWait),
+        [] {
+            if (g_awake != nullptr) g_awake->reset();  // only waiting: the computer may sleep
+            const std::string msg = "waiting for another job on this drive to finish";
+            if (g_json) emit({{"event", "drive_wait"}, {"message", msg}});
+            else out("Waiting: another job is using this backup drive; this one starts when it is done.\n");
+        },
+        [] {
+            if (stop_requested()) throw Cancelled();
+            return false;
+        },
+        admin ? jobs::DriveLockMode::admin_run : jobs::DriveLockMode::run);
+    if (lock->waited() && g_awake != nullptr && !g_awake->has_value() && !g_awake_reason.empty())
+        g_awake->emplace(g_awake_reason);
+    if (lock->other_account_skipped())
+        warning("another account kept the backup drive's turn for " + std::to_string(jobs::kOtherAccountWait.count()) +
+                " minutes; this run goes on without waiting for it (both then share the drive's speed)");
+    if (lock->gave_up_waiting())
+        warning("another run kept the backup drive's turn for " + std::to_string(jobs::kDriveLockWait.count()) +
+                " hours; this job with administrator rights goes on without waiting for it (both then share the "
+                "drive's speed)");
+    if (lock->not_shared()) {
+        // Not a warning: the run is as it was before runs shared their turn.
+        const std::string msg = "could not share this drive's turn with another account's runs";
+        if (jobs::RunLog* log = g_run_log.load()) log->line(msg);
+        else if (!g_json) err(msg + "\n");
+    }
+    g_held_drive_env = lock->child_environment();
+    return lock;
 }
 
 // Leaves this computer's status record in the job's repository (see jobs/computers.hpp), so other
@@ -2650,13 +2890,22 @@ int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job
     record.kind = jobs::RunKind::Copy;
     record.started = os::now();
     const std::string& where = job.second_copy.repository;
+    if (!jobs::copy_drive_connected(job)) {
+        // Kept elsewhere (often on purpose, away from the computer): it waits for its drive.
+        record = jobs::waiting_for_drive_record(jobs::RunKind::Copy, os::now(), where);
+        record.message = "waiting for the drive of the second copy: it is not connected (" + where +
+                         "); the copy catches up after the next backup with the drive connected";
+        if (g_json) emit({{"event", "copy"}, {"status", "waiting"}, {"message", record.message}});
+        else out("Second copy: " + record.message + "\n");
+        return kExitWaiting;
+    }
     try {
-        if (!jobs::copy_drive_connected(job)) throw Error("the drive of the second copy is not connected (" + where + ")");
         std::string pw = store.password(job.id);
         if (pw.empty()) pw = get_password(a, false);
         std::unique_ptr<Repository> target;
         try {
             const CloudCredentials cloud = store.copy_credentials(job);
+            claim_drive(where);
             auto backend = open_backend(where, &cloud, true);
             if (!backend->exists("config")) {
                 if (!g_json) out("Creating the second copy at " + where + "\n");
@@ -2743,7 +2992,7 @@ int cmd_copy(const Args& a) {
     const auto repo = open_job_repo(a, store, *job);
     jobs::RunRecord record;
     const int code = second_copy(a, store, *job, *repo, record);
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
@@ -2759,21 +3008,25 @@ int cmd_check_job(const Args& a) {
     jobs::RunRecord record;
     record.kind = a.has("--full") ? jobs::RunKind::FullCheck : jobs::RunKind::Check;
     record.started = os::now();
+    RunLogScope run_log(store.dir(), job->id, record.started);
     int code = kExitError;
+    std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
     try {
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir(), a.has("--admin"));
         repo = open_job_repo(a, store, *job);
-        code = health_check(*repo, *job, record.kind, record);
+        code = health_check(*repo, *job, record.kind, record, store.dir(), check_how(a, a.has("--scheduled")));
     } catch (const LockedError&) {
         throw;  // nothing was checked; not a result for the history
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the check started
             record.finished = os::now();
-            record.status = jobs::RunStatus::Failed;
-            record.message = std::string("the check could not run: ") + e.what();
+            const bool cancelled = dynamic_cast<const Cancelled*>(&e) != nullptr;  // while waiting for the drive
+            record.status = cancelled ? jobs::RunStatus::Cancelled : jobs::RunStatus::Failed;
+            record.message = cancelled ? std::string("cancelled") : std::string("the check could not run: ") + e.what();
         }
         try {
-            store.append_history(job->id, record);
+            append_run(store, job->id, record);
         } catch (const Error&) {
         }
         if (repo) publish_job_status(*repo, store, *job);
@@ -2782,7 +3035,7 @@ int cmd_check_job(const Args& a) {
         else err("health check cancelled\n");
         return kExitCancelled;
     }
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
@@ -2799,9 +3052,12 @@ int cmd_test_restore(const Args& a) {
     jobs::RunRecord record;
     record.kind = jobs::RunKind::RestoreTest;
     record.started = os::now();
+    RunLogScope run_log(store.dir(), job->id, record.started);
     int code = kExitError;
+    std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
     try {
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir(), a.has("--admin"));
         repo = open_job_repo(a, store, *job);
         code = restore_check(a, store, *repo, *job, record);
     } catch (const LockedError&) {
@@ -2809,11 +3065,12 @@ int cmd_test_restore(const Args& a) {
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the test started
             record.finished = os::now();
-            record.status = jobs::RunStatus::Failed;
-            record.message = std::string("the test restore could not run: ") + e.what();
+            const bool cancelled = dynamic_cast<const Cancelled*>(&e) != nullptr;  // while waiting for the drive
+            record.status = cancelled ? jobs::RunStatus::Cancelled : jobs::RunStatus::Failed;
+            record.message = cancelled ? std::string("cancelled") : std::string("the test restore could not run: ") + e.what();
         }
         try {
-            store.append_history(job->id, record);
+            append_run(store, job->id, record);
         } catch (const Error&) {
         }
         if (repo) publish_job_status(*repo, store, *job);
@@ -2822,72 +3079,47 @@ int cmd_test_restore(const Args& a) {
         else err("test restore cancelled\n");
         return kExitCancelled;
     }
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     publish_job_status(*repo, store, *job);
     if (g_json) emit({{"event", "done"}, {"status", jobs::to_string(record.status)}, {"message", record.message}});
     return code;
 }
 
+// Sends an alert of the job. One whose cause lasts across runs (a password that is not saved, a
+// check that cannot finish, a drive that stays away) goes out at most once a day.
+void send_job_alert(const jobs::Job& job, const jobs::Alert& a, const jobs::AlertSettings& s, const std::string& settings_dir) {
+    // Whether at least one channel took it.
+    const auto send = [&] {
+        const std::vector<std::string> failed = jobs::send_alert(s, a, settings_dir);
+        for (const std::string& f : failed) warning("could not send the alert: " + f);
+        return failed.size() < jobs::alert_channels(s);
+    };
+    if (jobs::alert_repeats(a.event)) (void)jobs::alert_once_a_day(settings_dir, job.id, a.event, os::now(), send);
+    else (void)send();
+}
+
 // Sends the alert a run calls for (see jobs/alerts.hpp), if the user set up alerts and wants this
 // kind. A failure to send is a warning, never a reason for the run to fail.
 void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string& settings_dir) {
-    // Alerts leave the computer: they say what happened in fixed words, with counts, and never
-    // carry a run's own message, file names or paths (those stay in Vaultik's history).
     const jobs::AlertSettings s = jobs::load_alerts(settings_dir);
-    if (!s.any()) return;
-    jobs::Alert a;
-    a.job = job.name;
-    const std::string where = " Open Vaultik on " + os::hostname() + " for the details.";
-    const bool check = jobs::is_check(r.kind) || r.kind == jobs::RunKind::RestoreTest;
-    if (check && s.on_damage && r.rot_files > 0 && !(r.status == jobs::RunStatus::Failed && r.errors > 0)) {
-        // Files on this computer that changed by themselves: the backup is fine, the drive is not.
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "rot";
-        a.title = "Health check of " + job.name + " found files that changed by themselves";
-        a.message = std::to_string(r.rot_files) +
-                    " file(s) on the computer changed although nothing wrote to them, which a failing drive does. "
-                    "The backup holds the earlier copy." + where;
-    } else if (check) {
-        // Damage found (not a check that could not run: the backup before it said so).
-        if (!s.on_damage || r.status != jobs::RunStatus::Failed || r.errors == 0) return;
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "damage";
-        a.title = (r.kind == jobs::RunKind::RestoreTest ? "Test restore of " : "Health check of ") + job.name +
-                  " found damage";
-        a.message = "Some backed-up data could not be read back or restored (" + std::to_string(r.errors) +
-                    " problem(s))." + where;
-    } else if (!r.alert.empty()) {
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "ransomware";
-        a.title = job.name + ": files may be encrypted by ransomware";
-        a.message = "Many files changed the way ransomware changes them. Disconnect the backup drive." + where;
-    } else if (r.status == jobs::RunStatus::Failed) {
-        if (!s.on_failure) return;
-        a.level = jobs::Alert::Level::Critical;
-        a.event = "failed";
-        a.title = "Backup of " + job.name + " failed";
-        a.message = "No version was saved." + where;
-    } else if (!r.drive.empty() && s.on_damage) {
-        a.level = jobs::Alert::Level::Warning;
-        a.event = "drive";
-        a.title = "The backup drive of " + job.name + " reports a problem";
-        a.message = "Copy the backup to another drive soon, before it fails." + where;
-    } else if (r.status == jobs::RunStatus::Partial) {
-        if (!s.on_failure) return;
-        a.level = jobs::Alert::Level::Warning;
-        a.event = "partial";
-        a.title = "Backup of " + job.name + " skipped " + std::to_string(r.errors) + " item(s)";
-        a.message = "A version was saved without them." + where;
-    } else if (r.status == jobs::RunStatus::Success && r.kind == jobs::RunKind::Backup && s.on_success) {
-        a.level = jobs::Alert::Level::Info;
-        a.event = "success";
-        a.title = "Backup of " + job.name + " completed";
-        a.message = std::to_string(r.files) + " files, " + format_bytes(r.new_bytes) + " new";
-    } else {
-        return;
+    const std::optional<jobs::Alert> a = jobs::alert_for_run(s, job.name, r, os::hostname());
+    if (!a) return;
+    send_job_alert(job, *a, s, settings_dir);
+}
+
+// Sends the alert for a backup drive (or the drive of the second copy) that has been away for
+// several days (see jobs::drive_missing_alert), once a day.
+void drive_missing_alert_for(const jobs::JobStore& store, const jobs::Job& job, jobs::RunKind kind) {
+    try {
+        const jobs::AlertSettings s = jobs::load_alerts(store.dir());
+        // Only the records of that kind: a job that backs up hourly while its copy waits would push
+        // the copy's records out of any window of the newest ones.
+        const std::optional<jobs::Alert> a = jobs::drive_missing_alert(
+            s, job, jobs::combined_history_of(store, job.id, kind, 50), kind, os::now(), os::hostname());
+        if (a) send_job_alert(job, *a, s, store.dir());
+    } catch (const std::exception& e) {
+        warning(std::string("could not send the alert: ") + e.what());
     }
-    a.title += " (" + os::hostname() + ")";
-    for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
 }
 
 // When the backup drive newly fills up within jobs::kFillWarnDays (the forecast after this run warns
@@ -2988,7 +3220,7 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
     // Stopping the backup stops the "before" command; the "after" one (often a cleanup, such as
     // restarting a service) still runs to the end, within its time limit.
     if (which == "before") o.cancelled = [] { return stop_requested(); };
-    const std::vector<std::pair<std::string, std::string>> vars = {
+    std::vector<std::pair<std::string, std::string>> vars = {
         {"VAULTIK_JOB", job.id}, {"VAULTIK_JOB_NAME", job.name}, {"VAULTIK_RESULT", result}};
     if (admin) {
         // With administrator rights: only an approved, checked command, with a fixed environment
@@ -3005,6 +3237,8 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
     } else {
         for (const auto& [name, value] : vars) os::set_env(name, value);
     }
+    // Only for the command (never this process: its own later locks must not take it as theirs).
+    if (!g_held_drive_env.first.empty()) o.extra_environment.push_back(g_held_drive_env);
     if (!g_json) out("Running the command " + which + " the backup\n");
     int code = 0;
     try {
@@ -3025,6 +3259,28 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
 
 #include "vaultik/cli/image_cmds.inc"
 #include "vaultik/cli/disk_cmds.inc"
+
+// "eject <job> [--when-done on|off]".
+int cmd_eject(const Args& a) {
+    if (a.positional.size() != 1) throw Error("usage: vaultik eject <job id or name> [--when-done on|off]");
+    const jobs::JobStore store = job_store(a);
+    const auto job = store.find(a.positional[0]);
+    if (!job) throw Error("no saved job called " + a.positional[0] + " (see vaultik jobs)");
+    if (const auto v = a.value("--when-done")) {
+        if (*v != "on" && *v != "off") throw Error("--when-done takes on or off");
+        jobs::set_eject_when_done(store.dir(), job->repository_volume, *v == "on");
+        if (g_json) emit({{"event", "done"}, {"status", "success"}, {"when_done", *v == "on"}});
+        else out(std::string("The backup drive of \"") + job->name + "\" is " + (*v == "on" ? "now" : "no longer") +
+                 " ejected once the last job using it is done.\n");
+        return kExitOk;
+    }
+    const std::string failed = jobs::eject_backup_drive(*job, store.dir());
+    if (g_json) emit({{"event", "done"}, {"status", failed.empty() ? "success" : "failed"},
+                      {"message", failed.empty() ? std::string("the drive can be unplugged now") : failed}});
+    else if (failed.empty()) out("The backup drive of \"" + job->name + "\" can be unplugged now.\n");
+    if (!failed.empty()) throw Error(failed);
+    return kExitOk;
+}
 
 int cmd_run_job(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik run-job <job id or name>");
@@ -3063,6 +3319,27 @@ int cmd_run_job(const Args& a) {
     if ((trigger == "event" || trigger == "update" || trigger == "sign-out") && !jobs::event_backup_due(store, *job))
         return kExitOk;
     if (trigger == "change" && !jobs::drive_connected(*job)) return kExitOk;
+    // Started on its own (by the schedule or an event): nobody is there to answer a question, and
+    // a scheduled task has no console to ask in. A job whose password is not saved on this computer
+    // cannot run, so it fails at once with that reason (recorded and alerted) instead of waiting.
+    const bool unattended = a.has("--scheduled") || on_connect || !trigger.empty();
+    if (unattended) {
+        disable_prompts("this run started on its own, with nobody to answer");
+        const bool saved = !store.password(job->id).empty() || a.value("--password-file") ||
+                           !os::get_env("VAULTIK_PASSWORD").empty();
+        if (!saved) {
+            const jobs::RunRecord record = jobs::password_not_saved_record(os::now());
+            try {
+                append_run(store, job->id, record);
+            } catch (const Error& e) {
+                warning(std::string("could not record the run: ") + e.what());
+            }
+            alert_for(*job, record, store.dir());
+            if (g_json) emit({{"event", "done"}, {"status", "failed"}, {"reason", "password"}, {"message", record.message}});
+            else err("Job \"" + job->name + "\": " + record.message + "\n");
+            return kExitAuth;
+        }
+    }
     // While a backup started by an update runs, the tray holds up the restart that follows it.
     struct UpdateMark {
         std::string dir, id;
@@ -3082,6 +3359,30 @@ int cmd_run_job(const Args& a) {
     record.on_connect = on_connect;
     record.trigger = trigger;
     record.started = os::now();
+    // "Eject when done": once this run let go of the drive and no other run took it up (one that
+    // waited for it does the same when it ends), the drive is ejected.
+    struct EjectWhenDone {
+        const jobs::Job& job;
+        std::string dir;
+        ~EjectWhenDone() {
+            try {
+                if (!jobs::eject_when_done(dir, job.repository_volume)) return;
+                g_drive_claims.clear();  // this run's own claims (its repository is closed by now)
+                std::this_thread::sleep_for(std::chrono::seconds(3));  // a waiting run takes the drive first
+                const std::string failed = jobs::eject_backup_drive(job, dir);
+                if (failed.empty()) {
+                    if (g_json) emit({{"event", "ejected"}, {"message", "the backup drive can be unplugged now"}});
+                    else out("The backup drive was ejected and can be unplugged now.\n");
+                } else if (!g_json) {
+                    out("The backup drive was not ejected: " + failed + "\n");
+                }
+            } catch (...) {
+            }
+        }
+    } eject_when_done{*job, store.dir()};
+    // One run at a time on this drive (also checks and prunes of other jobs there): held to the end,
+    // and let go of only once the repository is closed.
+    std::unique_ptr<jobs::DriveLock> drive_lock;
     int code = kExitError;
     std::unique_ptr<Repository> repo;
     // Once the repository is open, this computer's status there is updated last, however the run
@@ -3114,14 +3415,47 @@ int cmd_run_job(const Args& a) {
         record.finished = os::now();
         record.status = jobs::RunStatus::Cancelled;
         record.message = "skipped: the internet connection is metered";
-        store.append_history(job->id, record);
+        append_run(store, job->id, record);
         if (g_json) emit({{"event", "done"}, {"status", "cancelled"}, {"message", record.message}});
         else out("Job \"" + job->name + "\": " + record.message + "\n");
         return kExitOk;
     }
+    // The backup drive is elsewhere: no failure, the run waits for it (recorded quietly; the
+    // drive's return runs it). A run of a job already waiting adds no second record. Once the
+    // wait has gone on for several days, it is alerted as a failure, once a day.
+    if (!jobs::drive_connected(*job)) {
+        const jobs::RunRecord waiting = jobs::waiting_for_drive_record(jobs::RunKind::Backup, os::now(), job->repository);
+        try {
+            if (jobs::missed_run_waiting(jobs::combined_history_of(store, job->id, jobs::RunKind::Backup, 50)) == nullptr)
+                append_run(store, job->id, waiting);
+        } catch (const std::exception& e) {
+            warning(std::string("could not record the run: ") + e.what());
+        }
+        drive_missing_alert_for(store, *job, jobs::RunKind::Backup);
+        if (g_json) emit({{"event", "done"}, {"status", "waiting"}, {"reason", "drive"}, {"message", waiting.message}});
+        else out("Job \"" + job->name + "\": " + waiting.message + "\n");
+        return kExitWaiting;
+    }
+    // Every warning of this run, in full, in its own log file (named by the run's history records).
+    RunLogScope run_log(store.dir(), job->id, record.started);
     try {
-        if (!jobs::drive_connected(*job))
-            throw Error("the backup drive is not connected (" + job->repository + ")");
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir(), a.has("--admin"));
+        // Started on its own and queued behind another run on the drive: when that was a run of
+        // this very job that saved a version meanwhile (a scheduled run and one on connecting the
+        // drive at once, say), or the event that started it is no longer due, there is nothing
+        // left to do, and no second backup (with its before and after commands) runs.
+        if (drive_lock->waited() && unattended) {
+            const bool saved = jobs::saved_since(jobs::combined_history(store, job->id, 50), record.started);
+            const bool event_done = (trigger == "event" || trigger == "update" || trigger == "sign-out") &&
+                                    !jobs::event_backup_due(store, *job);
+            if (saved || event_done) {
+                // No record of this run names its log: none is left behind.
+                if (run_log.log) run_log.log->discard();
+                if (g_json) emit({{"event", "done"}, {"status", "success"}, {"reason", "done-meanwhile"}});
+                else out("Job \"" + job->name + "\": nothing left to do, another run of it did the backup while this one waited.\n");
+                return kExitOk;
+            }
+        }
         repo = open_job_repo(a, store, *job);
         const unsigned readers = apply_parallelism(*repo, a, job->repository, policy);
         if ((on_connect || !trigger.empty()) && backup_running(*repo, *job)) {
@@ -3144,6 +3478,7 @@ int cmd_run_job(const Args& a) {
         o.tags = job->tags;
         o.tags.push_back("job:" + job->id);
         o.skip_unchanged = job->skip_unchanged;
+        o.download_cloud_files = job->download_cloud_files;
         o.check_every_file = job->check_every_file;
         if (job->record_apps && job->image_disks.empty()) {
             // Within a day of the last backup (continuous or triggered runs, hourly schedules) the
@@ -3172,6 +3507,14 @@ int cmd_run_job(const Args& a) {
             return store.database_secret(job->id, db.id);
         });
         add_docker_volumes(o, job->docker_volumes, job->docker_image);
+        // The job's compression level becomes the destination's, for new data (0: left as it is).
+        if (job->compression != 0 && repo->compression_level() != job->compression) {
+            try {
+                repo->set_compression_level(job->compression);
+            } catch (const std::exception& e) {
+                warning(std::string("could not change the compression level of the destination: ") + e.what());
+            }
+        }
         // The job's repair data setting becomes the destination's (every writer then follows it).
         if (repo->parity_percent() != job->repair_data) {
             try {
@@ -3235,11 +3578,12 @@ int cmd_run_job(const Args& a) {
     } catch (const std::exception& e) {
         if (record.finished == 0) {  // failed before the backup started
             record.finished = os::now();
-            record.status = jobs::RunStatus::Failed;
-            record.message = e.what();
+            const bool cancelled = dynamic_cast<const Cancelled*>(&e) != nullptr;  // while waiting for the drive
+            record.status = cancelled ? jobs::RunStatus::Cancelled : jobs::RunStatus::Failed;
+            record.message = cancelled ? std::string("cancelled") : std::string(e.what());
         }
         try {
-            store.append_history(job->id, record);
+            append_run(store, job->id, record);
         } catch (const Error&) {
         }
         run_after(jobs::to_string(record.status));
@@ -3252,7 +3596,7 @@ int cmd_run_job(const Args& a) {
         fill_before = jobs::forecast_for(jobs::combined_history(store, job->id, 500), os::now());
     } catch (const std::exception&) {
     }
-    store.append_history(job->id, record);
+    append_run(store, job->id, record);
     run_after(jobs::to_string(record.status));
     alert_for(*job, record, store.dir());
     space_alert_for(store, *job, fill_before, store.dir());
@@ -3271,20 +3615,27 @@ int cmd_run_job(const Args& a) {
         jobs::RunRecord copy;
         second_copy(a, store, *job, *repo, copy, !record.alert.empty() || !record.hold.empty());
         try {
-            store.append_history(job->id, copy);
+            // Still waiting for the copy's drive: no second record of it.
+            const auto copies = jobs::combined_history_of(store, job->id, jobs::RunKind::Copy, 1);
+            const jobs::RunRecord* last = jobs::last_copy(copies);
+            if (copy.status != jobs::RunStatus::Waiting || last == nullptr || last->status != jobs::RunStatus::Waiting)
+                append_run(store, job->id, copy);
         } catch (const Error& e) {
             warning(std::string("could not record the second copy: ") + e.what());
         }
+        if (copy.status == jobs::RunStatus::Waiting) drive_missing_alert_for(store, *job, jobs::RunKind::Copy);
     }
 
     // Then the health check, when one is due. It never changes the backup's result: a problem
     // it finds is its own entry in the history (and a notification from the tray).
     if (a.has("--no-check") || g_cancel.load()) return code;
-    const auto due = jobs::due_check(job->health, jobs::combined_history(store, job->id, 500), os::now());
+    // A check of the same repository by another job counts for this one too.
+    const std::vector<jobs::RunRecord> shared_history = jobs::history_with_shared_checks(store, *job);
+    const auto due = jobs::due_check(job->health, shared_history, os::now());
     if (due) {
         jobs::RunRecord check;
         try {
-            health_check(*repo, *job, *due, check);
+            health_check(*repo, *job, *due, check, store.dir(), check_how(a, true));
         } catch (const LockedError&) {
             // Another run is using the repository: try again after the next backup.
             if (!g_json) clear_status();
@@ -3294,7 +3645,26 @@ int cmd_run_job(const Args& a) {
             // Cancelled or could not run: the record says which.
         }
         try {
-            store.append_history(job->id, check);
+            append_run(store, job->id, check);
+        } catch (const Error& e) {
+            warning(std::string("could not record the health check: ") + e.what());
+        }
+        alert_for(*job, check, store.dir());
+    } else if (job->image_disks.empty() &&
+               jobs::files_check_due(job->health, jobs::combined_history(store, job->id, 500), shared_history, os::now())) {
+        // Another job's check of this repository counts for the repository, but it compared that
+        // job's files on this computer: this job's own files get their silent damage check, when
+        // its own schedule calls for a check now.
+        jobs::RunRecord check;
+        try {
+            files_check(*repo, *job, check);
+        } catch (const LockedError&) {
+            if (!g_json) clear_status();
+            return code;
+        } catch (const std::exception&) {
+        }
+        try {
+            append_run(store, job->id, check);
         } catch (const Error& e) {
             warning(std::string("could not record the health check: ") + e.what());
         }
@@ -3316,7 +3686,7 @@ int cmd_run_job(const Args& a) {
         // Cancelled or could not run: the record says which.
     }
     try {
-        store.append_history(job->id, test);
+        append_run(store, job->id, test);
     } catch (const Error& e) {
         warning(std::string("could not record the test restore: ") + e.what());
     }
@@ -3366,6 +3736,7 @@ int cmd_forget(const Args& a) {
 
 int cmd_prune(const Args& a) {
     const bool dry = a.has("--dry-run");
+    const auto drive_lock = lock_drive(jobs::drive_lock_key(repo_path(a)), jobs::config_dir());
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Exclusive, "prune", lock_wait(a));
     const auto start = std::chrono::steady_clock::now();
@@ -3894,6 +4265,7 @@ int poll_requests(const Args& a) {
         if (pw.empty()) continue;
         try {
             const CloudCredentials cloud = store.cloud_credentials(list.front());
+            claim_drive(location);
             auto repo = Repository::open(open_backend(location, &cloud), pw, false);
             secure_wipe(pw.data(), pw.size());
             std::vector<std::string> local;
@@ -4344,10 +4716,18 @@ int cmd_hyperv(const Args& a) {
     return kExitOk;
 }
 
+// The restore does not fit at its target (and --ignore-space was not given).
+class RestoreTooBig : public Error {
+public:
+    using Error::Error;
+};
+
 int cmd_restore(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik restore -r <repo> <snapshot> --target <folder>");
     const auto target = a.value("--target");
     if (!target) throw Error("restore needs --target <folder>");
+    // Opening the repository claims its drive (so it is not ejected meanwhile); a restore never
+    // waits for a backup to let go of the drive's lock, though: it then reads alongside.
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "restore", lock_wait(a));
     repo->reload_index();  // a prune may have finished before the lock was granted
@@ -4357,8 +4737,40 @@ int cmd_restore(const Args& a) {
     o.target = *target;
     if (auto p = a.value("--path")) o.subpath = *p;
     o.overwrite = a.has("--overwrite");
+    o.skip_identical = a.has("--skip-identical");
     o.permissions = a.has("--permissions");
     o.links = !a.has("--no-links");
+    // Before anything is written: is there room for it at the target? Only an estimate: when it
+    // cannot be made (a damaged folder listing, say), the restore goes on and says so; the restore
+    // itself skips what it cannot read and restores the rest.
+    try {
+        const RestoreEstimate need = estimate_restore(*repo, ref.snapshot, o);
+        if (need.unknown_dirs > 0)
+            warning(std::to_string(need.unknown_dirs) +
+                    " folder listing(s) could not be read, so the size of the restore is only partly known");
+        std::string at = os::absolute_path(o.target);
+        while (!at.empty() && !os::exists(at) && os::parent_of(at) != at) at = os::parent_of(at);
+        const std::optional<os::DiskSpace> space = at.empty() ? std::nullopt : os::disk_space(at);
+        const std::uint64_t margin = 64ull << 20;  // folders, streams, the file system's own
+        const std::uint64_t wanted = need.needed + need.temporary;
+        if (space && wanted + margin > space->free) {
+            const std::string text = "the restore needs about " + format_bytes(wanted) +
+                                     (need.temporary > 0 ? " (with room to replace its largest file)" : "") +
+                                     " but only " + format_bytes(space->free) + " is free at " + o.target;
+            if (!a.has("--ignore-space"))
+                throw RestoreTooBig(text + "; free up space or choose another folder (--ignore-space restores anyway)");
+            warning(text + "; restoring anyway, it may stop when the drive is full");
+        }
+        if (g_json) emit({{"event", "restore_plan"}, {"files", need.files}, {"bytes", need.bytes}, {"needed", need.needed},
+                          {"temporary", need.temporary}, {"unknown_dirs", need.unknown_dirs},
+                          {"free", space ? space->free : 0}});
+    } catch (const RestoreTooBig&) {
+        throw;
+    } catch (const Cancelled&) {
+        throw;
+    } catch (const std::exception& e) {
+        warning(std::string("could not tell how much space the restore needs, restoring anyway: ") + e.what());
+    }
     const auto start = std::chrono::steady_clock::now();
     o.on_progress = [&](const RestoreProgress& p) {
         if (g_json) {
@@ -4380,6 +4792,7 @@ int cmd_restore(const Args& a) {
               {"dirs", r.dirs},
               {"bytes", r.bytes},
               {"skipped", r.skipped},
+              {"identical", r.identical},
               {"errors", r.errors},
               {"seconds", seconds_since(start)}});
         return r.errors > 0 ? kExitPartial : kExitOk;
@@ -4388,6 +4801,7 @@ int cmd_restore(const Args& a) {
     out("Restored " + std::to_string(r.files) + " files in " + std::to_string(r.dirs) + " folders, " +
         format_bytes(r.bytes) + " in " + format_duration(seconds_since(start)) + " from snapshot " +
         short_id(ref.id) + "\n");
+    if (r.identical > 0) out("  already identical, left as they were: " + std::to_string(r.identical) + "\n");
     if (r.skipped > 0) out("  skipped: " + std::to_string(r.skipped) + " (existing files, links or placeholders)\n");
     if (r.errors > 0) {
         out("  " + std::to_string(r.errors) + " item(s) failed; see warnings above\n");
@@ -4775,6 +5189,10 @@ int cmd_recovery_kit(const Args& a) {
         if (a.has("--new")) out("Recovery key: " + key + "\nWrite it down: the kit could not be written.\n");
         throw;
     }
+    try {
+        jobs::note_recovery_kit(jobs::config_dir(), location);  // the app no longer lists it as missing
+    } catch (const std::exception&) {
+    }
     out("Wrote the recovery kit to " + path + ".\n");
     out("It holds the recovery key: print it, keep the paper apart from this computer, and delete the file.\n");
     return kExitOk;
@@ -4905,11 +5323,26 @@ int run(const std::vector<std::string>& argv) {
     g_json_stdout = g_json = a.has("--json");
     if (g_json) start_cancel_watcher();
     connect_progress_channel(a);
+    // Runs that can take hours keep the computer from going to sleep until they end (however they
+    // end); the display still turns off as usual.
+    static const std::set<std::string> kLongRuns = {"run-job", "check-job", "test-restore", "copy",  "backup",
+                                                    "restore", "verify",    "prune",        "forget", "repair",
+                                                    "repair-data", "move-here", "image"};
+    std::optional<KeepAwake> awake;
+    if (kLongRuns.contains(a.command)) {
+        g_awake_reason = "Vaultik is running " + a.command + "; it lets the computer sleep when done";
+        awake.emplace(g_awake_reason);
+    }
+    g_awake = &awake;
+    struct ForgetAwake {
+        ~ForgetAwake() { g_awake = nullptr; }
+    } forget_awake;
 
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "drives") return cmd_drives(a);
     if (a.command == "run-job") return cmd_run_job(a);  // applies the job's own resource settings
     if (a.command == "check-job") return cmd_check_job(a);
+    if (a.command == "eject") return cmd_eject(a);
     if (a.command == "test-restore") return cmd_test_restore(a);
     if (a.command == "alert-test") return cmd_alert_test(a);
     if (a.command == "report") return cmd_report(a);

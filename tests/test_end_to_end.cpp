@@ -32,6 +32,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <share.h>
+#include <windows.h>
 #endif
 
 using namespace vaultik;
@@ -1288,4 +1289,254 @@ TEST_CASE("a backup with several readers stops promptly when cancelled") {
     const BackupResult r = run_backup(*repo, o);
     CHECK(r.snapshot.stats.files == 12);
     CHECK(r.snapshot.stats.errors == 0);
+}
+
+#ifdef _WIN32
+TEST_CASE("a file only in the cloud is counted, not read, unless the job downloads it") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "here.txt", text("on this disk"));
+    write_file(src / "online.txt", text("only in the cloud"));
+    // Marked the way a sync program marks a file it keeps online (offline: reading recalls it).
+    const std::wstring online = (src / "online.txt").wstring();
+    REQUIRE(SetFileAttributesW(online.c_str(), GetFileAttributesW(online.c_str()) | FILE_ATTRIBUTE_OFFLINE));
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    REQUIRE(os::stat(u8(src / "online.txt"), info, err));
+    REQUIRE(os::is_cloud_only(info));
+
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions o;
+    o.paths = {u8(src)};
+    const BackupResult first = run_backup(*repo, o);
+    CHECK(first.snapshot.stats.cloud_only == 1);
+    CHECK(first.snapshot.stats.cloud_only_bytes == 17);
+    CHECK(first.snapshot.stats.skipped == 0);
+    CHECK(first.snapshot.stats.files == 1);
+    CHECK(repo->load_snapshot(first.snapshot_id).stats.cloud_only == 1);
+
+    o.download_cloud_files = true;
+    const BackupResult second = run_backup(*repo, o);
+    CHECK(second.snapshot.stats.cloud_only == 0);
+    CHECK(second.snapshot.stats.files == 2);
+    CHECK(second.snapshot.stats.bytes == 12 + 17);
+}
+
+TEST_CASE("a folder the change journal calls unchanged is read again when its cloud files are to be downloaded") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "docs" / "here.txt", text("on this disk"));
+    write_file(src / "docs" / "online.txt", text("only in the cloud"));
+    const std::wstring online = (src / "docs" / "online.txt").wstring();
+    REQUIRE(SetFileAttributesW(online.c_str(), GetFileAttributesW(online.c_str()) | FILE_ATTRIBUTE_OFFLINE));
+
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions o;
+    o.paths = {u8(src)};
+    const BackupResult first = run_backup(*repo, o);
+    CHECK(first.snapshot.stats.cloud_only == 1);
+
+    // Nothing changed since, says the journal: without downloading, the folder is taken as it was.
+    o.journal_parent = first.snapshot_id;
+    o.dir_unchanged = [](const std::string&) { return true; };
+    const BackupResult same = run_backup(*repo, o);
+    CHECK(same.snapshot.stats.cloud_only == 1);
+
+    // With downloading on, the folder holding the cloud file is read again, so the file is saved.
+    o.journal_parent = same.snapshot_id;
+    o.download_cloud_files = true;
+    const BackupResult second = run_backup(*repo, o);
+    CHECK(second.snapshot.stats.cloud_only == 0);
+    CHECK(second.snapshot.stats.files == 2);
+    Node node;
+    REQUIRE(resolve_snapshot_path(*repo, second.snapshot, snapshot_path_of(src / "docs" / "online.txt"), node));
+    CHECK(node.kind == NodeKind::File);
+    CHECK(node.size == 17);
+}
+#endif
+
+TEST_CASE("restore: an interrupted restore goes on, leaving identical files alone; its size is known first") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "a.bin", seeded_bytes(300000, 41));
+    write_file(src / "b.bin", seeded_bytes(200000, 42));
+    write_file(src / "sub" / "c.txt", text("small file"));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions bo;
+    bo.paths = {u8(src)};
+    const BackupResult b = run_backup(*repo, bo);
+    const Snapshot snap = repo->load_snapshot(b.snapshot_id);
+
+    RestoreOptions o;
+    o.target = u8(tmp.path / "out");
+    RestoreEstimate e = estimate_restore(*repo, snap, o);
+    CHECK(e.files == 3);
+    CHECK(e.bytes == 300000 + 200000 + 10);
+    CHECK(e.needed == e.bytes);
+
+    RestoreResult r = run_restore(*repo, snap, o);
+    CHECK(r.files == 3);
+    const fs::path out = restored_location(tmp.path / "out", src);
+    REQUIRE(fs::exists(out / "a.bin"));
+    CHECK(estimate_restore(*repo, snap, o).needed == 0);  // all there already
+
+    // As if the restore stopped during b.bin: half of it written, with a time of now.
+    {
+        std::ofstream f(out / "b.bin", std::ios::binary | std::ios::trunc);
+        const Bytes half = seeded_bytes(100000, 42);
+        f.write(reinterpret_cast<const char*>(half.data()), static_cast<std::streamsize>(half.size()));
+    }
+    e = estimate_restore(*repo, snap, o);
+    CHECK(e.needed == 200000);
+
+    // Run again: identical files are left alone, the half one is restored again.
+    o.overwrite = true;
+    o.skip_identical = true;
+    r = run_restore(*repo, snap, o);
+    CHECK(r.identical == 2);
+    CHECK(r.files == 1);
+    CHECK(r.bytes == 200000);
+    CHECK(read_file(out / "b.bin") == seeded_bytes(200000, 42));
+    CHECK(r.errors == 0);
+
+    // Same size and time but other content: not identical, restored again.
+    {
+        Bytes changed = seeded_bytes(300000, 41);
+        changed[1000] ^= 1;
+        os::FileInfo info;
+        os::ErrorCode err = 0;
+        REQUIRE(os::stat(u8(out / "a.bin"), info, err));
+        std::ofstream(out / "a.bin", std::ios::binary | std::ios::trunc)
+            .write(reinterpret_cast<const char*>(changed.data()), static_cast<std::streamsize>(changed.size()));
+        os::set_metadata(u8(out / "a.bin"), info);
+    }
+    r = run_restore(*repo, snap, o);
+    CHECK(r.identical == 2);
+    CHECK(r.files == 1);
+    CHECK(read_file(out / "a.bin") == seeded_bytes(300000, 41));
+}
+
+TEST_CASE("restore: one damaged folder listing leaves the estimate and the rest of the restore going") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "good" / "a.txt", text("a file in a folder that stays readable"));
+    write_file(src / "bad" / "b.txt", text("a file in the folder whose listing gets damaged"));
+    write_file(src / "top.txt", text("top"));
+    init_repo(repo_dir);
+    Id bad_tree{};
+    Id snapshot_id{};
+    fs::path pack;
+    std::uint64_t at = 0;
+    {
+        auto repo = open_repo(repo_dir);
+        BackupOptions bo;
+        bo.paths = {u8(src)};
+        snapshot_id = run_backup(*repo, bo).snapshot_id;
+        Node node;
+        REQUIRE(resolve_snapshot_path(*repo, repo->load_snapshot(snapshot_id), snapshot_path_of(src / "bad"), node));
+        bad_tree = node.subtree;
+        // Flip a byte in the middle of that listing, where the index says it is (a listing can be
+        // stored more than once; the index names the copy that is read).
+        const BlobLocation* loc = repo->index().find(bad_tree);
+        REQUIRE(loc != nullptr);
+        pack = repo_dir / from_u8(Repository::pack_name(repo->index().packs()[loc->pack]));
+        at = loc->offset + loc->length / 2;
+        REQUIRE(fs::exists(pack));
+    }
+    {
+        // Once the repository is closed (Windows lets no other handle write to a pack it reads).
+        fs::permissions(pack, fs::perms::owner_write, fs::perm_options::add);
+        std::fstream f(pack, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(f.is_open());
+        f.seekg(static_cast<std::streamoff>(at));
+        char c = 0;
+        f.read(&c, 1);
+        c = static_cast<char>(c ^ 0x40);
+        f.seekp(static_cast<std::streamoff>(at));
+        f.write(&c, 1);
+    }
+
+    auto repo = open_repo(repo_dir);
+    REQUIRE_THROWS(repo->load_blob(BlobType::Tree, bad_tree));  // the damage took
+    const Snapshot snap = repo->load_snapshot(snapshot_id);
+    RestoreOptions o;
+    o.target = u8(tmp.path / "out");
+    const RestoreEstimate e = estimate_restore(*repo, snap, o);  // no throw
+    CHECK(e.unknown_dirs == 1);
+    CHECK(e.files == 2);
+    const RestoreResult r = run_restore(*repo, snap, o);
+    CHECK(r.files == 2);
+    CHECK(r.errors == 1);
+    const fs::path out = restored_location(tmp.path / "out", src);
+    CHECK(read_file(out / "good" / "a.txt") == text("a file in a folder that stays readable"));
+    CHECK(fs::exists(out / "top.txt"));
+
+    // The command line restores the rest too, without --ignore-space: the estimate only warns.
+    std::string output;
+    os::CommandOptions co;
+    co.output = &output;
+    co.timeout = std::chrono::seconds(120);
+    co.extra_environment = {{"VAULTIK_PASSWORD", kPassword}, {"VAULTIK_CONFIG_DIR", u8(tmp.path / "settings")}};
+    const int code = os::run_command({VAULTIK_TEST_CLI, "restore", "-r", u8(repo_dir), id_hex(snapshot_id), "--target",
+                                      u8(tmp.path / "cli")},
+                                     co);
+    CAPTURE(output);
+    CHECK(code == 3);  // finished, with the unreadable folder reported
+    CHECK(output.find("could not be read") != std::string::npos);
+    CHECK(fs::exists(restored_location(tmp.path / "cli", src) / "good" / "a.txt"));
+}
+
+TEST_CASE("restore estimate: only a regular file of the same size is there already; replacing needs room") {
+    TempDir tmp;
+    const fs::path src = tmp.path / "src";
+    const fs::path repo_dir = tmp.path / "repo";
+    write_file(src / "one.bin", seeded_bytes(50000, 7));
+    write_file(src / "two.bin", seeded_bytes(80000, 8));
+    init_repo(repo_dir);
+    auto repo = open_repo(repo_dir);
+    BackupOptions bo;
+    bo.paths = {u8(src / "one.bin"), u8(src / "two.bin")};
+    const Snapshot snap = repo->load_snapshot(run_backup(*repo, bo).snapshot_id);
+
+    // A single file: a folder of the same name is not it.
+    RestoreOptions o;
+    o.target = u8(tmp.path / "out");
+    o.subpath = snapshot_path_of(src / "one.bin");
+    fs::create_directories(tmp.path / "out" / "one.bin");
+    RestoreEstimate e = estimate_restore(*repo, snap, o);
+    CHECK(e.files == 1);
+    CHECK(e.needed == 50000);
+    fs::remove(tmp.path / "out" / "one.bin");
+    write_file(tmp.path / "out" / "one.bin", seeded_bytes(50000, 9));
+    e = estimate_restore(*repo, snap, o);
+    CHECK(e.needed == 0);
+    CHECK(e.temporary == 0);  // not replaced without overwrite
+    o.overwrite = true;
+    e = estimate_restore(*repo, snap, o);
+    CHECK(e.temporary == 50000);
+
+    // Everything with overwrite: room for the largest file of the same size it replaces, on top of
+    // what is new. The replaced file of another size (two.bin) is in `needed` in full, and is not
+    // counted twice.
+    o.subpath.clear();
+    write_file(restored_location(tmp.path / "all", src) / "two.bin", seeded_bytes(100, 1));
+    write_file(restored_location(tmp.path / "all", src) / "one.bin", seeded_bytes(50000, 1));
+    o.target = u8(tmp.path / "all");
+    e = estimate_restore(*repo, snap, o);
+    CHECK(e.files == 2);
+    CHECK(e.needed == 80000);
+    CHECK(e.temporary == 50000);
+    CHECK(e.unknown_dirs == 0);
+    // Only files of another size are replaced: nothing on top.
+    fs::remove(restored_location(tmp.path / "all", src) / "one.bin");
+    e = estimate_restore(*repo, snap, o);
+    CHECK(e.needed == 130000);
+    CHECK(e.temporary == 0);
 }

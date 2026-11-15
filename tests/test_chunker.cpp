@@ -24,7 +24,7 @@ std::vector<Bytes> chunk_all(const FastCdc& cdc, const Bytes& data, std::size_t 
         cdc,
         [&](std::uint8_t* dst, std::size_t max) {
             const std::size_t n = std::min({max, read_size, data.size() - pos});
-            std::memcpy(dst, data.data() + pos, n);
+            if (n > 0) std::memcpy(dst, data.data() + pos, n);  // (an empty input has no data pointer)
             pos += n;
             return n;
         },

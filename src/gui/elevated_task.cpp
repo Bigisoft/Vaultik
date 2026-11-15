@@ -44,14 +44,6 @@ QLabel* text_label() {
     return l;
 }
 
-// "33 h 06 min left", "12 min left", "less than a minute left"; empty when not known.
-QString time_left_text(double seconds) {
-    const TimeLeft t = split_time_left(seconds);
-    if (!t.known) return {};
-    if (t.under_a_minute) return QObject::tr("less than a minute left");
-    if (t.hours == 0) return QObject::tr("%1 min left").arg(t.minutes);
-    return QObject::tr("%1 h %2 min left").arg(t.hours).arg(t.minutes, 2, 10, QChar('0'));
-}
 
 }  // namespace
 

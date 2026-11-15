@@ -756,6 +756,17 @@ bool BackupEngine::scan_entry(const std::string& path, const os::FileInfo& info,
     scan_security(path, node);
     switch (info.type) {
         case os::EntryType::Other: {
+            // A cloud file only online: downloaded and backed up when the job asks for it (reading
+            // it makes its sync program download it), otherwise counted on its own.
+            if (os::is_cloud_only(info)) {
+                if (options_.download_cloud_files)
+                    return scan_entry(path, os::downloaded_form(info), parent_device, node, pnode, job);
+                node.kind = NodeKind::Reparse;
+                node.size = 0;
+                ++stats_.cloud_only;
+                stats_.cloud_only_bytes += info.size;
+                return true;
+            }
             // Stored as metadata only; following links could loop or leave the backup set. A
             // symlink's or junction's target is kept, so a restore can bring the link back.
             node.kind = NodeKind::Reparse;
@@ -1012,8 +1023,12 @@ bool BackupEngine::journal_unchanged(const std::string& dir) {
 
 std::optional<Id> BackupEngine::reuse_dir(const std::string& dir, std::uint64_t device, const Tree& parent) {
     // Everything the listing points at must still be stored (a prune may have removed data no
-    // version uses); otherwise the folder is read as usual.
+    // version uses); otherwise the folder is read as usual. So is a folder with files that were
+    // only in the cloud when the job now downloads them: unchanged, they would stay left out.
     for (const Node& n : parent.nodes) {
+        if (options_.download_cloud_files && n.kind == NodeKind::Reparse &&
+            os::is_cloud_only(os::FileInfo{os::EntryType::Other, n.attributes}))
+            return std::nullopt;
         if (n.security && !repo_.has_blob(*n.security)) return std::nullopt;
         if (n.kind == NodeKind::File && !all_present(n.content)) return std::nullopt;
         for (const DataStream& s : n.streams)
@@ -1035,7 +1050,8 @@ std::optional<Id> BackupEngine::reuse_dir(const std::string& dir, std::uint64_t 
                 ++stats_.files;
                 break;
             case NodeKind::Reparse:
-                ++stats_.skipped;
+                if (os::is_cloud_only(os::FileInfo{os::EntryType::Other, old.attributes})) ++stats_.cloud_only;
+                else ++stats_.skipped;
                 break;
             case NodeKind::Dir: {
                 // The folder's own entry is as before; what is in it is asked about in turn.

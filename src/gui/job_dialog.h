@@ -125,14 +125,17 @@ private:
     // Health checks after scheduled backups.
     QCheckBox* check_weekly_ = nullptr;
     QSpinBox* check_percent_ = nullptr;
+    QSpinBox* check_hours_ = nullptr;
     QCheckBox* check_monthly_ = nullptr;
     QCheckBox* check_restore_ = nullptr;
     QCheckBox* check_rot_ = nullptr;
     QCheckBox* skip_battery_ = nullptr;
     QCheckBox* skip_unchanged_ = nullptr;
     QCheckBox* check_every_file_ = nullptr;
+    QCheckBox* download_cloud_ = nullptr;
     QCheckBox* record_apps_ = nullptr;
     QComboBox* repair_data_ = nullptr;
+    QComboBox* compression_ = nullptr;
     QCheckBox* wake_ = nullptr;
     QCheckBox* skip_metered_ = nullptr;
     QLineEdit* before_command_ = nullptr;

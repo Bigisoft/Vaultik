@@ -56,6 +56,8 @@ QString format_time(std::uint64_t filetime);
 QString format_duration(double seconds);
 // "1 file" / "12 files", with thousands separators.
 QString count_of(std::uint64_t n, const QString& one, const QString& many);
+// "33 h 06 min left", "12 min left", "less than a minute left"; empty when not known (seconds < 0).
+QString time_left_text(double seconds);
 // FILETIME ticks to a local date and time (invalid for 0).
 QDateTime to_datetime(std::uint64_t filetime);
 std::uint64_t from_datetime(const QDateTime& dt);

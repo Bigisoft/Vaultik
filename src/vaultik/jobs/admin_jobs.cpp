@@ -8,9 +8,11 @@
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/drive_lock.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/repo/cloud.hpp"
 #include "vaultik/util/error.hpp"
 #include "vaultik/util/hex.hpp"
 #ifdef _WIN32
@@ -609,6 +611,8 @@ void act_for_account(const std::string& sid) {
                     "disabled), so the job does not run with administrator rights; an administrator can save it "
                     "again in Vaultik");
     acting_account() = sid;
+    // Its runs and this one take turns on a drive (see jobs/drive_lock.hpp).
+    set_drive_lock_account(sid);
 #else
     (void)sid;
 #endif
@@ -677,10 +681,92 @@ std::vector<RunRecord> combined_history(const JobStore& store, const std::string
     return all;
 }
 
+std::vector<RunRecord> combined_history_of(const JobStore& store, const std::string& id, RunKind kind,
+                                           std::size_t limit) {
+    std::vector<RunRecord> all = store.history_of(id, kind, limit);
+#ifdef _WIN32
+    try {
+        const std::string dir = admin_store_dir();
+        if (dir != store.dir() && os::exists(dir)) {
+            std::vector<RunRecord> more = JobStore(dir).history_of(id, kind, limit);
+            all.insert(all.end(), more.begin(), more.end());
+            std::stable_sort(all.begin(), all.end(),
+                             [](const RunRecord& a, const RunRecord& b) { return a.started < b.started; });
+            if (all.size() > limit) all.erase(all.begin(), all.end() - static_cast<std::ptrdiff_t>(limit));
+        }
+    } catch (const Error&) {
+    }
+#endif
+    return all;
+}
+
+namespace {
+
+// A location in one form, for comparing ("E:\\Backup\\" and "e:/backup" are the same on Windows).
+std::string location_form(const std::string& location) {
+    std::string s = location;
+    if (!is_cloud_location(s)) {
+        try {
+            s = os::absolute_path(s);
+        } catch (const std::exception&) {
+        }
+        std::replace(s.begin(), s.end(), '\\', '/');
+#ifdef _WIN32
+        s = os::fold_case(s);
+#endif
+    }
+    while (s.size() > 1 && s.back() == '/') s.pop_back();
+    return s;
+}
+
+}  // namespace
+
+bool same_repository(const Job& a, const Job& b) {
+    if (a.repository.empty() || b.repository.empty()) return false;
+    if (!a.repository_volume.empty() && !b.repository_volume.empty()) {
+        std::string x = a.repository_relative, y = b.repository_relative;
+        for (std::string* s : {&x, &y}) {
+            std::replace(s->begin(), s->end(), '\\', '/');
+            while (!s->empty() && s->back() == '/') s->pop_back();
+#ifdef _WIN32
+            *s = os::fold_case(*s);
+#endif
+        }
+        return a.repository_volume == b.repository_volume && x == y;
+    }
+    return location_form(a.repository) == location_form(b.repository);
+}
+
+std::vector<RunRecord> history_with_shared_checks(const JobStore& store, const Job& job, std::size_t limit) {
+    std::vector<RunRecord> out = combined_history(store, job.id, limit);
+    std::vector<Job> others;
+    try {
+        others = store.list();
+    } catch (const std::exception&) {
+    }
+    bool added = false;
+    for (const Job& other : others) {
+        if (other.id == job.id || !same_repository(job, other)) continue;
+        try {
+            for (const RunRecord& r : combined_history(store, other.id, limit))
+                if (is_check(r.kind) && !r.rot_only) {  // its files' own check is not this job's
+                    out.push_back(r);
+                    added = true;
+                }
+        } catch (const std::exception&) {
+        }
+    }
+    if (added)
+        std::stable_sort(out.begin(), out.end(), [](const RunRecord& x, const RunRecord& y) { return x.started < y.started; });
+    return out;
+}
+
 bool connect_backup_due(const JobStore& store, const Job& job) {
-    if (job.schedule.paused || !job.backup_on_connect || job.repository_volume.empty() || !drive_connected(job))
-        return false;
+    if (job.schedule.paused || job.repository_volume.empty() || !drive_connected(job)) return false;
     const std::vector<RunRecord> history = combined_history(store, job.id, 50);
+    // A job without "back up when connected" still catches up on a run it missed while the drive
+    // was away.
+    if (!job.backup_on_connect && missed_run_waiting(history) == nullptr) return false;
     const RunRecord* last = last_backup(history);
     constexpr std::uint64_t kQuiet = 10ull * 60 * 10'000'000;  // 10 minutes in FILETIME ticks
     return !(last && last->status != RunStatus::Failed && last->finished + kQuiet > os::now());

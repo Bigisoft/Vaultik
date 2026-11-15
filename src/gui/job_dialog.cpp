@@ -573,6 +573,14 @@ QWidget* JobDialog::build_schedule() {
            "this also checks every other file, for folders where hard links come and go, such as package "
            "stores."));
     form->addRow(QString(), check_every_file_);
+    download_cloud_ = new QCheckBox(tr("Download files that are only in the cloud (OneDrive) and back them up"));
+    download_cloud_->setToolTip(tr("Files that OneDrive keeps only online are not on this PC. Without this they are "
+                                   "listed in the backup but their content is not saved; with it, the backup "
+                                   "downloads them first, which takes time and fills the disk."));
+#ifndef _WIN32
+    download_cloud_->setVisible(false);
+#endif
+    form->addRow(QString(), download_cloud_);
     record_apps_ = new QCheckBox(tr("Keep a list of the installed programs with each version"));
     record_apps_->setToolTip(tr("On a new computer, \"Reinstall programs\" in the restore window then installs the "
                                 "missing ones with winget. The list is small and stored encrypted like the files."));
@@ -586,6 +594,15 @@ QWidget* JobDialog::build_schedule() {
                                 "backup drive can be rebuilt by Repair. Data saved before it is turned on gets it "
                                 "during the health checks."));
     form->addRow(tr("Repair data:"), repair_data_);
+    compression_ = new QComboBox;
+    compression_->addItem(tr("As the destination has it (fast, unless changed)"), 0);
+    compression_->addItem(tr("Fast (level 3)"), 3);
+    compression_->addItem(tr("Balanced (level 6)"), 6);
+    compression_->addItem(tr("Small (level 12), when the drive is slow"), 12);
+    compression_->setToolTip(tr("How hard new data is compressed. Smaller costs more CPU time and saves space and "
+                                "writes, which helps when the drive (USB 2.0, a network) is slower than compressing. "
+                                "Data already stored stays as it is, and every level reads back the same way."));
+    form->addRow(tr("Compression:"), compression_);
     form->addRow(tr("Scheduled runs:"), skip_battery_);
     form->addRow(QString(), wake_);
     form->addRow(QString(), skip_metered_);
@@ -646,7 +663,11 @@ QWidget* JobDialog::build_schedule() {
     check_percent_ = spin(1, 100, QStringLiteral("%"), QString());
     form->addRow(tr("Check:"), row({check_weekly_, check_percent_, new QLabel(tr("of the stored data"))}));
     check_monthly_ = new QCheckBox(tr("Once a month, read back all of it"));
-    form->addRow(QString(), check_monthly_);
+    check_hours_ = spin(0, 168, tr(" h"), tr("no limit"));
+    check_hours_->setValue(jobs::HealthPolicy{}.full_check_hours);
+    check_hours_->setToolTip(tr("A full check reads at most this long per run and goes on where it stopped after "
+                                "the next backup, until all of it was read within 30 days."));
+    form->addRow(QString(), row({check_monthly_, new QLabel(tr("at most")), check_hours_, new QLabel(tr("per run"))}));
     check_restore_ = new QCheckBox(tr("Once a month, test a restore of a few files"));
     check_restore_->setToolTip(tr("Restores up to 20 files (at most 500 MB) of the newest version into a temporary "
                                   "folder, checks them, compares them with the unchanged files on this PC and "
@@ -668,6 +689,7 @@ QWidget* JobDialog::build_schedule() {
     check_note->setForegroundRole(QPalette::PlaceholderText);
     form->addRow(QString(), check_note);
     connect(check_weekly_, &QCheckBox::toggled, check_percent_, &QWidget::setEnabled);
+    connect(check_monthly_, &QCheckBox::toggled, check_hours_, &QWidget::setEnabled);
     connect(check_monthly_, &QCheckBox::clicked, this, [this] { check_monthly_touched_ = true; });
     connect(repository_, &QLineEdit::textChanged, this, [this](const QString& text) {
         if (!editing_ && !check_monthly_touched_)
@@ -996,6 +1018,8 @@ void JobDialog::load(const jobs::Job& job) {
     check_percent_->setValue(job.health.sample_percent);
     check_percent_->setEnabled(job.health.weekly);
     check_monthly_->setChecked(job.health.monthly);
+    check_hours_->setValue(job.health.full_check_hours);
+    check_hours_->setEnabled(job.health.monthly);
     check_restore_->setChecked(job.health.restore_test);
     check_rot_->setChecked(job.health.rot_check);
     before_command_->setText(qs(job.before_command));
@@ -1010,6 +1034,7 @@ void JobDialog::load(const jobs::Job& job) {
     paused_->setChecked(job.schedule.paused);
     skip_unchanged_->setChecked(job.skip_unchanged);
     check_every_file_->setChecked(job.check_every_file);
+    download_cloud_->setChecked(job.download_cloud_files);
     record_apps_->setChecked(job.record_apps);
     {
         int at = repair_data_->findData(static_cast<int>(job.repair_data));
@@ -1018,6 +1043,14 @@ void JobDialog::load(const jobs::Job& job) {
             at = repair_data_->count() - 1;
         }
         repair_data_->setCurrentIndex(at);
+    }
+    {
+        int at = compression_->findData(job.compression);
+        if (at < 0) {
+            compression_->addItem(tr("Level %1").arg(job.compression), job.compression);
+            at = compression_->count() - 1;
+        }
+        compression_->setCurrentIndex(at);
     }
     wake_->setChecked(job.schedule.wake_computer);
     skip_metered_->setChecked(job.schedule.skip_metered);
@@ -1165,8 +1198,10 @@ jobs::Job JobDialog::collect() const {
     j.schedule.paused = paused_->isChecked();
     j.skip_unchanged = skip_unchanged_->isChecked();
     j.check_every_file = check_every_file_->isChecked();
+    j.download_cloud_files = download_cloud_->isChecked();
     j.record_apps = record_apps_->isChecked();
     j.repair_data = static_cast<unsigned>(repair_data_->currentData().toInt());
+    j.compression = compression_->currentData().toInt();
     j.schedule.wake_computer = wake_->isChecked();
     j.schedule.skip_metered = skip_metered_->isChecked();
     j.schedule.on_idle = on_idle_->isChecked();
@@ -1197,6 +1232,7 @@ jobs::Job JobDialog::collect() const {
     j.health.weekly = check_weekly_->isChecked();
     j.health.sample_percent = check_percent_->value();
     j.health.monthly = check_monthly_->isChecked();
+    j.health.full_check_hours = check_hours_->value();
     j.health.restore_test = check_restore_->isChecked();
     j.health.rot_check = check_rot_->isChecked();
     return j;

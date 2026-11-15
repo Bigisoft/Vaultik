@@ -129,12 +129,17 @@ void Tray::check() {
                     show_message(tr("Test restore of %1 found problems").arg(name), qs(r.message).left(250),
                                        QSystemTrayIcon::Critical, 15000);
             } else if (r.kind != jobs::RunKind::Backup) {
-                // A check that could not run is not news: the backup before it failed the same way.
+                // A check that found damage, or one that could not finish (a check runs only after a
+                // backup that did not fail, so the backup did not say it already).
                 if (fresh && settings.notify_failures && jobs::found_damage(r))
                     show_message(tr("Health check of %1 found problems").arg(name),
                                        tr("Some backed-up data could not be read back. Open Vaultik to see "
                                           "what is affected, and back up again soon."),
                                        QSystemTrayIcon::Critical, 15000);
+                else if (fresh && settings.notify_failures && jobs::check_not_finished(r))
+                    // Stopped part way (the drive was unplugged, say): it runs again after the next backup.
+                    show_message(tr("Health check of %1 could not finish").arg(name), qs(r.message).left(200),
+                                 QSystemTrayIcon::Warning, 15000);
                 else if (fresh && settings.notify_failures && r.rot_files > 0)
                     show_message(tr("Files on this PC changed by themselves (%1)").arg(name),
                                        tr("%1 changed although nothing wrote to them, which a failing drive does. "

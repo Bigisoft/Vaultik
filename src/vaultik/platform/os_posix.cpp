@@ -716,6 +716,12 @@ constexpr std::string_view kUuidPrefix = "uuid:";
 
 // Linux: the volume is named by its file system UUID ("uuid:1234-ABCD"), which stays the same
 // wherever the drive is mounted (/run/media/<user>/<label> on SteamOS and most desktops).
+std::string file_system_of(const std::string& path) {
+    const std::vector<Mount> mounts = read_mounts();
+    const Mount* m = mount_of(mounts, mounts::resolved_path(path));
+    return m == nullptr ? std::string() : m->type;
+}
+
 VolumeLocation volume_of(const std::string& path) {
     VolumeLocation loc;
     const std::string full = mounts::resolved_path(path);  // the drive a link points to

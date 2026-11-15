@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -296,7 +297,13 @@ TEST_CASE("progress events: speed and time left for events without them") {
 }
 
 TEST_CASE("progress channel: an engine that connects after the app stopped waiting for it is still taken") {
-    ProgressServer server;
+    auto server_owner = std::make_unique<ProgressServer>();
+    ProgressServer& server = *server_owner;
+    // The engine's channel and its listener outlive the engine's thread, as in the engine, where the
+    // listener reads until the app's end closes: both end only once the app's end is gone.
+    std::unique_ptr<ProgressClient> client;
+    std::atomic<bool> cancel{false};
+    std::thread listener;
     std::atomic<bool> stop{false};
     std::atomic<bool> got_cancel{false};
     std::string error;
@@ -304,15 +311,12 @@ TEST_CASE("progress channel: an engine that connects after the app stopped waiti
         // Connects late, as an engine whose password prompt (pkexec) was answered late.
         std::this_thread::sleep_for(std::chrono::milliseconds(900));
         try {
-            ProgressClient client(server.name(), server.user(), 5000);
-            client.send_line(R"({"event":"progress","done":1,"total":2})");
-            std::atomic<bool> cancel{false};
-            std::thread listener([&] { listen_for_cancel(client, cancel); });
+            client = std::make_unique<ProgressClient>(server.name(), server.user(), 5000);
+            client->send_line(R"({"event":"progress","done":1,"total":2})");
+            listener = std::thread([&] { listen_for_cancel(*client, cancel); });
             for (int i = 0; i < 500 && !cancel; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
             got_cancel = cancel.load();
             for (int i = 0; i < 500 && !stop; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            listener.detach();  // ends once the app's end closes; `client` outlives it below
-            for (int i = 0; i < 50; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         } catch (const std::exception& e) {
             error = e.what();
         }
@@ -332,6 +336,9 @@ TEST_CASE("progress channel: an engine that connects after the app stopped waiti
     engine.join();
     CHECK(error.empty());
     CHECK(got_cancel.load());
+    server_owner.reset();  // the app's end closes: the listener ends, then its channel goes
+    if (listener.joinable()) listener.join();
+    client.reset();
 }
 
 TEST_CASE("progress channel: the wait for the engine ends when it ended, or when the window went away") {
