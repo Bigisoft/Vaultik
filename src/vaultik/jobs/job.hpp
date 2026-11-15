@@ -281,6 +281,10 @@ struct RunRecord {
     // A full check: packs it was to read but left for the next one (its time limit). Such a check
     // is not complete, also when it found damage (see due_check).
     std::uint64_t packs_left = 0;
+    // A health check of this job that only compared files on this computer with the backup (the
+    // silent damage part, see rot_check_due): the repository itself was checked by another job
+    // backing up to it. It never counts as a check of the repository.
+    bool rot_only = false;
     std::string message;  // error text for Failed, summary otherwise
     // The run's log file, with every warning in full (see jobs/run_log.hpp); empty for none.
     std::string log;
@@ -372,6 +376,11 @@ const char* to_string(Schedule::Kind kind);
 // or stopped part way is tried again after the next backup.
 std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<RunRecord>& history,
                                  std::uint64_t now);
+// Whether the silent damage check of this job's own files is due (FILETIME ticks), from the job's
+// own history (oldest first): when it is on and no check of this job, of the repository or of the
+// files alone, finished in the last 7 days. Asked when the repository check is not due because
+// another job using the same repository did it: that check compared that job's files, not these.
+bool rot_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history, std::uint64_t now);
 // "Daily at 02:00", "Mon, Wed at 21:30", "Every 4 hours at :15", "Manual"; a paused job's in
 // brackets after "Paused": "Paused (Daily at 02:00)".
 std::string describe(const Schedule& schedule);

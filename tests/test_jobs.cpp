@@ -1255,4 +1255,25 @@ TEST_CASE("shared health checks: one completed check of a repository counts for 
     broken.status = RunStatus::Failed;
     store.append_history(c.id, broken);
     CHECK(due_check(h, history_with_shared_checks(store, c), now) == RunKind::FullCheck);
+
+    // The check of the repository is shared, the check of each job's own files is not: b's files
+    // were never compared, so b's silent damage check is due although its repository check is not.
+    CHECK(rot_check_due(h, store.history(a.id), now) == false);
+    CHECK(rot_check_due(h, store.history(b.id), now));
+    RunRecord files;
+    files.kind = RunKind::Check;
+    files.rot_only = true;
+    files.started = now - 100;
+    files.finished = now - 50;
+    store.append_history(b.id, files);
+    CHECK(record_from_json(to_json(files)).rot_only);
+    CHECK_FALSE(rot_check_due(h, store.history(b.id), now));
+    CHECK(rot_check_due(h, store.history(b.id), now + 8 * 864'000'000'000ull));
+    // It never counts as a check of the repository, for b or for the others.
+    CHECK(due_check(h, store.history(b.id), now) == RunKind::FullCheck);
+    CHECK(due_check(h, history_with_shared_checks(store, c), now) == RunKind::FullCheck);
+    for (const RunRecord& r : history_with_shared_checks(store, a)) CHECK_FALSE(r.rot_only);
+    HealthPolicy no_rot;
+    no_rot.rot_check = false;
+    CHECK_FALSE(rot_check_due(no_rot, {}, now));
 }

@@ -2342,6 +2342,54 @@ int health_check(Repository& repo, const jobs::Job& job, jobs::RunKind kind, job
     return r.errors > 0 ? kExitAuth : kExitOk;
 }
 
+// The silent damage part of a health check alone, for a job whose repository another job
+// checked (see jobs::rot_check_due): fills `record` as a check with rot_only set. Throws on cancel
+// or when it could not run, after filling the record.
+void files_check(Repository& repo, const jobs::Job& job, jobs::RunRecord& record) {
+    record.kind = jobs::RunKind::Check;
+    record.rot_only = true;
+    record.started = os::now();
+    std::string rot;
+    try {
+        RepoLock lock(repo, RepoLock::Mode::Shared, "check (job " + job.id + ")");
+        repo.reload_index();
+        if (!g_json) out("Health check: comparing unchanged files on this PC with the backup...\n");
+        rot = rot_check(repo, job, record, [&lock] { return stop_requested() || lock.lost(); });
+    } catch (const Cancelled&) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Cancelled;
+        record.message = "cancelled";
+        throw;
+    } catch (const std::exception& e) {
+        if (!g_json) clear_status();
+        record.finished = os::now();
+        record.status = jobs::RunStatus::Failed;
+        record.message = std::string("the check could not run: ") + e.what();
+        throw;
+    }
+    record.finished = os::now();
+    record.status = jobs::RunStatus::Success;
+    record.message = "the backup itself was checked by another job that backs up to the same place";
+    if (!rot.empty()) record.message += "; " + rot;
+    if (g_json) {
+        emit({{"event", "check"},
+              {"kind", jobs::to_string(record.kind)},
+              {"status", jobs::to_string(record.status)},
+              {"rot_only", true},
+              {"rot_files", record.rot_files},
+              {"message", record.message}});
+    } else {
+        clear_status();
+        out("Health check: " + record.message + "\n");
+        if (record.rot_files > 0)
+            out("WARNING: files on this PC changed although nothing wrote to them, which a failing drive does. "
+                "The backup holds the earlier copy: restore them from the version of " +
+                os::format_time_local(record.rot_version).substr(0, 16) + " (vaultik restore --job " + job.id +
+                " <version> --path <file> --target <folder>), then check the drive.\n");
+    }
+}
+
 // A test restore of the job's newest version (see ops/restore_test.hpp), recorded in `record`.
 // The temporary folder is made in the job store's folder: the user's own, or with administrator
 // rights the admin-only store, so a privileged restore never writes where the user could plant a
@@ -3491,6 +3539,24 @@ int cmd_run_job(const Args& a) {
             return code;
         } catch (const std::exception&) {
             // Cancelled or could not run: the record says which.
+        }
+        try {
+            append_run(store, job->id, check);
+        } catch (const Error& e) {
+            warning(std::string("could not record the health check: ") + e.what());
+        }
+        alert_for(*job, check, store.dir());
+    } else if (jobs::rot_check_due(job->health, jobs::combined_history(store, job->id, 500), os::now()) &&
+               job->image_disks.empty()) {
+        // Another job's check of this repository counts for the repository, but it compared that
+        // job's files on this computer: this job's own files get their silent damage check.
+        jobs::RunRecord check;
+        try {
+            files_check(*repo, *job, check);
+        } catch (const LockedError&) {
+            if (!g_json) clear_status();
+            return code;
+        } catch (const std::exception&) {
         }
         try {
             append_run(store, job->id, check);

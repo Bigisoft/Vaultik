@@ -727,7 +727,7 @@ std::vector<RunRecord> history_with_shared_checks(const JobStore& store, const J
         if (other.id == job.id || !same_repository(job, other)) continue;
         try {
             for (const RunRecord& r : combined_history(store, other.id, limit))
-                if (is_check(r.kind)) {
+                if (is_check(r.kind) && !r.rot_only) {  // its files' own check is not this job's
                     out.push_back(r);
                     added = true;
                 }

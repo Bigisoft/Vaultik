@@ -98,7 +98,7 @@ std::vector<ProtectionGap> protection_gaps(const Job& job, const std::vector<Job
     const RunRecord* check = last_check(history);
     std::uint64_t last_done = 0;
     for (const RunRecord& r : history)
-        if (check_completed(r) || (r.kind == RunKind::FullCheck && r.status == RunStatus::Partial))
+        if (!r.rot_only && (check_completed(r) || (r.kind == RunKind::FullCheck && r.status == RunStatus::Partial)))
             last_done = std::max(last_done, r.finished);
     const bool backed_up = last_backup(history) != nullptr;
     if (!job.health.weekly && !job.health.monthly) {

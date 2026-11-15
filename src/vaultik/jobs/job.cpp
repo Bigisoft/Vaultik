@@ -279,6 +279,7 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
     std::uint64_t last_full = 0, last_any = 0;
     for (const RunRecord& r : history) {
+        if (r.rot_only) continue;  // only this computer's files were compared
         const bool partial_full =
             r.kind == RunKind::FullCheck && (r.status == RunStatus::Partial || (r.packs_left > 0 && check_completed(r)));
         if (!check_completed(r) && !partial_full) continue;
@@ -289,6 +290,16 @@ std::optional<RunKind> due_check(const HealthPolicy& policy, const std::vector<R
     if (policy.monthly && older_than(last_full, 30 * kDay)) return RunKind::FullCheck;
     if (policy.weekly && older_than(last_any, 7 * kDay)) return RunKind::Check;
     return std::nullopt;
+}
+
+bool rot_check_due(const HealthPolicy& policy, const std::vector<RunRecord>& own_history, std::uint64_t now) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
+    if (!policy.rot_check || (!policy.weekly && !policy.monthly)) return false;
+    std::uint64_t last = 0;
+    for (const RunRecord& r : own_history)
+        if (check_completed(r) || (r.kind == RunKind::FullCheck && r.status == RunStatus::Partial))
+            last = std::max(last, r.finished);
+    return last == 0 || last + 7 * kDay <= now;
 }
 
 namespace {
@@ -702,6 +713,7 @@ std::string to_json(const RunRecord& r) {
     if (!r.reason.empty()) j["reason"] = r.reason;
     if (r.cloud_only > 0) j["cloud_only"] = r.cloud_only;
     if (r.packs_left > 0) j["packs_left"] = r.packs_left;
+    if (r.rot_only) j["rot_only"] = true;
     if (!r.log.empty()) j["log"] = r.log;
     if (r.backup_size > 0) j["backup_size"] = r.backup_size;
     if (r.free_space > 0) j["free_space"] = r.free_space;
@@ -734,6 +746,7 @@ RunRecord record_from_json(const std::string& text) {
         r.reason = j.value("reason", std::string());
         r.cloud_only = j.value("cloud_only", std::uint64_t{0});
         r.packs_left = j.value("packs_left", std::uint64_t{0});
+        r.rot_only = j.value("rot_only", false);
         r.log = j.value("log", std::string());
         r.backup_size = j.value("backup_size", std::uint64_t{0});
         r.free_space = j.value("free_space", std::uint64_t{0});
