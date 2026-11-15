@@ -2250,11 +2250,11 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
             req.disk = std::to_string(number);
             req.shown = identity_of(left);
             req.confirm = erase_text(left);
-            NewDiskOptions again;
-            again.filesystem = "exfat";
-            again.label = "VTAgain";
-            again.letter = own[0];
-            req.setup = again;
+            NewDiskOptions retry;
+            retry.filesystem = "exfat";
+            retry.label = "VTAgain";
+            retry.letter = own[0];
+            req.setup = retry;
             std::vector<std::string> args = setup_again_args(req, pin.table_id);
             CHECK(std::find(args.begin(), args.end(), "--expect-id") != args.end());
             args.push_back("--json");
