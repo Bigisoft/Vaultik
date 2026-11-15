@@ -339,18 +339,33 @@ TEST_CASE("full check: a pack that stays damaged does not keep the round open fo
     auto repo = repo_with_packs(tmp.path, 4);
     const std::size_t packs = repo->index().packs().size();
     REQUIRE(packs >= 4);
-    // One pack is damaged on the drive (a byte flipped in the middle), and stays so.
+    // One pack is damaged on the drive (a byte flipped in the middle), and stays so. Flipped with
+    // the repository closed (Windows writes no file another handle has open) and checked to take.
     const Id bad = repo->index().packs().front();
     const fs::path file = tmp.path / "repo" / fs::u8path(Repository::pack_name(bad));
     REQUIRE(fs::exists(file));
-    {
-        std::fstream f(file, std::ios::binary | std::ios::in | std::ios::out);
-        f.seekg(static_cast<std::streamoff>(fs::file_size(file) / 2));
-        char c = 0;
-        f.get(c);
-        f.seekp(static_cast<std::streamoff>(fs::file_size(file) / 2));
-        f.put(static_cast<char>(c ^ 0x5A));
-    }
+    const auto flip = [&] {
+        repo.reset();
+        const auto at = static_cast<std::streamoff>(fs::file_size(file) / 2);
+        char before = 0;
+        {
+            std::fstream f(file, std::ios::binary | std::ios::in | std::ios::out);
+            REQUIRE(f.is_open());
+            f.seekg(at);
+            f.get(before);
+            f.seekp(at);
+            f.put(static_cast<char>(before ^ 0x5A));
+            REQUIRE(f.good());
+        }
+        std::ifstream in(file, std::ios::binary);
+        in.seekg(at);
+        char after = 0;
+        in.get(after);
+        REQUIRE(after == static_cast<char>(before ^ 0x5A));
+        in.close();
+        repo = Repository::open(std::make_unique<LocalBackend>(u8(tmp.path / "repo")), kPassword);
+    };
+    flip();
     jobs::CheckState state;
     VerifyOptions o;
     o.read_data = true;
@@ -384,14 +399,7 @@ TEST_CASE("full check: a pack that stays damaged does not keep the round open fo
     CHECK(jobs::finish_full_check(state, *repo, o.fresh_since, now) == 0);
 
     // Repaired (here: the pack put back as it was): read intact, no longer damaged.
-    {
-        std::fstream f(file, std::ios::binary | std::ios::in | std::ios::out);
-        f.seekg(static_cast<std::streamoff>(fs::file_size(file) / 2));
-        char c = 0;
-        f.get(c);
-        f.seekp(static_cast<std::streamoff>(fs::file_size(file) / 2));
-        f.put(static_cast<char>(c ^ 0x5A));
-    }
+    flip();
     now = 162 * kDay;
     o.now = now;
     o.fresh_since = jobs::plan_full_check(state, true, now);
