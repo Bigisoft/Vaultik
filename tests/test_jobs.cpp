@@ -2058,17 +2058,80 @@ TEST_CASE("drive lock: the files in /run/lock are shared, opened without being m
     fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + drive_lock_name(race) + ".lock"));
 
     // Something else in its place (a pipe, which an open would wait on for good): never waited
-    // on, the settings folder is used instead.
+    // on; the run holds its own lock (the account's own file in /run/lock, root's mark), so the
+    // settings folder is not needed either.
     const std::string piped = "test-fifo-" + tmp.path.filename().string();
     const fs::path fifo = fs::path("/run/lock") / ("vaultik-drive-" + drive_lock_name(piped) + ".lock");
     REQUIRE(::mkfifo(fifo.c_str(), 0644) == 0);
     {
         DriveLock lock(piped, os::join(tmp.dir(), "c"), std::chrono::milliseconds(0));
         CHECK(lock.held());
-        if (::geteuid() != 0) CHECK(fs::exists(tmp.path / "c"));
+        CHECK_FALSE(fs::exists(tmp.path / "c"));
     }
     std::error_code ec;
     fs::remove(fifo, ec);
+    for (const std::string& k : {key, race, piped}) {
+        const std::string uid = std::to_string(::geteuid());
+        fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + drive_lock_name(k) + "." + uid + ".lock"), ec);
+    }
+}
+
+TEST_CASE("drive lock: the runs of one account take turns, whatever settings folder each uses (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-own-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string uid = std::to_string(::geteuid());
+    const fs::path own = fs::path("/run/lock") / ("vaultik-drive-" + name + "." + uid + ".lock");
+    const fs::path own_use = fs::path("/run/lock") / ("vaultik-use-" + name + "." + uid + ".lock");
+    // Another account (or root) may hold the file all accounts share, which is waited for only a
+    // short while (300 ms here): the account's own runs are waited for the whole wait all the same.
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(300)});
+    {
+        // The installed app's run, and a portable one (another settings folder).
+        OtherProcess installed("lock", key, os::join(tmp.dir(), "installed"), tmp.path);
+        REQUIRE(installed.held());
+        struct stat st{};
+        REQUIRE(::lstat(own.c_str(), &st) == 0);
+        CHECK(S_ISREG(st.st_mode));
+        CHECK(st.st_uid == ::geteuid());
+        CHECK((st.st_mode & 0777) == 0600);
+        const auto started = std::chrono::steady_clock::now();
+        CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(1500)), DriveBusy);
+        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1400));
+        // Its eject sees the run.
+        CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(0), {}, {},
+                                  DriveLockMode::eject),
+                        DriveBusy);
+        CHECK_FALSE(fs::exists(tmp.path / "installed"));
+        CHECK_FALSE(fs::exists(tmp.path / "portable"));
+    }
+    {
+        // A command of the installed app: an eject from the portable one sees it.
+        OtherProcess command("claim", key, os::join(tmp.dir(), "installed"), tmp.path);
+        REQUIRE(command.held());
+        CHECK(drive_claimed(key, os::join(tmp.dir(), "portable")));
+    }
+    CHECK_FALSE(drive_claimed(key, os::join(tmp.dir(), "portable")));
+    std::error_code ec;
+    for (const fs::path& f : {own, own_use}) fs::remove(f, ec);
+    // A link in the place of the account's own file (another account may make one there): never
+    // followed; the file in the settings folder instead.
+    fs::create_symlink(tmp.path / "elsewhere", own);
+    {
+        DriveLock run(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(0));
+        CHECK(run.held());
+        CHECK(fs::exists(tmp.path / "portable" / ("vaultik-drive-" + name + ".lock")));
+        CHECK_FALSE(fs::exists(tmp.path / "elsewhere"));
+    }
+    testing::set_drive_lock_hooks({});
+    for (const fs::path& f : {own, own_use, fs::path("/run/lock") / ("vaultik-drive-" + name + ".lock"),
+                              fs::path("/run/lock") / ("vaultik-use-" + name + ".lock")})
+        fs::remove(f, ec);
 }
 
 TEST_CASE("drive lock: root and another account share the drive's turn (Linux, as root)") {
@@ -2104,22 +2167,29 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         OtherProcess eject("claimed", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
         CHECK(eject.held());
     }
-    fs::remove(file);
-    fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".lock"));
-    fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock"));
+    std::error_code ec;
+    fs::remove(file, ec);
+    fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".lock"), ec);
+    fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + name + ".65534.lock"), ec);
+    fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".65534.lock"), ec);
+    fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock"), ec);
+    fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".root.lock"), ec);
 }
 
 namespace {
 
-// For the tests below, without root: this account's files in /run/lock count as another
-// account's (as root's do for an account), so a process of this account that holds one stands in
-// for another account; this account's own files there count as root's marks (a process that
-// holds one stands in for a root run); kOtherAccountWait is 300 ms. Removes those files again.
+// For the tests below, without root: this account's own lock is the file in the settings folder
+// (not its file in /run/lock), so a process of this account with another settings folder (and
+// without these hooks) stands in for another account; this account's own files in /run/lock count
+// as root's marks there (a process that holds one stands in for a root run); kOtherAccountWait is
+// 300 ms. Removes those files again.
 struct ForeignFiles {
     std::vector<fs::path> files;
     explicit ForeignFiles(const std::string& name) {
-        for (const char* f : {"vaultik-drive-%.lock", "vaultik-drive-%.root.lock", "vaultik-use-%.lock",
-                              "vaultik-use-%.root.lock"}) {
+        const std::string uid = std::to_string(::geteuid());
+        for (const std::string& f : {std::string("vaultik-drive-%.lock"), std::string("vaultik-drive-%.root.lock"),
+                                     std::string("vaultik-use-%.lock"), std::string("vaultik-use-%.root.lock"),
+                                     "vaultik-drive-%." + uid + ".lock", "vaultik-use-%." + uid + ".lock"}) {
             std::string file = f;
             file.replace(file.find('%'), 1, name);
             files.push_back(fs::path("/run/lock") / file);

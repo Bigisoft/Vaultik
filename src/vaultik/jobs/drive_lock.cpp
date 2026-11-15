@@ -306,11 +306,29 @@ int open_lock_file(const std::string& name, const std::string& fallback_dir) {
     return open_in_dir(name, fallback_dir);
 }
 
-// What a run of an account (not root) locks for `name`: `own`, which only runs of this account
-// can hold; and, when the file all accounts share is not this account's own (root's, which any
-// account that can open it may hold), that one as `shared` too, which is waited for only a short
-// while. Without a shared file of another account, `own` is the shared file (or, without one, a
-// file in `lock_dir`). Either may be -1.
+bool mine(const struct stat& st) {
+    return st.st_uid == ::geteuid();
+}
+
+// The account's own lock for `name` ("vaultik-drive-<hash>.lock"): the file
+// "vaultik-drive-<hash>.<uid>.lock" in /run/lock, readable by the account alone and used only
+// when it is a file the account owns, so that every run of the account takes turns there,
+// whatever settings folder it uses (the installed app and a portable one, VAULTIK_CONFIG_DIR).
+// Where that cannot be used (another account made one of that name first, say), the file in
+// `lock_dir` instead.
+int open_own_file(const std::string& name, const std::string& lock_dir) {
+    if (!hooks().own_in_folder) {
+        const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
+        const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine);
+        if (fd >= 0) return fd;
+    }
+    return open_in_dir(name, lock_dir);
+}
+
+// What a run of an account (not root) locks for `name`: `own` (see open_own_file), which only runs
+// of this account can hold, then `shared`, the file all accounts share (when it can be used),
+// which root's runs and those of other accounts may hold too and which is waited for only a short
+// while. Either may be -1.
 struct AccountFiles {
     int own = -1;
     int shared = -1;
@@ -318,14 +336,8 @@ struct AccountFiles {
 
 AccountFiles open_account_files(const std::string& name, const std::string& lock_dir) {
     AccountFiles f;
-    const int fd = open_in_run_lock(name, 0600, own_or_roots);
-    struct stat st{};
-    if (fd >= 0 && ::fstat(fd, &st) == 0 && (st.st_uid != ::geteuid() || hooks().shared_foreign)) {
-        f.shared = fd;
-        f.own = open_in_dir(name, lock_dir);
-        return f;
-    }
-    f.own = fd >= 0 ? fd : open_in_dir(name, lock_dir);
+    f.own = open_own_file(name, lock_dir);
+    f.shared = open_in_run_lock(name, 0600, own_or_roots);
     return f;
 }
 
@@ -532,8 +544,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             shared = -1;
         }
     } else {
-        // The account's own lock first when the shared one is another account's (see
-        // open_account_files).
+        // The account's own lock first, then the one all accounts share (see open_account_files).
         const AccountFiles files = open_account_files(name, lock_dir);
         own = files.own;
         shared = files.shared;
