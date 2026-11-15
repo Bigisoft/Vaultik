@@ -286,13 +286,15 @@ TEST_CASE("check progress: the bytes read so far and in all, reaching the total"
     }
     CHECK(seen.back().first == total);
 
-    // A sampled check counts only what it reads.
+    // A sampled check counts only what it reads: the pack the seed picks, and now and then
+    // another whose (random) id falls into the 1% share.
     seen.clear();
     o.read_share = 0.01;
     o.sample_seed = 3;
     const VerifyResult some = run_verify(*repo, o);
-    CHECK(some.packs_read == 1);
-    REQUIRE(seen.size() == 2);
+    CHECK(some.packs_read >= 1);
+    CHECK(some.packs_read < r.packs_read);
+    REQUIRE(seen.size() == some.packs_read + 1);
     CHECK(seen.back().first == seen.back().second);
     CHECK(seen.back().second < total);
 }
