@@ -1664,23 +1664,26 @@ TEST_CASE("a run queued behind a run of the same job exits without a second back
     saved.finished = os::now() + 600'000'000ull;  // ends after the queued run started
     store.append_history(j.id, saved);
 
+    // It starts, finds the drive busy and says that it waits; only then is the drive let go.
+    os::PipedProcess queued({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, os::PipedProcess::Direction::FromProgram,
+                            {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "test password"}});
     std::string output;
-    int code = -1;
-    std::thread queued([&] {
-        os::CommandOptions o;
-        o.output = &output;
-        o.timeout = std::chrono::seconds(120);
-        o.extra_environment = {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "test password"}};
-        code = os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o);
-    });
-    std::this_thread::sleep_for(std::chrono::seconds(5));  // it starts, finds the drive busy, waits
-    other.release();
-    queued.join();
-    CAPTURE(output);
-    CHECK(code == 0);
+    std::uint8_t c = 0;
+    while (output.find("Waiting") == std::string::npos && queued.read(&c, 1) == 1) output.push_back(static_cast<char>(c));
     CHECK(output.find("Waiting") != std::string::npos);
+    other.release();
+    std::uint8_t buf[4096];
+    for (std::size_t n; (n = queued.read(buf, sizeof buf)) > 0;) output.append(reinterpret_cast<const char*>(buf), n);
+    const int code = queued.wait();
+    CAPTURE(output);
+    CAPTURE(queued.messages());
+    CHECK(code == 0);
     CHECK(output.find("while this one waited") != std::string::npos);
     CHECK(store.history(j.id).size() == 1);  // no second record, no second backup
+    // Nor a log of its own that no record names.
+    std::error_code ec;
+    const fs::path logs = tmp.path / "logs" / j.id;
+    CHECK((!fs::exists(logs) || fs::is_empty(logs, ec)));
     auto repo = Repository::open(std::make_unique<LocalBackend>((tmp.path / "repo").string()), "test password");
     CHECK(repo->list_snapshot_ids().empty());
 
@@ -1877,6 +1880,20 @@ TEST_CASE("run log: every line up to its cap, the newest logs of a job kept") {
     RunRecord r;
     r.log = first;
     CHECK(record_from_json(to_json(r)).log == first);
+}
+
+TEST_CASE("run log: a run that ends with nothing to record leaves no log behind") {
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    RunLog log(tmp.dir(), "docs", 300, 100);
+    for (int i = 0; i < 20; ++i) log.line("warning: something " + std::to_string(i));  // past the cap: written
+    log.flush();
+    REQUIRE(fs::exists(fs::u8path(log.path())));
+    log.discard();
+    CHECK_FALSE(fs::exists(fs::u8path(log.path())));
+    log.line("warning: after the end");
+    log.flush();
+    CHECK_FALSE(fs::exists(fs::u8path(log.path())));
 }
 
 TEST_CASE("run log paths: only a log right in the job's own logs folder is opened") {

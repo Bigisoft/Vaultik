@@ -29,6 +29,9 @@ public:
     // line says the log was cut short, and the rest is dropped.
     void line(const std::string& text);
     void flush();
+    // Drops the log: a run that ends with nothing to record (no history record names it) leaves
+    // no file behind. Later lines are dropped too.
+    void discard();
 
     const std::string& path() const { return path_; }
 

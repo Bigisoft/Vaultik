@@ -105,4 +105,12 @@ void RunLog::flush() {
     buffer_.clear();
 }
 
+void RunLog::discard() {
+    std::lock_guard<std::mutex> lock(mu_);
+    buffer_.clear();
+    full_ = true;
+    (void)os::remove_file(path_);  // none yet: nothing to remove
+    written_ = 0;
+}
+
 }  // namespace vaultik::jobs

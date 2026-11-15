@@ -3435,6 +3435,8 @@ int cmd_run_job(const Args& a) {
             const bool event_done = (trigger == "event" || trigger == "update" || trigger == "sign-out") &&
                                     !jobs::event_backup_due(store, *job);
             if (saved || event_done) {
+                // No record of this run names its log: none is left behind.
+                if (run_log.log) run_log.log->discard();
                 if (g_json) emit({{"event", "done"}, {"status", "success"}, {"reason", "done-meanwhile"}});
                 else out("Job \"" + job->name + "\": nothing left to do, another run of it did the backup while this one waited.\n");
                 return kExitOk;
