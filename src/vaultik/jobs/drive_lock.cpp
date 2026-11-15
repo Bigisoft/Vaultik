@@ -353,6 +353,10 @@ bool root_holds(const std::string& name, bool write_only) {
     return false;
 }
 
+// How long a claim of an account still waits for the claims file after root's eject let go of its
+// mark (see DriveClaim).
+constexpr std::chrono::seconds kRootLetGo{2};
+
 int fd_of(void* handle) {
     return static_cast<int>(reinterpret_cast<std::intptr_t>(handle) - 1);
 }
@@ -689,12 +693,19 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         }
         // Shared with every other claim; only an eject holds one alone, until the drive is gone.
         const auto take = [&](int& fd, bool bounded) {
+            // Root's eject may let go of its mark a moment before the claims file (one that ends
+            // without letting go, killed say, leaves both in the order it opened them, the mark
+            // first): the file is waited for a little longer after the mark was last seen held, so
+            // that the claim is not taken without it, unseen by root's next eject.
+            auto root_until = std::chrono::steady_clock::time_point::min();
             for (;;) {
                 if (::flock(fd, LOCK_SH | LOCK_NB) == 0) return;
+                const bool busy = errno == EWOULDBLOCK || errno == EINTR;
+                const auto now = std::chrono::steady_clock::now();
                 // An account (bounded) waits on the file of another account only while root's eject
-                // holds its mark: another account may hold it alone for good.
-                if ((errno != EWOULDBLOCK && errno != EINTR) || std::chrono::steady_clock::now() >= until ||
-                    (bounded && !root_holds(mark, true))) {
+                // holds its mark (and a moment after): another account may hold it alone for good.
+                if (bounded && root_holds(mark, true)) root_until = now + kRootLetGo;
+                if (!busy || now >= until || (bounded && now >= root_until)) {
                     ::close(fd);
                     fd = -1;
                     return;

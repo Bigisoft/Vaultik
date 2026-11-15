@@ -1339,7 +1339,13 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
         const auto stop = std::chrono::steady_clock::now() + std::chrono::minutes(2);
         while (!fs::exists(until) && std::chrono::steady_clock::now() < stop)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        for (const int fd : flocked) ::close(fd);
+        // In the order they were taken, VAULTIK_TEST_HOLD_GAP_MS apart (as a process that ends
+        // without letting go leaves them, slowed down).
+        const std::string gap = os::get_env("VAULTIK_TEST_HOLD_GAP_MS");
+        for (const int fd : flocked) {
+            ::close(fd);
+            if (!gap.empty()) std::this_thread::sleep_for(std::chrono::milliseconds(std::stoi(gap)));
+        }
         return;
     }
 #endif
@@ -2234,8 +2240,11 @@ TEST_CASE("drive claims: another account can neither delay a command nor keep an
         CHECK(drive_claimed(key, mine));
     }
     {
-        // An eject of root's under way: a command waits for it.
-        OtherProcess root_eject("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.use_mark(), foreign.use()));
+        // An eject of root's under way: a command waits for it, also for the claims file that
+        // eject lets go of after its mark (as one that ends without letting go does).
+        auto env = hold_files(foreign.use_mark(), foreign.use());
+        env.push_back({"VAULTIK_TEST_HOLD_GAP_MS", "300"});
+        OtherProcess root_eject("flock-ex", {}, {}, tmp.path, {}, env);
         REQUIRE(root_eject.held());
         CHECK(drive_claimed(key, mine));
         std::thread later([&] {
