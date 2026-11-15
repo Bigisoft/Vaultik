@@ -201,7 +201,8 @@ restore it to another folder or to its original location; right-click an item fo
 versions. Before it writes anything, a restore works out how much it will write and stops
 with a clear message when the target drive does not have room for it ("the restore needs about
 40 GiB but only 12 GiB is free"; `--ignore-space` restores anyway). With **Overwrite**, it also
-counts room for the largest file it replaces. The estimate is only a help: when it cannot be made
+counts room for the largest file of the same size it replaces (a file of another size is counted
+in full already). The estimate is only a help: when it cannot be made
 (a damaged folder listing, say), the restore says so and goes on, restoring everything it can
 read. **Skip files that are already
 identical** (on by default; `--skip-identical`) leaves files in the target that have the same
@@ -599,13 +600,17 @@ as long as all three together. The turn follows the drive's volume ID, not its l
 between runs started by Task Scheduler or a systemd timer and runs started in the app. On Windows
 only your own account (and administrators and the system account) can take the turn, so another
 account cannot hold up your backups; jobs with administrator rights therefore take turns among
-themselves. On Linux every account shares the turn through /run/lock, so root's runs and your own
-prune or eject take turns too. A run gives up after waiting 12 hours, and a run that cannot take
-its turn at all (the system refuses it) goes on rather than not backing up. While a run only waits,
-the computer may go to sleep. A run started on its own that waited behind a run of the same job
-does nothing once that run saved a version. A `vaultik` command started by a job's before or after
-command (a prune of the same drive, say) does not wait for the run that started it. Cloud storage
-has no such turns.
+themselves, not with your own runs (letting your account into their turn would let any account
+that may open it hold up every job with administrator rights). An eject still waits for them. On
+Linux every account shares the turn through /run/lock, so root's runs and your own prune or eject
+take turns too; as any account could hold that shared turn, a run as root waits for another
+account's run for 5 minutes at most and then goes on with a warning (both then share the drive's
+speed). A run gives up after waiting 12 hours, and a run that cannot take its turn at all (the
+system refuses it) goes on rather than not backing up. While a run only waits, the computer may
+go to sleep. A run started on its own that waited behind a run of the same job does nothing once
+that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a
+job's before or after command (a prune of the same drive, say) does not wait for the run that
+started it; one that outlives that run takes the turn as usual. Cloud storage has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
 Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows
@@ -617,7 +622,9 @@ eject <job>`) prepares the drive to be unplugged, as Windows' "Safely remove" do
 flushed, locked and dismounted where your account may, then Windows is asked to eject it, which
 it refuses (naming the program) while something still uses the drive; on Linux `udisksctl
 unmount` and `power-off`. Vaultik refuses while any of its own commands has the drive open (a
-backup, check, cleanup, restore, copy, repair or any other command that opened the backup). **Eject it on its own when the last job using it is done** (`vaultik
+backup, check, cleanup, restore, copy, repair or any other command that opened the backup), also
+one with administrator rights, and a command that starts while the drive is being ejected waits
+for the eject (at most a minute) and then finds the drive gone. **Eject it on its own when the last job using it is done** (`vaultik
 eject <job> --when-done on`, per drive) ejects it after the last of the jobs that waited for it
 finishes. No administrator rights are needed for a USB drive.
 
@@ -632,7 +639,7 @@ speaks up as before, and so does an alert (below). A second copy whose drive is 
 the next backup with its drive connected. Once the backups of a job, or its second copy, have
 waited for their drive for 3 days (for a weekly job: the longest gap between its days, plus one),
 each run sends a "backup drive missing for N days" alert, at most one a day, also for a job that
-never saved a version, and without the app running. (Windows has no Task Scheduler trigger for a drive
+never saved a version or backs up every hour, and without the app running. (Windows has no Task Scheduler trigger for a drive
 being plugged in that works without turning on an extra event log first, so the catch-up is done
 by Vaultik itself.)
 
@@ -797,7 +804,11 @@ most 3 hours per run by default (the job's Schedule tab: "at most ... per run", 
 the time is up it stops calmly ("the rest after the next backup"), and the next check goes on
 where it stopped, also after a cancel or an unplugged drive. A full check is complete once every
 pack was read since that monthly round began, so each pack is read once every round. One that found
-damage is alerted at once, and the round is not complete. A full check you start yourself (the app,
+damage is alerted at once, and the round is not complete; a damaged pack counts as visited, so a
+pack that stays damaged does not keep the round open: the next round reads every pack again.
+Packs found in archive storage although the job does not say it keeps data there (an S3 lifecycle
+rule moved them) are remembered, take no part of the checks' reading and keep no full check open;
+the check says how many are in archive storage and could not be read. A full check you start yourself (the app,
 or `check-job <job> --full`) reads everything, without a time limit; `--budget` makes it keep to
 the job's limit and go on where it stopped next time. While a check reads, the app shows how far it is
 as a percentage of the data it reads this time, with the time left (smoothed over the last half
@@ -807,13 +818,15 @@ minute, as for the drive cleanser); `--json` gives `"done"` and `"total"` bytes 
 Several jobs that back up to the same repository (the same folder on the same drive, or the
 same cloud storage) share their checks: one completed check of the repository counts for all of
 them, so the repository is not read once per job, and what it read is remembered for all of them. The check of each job's
-own files on this PC (below) is not shared: when another job checked the repository, a job whose
-files were not compared in the last 7 days still gets that comparison after its backup.
+own files on this PC (below) is not shared: when another job checked the repository and the job's
+own schedule calls for a check, a job whose files were not compared in the last 7 days (30 with
+only the monthly check on) still gets that comparison after its backup.
 
 Only a check that read what it set out to read counts as done. A check that could not finish
 (the drive was unplugged part way, say) or was cancelled does not: it stays due and runs again
 after the next backup, and one that could not finish shows a notification and sends a "health
-check could not finish" alert (with "failure" alerts on, at most one a day per job).
+check could not finish" alert (with "failure" alerts on, at most one a day per job; one that no
+channel took, with no network yet, say, goes out with the next run instead of a day later).
 
 Each check also looks for silent damage on this computer ("bit rot"): it reads up to 20 files back
 from this PC (at most 256 MB, for at most 2 minutes, within the job's resource limits) whose size,
