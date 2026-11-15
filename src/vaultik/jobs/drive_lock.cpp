@@ -349,13 +349,23 @@ std::string root_dir() {
     return set.empty() ? std::string(kRootMarkDir) : set;
 }
 
-// Whether `dir` may hold root's marks: a folder (not a link) that root owns and nobody else may
-// write to, so that no account can put a file in a mark's place. `make`: made first (0755) when
-// missing.
-bool usable_root_dir(const std::string& dir, bool make) {
-    if (make && ::mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) return false;
+// Whether `dir` may hold root's marks (root only): a folder (not a link) that root owns, that
+// nobody else may write to, so that no account can put a file in a mark's place, and that every
+// account may look into, so that each can see root's marks held (see root_holds). Made first when
+// missing, and set to 0755 whatever the umask (one of 027 or 077 would leave it closed to the
+// other accounts, which would then never see root using the drive).
+bool usable_root_dir(const std::string& dir) {
+    if (::mkdir(dir.c_str(), 0755) != 0 && errno != EEXIST) return false;
+    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
     struct stat st{};
-    return ::lstat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == 0 && (st.st_mode & 022) == 0;
+    bool ok = ::fstat(fd, &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == 0;
+    if (ok && (st.st_mode & 07777) != 0755) {
+        (void)::fchmod(fd, 0755);
+        ok = ::fstat(fd, &st) == 0;
+    }
+    ::close(fd);
+    return ok && (st.st_mode & 022) == 0 && (st.st_mode & 0005) == 0005;
 }
 
 // Root's mark `name` (root only; see the header): in root's own folder, where no account can make
@@ -363,7 +373,7 @@ bool usable_root_dir(const std::string& dir, bool make) {
 // from its mark). Where that folder cannot be used, in /run/lock as before. -1 when neither can.
 int open_root_mark(const std::string& name) {
     const std::string dir = root_dir();
-    if (usable_root_dir(dir, true)) {
+    if (usable_root_dir(dir)) {
         const int fd = ::open((dir + "/" + name).c_str(), O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
         struct stat st{};
         if (fd >= 0 && ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == 0) {

@@ -40,8 +40,9 @@
 // settings folder each uses; then each waits for the shared one only a short while
 // (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning. A run
 // of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock in
-// /run/vaultik, a folder only root may write to, so no account can put a file in its place;
-// /run/lock where that folder cannot be used; every account can see it held in /proc/locks but none
+// /run/vaultik, a folder only root may write to, so no account can put a file in its place,
+// and that every account may look into (set so whatever root's umask); /run/lock where that
+// folder cannot be used; every account can see it held in /proc/locks but none
 // can take it): an account's run waits for the shared lock for as long as that mark is held, then
 // only the short while, and while the mark is held it counts the shared lock as busy even when it
 // is free (root's run may have passed it by). The claims (vaultik-use-<hash>.lock) work the same
