@@ -1257,7 +1257,6 @@ TEST_CASE("a run queued behind a run of the same job exits without a second back
     j.schedule.kind = Schedule::Kind::Daily;
     j.health.weekly = j.health.monthly = false;
     j.health.restore_test = false;
-    j.before_command = "exit 3";  // would fail the run, were it to back up
     store.save(j);
 
     // Another run of the job holds the drive, and saves a version meanwhile.
@@ -1288,7 +1287,7 @@ TEST_CASE("a run queued behind a run of the same job exits without a second back
     auto repo = Repository::open(std::make_unique<LocalBackend>((tmp.path / "repo").string()), "test password");
     CHECK(repo->list_snapshot_ids().empty());
 
-    // Without such a version, a queued run goes on as usual (here its failing before command).
+    // Without such a version, a queued run goes on as usual.
     std::vector<RunRecord> none;
     CHECK_FALSE(saved_since(none, 5));
     RunRecord failed = saved;

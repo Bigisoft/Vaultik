@@ -1440,16 +1440,13 @@ TEST_CASE("restore: one damaged folder listing leaves the estimate and the rest 
         Node node;
         REQUIRE(resolve_snapshot_path(*repo, repo->load_snapshot(snapshot_id), snapshot_path_of(src / "bad"), node));
         bad_tree = node.subtree;
-        // Flip a byte in the middle of that listing, where it is stored.
-        fs::path pack;
-        std::uint64_t at = 0;
-        for (const std::string& name : repo->backend().list("data"))
-            for (const BlobEntry& e : read_pack_header(repo->backend(), name, repo->aead()))
-                if (e.type == BlobType::Tree && e.id == bad_tree) {
-                    pack = repo_dir / from_u8(name);
-                    at = e.offset + e.length / 2;
-                }
-        REQUIRE_FALSE(pack.empty());
+        // Flip a byte in the middle of that listing, where the index says it is (a listing can be
+        // stored more than once; the index names the copy that is read).
+        const BlobLocation* loc = repo->index().find(bad_tree);
+        REQUIRE(loc != nullptr);
+        const fs::path pack = repo_dir / from_u8(Repository::pack_name(repo->index().packs()[loc->pack]));
+        const std::uint64_t at = loc->offset + loc->length / 2;
+        REQUIRE(fs::exists(pack));
         std::fstream f(pack, std::ios::binary | std::ios::in | std::ios::out);
         f.seekg(static_cast<std::streamoff>(at));
         char c = 0;
@@ -1460,6 +1457,7 @@ TEST_CASE("restore: one damaged folder listing leaves the estimate and the rest 
     }
 
     auto repo = open_repo(repo_dir);
+    REQUIRE_THROWS(repo->load_blob(BlobType::Tree, bad_tree));  // the damage took
     const Snapshot snap = repo->load_snapshot(snapshot_id);
     RestoreOptions o;
     o.target = u8(tmp.path / "out");
