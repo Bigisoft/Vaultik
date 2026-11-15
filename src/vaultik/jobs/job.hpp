@@ -427,6 +427,10 @@ public:
     void append_history(const std::string& id, const RunRecord& record) const;
     // Most recent last; at most `limit` records.
     std::vector<RunRecord> history(const std::string& id, std::size_t limit = 100) const;
+    // Only the records of one kind of run, however many of other kinds came after them (most
+    // recent last; at most `limit`): the last copy of a job whose copies wait while its hourly
+    // backups go on, say.
+    std::vector<RunRecord> history_of(const std::string& id, RunKind kind, std::size_t limit = 100) const;
 
 private:
     std::string dir_;

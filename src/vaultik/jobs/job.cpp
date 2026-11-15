@@ -1286,4 +1286,31 @@ std::vector<RunRecord> JobStore::history(const std::string& id, std::size_t limi
     return out;
 }
 
+std::vector<RunRecord> JobStore::history_of(const std::string& id, RunKind kind, std::size_t limit) const {
+    check_id(id);
+    std::string text;
+    try {
+        text = text_of(os::read_file(history_path(dir_, id)));
+    } catch (const os::OsError& e) {
+        if (os::is_not_found(e.code())) return {};
+        throw;
+    }
+    const std::vector<std::string> lines = lines_of(text);
+    // A record of another kind names its kind; a backup's names none (see to_json). A quote within
+    // a text is escaped, so this never matches inside one.
+    const std::string named = std::string("\"kind\":\"") + to_string(kind) + "\"";
+    std::vector<RunRecord> out;
+    for (auto it = lines.rbegin(); it != lines.rend() && out.size() < limit; ++it) {
+        if (kind != RunKind::Backup && it->find(named) == std::string::npos) continue;
+        try {
+            RunRecord r = record_from_json(*it);
+            if (r.kind == kind) out.push_back(std::move(r));
+        } catch (const Error&) {
+            // a torn last line after a crash; skip it
+        }
+    }
+    std::reverse(out.begin(), out.end());
+    return out;
+}
+
 }  // namespace vaultik::jobs

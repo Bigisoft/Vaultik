@@ -1066,6 +1066,83 @@ TEST_CASE("alerts that repeat while their cause lasts go out once a day: passwor
     CHECK(alert_once_a_day(tmp.dir(), "docs", "check-failed", 50 * day));
 }
 
+TEST_CASE("an alert that repeats is noted as sent only once a channel took it") {
+    constexpr std::uint64_t day = 864'000'000'000ull;
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    // Every channel failed (no network yet): not noted, so the next run sends it again.
+    int tries = 0;
+    const auto fails = [&] {
+        ++tries;
+        return false;
+    };
+    CHECK_FALSE(alert_once_a_day(tmp.dir(), "docs", "drive-missing", 10 * day, fails));
+    CHECK_FALSE(alert_once_a_day(tmp.dir(), "docs", "drive-missing", 10 * day + day / 24, fails));
+    CHECK(tries == 2);
+    // One went through: noted, and none other that day.
+    const auto works = [&] {
+        ++tries;
+        return true;
+    };
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "drive-missing", 10 * day + day / 12, works));
+    CHECK(tries == 3);
+    CHECK_FALSE(alert_once_a_day(tmp.dir(), "docs", "drive-missing", 10 * day + day / 6, works));
+    CHECK(tries == 3);  // not even tried
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "drive-missing", 11 * day + day / 12, works));
+
+    AlertSettings s;
+    CHECK(alert_channels(s) == 0);
+    s.ntfy_url = "https://ntfy.sh/topic";
+    s.webhook_url = "https://example.com/hook";
+    CHECK(alert_channels(s) == 2);
+}
+
+TEST_CASE("the second copy's missing drive is alerted for a job that backs up every hour") {
+    constexpr std::uint64_t day = 864'000'000'000ull;
+    constexpr std::uint64_t hour = day / 24;
+    TempStore tmp;
+    JobStore store(tmp.dir());
+    Job j;
+    j.name = "Docs";
+    j.repository = (tmp.path / "repo").string();
+    j.sources = {(tmp.path / "src").string()};
+    j.schedule.kind = Schedule::Kind::Hourly;
+    store.save(j);
+    const std::uint64_t start = 1000 * day;
+    // The copy's drive went away; since then one record of the wait, and four days of hourly
+    // backups (far more than 50 records), each with no second record of the wait.
+    RunRecord copied;
+    copied.kind = RunKind::Copy;
+    copied.started = copied.finished = start - hour;
+    store.append_history(j.id, copied);
+    store.append_history(j.id, waiting_for_drive_record(RunKind::Copy, start, "F:\\Copy"));
+    for (int h = 1; h <= 4 * 24; ++h) {
+        RunRecord b;
+        b.started = start + static_cast<std::uint64_t>(h) * hour;
+        b.finished = b.started + 1000;
+        store.append_history(j.id, b);
+    }
+    const std::uint64_t now = start + 4 * day + hour;
+    CHECK(waiting_since(combined_history(store, j.id, 50), RunKind::Copy) == std::nullopt);  // out of the window
+    const std::vector<RunRecord> copies = combined_history_of(store, j.id, RunKind::Copy, 50);
+    REQUIRE(copies.size() == 2);
+    CHECK(copies.back().status == RunStatus::Waiting);
+    CHECK(waiting_since(copies, RunKind::Copy) == start);
+    AlertSettings s;
+    s.webhook_url = "https://example.com/hook";
+    const auto a = drive_missing_alert(s, *store.find(j.id), copies, RunKind::Copy, now, "pc");
+    REQUIRE(a.has_value());
+    CHECK(a->title.find("second copy") != std::string::npos);
+    CHECK(a->title.find("4 days") != std::string::npos);
+    // The other kinds: the newest records of each, oldest first, at most the limit.
+    const std::vector<RunRecord> backups = combined_history_of(store, j.id, RunKind::Backup, 10);
+    REQUIRE(backups.size() == 10);
+    CHECK(backups.back().started == start + 4 * day);
+    CHECK(backups.front().started < backups.back().started);
+    CHECK(combined_history_of(store, j.id, RunKind::FullCheck, 10).empty());
+    CHECK(combined_history_of(store, "nobody", RunKind::Copy, 10).empty());
+}
+
 TEST_CASE("drive lock: two runs for the same drive take turns, other drives do not wait") {
     TempStore tmp;
     const std::string dir = tmp.dir();

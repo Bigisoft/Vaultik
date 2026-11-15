@@ -3071,8 +3071,14 @@ int cmd_test_restore(const Args& a) {
 // Sends an alert of the job. One whose cause lasts across runs (a password that is not saved, a
 // check that cannot finish, a drive that stays away) goes out at most once a day.
 void send_job_alert(const jobs::Job& job, const jobs::Alert& a, const jobs::AlertSettings& s, const std::string& settings_dir) {
-    if (jobs::alert_repeats(a.event) && !jobs::alert_once_a_day(settings_dir, job.id, a.event, os::now())) return;
-    for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
+    // Whether at least one channel took it.
+    const auto send = [&] {
+        const std::vector<std::string> failed = jobs::send_alert(s, a, settings_dir);
+        for (const std::string& f : failed) warning("could not send the alert: " + f);
+        return failed.size() < jobs::alert_channels(s);
+    };
+    if (jobs::alert_repeats(a.event)) (void)jobs::alert_once_a_day(settings_dir, job.id, a.event, os::now(), send);
+    else (void)send();
 }
 
 // Sends the alert a run calls for (see jobs/alerts.hpp), if the user set up alerts and wants this
@@ -3089,8 +3095,10 @@ void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string
 void drive_missing_alert_for(const jobs::JobStore& store, const jobs::Job& job, jobs::RunKind kind) {
     try {
         const jobs::AlertSettings s = jobs::load_alerts(store.dir());
-        const std::optional<jobs::Alert> a = jobs::drive_missing_alert(s, job, jobs::combined_history(store, job.id, 50),
-                                                                       kind, os::now(), os::hostname());
+        // Only the records of that kind: a job that backs up hourly while its copy waits would push
+        // the copy's records out of any window of the newest ones.
+        const std::optional<jobs::Alert> a = jobs::drive_missing_alert(
+            s, job, jobs::combined_history_of(store, job.id, kind, 50), kind, os::now(), os::hostname());
         if (a) send_job_alert(job, *a, s, store.dir());
     } catch (const std::exception& e) {
         warning(std::string("could not send the alert: ") + e.what());
@@ -3401,7 +3409,7 @@ int cmd_run_job(const Args& a) {
     if (!jobs::drive_connected(*job)) {
         const jobs::RunRecord waiting = jobs::waiting_for_drive_record(jobs::RunKind::Backup, os::now(), job->repository);
         try {
-            if (jobs::missed_run_waiting(jobs::combined_history(store, job->id, 50)) == nullptr)
+            if (jobs::missed_run_waiting(jobs::combined_history_of(store, job->id, jobs::RunKind::Backup, 50)) == nullptr)
                 append_run(store, job->id, waiting);
         } catch (const std::exception& e) {
             warning(std::string("could not record the run: ") + e.what());
@@ -3589,7 +3597,8 @@ int cmd_run_job(const Args& a) {
         second_copy(a, store, *job, *repo, copy, !record.alert.empty() || !record.hold.empty());
         try {
             // Still waiting for the copy's drive: no second record of it.
-            const jobs::RunRecord* last = jobs::last_copy(jobs::combined_history(store, job->id, 50));
+            const auto copies = jobs::combined_history_of(store, job->id, jobs::RunKind::Copy, 1);
+            const jobs::RunRecord* last = jobs::last_copy(copies);
             if (copy.status != jobs::RunStatus::Waiting || last == nullptr || last->status != jobs::RunStatus::Waiting)
                 append_run(store, job->id, copy);
         } catch (const Error& e) {

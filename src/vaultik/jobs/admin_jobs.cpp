@@ -678,6 +678,25 @@ std::vector<RunRecord> combined_history(const JobStore& store, const std::string
     return all;
 }
 
+std::vector<RunRecord> combined_history_of(const JobStore& store, const std::string& id, RunKind kind,
+                                           std::size_t limit) {
+    std::vector<RunRecord> all = store.history_of(id, kind, limit);
+#ifdef _WIN32
+    try {
+        const std::string dir = admin_store_dir();
+        if (dir != store.dir() && os::exists(dir)) {
+            std::vector<RunRecord> more = JobStore(dir).history_of(id, kind, limit);
+            all.insert(all.end(), more.begin(), more.end());
+            std::stable_sort(all.begin(), all.end(),
+                             [](const RunRecord& a, const RunRecord& b) { return a.started < b.started; });
+            if (all.size() > limit) all.erase(all.begin(), all.end() - static_cast<std::ptrdiff_t>(limit));
+        }
+    } catch (const Error&) {
+    }
+#endif
+    return all;
+}
+
 namespace {
 
 // A location in one form, for comparing ("E:\\Backup\\" and "e:/backup" are the same on Windows).

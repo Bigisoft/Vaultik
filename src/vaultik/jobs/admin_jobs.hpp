@@ -49,6 +49,9 @@ void check_program_dir(const std::string& program_dir);
 
 // Run history from the user's store and, when there is one, the admin store, oldest first.
 std::vector<RunRecord> combined_history(const JobStore& store, const std::string& id, std::size_t limit = 100);
+// The same for one kind of run only (see JobStore::history_of).
+std::vector<RunRecord> combined_history_of(const JobStore& store, const std::string& id, RunKind kind,
+                                           std::size_t limit = 100);
 
 // Whether two jobs back up to the same repository: the same recorded drive and folder on it, or
 // the same location (cloud storage, a share, a folder without a recorded drive).

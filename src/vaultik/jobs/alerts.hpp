@@ -9,6 +9,7 @@
 // message as an email), Telegram (a bot's message to a chat), and a webhook (a JSON POST to any
 // URL, e.g. for Home Assistant, Slack or Discord gateways).
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -29,6 +30,12 @@ struct AlertSettings {
     bool any() const { return !ntfy_url.empty() || !telegram_chat.empty() || !webhook_url.empty(); }
     bool operator==(const AlertSettings&) const = default;
 };
+
+// How many channels are set up (send_alert tries each of them).
+inline std::size_t alert_channels(const AlertSettings& s) {
+    return static_cast<std::size_t>(!s.ntfy_url.empty()) + static_cast<std::size_t>(!s.telegram_chat.empty()) +
+           static_cast<std::size_t>(!s.webhook_url.empty());
+}
 
 AlertSettings load_alerts(const std::string& dir = config_dir());
 void save_alerts(const AlertSettings& settings, const std::string& dir = config_dir());
@@ -74,9 +81,13 @@ std::optional<Alert> drive_missing_alert(const AlertSettings& settings, const Jo
 // saved ("password"), a check that cannot finish ("check-failed"), a drive that stays away
 // ("drive-missing").
 bool alert_repeats(const std::string& event);
-// Whether such an alert of this job may go out now: at most one per job and kind a day. True notes
-// it in <dir>/alerts-sent.json (the run's own record is written either way).
-bool alert_once_a_day(const std::string& dir, const std::string& job_id, const std::string& event, std::uint64_t now);
+// Sends such an alert of this job when it may go out now: at most one per job and kind a day.
+// `send` sends it and says whether at least one channel took it; only then is it noted in
+// <dir>/alerts-sent.json, so one that no channel took (no network yet) goes out with the next
+// run. Without `send`, it counts as sent. True when it went out (the run's own record is written
+// either way).
+bool alert_once_a_day(const std::string& dir, const std::string& job_id, const std::string& event, std::uint64_t now,
+                      const std::function<bool()>& send = {});
 
 // The JSON a webhook receives (invalid UTF-8 in the texts is replaced, never refused).
 std::string webhook_body(const Alert& alert, const std::string& computer, const std::string& time);

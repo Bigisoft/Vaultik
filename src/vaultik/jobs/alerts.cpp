@@ -203,23 +203,32 @@ bool alert_repeats(const std::string& event) {
     return event == "password" || event == "check-failed" || event == "drive-missing";
 }
 
-bool alert_once_a_day(const std::string& dir, const std::string& job_id, const std::string& event, std::uint64_t now) {
+bool alert_once_a_day(const std::string& dir, const std::string& job_id, const std::string& event, std::uint64_t now,
+                      const std::function<bool()>& send) {
     constexpr std::uint64_t kDay = 864'000'000'000ull;
     const std::string path = os::join(dir, "alerts-sent.json");
-    nlohmann::json j = nlohmann::json::object();
-    try {
-        const Bytes b = os::read_file(path, 1 << 20);
-        j = nlohmann::json::parse(std::string(b.begin(), b.end()));
-        if (!j.is_object()) j = nlohmann::json::object();
-    } catch (const std::exception&) {
-        j = nlohmann::json::object();
-    }
+    const auto load = [&path] {
+        nlohmann::json j = nlohmann::json::object();
+        try {
+            const Bytes b = os::read_file(path, 1 << 20);
+            j = nlohmann::json::parse(std::string(b.begin(), b.end()));
+            if (!j.is_object()) j = nlohmann::json::object();
+        } catch (const std::exception&) {
+            j = nlohmann::json::object();
+        }
+        return j;
+    };
     const std::string key = job_id + "/" + event;
-    const auto it = j.find(key);
-    if (it != j.end() && it->is_number_unsigned()) {
-        const std::uint64_t last = it->get<std::uint64_t>();
-        if (last <= now && now - last < kDay) return false;
+    {
+        const nlohmann::json j = load();
+        const auto it = j.find(key);
+        if (it != j.end() && it->is_number_unsigned()) {
+            const std::uint64_t last = it->get<std::uint64_t>();
+            if (last <= now && now - last < kDay) return false;
+        }
     }
+    if (send && !send()) return false;  // no channel took it: not noted, so the next run tries again
+    nlohmann::json j = load();  // again: sending can take a while, and other runs note theirs meanwhile
     j[key] = now;
     try {
         os::write_file_atomic(path, bytes_of(j.dump() + "\n"), 0600);
