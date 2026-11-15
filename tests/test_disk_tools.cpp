@@ -1444,6 +1444,67 @@ DiskInfo erased_stick(const DiskInfo& d) {
 
 }  // namespace
 
+TEST_CASE("set up again: a letter another drive took meanwhile is left to Windows") {
+    const DiskInfo d = listed_disk();  // its own volume is F:
+    const auto bit = [](char c) { return 1u << (c - 'A'); };
+    EraseRequest r;
+    r.disk = "7";
+    r.shown = identity_of(d);
+    r.confirm = "ERASE DISK 7";
+    r.method = "zeros";
+    NewDiskOptions o;
+    o.style = TableStyle::Gpt;
+    o.filesystem = "ntfs";
+    o.label = "Backup";
+    o.letter = 'g';
+    r.setup = o;
+    const std::vector<std::string> pinned_tail{"--confirm", "ERASE DISK 7", "--expect-size", std::to_string(64 * kMiB),
+                                               "--expect-serial", "SER-1"};
+
+    // Still free: kept, the arguments are exactly as before.
+    EraseRequest kept = r;
+    CHECK(drop_taken_setup_letter(kept, blank_of(d), bit('C')) == 0);
+    CHECK(kept.setup->letter == 'g');
+    CHECK(setup_again_args(kept) == setup_again_args(r));
+
+    // Another drive has it now: dropped, so disk init is not asked for a letter it refuses.
+    EraseRequest taken = r;
+    CHECK(drop_taken_setup_letter(taken, blank_of(d), bit('C') | bit('G')) == 'G');
+    CHECK(taken.setup->letter == 0);
+    std::vector<std::string> want{"disk", "init", "7", "--gpt", "--fs", "ntfs", "--label", "Backup"};
+    want.insert(want.end(), pinned_tail.begin(), pinned_tail.end());
+    CHECK(setup_again_args(taken) == want);
+    // Only the letter: the disk, its pins and the confirmation stay the same.
+    CHECK(taken.disk == r.disk);
+    CHECK(taken.confirm == r.confirm);
+    CHECK(taken.shown.size == r.shown.size);
+    CHECK(taken.shown.serial == r.shown.serial);
+    CHECK(taken.shown.id == r.shown.id);
+    const std::string table = "gpt-ABCDEF01-2222-3333-4444-555555555555";
+    std::vector<std::string> with_table = want;
+    with_table.insert(with_table.end(), {"--expect-id", table});
+    CHECK(setup_again_args(taken, table) == with_table);
+
+    // The disk's own drive has it (the failed setup gave it already): it stays, setting up removes that drive.
+    EraseRequest own = r;
+    own.setup->letter = 'F';
+    CHECK(drop_taken_setup_letter(own, d, bit('C') | bit('F')) == 0);
+    CHECK(own.setup->letter == 'F');
+    // Out of range (never offered, but never passed on either).
+    EraseRequest c = r;
+    c.setup->letter = 'C';
+    CHECK(drop_taken_setup_letter(c, blank_of(d), 0) == 'C');
+    CHECK(c.setup->letter == 0);
+    // No letter chosen, or no setup: nothing to drop.
+    EraseRequest any = r;
+    any.setup->letter = 0;
+    CHECK(drop_taken_setup_letter(any, blank_of(d), ~0u) == 0);
+    EraseRequest none = r;
+    none.setup.reset();
+    CHECK(drop_taken_setup_letter(none, blank_of(d), ~0u) == 0);
+    CHECK_FALSE(none.setup.has_value());
+}
+
 TEST_CASE("erase then set up: what belongs to the disk being set up itself") {
     DiskInfo d = listed_disk();
     d.removable = true;

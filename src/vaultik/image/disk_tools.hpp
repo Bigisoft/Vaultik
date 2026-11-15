@@ -562,6 +562,12 @@ std::vector<std::string> erase_disk_args(const EraseRequest& r);
 // got one meanwhile is refused), or with exactly `table_id` when the failed setup had written
 // that table (--expect-id). The confirmation is the one typed for the erase.
 std::vector<std::string> setup_again_args(const EraseRequest& r, const std::string& table_id = {});
+// Before setup_again_args: when the drive letter chosen for the setup of erase `r` went to
+// another drive meanwhile (letter_problem(now, ...) with `used`, as erase_and_set_up checks it),
+// it is dropped from `r`, so the new drive gets the letter Windows gives it instead of disk init
+// refusing a letter in use. Returns the letter dropped (upper case), or 0 when it stays or none
+// was chosen. Only the letter changes: the disk and its pins are the same.
+char drop_taken_setup_letter(EraseRequest& r, const DiskInfo& now, std::uint32_t used);
 
 // Whether `id` is a partition table id as the engine writes one: "gpt-" and a GUID
 // (8-4-4-4-12 hex digits) or "mbr-" and 8 hex digits. Anything else (from the engine's done

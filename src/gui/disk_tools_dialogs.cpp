@@ -860,11 +860,19 @@ void DriveCleanserDialog::set_up_again(const image::DiskInfo& erased, const imag
                              tr("The drive was not set up: %1. Use Set up a new disk to set it up.").arg(qs(pin.why)));
         return;
     }
+    // A letter another drive got meanwhile stays with that drive (as after the erase): this setup
+    // leaves the letter to Windows instead of asking disk init for one it refuses. Only the letter
+    // changes; the disk, its pins and the confirmation are the same.
+    image::EraseRequest again = request;
+    const char taken = image::drop_taken_setup_letter(again, *current, image::used_drive_letters());
+    QString question = tr("Set up this disk now? Whatever is on it is replaced.\n\n%1").arg(qs(image::describe(*current)));
+    if (taken != 0)
+        question += "\n\n" + tr("%1: is used by another drive now, so Windows will give this drive a free letter. "
+                                  "You can change the letter later in Disk Management.")
+                                   .arg(QChar(taken));
     // A card reader without a serial number tells one card from another of the same size only by
     // what the user sees: asked once, with the disk as it is now.
-    QMessageBox ask(QMessageBox::Question, windowTitle(),
-                    tr("Set up this disk now? Whatever is on it is replaced.\n\n%1").arg(qs(image::describe(*current))),
-                    QMessageBox::NoButton, this);
+    QMessageBox ask(QMessageBox::Question, windowTitle(), question, QMessageBox::NoButton, this);
     ask.setTextFormat(Qt::PlainText);
     QPushButton* yes = ask.addButton(tr("Set up the drive"), QMessageBox::AcceptRole);
     QPushButton* no = ask.addButton(tr("Cancel"), QMessageBox::RejectRole);
@@ -872,7 +880,7 @@ void DriveCleanserDialog::set_up_again(const image::DiskInfo& erased, const imag
     ask.exec();
     if (ask.clickedButton() != yes) return;
     ElevatedTask task{windowTitle(), tr("Setting up the drive..."), QString(), tr("The disk is ready to use.")};
-    const ElevatedResult r = run_disk_engine_forcing(this, task, qt_args(image::setup_again_args(request, pin.table_id)), {},
+    const ElevatedResult r = run_disk_engine_forcing(this, task, qt_args(image::setup_again_args(again, pin.table_id)), {},
                                                      tr("Force close and set up"));
     if (r.code == -2) return;
     status_->setText(outcome_text(r, tr("The disk is ready to use."), tr("The disk was not set up: it is in use."),

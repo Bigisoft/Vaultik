@@ -1087,6 +1087,13 @@ std::vector<std::string> setup_again_args(const EraseRequest& r, const std::stri
     return args;
 }
 
+char drop_taken_setup_letter(EraseRequest& r, const DiskInfo& now, std::uint32_t used) {
+    if (!r.setup || r.setup->letter == 0 || letter_problem(now, r.setup->letter, used).empty()) return 0;
+    const char c = static_cast<char>(std::toupper(static_cast<unsigned char>(r.setup->letter)));
+    r.setup->letter = 0;
+    return c;
+}
+
 bool valid_table_id(const std::string& id) {
     const auto hex = [&](std::size_t from, std::size_t n) {
         for (std::size_t i = from; i < from + n; ++i)

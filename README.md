@@ -1130,7 +1130,9 @@ sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
   shows the disk once more and asks before it starts, and it works only on the same disk, still
   blank, or with exactly the partition table the failed setup had written (when it failed while
   writing that table: blank, or with exactly that table). It keeps the letter you chose, also
-  when the failed setup had already given it to the new drive.
+  when the failed setup had already given it to the new drive. Should another drive have taken
+  that letter meanwhile, it stays with that drive: Windows gives the new drive a free letter
+  (you can change it later), and the window says so before it starts.
 - **One drive (volume):** only that partition (`ERASE E:`, Linux `ERASE sdb1`); never the one
   Windows or Vaultik runs from, nor one with a page or hibernation file, nor an EFI system,
   reserved, recovery or active partition, nor a volume on a dynamic disk or over several disks.
