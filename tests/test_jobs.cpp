@@ -2495,6 +2495,53 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
     }
 }
 
+TEST_CASE("drive lock: the marker alone never makes a run inherit the drive (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-marker-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string mine = os::join(tmp.dir(), "mine");
+    const ForeignFiles foreign(name);
+    // The marker names the drive (set by hand, or left from a run that has ended), but whoever
+    // holds the lock is no process this one descends from.
+    os::set_env(kHeldDrivesVariable, name + ":parent");
+    testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(20000), {}});
+    {
+        // Another account's run: waited for as usual (the short while is 20 s here).
+        OtherProcess other("lock", key, os::join(tmp.dir(), "other"), tmp.path);
+        REQUIRE(other.held());
+        bool busy = false;
+        const auto started = std::chrono::steady_clock::now();
+        try {
+            DriveLock run(key, mine, std::chrono::milliseconds(1500));
+            CHECK_FALSE(run.inherited());
+        } catch (const DriveBusy&) {
+            busy = true;
+        }
+        CHECK(busy);
+        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1400));
+    }
+    {
+        // A run of root's: waited for, and an eject counts it as busy (fail closed).
+        OtherProcess root_run("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.drive_mark(), foreign.drive()));
+        REQUIRE(root_run.held());
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(1500)), DriveBusy);
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+    }
+    {
+        // Another run of the account's own: waited for too.
+        OtherProcess own("lock", key, mine, tmp.path, {}, kForeign);
+        REQUIRE(own.held());
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(1500)), DriveBusy);
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+    }
+    os::set_env(kHeldDrivesVariable, "");
+}
+
 TEST_CASE("drive claims: another account can neither delay a command nor keep an eject busy (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");
