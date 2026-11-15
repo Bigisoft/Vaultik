@@ -15,6 +15,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <aclapi.h>
 #include <sddl.h>
 #else
 #include <grp.h>
