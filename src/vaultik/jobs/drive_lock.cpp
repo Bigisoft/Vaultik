@@ -633,13 +633,20 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         const auto bound = other_account_wait();
         auto other_deadline = std::min(deadline, std::chrono::steady_clock::now() + bound);
         for (;;) {
+            // Asked once a turn: root's run may end between two looks, which would then disagree
+            // (an eject of an account's would pass by a lock it just saw root's run hold).
+            bool by_root = false;
             if (::flock(shared, LOCK_EX | LOCK_NB) == 0) {
-                if (root || !root_holds(mark, false)) break;
+                if (root) break;
+                by_root = root_holds(mark, false);
+                if (!by_root) break;
                 ::flock(shared, LOCK_UN);
             } else if (errno != EWOULDBLOCK && errno != EINTR) {
                 ::close(shared);
                 shared = -1;
                 break;
+            } else {
+                by_root = !root && root_holds(mark, false);
             }
             // Named by the parent run, which holds it (or holds root's mark): whatever its own
             // lock, the run inherits the drive (a command with root rights that an account's run
@@ -649,7 +656,6 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 return;
             }
             const auto now = std::chrono::steady_clock::now();
-            const bool by_root = !root && root_holds(mark, false);
             if (by_root) other_deadline = std::min(deadline, now + bound);
             const bool pass = !by_root && (fail_closed ? !root : now >= other_deadline && other_deadline < deadline);
             if (pass) {
