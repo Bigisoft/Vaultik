@@ -889,9 +889,25 @@ CloudCredentials cloud_credentials(const Args& a) {
     return {};
 }
 
+// Shared claims on the backup drives this command opens (see jobs/drive_lock.hpp), held until it
+// ends, so the drive is never ejected under it. Best effort: a claim that cannot be had is none.
+std::vector<std::unique_ptr<jobs::DriveClaim>> g_drive_claims;
+
+void claim_drive(const std::string& location) {
+    try {
+        const std::string key = jobs::drive_lock_key(location);
+        if (key.empty()) return;
+        auto claim = std::make_unique<jobs::DriveClaim>(key, os::join(jobs::config_dir(), "locks"));
+        if (claim->held()) g_drive_claims.push_back(std::move(claim));
+    } catch (const std::exception&) {
+    }
+}
+
 std::unique_ptr<Backend> backend_for(const Args& a, bool create = false) {
     const CloudCredentials cloud = cloud_credentials(a);
-    return open_backend(repo_path(a), &cloud, create);
+    const std::string location = repo_path(a);
+    claim_drive(location);
+    return open_backend(location, &cloud, create);
 }
 
 std::unique_ptr<Repository> open_repo(const Args& a, bool load_index = true) {
@@ -2487,6 +2503,7 @@ std::unique_ptr<Repository> open_job_repo(const Args& a, const jobs::JobStore& s
     std::unique_ptr<Repository> repo;
     try {
         const CloudCredentials cloud = store.cloud_credentials(job);
+        claim_drive(job.repository);
         repo = Repository::open(open_backend(job.repository, &cloud), pw);
     } catch (...) {
         secure_wipe(pw.data(), pw.size());
@@ -2509,12 +2526,23 @@ void append_run(const jobs::JobStore& store, const std::string& id, jobs::RunRec
     store.append_history(id, record);
 }
 
+// The request that keeps the computer awake during a long run (see run()), and why; let go of
+// while the run only waits for its drive, so a computer with nothing to do may sleep meanwhile.
+std::optional<KeepAwake>* g_awake = nullptr;
+std::string g_awake_reason;
+
+// What the commands this run starts (its before and after commands) get to know of the drive lock
+// it holds (see jobs::kHeldDrivesVariable): a vaultik command among them for the same drive does
+// not wait for this run, which waits for it.
+std::pair<std::string, std::string> g_held_drive_env;
+
 // Takes the lock of the backup drive behind `key` (see jobs/drive_lock.hpp) for this run, waiting
 // while another run uses the drive and saying so. Stopping the run stops the wait.
 std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::string& settings_dir) {
-    return std::make_unique<jobs::DriveLock>(
+    auto lock = std::make_unique<jobs::DriveLock>(
         key, os::join(settings_dir, "locks"), std::chrono::duration_cast<std::chrono::milliseconds>(jobs::kDriveLockWait),
         [] {
+            if (g_awake != nullptr) g_awake->reset();  // only waiting: the computer may sleep
             const std::string msg = "waiting for another job on this drive to finish";
             if (g_json) emit({{"event", "drive_wait"}, {"message", msg}});
             else out("Waiting: another job is using this backup drive; this one starts when it is done.\n");
@@ -2523,6 +2551,10 @@ std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::s
             if (stop_requested()) throw Cancelled();
             return false;
         });
+    if (lock->waited() && g_awake != nullptr && !g_awake->has_value() && !g_awake_reason.empty())
+        g_awake->emplace(g_awake_reason);
+    g_held_drive_env = lock->child_environment();
+    return lock;
 }
 
 // Leaves this computer's status record in the job's repository (see jobs/computers.hpp), so other
@@ -2853,6 +2885,7 @@ int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job
         std::unique_ptr<Repository> target;
         try {
             const CloudCredentials cloud = store.copy_credentials(job);
+            claim_drive(where);
             auto backend = open_backend(where, &cloud, true);
             if (!backend->exists("config")) {
                 if (!g_json) out("Creating the second copy at " + where + "\n");
@@ -3159,7 +3192,7 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
     // Stopping the backup stops the "before" command; the "after" one (often a cleanup, such as
     // restarting a service) still runs to the end, within its time limit.
     if (which == "before") o.cancelled = [] { return stop_requested(); };
-    const std::vector<std::pair<std::string, std::string>> vars = {
+    std::vector<std::pair<std::string, std::string>> vars = {
         {"VAULTIK_JOB", job.id}, {"VAULTIK_JOB_NAME", job.name}, {"VAULTIK_RESULT", result}};
     if (admin) {
         // With administrator rights: only an approved, checked command, with a fixed environment
@@ -3176,6 +3209,8 @@ int run_job_command(const jobs::Job& job, const std::string& which, const std::s
     } else {
         for (const auto& [name, value] : vars) os::set_env(name, value);
     }
+    // Only for the command (never this process: its own later locks must not take it as theirs).
+    if (!g_held_drive_env.first.empty()) o.extra_environment.push_back(g_held_drive_env);
     if (!g_json) out("Running the command " + which + " the backup\n");
     int code = 0;
     try {
@@ -3304,6 +3339,7 @@ int cmd_run_job(const Args& a) {
         ~EjectWhenDone() {
             try {
                 if (!jobs::eject_when_done(dir, job.repository_volume)) return;
+                g_drive_claims.clear();  // this run's own claims (its repository is closed by now)
                 std::this_thread::sleep_for(std::chrono::seconds(3));  // a waiting run takes the drive first
                 const std::string failed = jobs::eject_backup_drive(job, dir);
                 if (failed.empty()) {
@@ -3376,6 +3412,20 @@ int cmd_run_job(const Args& a) {
     RunLogScope run_log(store.dir(), job->id, record.started);
     try {
         drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
+        // Started on its own and queued behind another run on the drive: when that was a run of
+        // this very job that saved a version meanwhile (a scheduled run and one on connecting the
+        // drive at once, say), or the event that started it is no longer due, there is nothing
+        // left to do, and no second backup (with its before and after commands) runs.
+        if (drive_lock->waited() && unattended) {
+            const bool saved = jobs::saved_since(jobs::combined_history(store, job->id, 50), record.started);
+            const bool event_done = (trigger == "event" || trigger == "update" || trigger == "sign-out") &&
+                                    !jobs::event_backup_due(store, *job);
+            if (saved || event_done) {
+                if (g_json) emit({{"event", "done"}, {"status", "success"}, {"reason", "done-meanwhile"}});
+                else out("Job \"" + job->name + "\": nothing left to do, another run of it did the backup while this one waited.\n");
+                return kExitOk;
+            }
+        }
         repo = open_job_repo(a, store, *job);
         const unsigned readers = apply_parallelism(*repo, a, job->repository, policy);
         if ((on_connect || !trigger.empty()) && backup_running(*repo, *job)) {
@@ -4182,6 +4232,7 @@ int poll_requests(const Args& a) {
         if (pw.empty()) continue;
         try {
             const CloudCredentials cloud = store.cloud_credentials(list.front());
+            claim_drive(location);
             auto repo = Repository::open(open_backend(location, &cloud), pw, false);
             secure_wipe(pw.data(), pw.size());
             std::vector<std::string> local;
@@ -4642,14 +4693,8 @@ int cmd_restore(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik restore -r <repo> <snapshot> --target <folder>");
     const auto target = a.value("--target");
     if (!target) throw Error("restore needs --target <folder>");
-    // The backup drive is in use (so it is not ejected meanwhile); a restore never waits for a
-    // backup to let go of it, though: it then reads alongside.
-    std::unique_ptr<jobs::DriveLock> drive_claim;
-    try {
-        drive_claim = std::make_unique<jobs::DriveLock>(jobs::drive_lock_key(repo_path(a)),
-                                                        os::join(jobs::config_dir(), "locks"), std::chrono::milliseconds(0));
-    } catch (const std::exception&) {
-    }
+    // Opening the repository claims its drive (so it is not ejected meanwhile); a restore never
+    // waits for a backup to let go of the drive's lock, though: it then reads alongside.
     auto repo = open_repo(a);
     RepoLock lock(*repo, RepoLock::Mode::Shared, "restore", lock_wait(a));
     repo->reload_index();  // a prune may have finished before the lock was granted
@@ -5251,7 +5296,14 @@ int run(const std::vector<std::string>& argv) {
                                                     "restore", "verify",    "prune",        "forget", "repair",
                                                     "repair-data", "move-here", "image"};
     std::optional<KeepAwake> awake;
-    if (kLongRuns.contains(a.command)) awake.emplace("Vaultik is running " + a.command + "; it lets the computer sleep when done");
+    if (kLongRuns.contains(a.command)) {
+        g_awake_reason = "Vaultik is running " + a.command + "; it lets the computer sleep when done";
+        awake.emplace(g_awake_reason);
+    }
+    g_awake = &awake;
+    struct ForgetAwake {
+        ~ForgetAwake() { g_awake = nullptr; }
+    } forget_awake;
 
     if (a.command == "jobs") return cmd_jobs(a);
     if (a.command == "drives") return cmd_drives(a);

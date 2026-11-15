@@ -1,9 +1,9 @@
 #pragma once
 
-// Ejecting a job's backup drive: never while a backup, health check, cleanup or restore uses it
-// (they hold the drive's lock, see drive_lock.hpp), and optionally on its own once the last run
-// that waited for the drive is done ("eject when done", a setting per drive kept in
-// <settings dir>/drives-eject.json).
+// Ejecting a job's backup drive: never while a backup, health check or cleanup uses it (they hold
+// the drive's lock, see drive_lock.hpp) nor while any command has its repository open (a claim on
+// the drive), and optionally on its own once the last run that waited for the drive is done
+// ("eject when done", a setting per drive kept in <settings dir>/drives-eject.json).
 
 #include <string>
 

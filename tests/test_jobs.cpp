@@ -9,6 +9,10 @@
 
 #include <nlohmann/json.hpp>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/admin_jobs.hpp"
 #include "vaultik/jobs/alerts.hpp"
@@ -22,6 +26,8 @@
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/jobs/update_check.hpp"
 #include "vaultik/ops/backup.hpp"
+#include "vaultik/repo/local_backend.hpp"
+#include "vaultik/repo/repository.hpp"
 #include "vaultik/util/hex.hpp"
 
 using namespace vaultik;
@@ -1113,6 +1119,185 @@ TEST_CASE("drive lock: two runs for the same drive take turns, other drives do n
     CHECK_FALSE(none.held());
 }
 
+namespace {
+
+// Holds the drive lock of `key` on another thread (a Windows mutex lets its own thread in again)
+// until release() or the end of the scope.
+struct HeldDrive {
+    std::atomic<int> state{0};  // 1: held, 2: may let go, -1: could not take it
+    std::pair<std::string, std::string> env;
+    std::thread thread;
+    HeldDrive(const std::string& key, const std::string& dir) {
+        thread = std::thread([this, key, dir] {
+            DriveLock lock(key, dir, std::chrono::milliseconds(0));
+            env = lock.child_environment();
+            state = lock.held() ? 1 : -1;
+            while (state == 1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        });
+        while (state == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    void release() {
+        if (state == 1) state = 2;
+        if (thread.joinable()) thread.join();
+    }
+    ~HeldDrive() { release(); }
+};
+
+void init_test_repo(const fs::path& dir) {
+    LocalBackend backend(dir.string(), true);
+    InitOptions options;
+    options.kdf_iterations = 1000;
+    Repository::init(backend, "test password", options);
+}
+
+}  // namespace
+
+TEST_CASE("drive lock: a command started by the run holding the drive does not wait for it") {
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-nested-" + tmp.path.filename().string();
+    HeldDrive parent(key, tmp.dir());
+    REQUIRE(parent.state == 1);
+    CHECK(parent.env.first == kHeldDrivesVariable);
+    CHECK_FALSE(parent.env.second.empty());
+
+    // Without the marker: busy.
+    CHECK_THROWS_AS(DriveLock(key, tmp.dir(), std::chrono::milliseconds(50)), DriveBusy);
+    // With it (as the parent's before and after commands get it): at once, without taking it.
+    os::set_env(kHeldDrivesVariable, "other:1;" + parent.env.second);
+    {
+        DriveLock nested(key, tmp.dir(), std::chrono::milliseconds(50));
+        CHECK(nested.inherited());
+        CHECK_FALSE(nested.held());
+        CHECK_FALSE(nested.waited());
+        // And passed on to what it starts in turn.
+        CHECK(nested.child_environment().second.find(parent.env.second) != std::string::npos);
+        // Another drive still locks as usual.
+        DriveLock other(key + "-other", tmp.dir(), std::chrono::milliseconds(0));
+        CHECK(other.held());
+        CHECK_FALSE(other.inherited());
+    }
+    os::set_env(kHeldDrivesVariable, "");
+
+    // The command line: a prune of the same drive in the run's after command finishes at once.
+    fs::create_directories(tmp.path / "repo");
+    init_test_repo(tmp.path / "repo");
+    HeldDrive run(drive_lock_key((tmp.path / "repo").string()), os::join(tmp.dir(), "locks"));
+    REQUIRE(run.state == 1);
+    std::string output;
+    os::CommandOptions o;
+    o.output = &output;
+    o.timeout = std::chrono::seconds(60);
+    o.extra_environment = {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "test password"}, run.env};
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(os::run_command({VAULTIK_TEST_CLI, "prune", "-r", (tmp.path / "repo").string(), "--dry-run"}, o) == 0);
+    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(30));
+    CHECK(output.find("Waiting") == std::string::npos);
+}
+
+TEST_CASE("drive lock: one place per drive, whatever settings folder a run uses") {
+#ifndef _WIN32
+    if (::access("/run/lock", W_OK) != 0) {
+        MESSAGE("/run/lock is not writable here: runs of one account share the lock through its settings folder");
+        return;
+    }
+#endif
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-place-" + tmp.path.filename().string();
+    // As a run with administrator rights (the admin-only store) and the user's own prune would.
+    HeldDrive admin(key, os::join(tmp.dir(), "admin-store"));
+    REQUIRE(admin.state == 1);
+    CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "user-settings"), std::chrono::milliseconds(100)), DriveBusy);
+    admin.release();
+    DriveLock user(key, os::join(tmp.dir(), "user-settings"), std::chrono::milliseconds(0));
+    CHECK(user.held());
+}
+
+TEST_CASE("drive claims: any command with the drive open keeps it from being ejected") {
+    TempStore tmp;
+    fs::create_directories(tmp.path / "repo");
+    Job j = sample();
+    j.repository = (tmp.path / "repo").string();
+    j.repository_volume.clear();
+    const std::string key = drive_lock_key(j);
+    const std::string dir = os::join(tmp.dir(), "locks");
+    CHECK_FALSE(drive_claimed(key, dir));
+    std::atomic<int> state{0};
+    std::thread reader([&] {
+        // Two commands at once (a restore and a verify, say): claims go together.
+        DriveClaim one(key, dir);
+        DriveClaim two(key, dir);
+        state = one.held() && two.held() ? 1 : -1;
+        while (state == 1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    });
+    while (state == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE(state == 1);
+    CHECK(drive_claimed(key, dir));
+    // The drive lock is free (no backup runs), yet the eject is refused, the drive never touched.
+    CHECK(eject_backup_drive(j, tmp.dir()).find("is using this drive") != std::string::npos);
+    state = 2;
+    reader.join();
+    CHECK_FALSE(drive_claimed(key, dir));
+    DriveClaim none("", dir);
+    CHECK_FALSE(none.held());
+}
+
+TEST_CASE("a run queued behind a run of the same job exits without a second backup") {
+    TempStore tmp;
+    fs::create_directories(tmp.path / "src");
+    std::ofstream(tmp.path / "src" / "file.txt") << "content";
+    fs::create_directories(tmp.path / "repo");
+    init_test_repo(tmp.path / "repo");
+    JobStore store(tmp.dir());
+    Job j;
+    j.name = "Docs";
+    j.repository = (tmp.path / "repo").string();
+    j.sources = {(tmp.path / "src").string()};
+    j.schedule.kind = Schedule::Kind::Daily;
+    j.health.weekly = j.health.monthly = false;
+    j.health.restore_test = false;
+    j.before_command = "exit 3";  // would fail the run, were it to back up
+    store.save(j);
+
+    // Another run of the job holds the drive, and saves a version meanwhile.
+    HeldDrive other(drive_lock_key(*store.find(j.id)), os::join(tmp.dir(), "locks"));
+    REQUIRE(other.state == 1);
+    RunRecord saved;
+    saved.started = os::now() - 10;
+    saved.finished = os::now() + 600'000'000ull;  // ends after the queued run started
+    store.append_history(j.id, saved);
+
+    std::string output;
+    int code = -1;
+    std::thread queued([&] {
+        os::CommandOptions o;
+        o.output = &output;
+        o.timeout = std::chrono::seconds(120);
+        o.extra_environment = {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "test password"}};
+        code = os::run_command({VAULTIK_TEST_CLI, "run-job", j.id, "--scheduled"}, o);
+    });
+    std::this_thread::sleep_for(std::chrono::seconds(5));  // it starts, finds the drive busy, waits
+    other.release();
+    queued.join();
+    CAPTURE(output);
+    CHECK(code == 0);
+    CHECK(output.find("Waiting") != std::string::npos);
+    CHECK(output.find("while this one waited") != std::string::npos);
+    CHECK(store.history(j.id).size() == 1);  // no second record, no second backup
+    auto repo = Repository::open(std::make_unique<LocalBackend>((tmp.path / "repo").string()), "test password");
+    CHECK(repo->list_snapshot_ids().empty());
+
+    // Without such a version, a queued run goes on as usual (here its failing before command).
+    std::vector<RunRecord> none;
+    CHECK_FALSE(saved_since(none, 5));
+    RunRecord failed = saved;
+    failed.status = RunStatus::Failed;
+    CHECK_FALSE(saved_since({failed}, saved.started));
+    CHECK(saved_since({saved}, saved.started));
+    CHECK_FALSE(saved_since({saved}, saved.finished + 1));
+}
+
 TEST_CASE("what is still unprotected: each gap is named, and goes away once fixed") {
     constexpr std::uint64_t day = 864'000'000'000ull;
     const std::uint64_t now = 1000 * day;
@@ -1296,6 +1481,41 @@ TEST_CASE("run log: every line up to its cap, the newest logs of a job kept") {
     RunRecord r;
     r.log = first;
     CHECK(record_from_json(to_json(r)).log == first);
+}
+
+TEST_CASE("run log paths: only a log right in the job's own logs folder is opened") {
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    std::string path;
+    {
+        RunLog log(tmp.dir(), "docs", 100);
+        log.line("backup: success");
+        path = log.path();
+    }
+    CHECK(is_run_log_of(tmp.dir(), "docs", path));
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "photos", path));  // another job's folder
+    CHECK_FALSE(is_run_log_of(os::join(tmp.dir(), "other"), "docs", path));
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "docs", path + ".missing"));
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "", path));
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "..", path));
+    // Not a .log, or not right in the folder, or reached through "..": refused.
+    const fs::path folder = tmp.path / "logs" / "docs";
+    std::ofstream(folder / "run.exe") << "MZ";
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "docs", (folder / "run.exe").string()));
+    fs::create_directories(folder / "sub");
+    std::ofstream(folder / "sub" / "deeper.log") << "x";
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "docs", (folder / "sub" / "deeper.log").string()));
+    std::ofstream(tmp.path / "elsewhere.log") << "x";
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "docs", (tmp.path / "elsewhere.log").string()));
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "docs", (folder / ".." / ".." / "elsewhere.log").string()));
+    CHECK(is_run_log_of(tmp.dir(), "docs", (folder / "sub" / ".." / fs::path(path).filename()).string()));
+    fs::create_directories(folder / "dir.log");
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "docs", (folder / "dir.log").string()));
+#ifndef _WIN32
+    // A link in the folder to a file elsewhere: what it leads to counts.
+    fs::create_symlink(tmp.path / "elsewhere.log", folder / "link.log");
+    CHECK_FALSE(is_run_log_of(tmp.dir(), "docs", (folder / "link.log").string()));
+#endif
 }
 
 TEST_CASE("drive note: one calm line for a drive without a journal") {

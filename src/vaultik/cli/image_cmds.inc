@@ -706,6 +706,7 @@ void recovery_restore() {
     for (int tries = 0; !repo; ++tries) {
         std::string pw = read_password("Password of the backup: ");
         try {
+            claim_drive(location);
             repo = Repository::open(open_backend(location, nullptr), pw);
         } catch (const AuthError&) {
             if (tries >= 2) {

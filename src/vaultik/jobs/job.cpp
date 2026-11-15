@@ -794,6 +794,13 @@ const RunRecord* missed_run_waiting(const std::vector<RunRecord>& history) {
     return nullptr;
 }
 
+bool saved_since(const std::vector<RunRecord>& history, std::uint64_t since) {
+    return std::any_of(history.begin(), history.end(), [since](const RunRecord& r) {
+        return r.kind == RunKind::Backup && (r.status == RunStatus::Success || r.status == RunStatus::Partial) &&
+               r.finished >= since;
+    });
+}
+
 RunRecord waiting_for_drive_record(RunKind kind, std::uint64_t now, const std::string& what) {
     RunRecord r;
     r.kind = kind;

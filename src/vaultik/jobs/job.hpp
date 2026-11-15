@@ -346,6 +346,10 @@ const RunRecord* last_restore_test(const std::vector<RunRecord>& history);
 // The newest record of a backup that waited for its drive, when no backup ran after it (so a run
 // was missed while the drive was away); null otherwise.
 const RunRecord* missed_run_waiting(const std::vector<RunRecord>& history);
+// Whether a backup of the job saved a version (it succeeded, also with skipped items or nothing
+// changed) that ended at or after `since` (FILETIME ticks): a run that waited for the drive while
+// another run of the same job used it has then nothing left to do.
+bool saved_since(const std::vector<RunRecord>& history, std::uint64_t since);
 // What a run that finds its backup drive not connected records (`what`: the destination).
 RunRecord waiting_for_drive_record(RunKind kind, std::uint64_t now, const std::string& what);
 // Whether the monthly test restore is on and none finished (not cancelled) in the last 30 days.
