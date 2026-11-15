@@ -665,8 +665,10 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 CloseHandle(e);
                 break;
             }
-            // Not there (no eject), or made by an eject this account may not open: waited for.
-            if (eject.status != Opened::denied || std::chrono::steady_clock::now() >= until) break;
+            // Not there (no eject), or the name taken by another kind of object: not waited for.
+            // There but not to be shared (made by an eject this account may not open, or owned by
+            // another account): waited for, at most until the claim's wait ends.
+            if (!not_to_share(eject) || std::chrono::steady_clock::now() >= until) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         handle_ = held;
