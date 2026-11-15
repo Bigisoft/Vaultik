@@ -639,7 +639,8 @@ finishes. No administrator rights are needed for a USB drive.
 When a run finds the backup drive not connected, that is no failure: the drive is simply
 elsewhere. The run is recorded once as "Waiting for the drive" (grey, not red; `"status":
 "waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert or
-failure notification at first, and the Overview says since when it waits. As soon as the drive is plugged
+failure notification at first, and the Overview says since when it waits. **Back up now** with the
+drive away says the same in the status bar ("Waiting for the drive"), not "Backup failed". As soon as the drive is plugged
 in while Vaultik is open (or in the notification area), the missed backup runs, also for jobs
 without "Also back up when the destination drive is connected"; otherwise the next scheduled run
 does it. If the drive stays away too long, the overdue reminder ("not backed up for N days")

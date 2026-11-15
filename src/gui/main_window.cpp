@@ -392,6 +392,11 @@ MainWindow::MainWindow(bool in_tray) : started_in_tray_(in_tray) {
                                  .arg(count_of(static_cast<std::uint64_t>(cloud), tr("file is"), tr("files are")));
         } else if (result == "cancelled") {
             msg = tr("Backup cancelled; no version was saved.");
+        } else if (result == "waiting") {
+            // The backup drive is not connected: no failure (the history shows "Waiting for the
+            // drive"), the backup runs when the drive is back.
+            msg = tr("Waiting for the drive: the backup drive is not connected. The backup runs when it is "
+                     "connected while Vaultik is open, or at the next scheduled time.");
         } else {
             msg = tr("Backup failed: %1").arg(ev.value("message").toString());
             log_->appendPlainText(msg);
