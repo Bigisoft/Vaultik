@@ -52,11 +52,18 @@ struct RestoreResult {
 
 // Before a restore: how much it writes. `bytes` is the size of every file it restores, `needed`
 // leaves out files already in the target with the same size (which are skipped, or with
-// skip_identical left alone when they are the same).
+// skip_identical left alone when they are the same). With `overwrite`, `temporary` is the room a
+// replaced file needs on top: its new copy is written before the space of the old one is free
+// again everywhere (a file still open elsewhere, a file system that keeps snapshots), so the
+// largest file it replaces. A folder whose listing cannot be read is counted in `unknown_dirs`
+// (its size is not known; the restore itself skips it with a warning) instead of failing the
+// estimate.
 struct RestoreEstimate {
     std::uint64_t files = 0;
     std::uint64_t bytes = 0;
     std::uint64_t needed = 0;
+    std::uint64_t temporary = 0;
+    std::uint64_t unknown_dirs = 0;
 };
 RestoreEstimate estimate_restore(Repository& repo, const Snapshot& snapshot, const RestoreOptions& options);
 

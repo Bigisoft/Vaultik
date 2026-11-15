@@ -4519,6 +4519,12 @@ int cmd_hyperv(const Args& a) {
     return kExitOk;
 }
 
+// The restore does not fit at its target (and --ignore-space was not given).
+class RestoreTooBig : public Error {
+public:
+    using Error::Error;
+};
+
 int cmd_restore(const Args& a) {
     if (a.positional.empty()) throw Error("usage: vaultik restore -r <repo> <snapshot> --target <folder>");
     const auto target = a.value("--target");
@@ -4543,22 +4549,36 @@ int cmd_restore(const Args& a) {
     o.skip_identical = a.has("--skip-identical");
     o.permissions = a.has("--permissions");
     o.links = !a.has("--no-links");
-    // Before anything is written: is there room for it at the target?
-    {
+    // Before anything is written: is there room for it at the target? Only an estimate: when it
+    // cannot be made (a damaged folder listing, say), the restore goes on and says so; the restore
+    // itself skips what it cannot read and restores the rest.
+    try {
         const RestoreEstimate need = estimate_restore(*repo, ref.snapshot, o);
+        if (need.unknown_dirs > 0)
+            warning(std::to_string(need.unknown_dirs) +
+                    " folder listing(s) could not be read, so the size of the restore is only partly known");
         std::string at = os::absolute_path(o.target);
         while (!at.empty() && !os::exists(at) && os::parent_of(at) != at) at = os::parent_of(at);
         const std::optional<os::DiskSpace> space = at.empty() ? std::nullopt : os::disk_space(at);
         const std::uint64_t margin = 64ull << 20;  // folders, streams, the file system's own
-        if (space && need.needed + margin > space->free) {
-            const std::string text = "the restore needs about " + format_bytes(need.needed) + " but only " +
-                                     format_bytes(space->free) + " is free at " + o.target;
+        const std::uint64_t wanted = need.needed + need.temporary;
+        if (space && wanted + margin > space->free) {
+            const std::string text = "the restore needs about " + format_bytes(wanted) +
+                                     (need.temporary > 0 ? " (with room to replace its largest file)" : "") +
+                                     " but only " + format_bytes(space->free) + " is free at " + o.target;
             if (!a.has("--ignore-space"))
-                throw Error(text + "; free up space or choose another folder (--ignore-space restores anyway)");
+                throw RestoreTooBig(text + "; free up space or choose another folder (--ignore-space restores anyway)");
             warning(text + "; restoring anyway, it may stop when the drive is full");
         }
         if (g_json) emit({{"event", "restore_plan"}, {"files", need.files}, {"bytes", need.bytes}, {"needed", need.needed},
+                          {"temporary", need.temporary}, {"unknown_dirs", need.unknown_dirs},
                           {"free", space ? space->free : 0}});
+    } catch (const RestoreTooBig&) {
+        throw;
+    } catch (const Cancelled&) {
+        throw;
+    } catch (const std::exception& e) {
+        warning(std::string("could not tell how much space the restore needs, restoring anyway: ") + e.what());
     }
     const auto start = std::chrono::steady_clock::now();
     o.on_progress = [&](const RestoreProgress& p) {

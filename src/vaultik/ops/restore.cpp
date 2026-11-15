@@ -1,5 +1,6 @@
 #include "vaultik/ops/restore.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <optional>
@@ -555,21 +556,34 @@ RestoreResult RestoreEngine::run(const Snapshot& snapshot) {
 
 namespace {
 
-void estimate_dir(Repository& repo, const Id& tree_id, const std::string& dir, RestoreEstimate& e) {
-    const Tree tree = parse_tree(repo.load_blob(BlobType::Tree, tree_id));
+// One file of the estimate, restored to `path`: only a regular file of the same size counts as
+// there already.
+void estimate_file(const Node& n, const std::string& path, const RestoreOptions& options, RestoreEstimate& e) {
+    ++e.files;
+    e.bytes += n.size;
+    os::FileInfo info;
+    os::ErrorCode err = 0;
+    const bool exists = os::stat(path, info, err);
+    const bool file = exists && info.type == os::EntryType::File;
+    if (!(file && info.size == n.size)) e.needed += n.size;
+    if (options.overwrite && file) e.temporary = std::max(e.temporary, n.size);
+}
+
+void estimate_dir(Repository& repo, const Id& tree_id, const std::string& dir, const RestoreOptions& options,
+                  RestoreEstimate& e) {
+    Tree tree;
+    try {
+        tree = parse_tree(repo.load_blob(BlobType::Tree, tree_id));
+    } catch (const Error&) {
+        // Unreadable (damaged, or in archive storage): its size is not known. The restore skips
+        // it with a warning and restores the rest, so the estimate goes on as well.
+        ++e.unknown_dirs;
+        return;
+    }
     for (const Node& n : tree.nodes) {
         const std::string path = os::join(dir, n.name);
-        if (n.kind == NodeKind::Dir) {
-            estimate_dir(repo, n.subtree, path, e);
-            continue;
-        }
-        if (n.kind != NodeKind::File) continue;
-        ++e.files;
-        e.bytes += n.size;
-        os::FileInfo info;
-        os::ErrorCode err = 0;
-        const bool there = os::stat(path, info, err) && info.type == os::EntryType::File && info.size == n.size;
-        if (!there) e.needed += n.size;
+        if (n.kind == NodeKind::Dir) estimate_dir(repo, n.subtree, path, options, e);
+        else if (n.kind == NodeKind::File) estimate_file(n, path, options, e);
     }
 }
 
@@ -582,16 +596,11 @@ RestoreEstimate estimate_restore(Repository& repo, const Snapshot& snapshot, con
         throw Error("path not found in snapshot: " + options.subpath);
     const std::string root = os::absolute_path(options.target);
     if (options.subpath.empty() || (options.contents_only && start.kind == NodeKind::Dir)) {
-        estimate_dir(repo, start.subtree, root, e);
+        estimate_dir(repo, start.subtree, root, options, e);
     } else if (start.kind == NodeKind::Dir) {
-        estimate_dir(repo, start.subtree, os::join(root, start.name), e);
+        estimate_dir(repo, start.subtree, os::join(root, start.name), options, e);
     } else if (start.kind == NodeKind::File) {
-        e.files = 1;
-        e.bytes = start.size;
-        os::FileInfo info;
-        os::ErrorCode err = 0;
-        const bool there = os::stat(os::join(root, start.name), info, err) && info.size == start.size;
-        e.needed = there ? 0 : start.size;
+        estimate_file(start, os::join(root, start.name), options, e);
     }
     return e;
 }
