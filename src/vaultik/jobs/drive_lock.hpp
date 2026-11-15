@@ -113,9 +113,10 @@ enum class DriveLockMode { run, admin_run, eject };
 std::string drive_lock_name(const std::string& key);
 
 // The environment variable a run that holds drive locks passes to the commands it starts (its
-// before and after commands): the tokens of those locks, separated by ';'. A vaultik command
-// started by such a command for the same drive (a prune in an after command, say) then does not
-// wait for its own parent run, which waits for it to end.
+// before and after commands): the tokens of those locks, separated by ';'. Windows: a vaultik
+// command started by such a command for the same drive (a prune in an after command, say) then
+// does not wait for its own parent run, which waits for it to end. Linux: not looked at (sudo and
+// pkexec do not pass it on); the lock's holder tells instead (see DriveLock).
 constexpr const char* kHeldDrivesVariable = "VAULTIK_HELD_DRIVES";
 
 class DriveLock {
@@ -123,13 +124,17 @@ public:
     // Takes the lock of `key` (see drive_lock_key; an empty key takes none), waiting up to `wait`
     // while other runs hold it. `on_wait` is called once when it has to wait; `cancelled` is
     // asked about once a second while waiting (true: throws Error "cancelled"). Throws DriveBusy
-    // when the wait ends without the lock. When kHeldDrivesVariable names this drive, the lock is
-    // tried without waiting: free (the run that passed it on has ended), it is taken as usual;
-    // busy, the parent run holds it, and nothing waits (inherited()), also when the parent has
-    // other rights (Linux: root's command started by an account's run, or the other way round) and
-    // holds only the lock all accounts share. Another DriveLock of this process on the drive (any
-    // thread) counts as busy. `lock_dir`: see above. `mode`: see
-    // DriveLockMode.
+    // when the wait ends without the lock. The run that started this command may hold the drive
+    // (a prune in its after command, say), and waits for the command to end: then nothing waits
+    // (inherited()), also when that run has other rights (Linux: root's command started by an
+    // account's run, or the other way round) and holds only the lock all accounts share, or only
+    // root's mark. Windows: that run is the one kHeldDrivesVariable names, when the lock is busy.
+    // Linux: a process this one descends from (through any shell, sudo or pkexec) holds a lock
+    // file of the drive, as /proc/locks shows, whatever the environment; one that is no ancestor
+    // (a command that outlived its run, another account's run) is waited for as usual. Either
+    // way, a lock that is free (the run that started the command has ended) is taken as usual.
+    // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see
+    // above. `mode`: see DriveLockMode.
     DriveLock(const std::string& key, const std::string& lock_dir, std::chrono::milliseconds wait,
               const std::function<void()>& on_wait = {}, const std::function<bool()>& cancelled = {},
               DriveLockMode mode = DriveLockMode::run);

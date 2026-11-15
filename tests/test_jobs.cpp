@@ -1219,10 +1219,14 @@ struct HeldDrive {
     std::thread thread;
     HeldDrive(const std::string& key, const std::string& dir) {
         thread = std::thread([this, key, dir] {
-            DriveLock lock(key, dir, std::chrono::milliseconds(0));
-            env = lock.child_environment();
-            state = lock.held() ? 1 : -1;
-            while (state == 1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            try {
+                DriveLock lock(key, dir, std::chrono::milliseconds(0));
+                env = lock.child_environment();
+                state = lock.held() ? 1 : -1;
+                while (state == 1) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            } catch (const DriveBusy&) {
+                state = -1;
+            }
         });
         while (state == 0) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
@@ -1242,72 +1246,11 @@ void init_test_repo(const fs::path& dir) {
 
 }  // namespace
 
-TEST_CASE("drive lock: a command started by the run holding the drive does not wait for it") {
-    TempStore tmp;
-    fs::create_directories(tmp.path);
-    const std::string key = "test-nested-" + tmp.path.filename().string();
-    HeldDrive parent(key, tmp.dir());
-    REQUIRE(parent.state == 1);
-    CHECK(parent.env.first == kHeldDrivesVariable);
-    CHECK_FALSE(parent.env.second.empty());
-
-    // Without the marker: busy.
-    CHECK_THROWS_AS(DriveLock(key, tmp.dir(), std::chrono::milliseconds(50)), DriveBusy);
-    // With it (as the parent's before and after commands get it): at once, without taking it.
-    os::set_env(kHeldDrivesVariable, "other:1;" + parent.env.second);
-    {
-        DriveLock nested(key, tmp.dir(), std::chrono::milliseconds(50));
-        CHECK(nested.inherited());
-        CHECK_FALSE(nested.held());
-        CHECK_FALSE(nested.waited());
-        // And passed on to what it starts in turn.
-        CHECK(nested.child_environment().second.find(parent.env.second) != std::string::npos);
-        // Another drive still locks as usual.
-        DriveLock other(key + "-other", tmp.dir(), std::chrono::milliseconds(0));
-        CHECK(other.held());
-        CHECK_FALSE(other.inherited());
-    }
-    // The run that passed it on has ended, but what its command started still runs: named, yet
-    // free, so taken as usual (and held for good measure against the next run).
-    parent.release();
-    {
-        DriveLock orphan(key, tmp.dir(), std::chrono::milliseconds(50));
-        CHECK(orphan.held());
-        CHECK_FALSE(orphan.inherited());
-        HeldDrive next(key, tmp.dir());
-        CHECK(next.state == -1);  // the next run waits for it
-    }
-    // An eject started by such a command does not take a held drive for its own.
-    {
-        HeldDrive again(key, tmp.dir());
-        REQUIRE(again.state == 1);
-        os::set_env(kHeldDrivesVariable, again.env.second);
-        CHECK_THROWS_AS(DriveLock(key, tmp.dir(), std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
-        DriveLock nested(key, tmp.dir(), std::chrono::milliseconds(0));
-        CHECK(nested.inherited());
-    }
-    os::set_env(kHeldDrivesVariable, "");
-
-    // The command line: a prune of the same drive in the run's after command finishes at once.
-    fs::create_directories(tmp.path / "repo");
-    init_test_repo(tmp.path / "repo");
-    HeldDrive run(drive_lock_key((tmp.path / "repo").string()), os::join(tmp.dir(), "locks"));
-    REQUIRE(run.state == 1);
-    std::string output;
-    os::CommandOptions o;
-    o.output = &output;
-    o.timeout = std::chrono::seconds(60);
-    o.extra_environment = {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "test password"}, run.env};
-    const auto started = std::chrono::steady_clock::now();
-    CHECK(os::run_command({VAULTIK_TEST_CLI, "prune", "-r", (tmp.path / "repo").string(), "--dry-run"}, o) == 0);
-    CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(30));
-    CHECK(output.find("Waiting") == std::string::npos);
-}
-
 // Another process holding a drive lock or claim, for the tests below: this test program again,
-// running only this case, which does what VAULTIK_TEST_HOLD says ("lock", "claim", or "claimed",
-// which asks drive_claimed) for VAULTIK_TEST_HOLD_KEY with the settings folder
-// VAULTIK_TEST_HOLD_DIR, says "HOLD:held" or "HOLD:free" on its output, and keeps what it holds
+// running only this case, which does what VAULTIK_TEST_HOLD says ("lock", "eject" (a DriveLock
+// of an eject), "claim", or "claimed", which asks drive_claimed) for VAULTIK_TEST_HOLD_KEY with
+// the settings folder VAULTIK_TEST_HOLD_DIR, says "HOLD:held" or "HOLD:free" on its output (after
+// "HOLD:inherited" for a lock it inherited, "HOLD:busy" for one that threw DriveBusy), and keeps what it holds
 // until the file VAULTIK_TEST_HOLD_UNTIL is there. POSIX: VAULTIK_TEST_HOLD_UID makes a helper
 // started as root go on as that account first; VAULTIK_TEST_HOLD_FOREIGN=1 sets the hooks of
 // ForeignFiles below, VAULTIK_TEST_HOLD_ROOT_DIR the folder of root's marks; "flock-ex" and "flock-sh" hold a flock on each of the files (made when
@@ -1357,11 +1300,15 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
     std::unique_ptr<DriveLock> lock;
     std::unique_ptr<DriveClaim> claim;
     bool held = false;
-    if (what == "lock") {
+    if (what == "lock" || what == "eject") {
         try {
-            lock = std::make_unique<DriveLock>(key, dir, std::chrono::milliseconds(0));
+            lock = std::make_unique<DriveLock>(key, dir, std::chrono::milliseconds(0), std::function<void()>{},
+                                               std::function<bool()>{},
+                                               what == "eject" ? DriveLockMode::eject : DriveLockMode::run);
             held = lock->held();
+            if (lock->inherited()) std::cout << "HOLD:inherited" << std::endl;
         } catch (const DriveBusy&) {
+            std::cout << "HOLD:busy" << std::endl;
         }
     } else if (what == "claim") {
         claim = std::make_unique<DriveClaim>(key, dir);
@@ -1406,6 +1353,8 @@ struct OtherProcess {
             said.push_back(static_cast<char>(c));
     }
     bool held() const { return said.find("HOLD:held") != std::string::npos; }
+    bool inherited() const { return said.find("HOLD:inherited") != std::string::npos; }
+    bool busy() const { return said.find("HOLD:busy") != std::string::npos; }
     int release() {
         if (!process) return -1;
         std::ofstream(until) << "go";
@@ -1617,6 +1566,102 @@ void check_mutex_rights(const std::wstring& name, const std::string& account) {
 
 }  // namespace
 #endif
+
+TEST_CASE("drive lock: a command started by the run holding the drive does not wait for it") {
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-nested-" + tmp.path.filename().string();
+    HeldDrive parent(key, tmp.dir());
+    REQUIRE(parent.state == 1);
+    CHECK(parent.env.first == kHeldDrivesVariable);
+    CHECK_FALSE(parent.env.second.empty());
+
+    // Without the marker: busy.
+    CHECK_THROWS_AS(DriveLock(key, tmp.dir(), std::chrono::milliseconds(50)), DriveBusy);
+#ifdef _WIN32
+    // With it (as the parent's before and after commands get it): at once, without taking it.
+    os::set_env(kHeldDrivesVariable, "other:1;" + parent.env.second);
+    {
+        DriveLock nested(key, tmp.dir(), std::chrono::milliseconds(50));
+        CHECK(nested.inherited());
+        CHECK_FALSE(nested.held());
+        CHECK_FALSE(nested.waited());
+        // And passed on to what it starts in turn.
+        CHECK(nested.child_environment().second.find(parent.env.second) != std::string::npos);
+        // Another drive still locks as usual.
+        DriveLock other(key + "-other", tmp.dir(), std::chrono::milliseconds(0));
+        CHECK(other.held());
+        CHECK_FALSE(other.inherited());
+    }
+#else
+    // Linux: the holder is asked, not the environment, which sudo and pkexec do not pass on. A
+    // command this process started (without the marker): at once, without taking it; its eject
+    // does not take the drive for its own.
+    {
+        OtherProcess nested("lock", key, tmp.dir(), tmp.path);
+        CHECK(nested.inherited());
+        CHECK_FALSE(nested.held());
+        OtherProcess eject("eject", key, tmp.dir(), tmp.path);
+        CHECK(eject.busy());
+        CHECK_FALSE(eject.held());
+        CHECK_FALSE(eject.inherited());
+        // Another drive still locks as usual.
+        OtherProcess other("lock", key + "-other", tmp.dir(), tmp.path);
+        CHECK(other.held());
+        CHECK_FALSE(other.inherited());
+    }
+    // This process itself is not the run that started it: another DriveLock of it stays busy,
+    // the marker or not.
+    os::set_env(kHeldDrivesVariable, parent.env.second);
+    CHECK_THROWS_AS(DriveLock(key, tmp.dir(), std::chrono::milliseconds(50)), DriveBusy);
+#endif
+    // The run that passed it on has ended, but what its command started still runs: named, yet
+    // free, so taken as usual (and held for good measure against the next run).
+    os::set_env(kHeldDrivesVariable, parent.env.second);
+    parent.release();
+    {
+        DriveLock orphan(key, tmp.dir(), std::chrono::milliseconds(50));
+        CHECK(orphan.held());
+        CHECK_FALSE(orphan.inherited());
+        HeldDrive next(key, tmp.dir());
+        CHECK(next.state == -1);  // the next run waits for it
+    }
+#ifdef _WIN32
+    // An eject started by such a command does not take a held drive for its own.
+    {
+        HeldDrive again(key, tmp.dir());
+        REQUIRE(again.state == 1);
+        os::set_env(kHeldDrivesVariable, again.env.second);
+        CHECK_THROWS_AS(DriveLock(key, tmp.dir(), std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+        DriveLock nested(key, tmp.dir(), std::chrono::milliseconds(0));
+        CHECK(nested.inherited());
+    }
+#endif
+    os::set_env(kHeldDrivesVariable, "");
+
+    // The command line: a prune of the same drive in the run's after command finishes at once,
+    // also (Linux) when the marker did not reach it (sudo or pkexec in between).
+    fs::create_directories(tmp.path / "repo");
+    init_test_repo(tmp.path / "repo");
+    HeldDrive run(drive_lock_key((tmp.path / "repo").string()), os::join(tmp.dir(), "locks"));
+    REQUIRE(run.state == 1);
+    std::vector<std::vector<std::pair<std::string, std::string>>> envs = {
+        {{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "test password"}, run.env}};
+#ifndef _WIN32
+    envs.push_back({{"VAULTIK_CONFIG_DIR", tmp.dir()}, {"VAULTIK_PASSWORD", "test password"}});
+#endif
+    for (const auto& env : envs) {
+        std::string output;
+        os::CommandOptions o;
+        o.output = &output;
+        o.timeout = std::chrono::seconds(60);
+        o.extra_environment = env;
+        const auto started = std::chrono::steady_clock::now();
+        CHECK(os::run_command({VAULTIK_TEST_CLI, "prune", "-r", (tmp.path / "repo").string(), "--dry-run"}, o) == 0);
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(30));
+        CHECK(output.find("Waiting") == std::string::npos);
+    }
+}
 
 TEST_CASE("drive lock: one place per drive, whatever settings folder a run uses") {
     TempStore tmp;
@@ -2213,18 +2258,28 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
     }
     {
         // A command with root rights that a run of the account started (sudo vaultik in its after
-        // command): it inherits the drive at once instead of waiting for its own parent.
-        OtherProcess parent("lock", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
-        REQUIRE(parent.held());
-        os::set_env(kHeldDrivesVariable, name + ":parent");
-        const auto started = std::chrono::steady_clock::now();
+        // command, which gets none of the run's environment): it inherits the drive at once
+        // instead of waiting for its own parent. Here this process stands in for that run (it
+        // holds the lock all accounts share, as the account's run does), and the command is a
+        // process it starts.
+        const int fd = ::open(file.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+        REQUIRE(fd >= 0);
+        REQUIRE(::flock(fd, LOCK_EX | LOCK_NB) == 0);
         {
-            DriveLock child(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(60000));
+            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
             CHECK(child.inherited());
             CHECK_FALSE(child.held());
         }
-        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
-        os::set_env(kHeldDrivesVariable, "");
+        ::close(fd);
+    }
+    {
+        // A command of the account that a run of root's started (runuser in its after command):
+        // the same.
+        DriveLock run(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(0));
+        REQUIRE(run.held());
+        OtherProcess child("lock", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
+        CHECK(child.inherited());
+        CHECK_FALSE(child.held());
     }
     std::error_code ec;
     fs::remove(file, ec);
@@ -2413,22 +2468,30 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
         CHECK_FALSE(run.other_account_skipped());
     }
     {
-        // A command with other rights that a run started (its parent, which holds the shared lock):
-        // it inherits the drive at once, with a lock of its own free or not, instead of waiting the
-        // short while for its own parent (20 s here).
-        OtherProcess parent("lock", key, os::join(tmp.dir(), "other"), tmp.path);
-        REQUIRE(parent.held());
-        testing::set_drive_lock_hooks({true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(20000), {}});
-        os::set_env(kHeldDrivesVariable, name + ":parent");
-        const auto started = std::chrono::steady_clock::now();
-        {
-            DriveLock child(key, mine, std::chrono::milliseconds(60000));
-            CHECK(child.inherited());
-            CHECK_FALSE(child.held());
-            CHECK_FALSE(child.other_account_skipped());
-        }
-        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
-        os::set_env(kHeldDrivesVariable, "");
+        // A command with other rights that a run started (this process, which holds the shared
+        // lock), without the run's environment: it inherits the drive at once, with a lock of its
+        // own free or not, instead of waiting the short while for its own parent (or giving up,
+        // with no wait of its own).
+        DriveLock run(key, os::join(tmp.dir(), "other"), std::chrono::milliseconds(0));
+        REQUIRE(run.held());
+        OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
+        CHECK(child.inherited());
+        CHECK_FALSE(child.held());
+        CHECK_FALSE(child.busy());
+        // Its eject does not take the drive for its own.
+        OtherProcess eject("eject", key, mine, tmp.path, {}, kForeign);
+        CHECK(eject.busy());
+    }
+    {
+        // The same with a run of root's that holds only its mark (it passed the shared lock by).
+        OtherProcess unrelated("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.drive()));
+        REQUIRE(unrelated.held());
+        const int fd = ::open(foreign.drive_mark().c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        REQUIRE(fd >= 0);
+        REQUIRE(::flock(fd, LOCK_EX | LOCK_NB) == 0);
+        OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
+        CHECK(child.inherited());
+        ::close(fd);
     }
 }
 

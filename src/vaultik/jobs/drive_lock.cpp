@@ -42,6 +42,7 @@ std::string key_hash(const std::string& key) {
     return to_hex(ByteSpan(id.data(), 16));
 }
 
+#ifdef _WIN32
 // Whether the parent run passed this drive's lock on (see kHeldDrivesVariable).
 bool named_by_parent(const std::string& hash) {
     const std::string held = os::get_env(kHeldDrivesVariable);
@@ -54,6 +55,7 @@ bool named_by_parent(const std::string& hash) {
     }
     return false;
 }
+#endif
 
 // The drive locks and claims this process holds, by drive (any thread): a Windows mutex lets the
 // thread that owns it in again, and on every system a lock or claim of this very process must
@@ -385,18 +387,18 @@ int open_root_mark(const std::string& name) {
     return open_in_run_lock(name, 0600, roots);
 }
 
-// Whether root holds its mark `name` (`write_only`: holds it alone, as an eject does), in root's
-// folder or, as earlier versions kept it, in /run/lock. Only root may open such a file, so only
-// root can hold it; every account can see in /proc/locks that it is held. False when that cannot
-// be told.
-bool root_holds(const std::string& name, bool write_only) {
-    std::vector<std::pair<dev_t, ino_t>> files;
-    for (const std::string& dir : {root_dir(), std::string("/run/lock")}) {
-        struct stat st{};
-        if (::lstat((dir + "/" + name).c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == hooks().root_uid)
-            files.emplace_back(st.st_dev, st.st_ino);
-    }
-    if (files.empty()) return false;
+// A flock held on a file, as /proc/locks shows it (every account may read it).
+struct HeldFlock {
+    unsigned dev_major = 0;
+    unsigned dev_minor = 0;
+    unsigned long long inode = 0;
+    bool write = false;
+    long pid = 0;  // the process that took it
+};
+
+// The flocks held now (not the ones waited for).
+std::vector<HeldFlock> held_flocks() {
+    std::vector<HeldFlock> out;
     std::ifstream in("/proc/locks");
     std::string line;
     while (std::getline(in, line)) {
@@ -405,12 +407,83 @@ bool root_holds(const std::string& name, bool write_only) {
         std::string id, kind, advisory, type, pid, where;
         if (!(words >> id >> kind) || kind == "->" || kind != "FLOCK") continue;
         if (!(words >> advisory >> type >> pid >> where)) continue;
-        unsigned dev_major = 0, dev_minor = 0;
-        unsigned long long inode = 0;
-        if (std::sscanf(where.c_str(), "%x:%x:%llu", &dev_major, &dev_minor, &inode) != 3) continue;
-        for (const auto& [dev, ino] : files)
-            if (dev_major == major(dev) && dev_minor == minor(dev) && inode == ino && (!write_only || type == "WRITE"))
-                return true;
+        HeldFlock f;
+        if (std::sscanf(where.c_str(), "%x:%x:%llu", &f.dev_major, &f.dev_minor, &f.inode) != 3) continue;
+        try {
+            f.pid = std::stol(pid);
+        } catch (const std::exception&) {
+            continue;
+        }
+        f.write = type == "WRITE";
+        out.push_back(f);
+    }
+    return out;
+}
+
+using FileId = std::pair<dev_t, ino_t>;
+
+bool is_file(const HeldFlock& f, const FileId& id) {
+    return f.dev_major == major(id.first) && f.dev_minor == minor(id.first) && f.inode == id.second;
+}
+
+// Root's mark files `name`, in root's folder or, as earlier versions kept it, in /run/lock: only
+// the ones root owns, which only root may open, so only root can hold them.
+std::vector<FileId> root_mark_files(const std::string& name) {
+    std::vector<FileId> files;
+    for (const std::string& dir : {root_dir(), std::string("/run/lock")}) {
+        struct stat st{};
+        if (::lstat((dir + "/" + name).c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == hooks().root_uid)
+            files.emplace_back(st.st_dev, st.st_ino);
+    }
+    return files;
+}
+
+// Whether root holds its mark `name` (`write_only`: holds it alone, as an eject does); every
+// account can see in /proc/locks that it is held. False when that cannot be told.
+bool root_holds(const std::string& name, bool write_only) {
+    const std::vector<FileId> files = root_mark_files(name);
+    if (files.empty()) return false;
+    for (const HeldFlock& f : held_flocks())
+        for (const FileId& id : files)
+            if (is_file(f, id) && (!write_only || f.write)) return true;
+    return false;
+}
+
+// The parent of process `pid`, from /proc/<pid>/stat ("pid (name) state ppid ..."; the name may
+// hold spaces and parentheses, so it is read from after the last ')'). 0 when it cannot be told.
+long parent_of(long pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
+    std::string stat;
+    if (!std::getline(in, stat)) return 0;
+    const std::size_t close = stat.rfind(')');
+    if (close == std::string::npos) return 0;
+    std::istringstream rest(stat.substr(close + 1));
+    std::string state;
+    long ppid = 0;
+    if (!(rest >> state >> ppid)) return 0;
+    return ppid;
+}
+
+// Whether a process this one descends from (its parent, or one further up: a run's before or
+// after command reaches vaultik through a shell, sudo or pkexec, which keep no environment of
+// it) holds a flock on the file of `fd` or on root's mark `mark`: then the run that started this
+// command holds the drive, and waits for the command to end. Never this process itself (another
+// DriveLock of it on the drive counts as busy), and never a process that is no ancestor (a
+// command that outlived its run, or another account's run). False when it cannot be told.
+bool held_by_ancestor(int fd, const std::string& mark) {
+    std::vector<FileId> files = root_mark_files(mark);
+    struct stat st{};
+    if (fd >= 0 && ::fstat(fd, &st) == 0) files.emplace_back(st.st_dev, st.st_ino);
+    std::vector<long> holders;
+    for (const HeldFlock& f : held_flocks())
+        for (const FileId& id : files)
+            if (is_file(f, id)) holders.push_back(f.pid);
+    if (holders.empty()) return false;
+    long pid = static_cast<long>(::getppid());
+    for (int depth = 0; depth < 64 && pid > 0; ++depth) {
+        if (std::find(holders.begin(), holders.end(), pid) != holders.end()) return true;
+        if (pid == 1) break;
+        pid = parent_of(pid);
     }
     return false;
 }
@@ -484,11 +557,12 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                      const std::function<void()>& on_wait, const std::function<bool()>& cancelled, DriveLockMode mode) {
     if (key.empty()) return;
     const std::string hash = key_hash(key);
+    const bool fail_closed = mode == DriveLockMode::eject;
+#ifdef _WIN32
     // Named by the run that started this command: tried without waiting. Busy, that run holds the
     // drive and waits for this command to end; free, it ended (this command outlived it) and the
     // lock is taken as usual.
     const bool parent = named_by_parent(hash);
-    const bool fail_closed = mode == DriveLockMode::eject;
     const auto busy_now = [&] {
         if (parent && !fail_closed) {
             inherited_ = true;
@@ -496,6 +570,23 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         }
         return false;
     };
+#else
+    // Linux: a lock that is busy is asked who holds it. A run this command descends from (see
+    // held_by_ancestor), whatever its rights and whatever environment reached this command: that
+    // run holds the drive and waits for this command to end, which inherits the drive instead
+    // (an eject throws DriveBusy, fail closed). Free, or held by anybody else, the lock is taken
+    // or waited for as usual.
+    const std::string mark = "vaultik-drive-" + hash + ".root.lock";
+    constexpr bool parent = false;
+    const auto by_parent = [&](int fd) {
+        if (!held_by_ancestor(fd, mark)) return false;
+        if (!fail_closed) inherited_ = true;
+        return true;
+    };
+    const auto parent_busy = [&] {
+        if (fail_closed) throw DriveBusy("the run that started this command uses the backup drive");
+    };
+#endif
     const auto deadline = std::chrono::steady_clock::now() + wait;
     // Once more around the wait; false: a job with administrator rights waited the whole wait and
     // goes on without the lock.
@@ -517,9 +608,13 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         std::this_thread::sleep_for(std::clamp(left, std::chrono::milliseconds(0), most));
     };
-    // Another DriveLock of this process first (it may be this very thread).
+    // Another DriveLock of this process first (it may be this very thread). Linux: never the
+    // run that started this command, which is another process.
     while (!take_in_process_lock(hash)) {
-        if (busy_now() || !waiting()) return;
+#ifdef _WIN32
+        if (busy_now()) return;
+#endif
+        if (!waiting()) return;
         pause(std::chrono::milliseconds(100));
     }
     // From here, returning without a handle lets go of the in-process part again.
@@ -580,7 +675,6 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     }
 #else
     const std::string name = "vaultik-drive-" + hash + ".lock";
-    const std::string mark = "vaultik-drive-" + hash + ".root.lock";
     const bool root = ::geteuid() == 0;
     int own = -1;
     int shared = -1;
@@ -607,8 +701,13 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     if (own < 0 && shared < 0) return;
     while (own >= 0) {
         if (::flock(own, LOCK_EX | LOCK_NB) == 0) break;
-        if ((errno != EWOULDBLOCK && errno != EINTR) || busy_now()) {
+        if (errno != EWOULDBLOCK && errno != EINTR) {
             close_all();
+            return;
+        }
+        if (by_parent(own)) {
+            close_all();
+            parent_busy();
             return;
         }
         try {
@@ -648,11 +747,12 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             } else {
                 by_root = !root && root_holds(mark, false);
             }
-            // Named by the parent run, which holds it (or holds root's mark): whatever its own
-            // lock, the run inherits the drive (a command with root rights that an account's run
+            // Held by the run that started this command (or root's mark is): whatever its own
+            // lock, the command inherits the drive (one with root rights that an account's run
             // started, or the other way round) instead of waiting for its own parent.
-            if (busy_now()) {
+            if (by_parent(shared)) {
                 close_all();
+                parent_busy();
                 return;
             }
             const auto now = std::chrono::steady_clock::now();
