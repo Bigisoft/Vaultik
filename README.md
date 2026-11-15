@@ -200,7 +200,10 @@ jobs with their last result; the job page shows live progress and four tabs:
 restore it to another folder or to its original location; right-click an item for all its
 versions. Before it writes anything, a restore works out how much it will write and stops
 with a clear message when the target drive does not have room for it ("the restore needs about
-40 GiB but only 12 GiB is free"; `--ignore-space` restores anyway). **Skip files that are already
+40 GiB but only 12 GiB is free"; `--ignore-space` restores anyway). With **Overwrite**, it also
+counts room for the largest file it replaces. The estimate is only a help: when it cannot be made
+(a damaged folder listing, say), the restore says so and goes on, restoring everything it can
+read. **Skip files that are already
 identical** (on by default; `--skip-identical`) leaves files in the target that have the same
 size, date and content as in the backup as they are, so a restore that was interrupted (the drive
 was unplugged, the computer went off) simply goes on where it stopped when run again; a file it
@@ -245,8 +248,8 @@ or `~/.config/vaultik` (override with `VAULTIK_CONFIG_DIR`).
 A run that starts on its own (the schedule, a connected drive, an idle or locked computer, changed
 files) never asks for anything. When the job's password is not saved on this PC (or was saved by
 another account), it fails at once with "the password of this backup is not saved on this PC",
-records that in the job's history and sends a "password" alert, instead of waiting for an answer
-nobody can give. Edit the job and enter its password, or start it with **Back up now**.
+records that in the job's history and sends a "password" alert (at most one a day per job, however
+often the job is started), instead of waiting for an answer nobody can give. Edit the job and enter its password, or start it with **Back up now**.
 
 **Keep the password safe elsewhere too.** Without it the backups cannot be decrypted, and nobody
 can reset it. What helps is the **recovery key**: a new backup shows one once (8 groups of 4
@@ -576,7 +579,9 @@ Overview's last backup and **Still unprotected** then say "N files are only in t
 backed up" (`"cloud_only"` in the history and the `--json` result; the version keeps the count).
 Turn on **Download files that are only in the cloud** in the job's Options to have the backup
 download them first and save their content; that takes time and fills the disk with them (OneDrive
-can free the space again later).
+can free the space again later). With it on, folders the change journal says are unchanged are read
+again when they hold such files, so they are downloaded too, and **Still unprotected** keeps naming
+the files until a backup saved them.
 
 ### External drives
 
@@ -591,9 +596,16 @@ Jobs that back up to the same drive take turns: a backup, health check, test res
 waits while another job uses that drive ("Waiting for another job on this drive" in the app),
 and starts when it is done, so three jobs on one USB drive do not share its speed and each take
 as long as all three together. The turn follows the drive's volume ID, not its letter, and holds
-between runs started by Task Scheduler or a systemd timer and runs started in the app (also for
-jobs with administrator rights). A run gives up after waiting 12 hours. Cloud storage has no
-such turns.
+between runs started by Task Scheduler or a systemd timer and runs started in the app. On Windows
+only your own account (and administrators and the system account) can take the turn, so another
+account cannot hold up your backups; jobs with administrator rights therefore take turns among
+themselves. On Linux every account shares the turn through /run/lock, so root's runs and your own
+prune or eject take turns too. A run gives up after waiting 12 hours, and a run that cannot take
+its turn at all (the system refuses it) goes on rather than not backing up. While a run only waits,
+the computer may go to sleep. A run started on its own that waited behind a run of the same job
+does nothing once that run saved a version. A `vaultik` command started by a job's before or after
+command (a prune of the same drive, say) does not wait for the run that started it. Cloud storage
+has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
 Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows
@@ -604,20 +616,23 @@ for more safety."
 eject <job>`) prepares the drive to be unplugged, as Windows' "Safely remove" does: it is
 flushed, locked and dismounted where your account may, then Windows is asked to eject it, which
 it refuses (naming the program) while something still uses the drive; on Linux `udisksctl
-unmount` and `power-off`. Vaultik refuses while one of its own backups, checks, cleanups or
-restores uses the drive. **Eject it on its own when the last job using it is done** (`vaultik
+unmount` and `power-off`. Vaultik refuses while any of its own commands has the drive open (a
+backup, check, cleanup, restore, copy, repair or any other command that opened the backup). **Eject it on its own when the last job using it is done** (`vaultik
 eject <job> --when-done on`, per drive) ejects it after the last of the jobs that waited for it
 finishes. No administrator rights are needed for a USB drive.
 
 When a run finds the backup drive not connected, that is no failure: the drive is simply
 elsewhere. The run is recorded once as "Waiting for the drive" (grey, not red; `"status":
-"waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert and no
-failure notification, and the Overview says since when it waits. As soon as the drive is plugged
+"waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert or
+failure notification at first, and the Overview says since when it waits. As soon as the drive is plugged
 in while Vaultik is open (or in the notification area), the missed backup runs, also for jobs
 without "Also back up when the destination drive is connected"; otherwise the next scheduled run
 does it. If the drive stays away too long, the overdue reminder ("not backed up for N days")
-speaks up as before. A second copy whose drive is away waits the same way and catches up after
-the next backup with its drive connected. (Windows has no Task Scheduler trigger for a drive
+speaks up as before, and so does an alert (below). A second copy whose drive is away waits the same way and catches up after
+the next backup with its drive connected. Once the backups of a job, or its second copy, have
+waited for their drive for 3 days (for a weekly job: the longest gap between its days, plus one),
+each run sends a "backup drive missing for N days" alert, at most one a day, also for a job that
+never saved a version, and without the app running. (Windows has no Task Scheduler trigger for a drive
 being plugged in that works without turning on an extra event log first, so the catch-up is done
 by Vaultik itself.)
 
@@ -774,24 +789,31 @@ the same on any repository. New cloud jobs skip the monthly full check, since it
 whole backup.
 
 Vaultik remembers on this PC (in `checks` in its settings folder, never in the backup) when each
-stored pack was last read back intact. The weekly check reads the share read longest ago, so
-over the weeks every part of the backup is read. The monthly full check reads for at most 3 hours
-per run by default (the job's Schedule tab: "at most ... per run", or no limit) and reads what was
-not read in the last 30 days; when the time is up it stops calmly ("the rest after the next
-backup"), and the next check goes on where it stopped, also after a cancel or an unplugged drive.
-A full check is complete once every pack was read within 30 days. While a check reads, the app shows how far it is
+stored pack was last read back intact, for the backup where it is: a copy of the backup on
+another drive or in another folder starts from scratch. The weekly check reads the share read
+longest ago, so over the weeks every part of the backup is read (packs in archive storage, which
+cannot be read without a thaw, take no part of it). The scheduled monthly full check reads for at
+most 3 hours per run by default (the job's Schedule tab: "at most ... per run", or no limit); when
+the time is up it stops calmly ("the rest after the next backup"), and the next check goes on
+where it stopped, also after a cancel or an unplugged drive. A full check is complete once every
+pack was read since that monthly round began, so each pack is read once every round. One that found
+damage is alerted at once, and the round is not complete. A full check you start yourself (the app,
+or `check-job <job> --full`) reads everything, without a time limit; `--budget` makes it keep to
+the job's limit and go on where it stopped next time. While a check reads, the app shows how far it is
 as a percentage of the data it reads this time, with the time left (smoothed over the last half
 minute, as for the drive cleanser); `--json` gives `"done"` and `"total"` bytes in its
 `check_progress` events.
 
 Several jobs that back up to the same repository (the same folder on the same drive, or the
 same cloud storage) share their checks: one completed check of the repository counts for all of
-them, so the repository is not read once per job, and what it read is remembered for all of them.
+them, so the repository is not read once per job, and what it read is remembered for all of them. The check of each job's
+own files on this PC (below) is not shared: when another job checked the repository, a job whose
+files were not compared in the last 7 days still gets that comparison after its backup.
 
 Only a check that read what it set out to read counts as done. A check that could not finish
 (the drive was unplugged part way, say) or was cancelled does not: it stays due and runs again
 after the next backup, and one that could not finish shows a notification and sends a "health
-check could not finish" alert (with "failure" alerts on).
+check could not finish" alert (with "failure" alerts on, at most one a day per job).
 
 Each check also looks for silent damage on this computer ("bit rot"): it reads up to 20 files back
 from this PC (at most 256 MB, for at most 2 minutes, within the job's resource limits) whose size,
