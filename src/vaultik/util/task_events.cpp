@@ -84,6 +84,9 @@ TaskEvent parse_task_event(std::string_view line) {
         e.status = to_text(j, "status");
         const auto erased = j.find("erased");
         e.erased = erased != j.end() && erased->is_boolean() && erased->get<bool>();
+        const auto written = j.find("table_written");
+        e.table_written = written != j.end() && written->is_boolean() && written->get<bool>();
+        e.table_id = to_text(j, "table_id");
         e.text = to_text(j, "message");
         e.volumes = to_list(j, "volumes");
     }

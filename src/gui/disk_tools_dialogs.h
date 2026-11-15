@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "elevated_task.h"
 #include "vaultik/image/disk.hpp"
 #include "vaultik/image/disk_tools.hpp"
 
@@ -73,8 +74,10 @@ private:
     void fill_setup();
     // The setup asked for (none when the section is not checked).
     std::optional<vaultik::image::NewDiskOptions> setup_options() const;
-    // Sets up the disk erased by `request` after the setup in the same run failed (disk init).
-    void set_up_again(const vaultik::image::DiskInfo& erased, const vaultik::image::EraseRequest& request);
+    // Sets up the disk erased by `request` after the setup in the same run failed (disk init),
+    // pinned to the partition table that setup wrote (`failed`), or to a blank disk.
+    void set_up_again(const vaultik::image::DiskInfo& erased, const vaultik::image::EraseRequest& request,
+                      const ElevatedResult& failed);
 
     std::vector<vaultik::image::DiskInfo> disks_;
     // What each listed volume was when it was listed (by its name, "E:" or "/dev/sdb1"), checked

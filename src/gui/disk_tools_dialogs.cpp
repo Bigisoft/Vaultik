@@ -95,14 +95,14 @@ QStringList qt_args(const std::vector<std::string>& args) {
     return out;
 }
 
-// The drive letters no drive uses now (Windows; empty on Linux).
+// The drive letters Windows has not given to any drive (empty on Linux). A letter where nothing
+// can be read (an empty card reader or optical drive, a locked BitLocker drive) is taken too.
 std::string free_letters() {
-    std::string out;
 #ifdef _WIN32
-    for (char c = 'D'; c <= 'Z'; ++c)
-        if (!os::exists(std::string(1, c) + ":\\")) out.push_back(c);
+    return image::free_letters(image::used_drive_letters());
+#else
+    return {};
 #endif
-    return out;
 }
 
 // "NTFS", "exFAT", "ext4".
@@ -281,8 +281,7 @@ NewDiskDialog::NewDiskDialog(QWidget* parent) : QDialog(parent) {
     letter_ = new QComboBox;
 #ifdef _WIN32
     letter_->addItem(tr("Any free letter"), QString());
-    for (char c = 'D'; c <= 'Z'; ++c)
-        if (!os::exists(std::string(1, c) + ":\\")) letter_->addItem(QString(QChar(c)) + ":", QString(QChar(c)));
+    for (const char c : free_letters()) letter_->addItem(QString(QChar(c)) + ":", QString(QChar(c)));
     form->addRow(tr("Drive letter:"), letter_);
 #else
     letter_->hide();
@@ -618,7 +617,7 @@ void DriveCleanserDialog::fill_setup() {
     if (!mbr) setup_style_->setCurrentIndex(0);
     if (d == nullptr) return;
     const std::string free = free_letters();
-    const image::SetupDefaults defaults = image::setup_defaults(*d, free);
+    const image::SetupDefaults defaults = image::setup_defaults(*d);
     if (!setup_label_edited_) setup_label_->setText(qs(defaults.label));
     const QSignalBlocker block(setup_letter_);
     setup_letter_->clear();
@@ -836,23 +835,43 @@ void DriveCleanserDialog::start() {
                          (r.code != 0 && !r.left_running ? not_set_up : QString()));
     }
     fill_targets();
-    if (with_setup && r.action) set_up_again(*erased, request);
+    if (with_setup && r.action) set_up_again(*erased, request, r);
 }
 
-void DriveCleanserDialog::set_up_again(const image::DiskInfo& erased, const image::EraseRequest& request) {
-    // Only the disk that was erased, still blank: the setup's own confirmation is the one typed
-    // for the erase, and the engine refuses a disk that got a partition table meanwhile.
+void DriveCleanserDialog::set_up_again(const image::DiskInfo& erased, const image::EraseRequest& request,
+                                       const ElevatedResult& failed) {
+    // Only the disk that was erased: still blank, or (when the failed setup had written a new
+    // partition table) with exactly that table. The setup's own confirmation is the one typed
+    // for the erase, and the engine refuses a disk that is not as pinned.
+    const std::string table_id = failed.table_written ? u8(failed.table_id) : std::string();
+    if (failed.table_written && table_id.empty()) {
+        QMessageBox::warning(this, windowTitle(),
+                             tr("The drive was not set up: a partition table was written, but which one is not known. "
+                                "Use Set up a new disk to set it up."));
+        return;
+    }
     const std::vector<image::DiskInfo> now = image::list_tool_disks();
     auto current = std::find_if(now.begin(), now.end(), [&](const image::DiskInfo& x) { return x.number == erased.number; });
     const std::string other = current == now.end() ? "the disk is not connected any more"
-                                                   : image::erased_disk_mismatch(*current, erased, request.shown);
+                                                   : image::erased_disk_mismatch(*current, erased, request.shown, table_id);
     if (!other.empty()) {
         QMessageBox::warning(this, windowTitle(),
                              tr("The drive was not set up: %1. Use Set up a new disk to set it up.").arg(qs(other)));
         return;
     }
+    // A card reader without a serial number tells one card from another of the same size only by
+    // what the user sees: asked once, with the disk as it is now.
+    QMessageBox ask(QMessageBox::Question, windowTitle(),
+                    tr("Set up this disk now? Whatever is on it is replaced.\n\n%1").arg(qs(image::describe(*current))),
+                    QMessageBox::NoButton, this);
+    ask.setTextFormat(Qt::PlainText);
+    QPushButton* yes = ask.addButton(tr("Set up the drive"), QMessageBox::AcceptRole);
+    QPushButton* no = ask.addButton(tr("Cancel"), QMessageBox::RejectRole);
+    ask.setDefaultButton(no);
+    ask.exec();
+    if (ask.clickedButton() != yes) return;
     ElevatedTask task{windowTitle(), tr("Setting up the drive..."), QString(), tr("The disk is ready to use.")};
-    const ElevatedResult r = run_disk_engine_forcing(this, task, qt_args(image::setup_again_args(request)), {},
+    const ElevatedResult r = run_disk_engine_forcing(this, task, qt_args(image::setup_again_args(request, table_id)), {},
                                                      tr("Force close and set up"));
     if (r.code == -2) return;
     status_->setText(outcome_text(r, tr("The disk is ready to use."), tr("The disk was not set up: it is in use."),

@@ -31,6 +31,8 @@ struct ElevatedResult {
     QStringList in_use;       // the drives in use it named
     QStringList volumes;      // the drives it set up (its "done" event)
     bool erased = false;      // its "done" event said the disk was erased completely
+    bool table_written = false;  // its "done" event said the setup had written a new partition table
+    QString table_id;            // and that table's id
     bool in_window = false;   // no progress channel: it ran in a window of its own
     bool ended = false;       // it ended (or did not start), and `code` tells how
     bool left_running = false;  // the window was closed (or Vaultik was) while it ran: it goes on

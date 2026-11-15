@@ -286,6 +286,8 @@ void ElevatedTaskDialog::on_line(const QString& line) {
             result_.status = qs(e.status);
             result_.message = qs(e.text);
             result_.erased = e.erased;
+            result_.table_written = e.table_written;
+            result_.table_id = qs(e.table_id);
             if (e.status == "in_use" && result_.in_use.isEmpty())
                 for (const std::string& v : e.volumes) result_.in_use << qs(v);
             if (e.status != "in_use")
@@ -447,6 +449,12 @@ void ElevatedTaskDialog::reject() {
     box.exec();
     if (box.clickedButton() != stop || !running_) return;
     if (lost_) return;  // it said so meanwhile
+    if (!can_cancel_) {
+        // A part that cannot be stopped began while the question was open.
+        note_->setText(tr("It could not be stopped any more: the previous part had finished."));
+        note_->show();
+        return;
+    }
     cancelling_ = true;
     cancel_ = true;
     button_->setEnabled(false);

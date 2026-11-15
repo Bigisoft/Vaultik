@@ -176,6 +176,10 @@ int cmd_disk_init(const Args& a) {
         }
     };
     const image::NewDiskResult r = image::init_disk(d, confirmed, image::protected_tool_disks(), o);
+    for (const std::string& w : r.warnings) {
+        if (!g_json) clear_status();
+        warning(w);
+    }
     std::string list;
     for (const std::string& v : r.volumes) list += (list.empty() ? "" : ", ") + v;
     if (g_json) {
@@ -306,14 +310,20 @@ int cmd_disk_wipe(const Args& a) {
             const std::vector<int> keep = image::protected_tool_disks();
             steps.open = [&] { return image::open_wipe_disk(d, confirmed, keep, force); };
             steps.list = [] { return image::list_tool_disks(); };
-            steps.init = [&](const image::DiskInfo& found, const image::DiskIdentity& pinned, const image::NewDiskOptions& n) {
-                image::NewDiskOptions with_steps = n;
+            steps.settle = [](const image::DiskInfo&, const image::NewDiskOptions& n) {
 #ifdef _WIN32
                 // The letter the erased volume had is free once Windows has let go of that volume,
-                // which may take a moment after the disk was seen blank.
-                for (int i = 0; i < 40 && n.letter != 0 && os::exists(std::string(1, n.letter) + ":\\"); ++i)
+                // which may take a moment after the disk was seen blank. Asked of the drive
+                // letters Windows has given (not whether something can be read there).
+                const auto taken = [&] { return !image::letter_problem(n.letter, image::used_drive_letters()).empty(); };
+                for (int i = 0; i < 40 && n.letter != 0 && taken(); ++i)
                     std::this_thread::sleep_for(std::chrono::milliseconds(250));
+#else
+                (void)n;
 #endif
+            };
+            steps.init = [&](const image::DiskInfo& found, const image::DiskIdentity& pinned, const image::NewDiskOptions& n) {
+                image::NewDiskOptions with_steps = n;
                 with_steps.on_step = [](const std::string& s) {
                     if (g_json) emit({{"event", "step"}, {"phase", "setup"}, {"message", s}});
                     else out(s + "...\n");
@@ -367,13 +377,22 @@ int cmd_disk_wipe(const Args& a) {
         return kExitCancelled;
     }
     if (!whole.set_up) {
-        const std::string failed = "Erased, but setting it up failed: " + whole.setup_error;
-        if (g_json) emit({{"event", "done"}, {"status", "setup_failed"}, {"erased", true}, {"message", failed}});
+        // Whether the setup had written the new partition table, and its id: setting it up
+        // again is pinned to that table then, and to a blank disk otherwise.
+        const std::string failed = "Erased, but setting it up failed: " + whole.setup_error +
+                                   (whole.table_written ? " (a new partition table was written, id " + whole.table_id + ")" : "");
+        if (g_json)
+            emit({{"event", "done"}, {"status", "setup_failed"}, {"erased", true}, {"table_written", whole.table_written},
+                  {"table_id", whole.table_id}, {"message", failed}});
         else {
             clear_status();
             err(msg + "\n" + failed + "\n");
         }
         return kExitSetupFailed;
+    }
+    for (const std::string& w : whole.setup.warnings) {
+        if (!g_json) clear_status();
+        warning(w);
     }
     std::string list;
     for (const std::string& v : whole.setup.volumes) list += (list.empty() ? "" : ", ") + volume_name(v);

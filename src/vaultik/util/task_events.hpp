@@ -10,7 +10,8 @@
 // fields are the ones the engine writes and the app's Runner reads: "progress" (done, total,
 // speed, seconds_left, pass, passes, verifying, current), "step" (message, and phase when a
 // task of several parts starts its next one, such as "setup" after an erase), "warning",
-// "in_use" (volumes) and "done" (status, message, volumes).
+// "in_use" (volumes) and "done" (status, message, volumes, and after an erase erased,
+// table_written and table_id).
 
 namespace vaultik {
 
@@ -30,6 +31,10 @@ struct TaskEvent {
     std::string status;  // done: success, failed, cancelled, in_use or setup_failed
     std::string phase;   // step: the part of the task it belongs to ("setup"); empty when not given
     bool erased = false;  // done: a whole disk was erased completely (also when its setup did not run or failed)
+    // done (setup_failed): the setup had written a new partition table, and its id ("gpt-<GUID>"),
+    // so the disk is not blank any more.
+    bool table_written = false;
+    std::string table_id;
     std::vector<std::string> volumes;  // in_use; done: the drives in use (in_use), or the ones set up
 };
 
