@@ -598,15 +598,17 @@ waits while another job uses that drive ("Waiting for another job on this drive"
 and starts when it is done, so three jobs on one USB drive do not share its speed and each take
 as long as all three together. The turn follows the drive's volume ID, not its letter, and holds
 between runs started by Task Scheduler or a systemd timer and runs started in the app. On Windows
-only your own account (and administrators and the system account) can take the turn, so another
-account cannot hold up your backups; jobs with administrator rights therefore take turns among
-themselves, not with your own runs (letting your account into their turn would let any account
-that may open it hold up every job with administrator rights). An eject still waits for them. On
-Linux every account shares the turn through /run/lock, so root's runs and your own prune or eject
-take turns too; as any account could hold that shared turn, a run as root waits for another
-account's run for 5 minutes at most and then goes on with a warning (both then share the drive's
-speed). A run gives up after waiting 12 hours, and a run that cannot take its turn at all (the
-system refuses it) goes on rather than not backing up. While a run only waits, the computer may
+jobs with administrator rights take turns with the runs of the account that set them up; other
+accounts cannot take or hold the turn, so they cannot hold up your backups. As a program of your
+own account could hold the turn, a job with administrator rights that waited the whole 12 hours
+goes on with a warning instead of giving up: it can be delayed, never stopped. A turn that
+another account made, or one your account may not open, is not waited for: the run goes on (and
+says so in its log), while an eject counts it as in use. On Linux root's runs take turns with
+the runs of every account through /run/lock, your own prune or eject too; as any account could
+hold that shared turn, a run as root waits for another account's run for 5 minutes at most and
+then goes on with a warning (both then share the drive's speed): it too can be delayed, never
+stopped. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
+all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
 go to sleep. A run started on its own that waited behind a run of the same job does nothing once
 that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a
 job's before or after command (a prune of the same drive, say) does not wait for the run that

@@ -27,6 +27,7 @@ std::string admin_store_dir(const std::string& sid = {});
 // is that account's. Throws Error unless this process runs as the system account and `sid` is an
 // account's SID. No-op on POSIX.
 // Also throws when that account is no longer an administrator of this computer, or is disabled.
+// The run then takes turns on a drive with that account's runs (set_drive_lock_account).
 void act_for_account(const std::string& sid);
 
 // Whether `sid` names an enabled account that is an administrator of this computer, directly or

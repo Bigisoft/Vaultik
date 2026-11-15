@@ -15,20 +15,24 @@
 // Scheduler, systemd timers and the app. The system releases it when the run ends, however it
 // ends (a run that crashed leaves nothing behind).
 //
-// Windows: named mutexes in the global namespace, which only this account, the system account and
-// administrators may open, and only one owned by one of them is used: another account cannot hold
-// the lock to stall this account's runs. (Jobs with administrator rights, run by the system
-// account, so do not wait for the user's own runs, nor the other way round: letting the user's
-// account open the system account's lock would let any account that may open it hold it, and so
-// stall every job with administrator rights.) An eject by the user still sees such a run: a lock
-// or claim that is there but may not be opened counts as busy for an eject.
-// Linux: flock on a file in /run/lock, the same for every account (root's runs, the user's
-// prunes and ejects). An account uses a file there that belongs to root or to itself (its own
-// are readable by it alone); root uses any. As any account that can open a file may hold its
-// flock, root's runs first take a lock of their own that only root may open, and then wait for
-// the shared one only a short while (kOtherAccountWait): whoever holds it then is not a root
-// run, and the run goes on with a warning instead of being stalled for hours. Where /run/lock
-// cannot be used, a file in the given folder (the user's settings) instead.
+// Windows: named mutexes in the global namespace (jobs with administrator rights run as the system
+// account, in a session of their own). Jobs with administrator rights take turns with the runs of
+// the account that set them up; other accounts cannot take or hold the turn. Each mutex is open to
+// the system account, the administrators and one account more, the one the run acts for (see
+// set_drive_lock_account), which may only wait for it and let go of it; and only one owned by one
+// of these three is used. Whoever makes it, it gets the same rights. One that is there but cannot
+// be shared (made by another account, or one this account may not open) is not waited for: a run
+// goes on without it, an eject counts it as busy. As the account's own programs can hold the
+// turn, a job with administrator rights that waited the whole wait goes on with a warning instead
+// of giving up: such a program can delay it, never stop it.
+// Linux: flock on a file in /run/lock, the same for every account: root's runs take turns with
+// the runs of every account (the user's prunes and ejects too). An account uses a file there that
+// belongs to root or to itself (its own are readable by it alone); root uses any. As any account
+// that can open a file may hold its flock, root's runs first take a lock of their own that only
+// root may open, and then wait for the shared one only a short while (kOtherAccountWait): whoever
+// holds it then is not a root run, and the run goes on with a warning. Another account can delay a
+// root run, never stop it. Where /run/lock cannot be used, a file in the given folder (the user's
+// settings) instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a
@@ -66,6 +70,26 @@ constexpr std::chrono::minutes kOtherAccountWait{5};
 // holds off new claims until the drive is gone, so the command then finds it gone).
 constexpr std::chrono::seconds kEjectWait{60};
 
+// Windows: the account whose runs share the drive's turn with this process (see above). A run as
+// the system account for an account ("run-job --admin --user <SID>") sets it once act_for_account
+// has checked that SID; empty: this process's own account again (none for the system account).
+// A no-op on POSIX.
+void set_drive_lock_account(const std::string& sid);
+// That account for a process of `process_sid` that was set `chosen`: `chosen`, else the process's
+// own account, but none (empty) for the system account (S-1-5-18).
+std::string drive_lock_account_for(const std::string& process_sid, const std::string& chosen);
+// The security descriptor (SDDL) of the drive's mutexes for that account, the same whoever makes
+// them: full rights for the system account and the administrators; the account (none when empty)
+// may wait for one and let go of it, never change who may open it.
+std::string drive_lock_sddl(const std::string& account);
+
+// How a DriveLock takes its turn. `run`: a backup, check, prune or restore, which goes on without
+// a lock that cannot be shared and gives up (DriveBusy) when the wait ends. `admin_run`: the same
+// for a job with administrator rights, except that it goes on without the lock when the wait ends
+// (gave_up_waiting()). `eject`: fails closed: a lock that is there but cannot be shared, or one
+// the parent run holds, counts as busy.
+enum class DriveLockMode { run, admin_run, eject };
+
 // The name part of the drive's lock objects (mutexes, files) for `key`: hex, the same for every
 // account.
 std::string drive_lock_name(const std::string& key);
@@ -84,12 +108,11 @@ public:
     // when the wait ends without the lock. When kHeldDrivesVariable names this drive, the lock is
     // tried without waiting: free (the run that passed it on has ended), it is taken as usual;
     // busy, the parent run holds it, and nothing waits (inherited()). Another DriveLock of this
-    // process on the drive (any thread) counts as busy. `lock_dir`: see above.
-    // `fail_closed` (an eject): a lock that is there but may not be opened (made by a run with
-    // administrator rights), or one the parent run holds, counts as busy; a run instead goes on.
+    // process on the drive (any thread) counts as busy. `lock_dir`: see above. `mode`: see
+    // DriveLockMode.
     DriveLock(const std::string& key, const std::string& lock_dir, std::chrono::milliseconds wait,
               const std::function<void()>& on_wait = {}, const std::function<bool()>& cancelled = {},
-              bool fail_closed = false);
+              DriveLockMode mode = DriveLockMode::run);
     ~DriveLock();
     DriveLock(const DriveLock&) = delete;
     DriveLock& operator=(const DriveLock&) = delete;
@@ -100,6 +123,11 @@ public:
     // Linux, root: the lock all accounts share was held by another account for kOtherAccountWait,
     // and the run goes on without it (holding root's own lock only).
     bool other_account_skipped() const { return skipped_; }
+    // Windows: the drive's lock is there but cannot be shared with this run (another account made
+    // it, or this account may not open it), and the run goes on without it.
+    bool not_shared() const { return not_shared_; }
+    // An admin_run that waited the whole wait and goes on without the lock.
+    bool gave_up_waiting() const { return gave_up_; }
 
     // The kHeldDrivesVariable entry for the commands this run starts: this lock's token added to
     // the ones it inherited. Empty name when it holds none.
@@ -111,6 +139,8 @@ private:
     bool waited_ = false;
     bool inherited_ = false;
     bool skipped_ = false;
+    bool not_shared_ = false;
+    bool gave_up_ = false;
     std::string hash_;
     std::string token_;
 };

@@ -8,6 +8,7 @@
 
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/jobs/alerts.hpp"
+#include "vaultik/jobs/drive_lock.hpp"
 #include "vaultik/jobs/scheduler.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
@@ -610,6 +611,8 @@ void act_for_account(const std::string& sid) {
                     "disabled), so the job does not run with administrator rights; an administrator can save it "
                     "again in Vaultik");
     acting_account() = sid;
+    // Its runs and this one take turns on a drive (see jobs/drive_lock.hpp).
+    set_drive_lock_account(sid);
 #else
     (void)sid;
 #endif

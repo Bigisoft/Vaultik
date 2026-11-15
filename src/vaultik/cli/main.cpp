@@ -2540,8 +2540,11 @@ std::string g_awake_reason;
 std::pair<std::string, std::string> g_held_drive_env;
 
 // Takes the lock of the backup drive behind `key` (see jobs/drive_lock.hpp) for this run, waiting
-// while another run uses the drive and saying so. Stopping the run stops the wait.
-std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::string& settings_dir) {
+// while another run uses the drive and saying so. Stopping the run stops the wait. `admin` (a job
+// with administrator rights, --admin): when the wait ends it goes on without the lock, with a
+// warning, instead of giving up, since a program of the account it shares the turn with may hold
+// it.
+std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::string& settings_dir, bool admin = false) {
     auto lock = std::make_unique<jobs::DriveLock>(
         key, os::join(settings_dir, "locks"), std::chrono::duration_cast<std::chrono::milliseconds>(jobs::kDriveLockWait),
         [] {
@@ -2553,12 +2556,23 @@ std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::s
         [] {
             if (stop_requested()) throw Cancelled();
             return false;
-        });
+        },
+        admin ? jobs::DriveLockMode::admin_run : jobs::DriveLockMode::run);
     if (lock->waited() && g_awake != nullptr && !g_awake->has_value() && !g_awake_reason.empty())
         g_awake->emplace(g_awake_reason);
     if (lock->other_account_skipped())
         warning("another account kept the backup drive's turn for " + std::to_string(jobs::kOtherAccountWait.count()) +
                 " minutes; this run goes on without waiting for it (both then share the drive's speed)");
+    if (lock->gave_up_waiting())
+        warning("another run kept the backup drive's turn for " + std::to_string(jobs::kDriveLockWait.count()) +
+                " hours; this job with administrator rights goes on without waiting for it (both then share the "
+                "drive's speed)");
+    if (lock->not_shared()) {
+        // Not a warning: the run is as it was before runs shared their turn.
+        const std::string msg = "could not share this drive's turn with another account's runs";
+        if (jobs::RunLog* log = g_run_log.load()) log->line(msg);
+        else if (!g_json) err(msg + "\n");
+    }
     g_held_drive_env = lock->child_environment();
     return lock;
 }
@@ -2999,7 +3013,7 @@ int cmd_check_job(const Args& a) {
     std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
     try {
-        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir(), a.has("--admin"));
         repo = open_job_repo(a, store, *job);
         code = health_check(*repo, *job, record.kind, record, store.dir(), check_how(a, a.has("--scheduled")));
     } catch (const LockedError&) {
@@ -3043,7 +3057,7 @@ int cmd_test_restore(const Args& a) {
     std::unique_ptr<jobs::DriveLock> drive_lock;
     std::unique_ptr<Repository> repo;
     try {
-        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir(), a.has("--admin"));
         repo = open_job_repo(a, store, *job);
         code = restore_check(a, store, *repo, *job, record);
     } catch (const LockedError&) {
@@ -3425,7 +3439,7 @@ int cmd_run_job(const Args& a) {
     // Every warning of this run, in full, in its own log file (named by the run's history records).
     RunLogScope run_log(store.dir(), job->id, record.started);
     try {
-        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir());
+        drive_lock = lock_drive(jobs::drive_lock_key(*job), store.dir(), a.has("--admin"));
         // Started on its own and queued behind another run on the drive: when that was a run of
         // this very job that saved a version meanwhile (a scheduled run and one on connecting the
         // drive at once, say), or the event that started it is no longer due, there is nothing

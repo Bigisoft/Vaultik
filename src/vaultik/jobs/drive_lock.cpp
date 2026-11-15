@@ -9,6 +9,7 @@
 #include "vaultik/crypto/crypto.hpp"
 #include "vaultik/crypto/hash.hpp"
 #include "vaultik/jobs/job.hpp"
+#include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/cloud.hpp"
 #include "vaultik/util/hex.hpp"
@@ -93,29 +94,54 @@ bool used_in_process(const std::string& hash) {
 }
 
 #ifdef _WIN32
+// The account set with set_drive_lock_account (empty: none).
+struct ChosenAccount {
+    std::mutex mu;
+    std::string sid;
+};
+
+ChosenAccount& chosen_account() {
+    static ChosenAccount* const c = new ChosenAccount;
+    return *c;
+}
+
 constexpr int kClaimSlots = 32;
 
-// This process's account, as a SID ("S-1-5-21-..."); empty when it cannot be told.
-std::vector<std::uint8_t> user_sid() {
-    HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return {};
-    DWORD size = 0;
-    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
-    std::vector<std::uint8_t> info(size);
-    std::vector<std::uint8_t> out;
-    if (size > 0 && GetTokenInformation(token, TokenUser, info.data(), size, &size)) {
-        const PSID sid = reinterpret_cast<TOKEN_USER*>(info.data())->User.Sid;
-        const DWORD length = GetLengthSid(sid);
-        out.resize(length);
-        if (!CopySid(length, out.data(), sid)) out.clear();
+std::wstring wide(const std::string& ascii) {
+    return std::wstring(ascii.begin(), ascii.end());
+}
+
+// The account whose runs share the drive's turn (see set_drive_lock_account); empty: none.
+std::string lock_account() {
+    std::string chosen;
+    {
+        ChosenAccount& c = chosen_account();
+        std::lock_guard<std::mutex> lock(c.mu);
+        chosen = c.sid;
     }
-    CloseHandle(token);
+    std::string mine;
+    try {
+        mine = os::current_user_sid();
+    } catch (const std::exception&) {
+    }
+    return drive_lock_account_for(mine, chosen);
+}
+
+// `sid` ("S-1-5-21-...") in binary form; empty when it is not a SID.
+std::vector<std::uint8_t> sid_bytes(const std::string& sid) {
+    std::vector<std::uint8_t> out;
+    PSID bin = nullptr;
+    if (sid.empty() || !ConvertStringSidToSidW(wide(sid).c_str(), &bin)) return out;
+    const DWORD length = GetLengthSid(bin);
+    out.resize(length);
+    if (!CopySid(length, out.data(), bin)) out.clear();
+    LocalFree(bin);
     return out;
 }
 
-// Only an object this account, the system account or the administrators own is used: one made by
-// another account (to hold it and stall this account's runs) is not.
-bool trusted_owner(HANDLE object, const std::vector<std::uint8_t>& me) {
+// Only an object the system account, the administrators or the account whose runs share the turn
+// own is used: one made by another account (to hold it and stall these runs) is not.
+bool trusted_owner(HANDLE object, const std::vector<std::uint8_t>& account) {
     PSID owner = nullptr;
     PSECURITY_DESCRIPTOR sd = nullptr;
     if (GetSecurityInfo(object, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr, nullptr, &sd) !=
@@ -123,50 +149,62 @@ bool trusted_owner(HANDLE object, const std::vector<std::uint8_t>& me) {
         return false;
     const bool ok = owner != nullptr &&
                     (IsWellKnownSid(owner, WinLocalSystemSid) || IsWellKnownSid(owner, WinBuiltinAdministratorsSid) ||
-                     (!me.empty() && EqualSid(owner, const_cast<std::uint8_t*>(me.data()))));
+                     (!account.empty() && EqualSid(owner, const_cast<std::uint8_t*>(account.data()))));
     LocalFree(sd);
     return ok;
 }
 
-// Opens the named mutex, making it when it is not there yet (`create`), so that only this
-// account, the system account and administrators may open it. Null when it cannot be used;
-// `denied` then says whether it is there but this account may not open it (one a run with
-// administrator rights made, say).
-HANDLE open_mutex(const std::wstring& name, bool create, bool* denied = nullptr) {
-    if (denied != nullptr) *denied = false;
-    const std::vector<std::uint8_t> me = user_sid();
+// What open_mutex found. `denied`: there, but this account may not open it (made before runs
+// shared their turn, or by another account); `untrusted`: there, owned by nobody to trust; `none`:
+// not there (and not to be made); `error`: anything else (the name taken by another kind of
+// object, say).
+enum class Opened { ok, denied, untrusted, none, error };
+
+struct Mutex {
+    HANDLE handle = nullptr;
+    Opened status = Opened::error;
+};
+
+// Opens the named mutex, making it when it is not there yet (`create`) with the same rights
+// whoever makes it (drive_lock_sddl). A handle only with Opened::ok.
+Mutex open_mutex(const std::wstring& name, bool create) {
+    const std::string account = lock_account();
+    const std::vector<std::uint8_t> sid = sid_bytes(account);
+    if (!account.empty() && sid.empty()) return {};
+    // Wait for it and let go of it, and read who owns it; never more.
     constexpr DWORD kAccess = SYNCHRONIZE | MUTEX_MODIFY_STATE | READ_CONTROL;
+    static_assert(kAccess == 0x120001);
     HANDLE m = nullptr;
-    bool refused = false;
+    DWORD error = ERROR_FILE_NOT_FOUND;
     if (create) {
-        std::wstring sddl = L"D:(A;;GA;;;SY)(A;;GA;;;BA)";
-        LPWSTR mine = nullptr;
-        if (!me.empty() && ConvertSidToStringSidW(const_cast<std::uint8_t*>(me.data()), &mine)) {
-            sddl += L"(A;;GA;;;" + std::wstring(mine) + L")";
-            LocalFree(mine);
-        }
-        SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, FALSE};
         PSECURITY_DESCRIPTOR sd = nullptr;
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sd, nullptr))
-            sa.lpSecurityDescriptor = sd;
+        if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(wide(drive_lock_sddl(account)).c_str(), SDDL_REVISION_1,
+                                                                  &sd, nullptr))
+            return {};
+        SECURITY_ATTRIBUTES sa{sizeof sa, sd, FALSE};
         m = CreateMutexExW(&sa, name.c_str(), 0, kAccess);
-        if (m == nullptr) refused = GetLastError() == ERROR_ACCESS_DENIED;
-        if (sd != nullptr) LocalFree(sd);
+        if (m == nullptr) error = GetLastError();
+        LocalFree(sd);
     }
     if (m == nullptr) {
         m = OpenMutexW(kAccess, FALSE, name.c_str());
-        if (m == nullptr && GetLastError() == ERROR_ACCESS_DENIED) refused = true;
-        if (m == nullptr && denied != nullptr) *denied = refused;
+        if (m == nullptr) error = GetLastError();
     }
-    if (m != nullptr && !trusted_owner(m, me)) {
+    if (m == nullptr) {
+        if (error == ERROR_ACCESS_DENIED) return {nullptr, Opened::denied};
+        if (!create && error == ERROR_FILE_NOT_FOUND) return {nullptr, Opened::none};
+        return {};
+    }
+    if (!trusted_owner(m, sid)) {
         CloseHandle(m);
-        m = nullptr;
+        return {nullptr, Opened::untrusted};
     }
-    return m;
+    return {m, Opened::ok};
 }
 
-std::wstring wide(const std::string& ascii) {
-    return std::wstring(ascii.begin(), ascii.end());
+// There, but not to be shared with this account's runs.
+bool not_to_share(const Mutex& m) {
+    return m.status == Opened::denied || m.status == Opened::untrusted;
 }
 
 std::wstring slot_name(const std::string& hash, int slot) {
@@ -244,6 +282,30 @@ std::string drive_lock_name(const std::string& key) {
     return key_hash(key);
 }
 
+void set_drive_lock_account(const std::string& sid) {
+#ifdef _WIN32
+    ChosenAccount& c = chosen_account();
+    std::lock_guard<std::mutex> lock(c.mu);
+    c.sid = sid;
+#else
+    (void)sid;
+#endif
+}
+
+std::string drive_lock_account_for(const std::string& process_sid, const std::string& chosen) {
+    if (!chosen.empty()) return chosen;
+    if (process_sid == "S-1-5-18") return {};  // the system account acts for nobody unless told
+    return process_sid;
+}
+
+std::string drive_lock_sddl(const std::string& account) {
+    // Protected, and no SACL. 0x120001: SYNCHRONIZE, READ_CONTROL and MUTEX_MODIFY_STATE, never
+    // WRITE_DAC, WRITE_OWNER or DELETE.
+    std::string sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)";
+    if (!account.empty()) sddl += "(A;;0x120001;;;" + account + ")";
+    return sddl;
+}
+
 std::string drive_lock_key(const std::string& location, const std::string& volume) {
     if (location.empty() || is_cloud_location(location)) return {};
     if (!volume.empty()) return volume;
@@ -267,13 +329,14 @@ std::string drive_lock_key(const Job& job) {
 }
 
 DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::chrono::milliseconds wait,
-                     const std::function<void()>& on_wait, const std::function<bool()>& cancelled, bool fail_closed) {
+                     const std::function<void()>& on_wait, const std::function<bool()>& cancelled, DriveLockMode mode) {
     if (key.empty()) return;
     const std::string hash = key_hash(key);
     // Named by the run that started this command: tried without waiting. Busy, that run holds the
     // drive and waits for this command to end; free, it ended (this command outlived it) and the
     // lock is taken as usual.
     const bool parent = named_by_parent(hash);
+    const bool fail_closed = mode == DriveLockMode::eject;
     const auto busy_now = [&] {
         if (parent && !fail_closed) {
             inherited_ = true;
@@ -282,13 +345,21 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         return false;
     };
     const auto deadline = std::chrono::steady_clock::now() + wait;
+    // Once more around the wait; false: a job with administrator rights waited the whole wait and
+    // goes on without the lock.
     const auto waiting = [&] {
         if (parent && fail_closed) throw DriveBusy("the run that started this command uses the backup drive");
         if (!waited_ && on_wait) on_wait();
         waited_ = true;
         if (cancelled && cancelled()) throw Error("cancelled");
-        if (std::chrono::steady_clock::now() >= deadline)
+        if (std::chrono::steady_clock::now() >= deadline) {
+            if (mode == DriveLockMode::admin_run) {
+                gave_up_ = true;
+                return false;
+            }
             throw DriveBusy("another Vaultik run kept the backup drive busy for too long; try again later");
+        }
+        return true;
     };
     const auto pause = [&](std::chrono::milliseconds most) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
@@ -296,8 +367,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     };
     // Another DriveLock of this process first (it may be this very thread).
     while (!take_in_process_lock(hash)) {
-        if (busy_now()) return;
-        waiting();
+        if (busy_now() || !waiting()) return;
         pause(std::chrono::milliseconds(100));
     }
     // From here, returning without a handle lets go of the in-process part again.
@@ -313,15 +383,19 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     const std::string token = hash + ":" + to_hex(ByteSpan(rnd, sizeof rnd));
 #ifdef _WIN32
     (void)lock_dir;
-    bool denied = false;
-    HANDLE m = open_mutex(L"Global\\Vaultik-drive-" + wide(hash), true, &denied);
-    if (m == nullptr) {
-        // There, but made by a run this account may not open (one with administrator rights): it
-        // runs now. An eject waits for nothing; a run goes on without the lock, as before.
-        if (denied && busy_now()) return;
-        if (denied && fail_closed) throw DriveBusy("a run with administrator rights uses the backup drive");
+    const Mutex opened = open_mutex(L"Global\\Vaultik-drive-" + wide(hash), true);
+    if (opened.handle == nullptr) {
+        // There, but not to be shared with this account's runs (another account made it, or this
+        // one may not open it): never waited for, nor taken over. An eject counts it as busy; a
+        // run goes on without the lock.
+        if (not_to_share(opened)) {
+            if (busy_now()) return;
+            if (fail_closed) throw DriveBusy("a run this account cannot see into uses the backup drive");
+            not_shared_ = true;
+        }
         return;  // no lock to share (the runs then overlap, as before)
     }
+    HANDLE m = opened.handle;
     for (;;) {
         const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
         const DWORD slice = static_cast<DWORD>(std::clamp<long long>(left.count(), 0, 1000));
@@ -342,7 +416,10 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             return;
         }
         try {
-            waiting();
+            if (!waiting()) {
+                CloseHandle(m);
+                return;
+            }
         } catch (...) {
             CloseHandle(m);
             throw;
@@ -371,7 +448,10 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             return;
         }
         try {
-            waiting();
+            if (!waiting()) {
+                close_all();
+                return;
+            }
         } catch (...) {
             close_all();
             throw;
@@ -396,7 +476,10 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 break;
             }
             try {
-                waiting();
+                if (!waiting()) {
+                    close_all();
+                    return;
+                }
             } catch (...) {
                 close_all();
                 throw;
@@ -445,8 +528,8 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         // A claim takes one of a few slots; an eject looks at all of them.
         HANDLE held = nullptr;
         for (int slot = 0; slot < kClaimSlots && held == nullptr; ++slot) {
-            HANDLE m = open_mutex(slot_name(hash, slot), true);
-            if (m == nullptr) continue;
+            const HANDLE m = open_mutex(slot_name(hash, slot), true).handle;
+            if (m == nullptr) continue;  // one that cannot be shared: another slot
             const DWORD r = WaitForSingleObject(m, 0);
             if (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED) held = m;
             else CloseHandle(m);
@@ -456,8 +539,8 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         // under way now may not have seen this slot, so it is waited for (and the drive is then
         // gone, which the command finds).
         for (;;) {
-            bool denied = false;
-            HANDLE e = open_mutex(eject_name(hash), false, &denied);
+            const Mutex eject = open_mutex(eject_name(hash), false);
+            const HANDLE e = eject.handle;
             if (e != nullptr) {
                 const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(until - std::chrono::steady_clock::now());
                 const DWORD r = WaitForSingleObject(e, static_cast<DWORD>(std::clamp<long long>(left.count(), 0, 60000)));
@@ -465,8 +548,8 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 CloseHandle(e);
                 break;
             }
-            // Not there (no eject), or made by an eject with administrator rights: waited for.
-            if (!denied || std::chrono::steady_clock::now() >= until) break;
+            // Not there (no eject), or made by an eject this account may not open: waited for.
+            if (eject.status != Opened::denied || std::chrono::steady_clock::now() >= until) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
         handle_ = held;
@@ -515,8 +598,8 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
 #ifdef _WIN32
     (void)lock_dir;
     // The eject's own mutex first: a claim taken from now on waits for it (see DriveClaim).
-    bool denied = false;
-    HANDLE e = open_mutex(eject_name(hash), true, &denied);
+    const Mutex eject = open_mutex(eject_name(hash), true);
+    HANDLE e = eject.handle;
     if (e != nullptr) {
         const DWORD r = WaitForSingleObject(e, 0);
         if (r != WAIT_OBJECT_0 && r != WAIT_ABANDONED) {
@@ -524,15 +607,16 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
             e = nullptr;
             busy_ = true;  // another eject is under way
         }
-    } else if (denied) {
-        busy_ = true;  // an eject with administrator rights is under way
+    } else if (not_to_share(eject)) {
+        busy_ = true;  // one this account cannot see into: as if another eject were under way
     }
     for (int slot = 0; slot < kClaimSlots && !busy_; ++slot) {
-        HANDLE m = open_mutex(slot_name(hash, slot), false, &denied);
+        const Mutex slot_mutex = open_mutex(slot_name(hash, slot), false);
+        const HANDLE m = slot_mutex.handle;
         if (m == nullptr) {
-            // Never made, or made by nobody to trust; there but not to be opened by this account
-            // (a command with administrator rights holds it): in use.
-            if (denied) busy_ = true;
+            // Never made (or not a mutex): free. There but not to be shared with this account
+            // (another account made it, or this one may not open it): in use (fail closed).
+            if (not_to_share(slot_mutex)) busy_ = true;
             continue;
         }
         const DWORD r = WaitForSingleObject(m, 0);
