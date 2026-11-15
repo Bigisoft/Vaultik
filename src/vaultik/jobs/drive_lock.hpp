@@ -22,9 +22,10 @@
 // set_drive_lock_account), which may only wait for it and let go of it; and only one owned by one
 // of these three is used. Whoever makes it, it gets the same rights. One that is there but cannot
 // be shared (made by another account, or one this account may not open) is not waited for: a run
-// goes on without it, an eject counts it as busy. As the account's own programs can hold the
-// turn, a job with administrator rights that waited the whole wait goes on with a warning instead
-// of giving up: such a program can delay it, never stop it.
+// goes on without it, an eject counts it as busy; so does a name taken by another kind of object
+// (an event, say). As the account's own programs can hold the turn, a job with administrator
+// rights that waited the whole wait goes on with a warning instead of giving up: such a program
+// can delay it, never stop it.
 // Linux: flock on a file in /run/lock, the same for every account: root's runs take turns with
 // the runs of every account (the user's prunes and ejects too). An account uses a file there that
 // belongs to root or to itself (its own are readable by it alone); root uses any. As any account

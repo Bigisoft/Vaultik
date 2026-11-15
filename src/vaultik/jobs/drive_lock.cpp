@@ -159,10 +159,11 @@ bool trusted_owner(HANDLE object, const std::vector<std::uint8_t>& account) {
 }
 
 // What open_mutex found. `denied`: there, but this account may not open it (made before runs
-// shared their turn, or by another account); `untrusted`: there, owned by nobody to trust; `none`:
-// not there (and not to be made); `error`: anything else (the name taken by another kind of
-// object, say).
-enum class Opened { ok, denied, untrusted, none, error };
+// shared their turn, or by another account); `untrusted`: there, owned by nobody to trust;
+// `wrong_type`: the name is taken by another kind of object (an event, say, which any account may
+// make to keep the name from Vaultik); `none`: not there (and not to be made); `error`: anything
+// else.
+enum class Opened { ok, denied, untrusted, wrong_type, none, error };
 
 struct Mutex {
     HANDLE handle = nullptr;
@@ -196,6 +197,7 @@ Mutex open_mutex(const std::wstring& name, bool create) {
     }
     if (m == nullptr) {
         if (error == ERROR_ACCESS_DENIED) return {nullptr, Opened::denied};
+        if (error == ERROR_INVALID_HANDLE) return {nullptr, Opened::wrong_type};
         if (!create && error == ERROR_FILE_NOT_FOUND) return {nullptr, Opened::none};
         return {};
     }
@@ -209,6 +211,12 @@ Mutex open_mutex(const std::wstring& name, bool create) {
 // There, but not to be shared with this account's runs.
 bool not_to_share(const Mutex& m) {
     return m.status == Opened::denied || m.status == Opened::untrusted;
+}
+
+// Busy for an eject (fail closed): one not to be shared, or a name taken by another kind of object,
+// behind which a run or command may be (it got no lock or claim there either).
+bool busy_for_eject(const Mutex& m) {
+    return not_to_share(m) || m.status == Opened::wrong_type;
 }
 
 std::wstring slot_name(const std::string& hash, int slot) {
@@ -465,11 +473,12 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     if (opened.handle == nullptr) {
         // There, but not to be shared with this account's runs (another account made it, or this
         // one may not open it): never waited for, nor taken over. An eject counts it as busy; a
-        // run goes on without the lock.
-        if (not_to_share(opened)) {
+        // run goes on without the lock. So does a name taken by another kind of object, behind
+        // which runs go on without the lock too.
+        if (busy_for_eject(opened)) {
             if (busy_now()) return;
             if (fail_closed) throw DriveBusy("a run this account cannot see into uses the backup drive");
-            not_shared_ = true;
+            if (not_to_share(opened)) not_shared_ = true;
         }
         return;  // no lock to share (the runs then overlap, as before)
     }
@@ -745,16 +754,17 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
             e = nullptr;
             busy_ = true;  // another eject is under way
         }
-    } else if (not_to_share(eject)) {
+    } else if (busy_for_eject(eject)) {
         busy_ = true;  // one this account cannot see into: as if another eject were under way
     }
     for (int slot = 0; slot < kClaimSlots && !busy_; ++slot) {
         const Mutex slot_mutex = open_mutex(slot_name(hash, slot), false);
         const HANDLE m = slot_mutex.handle;
         if (m == nullptr) {
-            // Never made (or not a mutex): free. There but not to be shared with this account
-            // (another account made it, or this one may not open it): in use (fail closed).
-            if (not_to_share(slot_mutex)) busy_ = true;
+            // Never made: free. There but not to be shared with this account (another account made
+            // it, or this one may not open it), or the name taken by another kind of object: in use
+            // (fail closed).
+            if (busy_for_eject(slot_mutex)) busy_ = true;
             continue;
         }
         const DWORD r = WaitForSingleObject(m, 0);

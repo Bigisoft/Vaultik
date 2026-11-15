@@ -603,7 +603,8 @@ accounts cannot take or hold the turn, so they cannot hold up your backups. As a
 own account could hold the turn, a job with administrator rights that waited the whole 12 hours
 goes on with a warning instead of giving up: it can be delayed, never stopped. A turn that
 another account made, or one your account may not open, is not waited for: the run goes on (and
-says so in its log), while an eject counts it as in use. On Linux root's runs take turns with
+says so in its log), while an eject counts it as in use, as it does when another program took the
+turn's name for something else. On Linux root's runs take turns with
 the runs of every account through /run/lock, your own prune or eject too; as any account could
 hold that shared turn, a run waits for another account's run for 5 minutes at most and then goes
 on with a warning (both then share the drive's speed): it too can be delayed, never stopped. Your

@@ -1944,17 +1944,23 @@ TEST_CASE("drive lock: a run that ended without letting go leaves the turn to th
     CloseHandle(keep);
 }
 
-TEST_CASE("drive lock: a name taken by another kind of object is passed by (Windows)") {
+TEST_CASE("drive lock: a name taken by another kind of object is passed by, an eject counts it as busy (Windows)") {
     TempStore tmp;
     fs::create_directories(tmp.path);
     const std::string key = "test-event-" + tmp.path.filename().string();
     const std::wstring hash = wide(drive_lock_name(key));
     const std::string dir = os::join(tmp.dir(), "locks");
-    HANDLE events[3] = {CreateEventW(nullptr, TRUE, FALSE, (L"Global\\Vaultik-drive-" + hash).c_str()),
-                        CreateEventW(nullptr, TRUE, FALSE, (L"Global\\Vaultik-use-" + hash + L"-0").c_str()),
-                        CreateEventW(nullptr, TRUE, FALSE, (L"Global\\Vaultik-eject-" + hash).c_str())};
-    for (HANDLE e : events) REQUIRE(e != nullptr);
+    const auto event = [](const std::wstring& name) {
+        HANDLE e = CreateEventW(nullptr, TRUE, FALSE, name.c_str());
+        REQUIRE(e != nullptr);
+        return e;
+    };
+    // Taken by another account (here by this test) before any run of Vaultik.
+    HANDLE drive = event(L"Global\\Vaultik-drive-" + hash);
+    HANDLE eject = event(L"Global\\Vaultik-eject-" + hash);
+    std::vector<HANDLE> slots = {event(L"Global\\Vaultik-use-" + hash + L"-0")};
     {
+        // Runs go on without the lock (as before runs took turns).
         DriveLock run(key, dir, std::chrono::milliseconds(0));
         CHECK_FALSE(run.held());
         CHECK_FALSE(run.waited());
@@ -1965,8 +1971,33 @@ TEST_CASE("drive lock: a name taken by another kind of object is passed by (Wind
         CHECK(claim.held());  // another slot
         CHECK(drive_claimed(key, dir));
     }
+    // An eject fails closed: a run or command may be behind such a name, without a lock or claim.
+    CHECK_THROWS_AS(DriveLock(key, dir, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+    CHECK(drive_claimed(key, dir));
+    // Every name taken: no claim, and an eject still never sees the drive as free.
+    for (int slot = 1; slot < 32; ++slot)
+        slots.push_back(event(L"Global\\Vaultik-use-" + hash + L"-" + std::to_wstring(slot)));
+    {
+        DriveClaim claim(key, dir);
+        CHECK_FALSE(claim.held());
+        CHECK(drive_claimed(key, dir));
+        EjectHold hold(key, dir);
+        CHECK(hold.busy());
+    }
+    // Only the eject's name: busy, as if another eject were under way.
+    for (HANDLE e : slots) CloseHandle(e);
+    CloseHandle(drive);
+    CHECK(drive_claimed(key, dir));
+    {
+        DriveLock eject_lock(key, dir, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject);
+        CHECK(eject_lock.held());
+    }
+    // Only one slot's name: busy too.
+    CloseHandle(eject);
+    slots = {event(L"Global\\Vaultik-use-" + hash + L"-7")};
+    CHECK(drive_claimed(key, dir));
+    CloseHandle(slots[0]);
     CHECK_FALSE(drive_claimed(key, dir));
-    for (HANDLE e : events) CloseHandle(e);
 }
 #else
 TEST_CASE("drive lock: the files in /run/lock are shared, opened without being made again") {
