@@ -959,6 +959,98 @@ TEST_CASE("pausing a job: when its schedule cannot be changed, it is saved back 
     CHECK(j.schedule.paused);
 }
 
+TEST_CASE("a drive away for days is alerted as missing, once a day, also for the second copy") {
+    constexpr std::uint64_t day = 864'000'000'000ull;
+    const std::uint64_t now = 1000 * day;
+    AlertSettings s;
+    s.webhook_url = "https://example.com/hook";
+    Job j = sample();
+    j.schedule.kind = Schedule::Kind::Daily;
+    CHECK(drive_wait_alert_days(j) == 3);
+
+    // A job that never saved a version: only the first record of the wait is kept.
+    std::vector<RunRecord> history = {waiting_for_drive_record(RunKind::Backup, now - 2 * day, "E:\\Backup")};
+    CHECK(waiting_since(history, RunKind::Backup) == now - 2 * day);
+    CHECK_FALSE(drive_missing_alert(s, j, history, RunKind::Backup, now, "pc").has_value());  // 2 days: quiet
+    const auto a = drive_missing_alert(s, j, history, RunKind::Backup, now + day, "pc");
+    REQUIRE(a.has_value());
+    CHECK(a->event == "drive-missing");
+    CHECK(a->level == Alert::Level::Critical);
+    CHECK(a->title.find("missing for 3 days") != std::string::npos);
+    CHECK(a->message.find("E:") == std::string::npos);  // no paths leave the computer
+    CHECK(alert_repeats(a->event));
+    // Not for a paused job, nor without "on failure", nor once a backup ran after the wait.
+    Job paused = j;
+    paused.schedule.paused = true;
+    CHECK_FALSE(drive_missing_alert(s, paused, history, RunKind::Backup, now + day, "pc").has_value());
+    AlertSettings quiet = s;
+    quiet.on_failure = false;
+    CHECK_FALSE(drive_missing_alert(quiet, j, history, RunKind::Backup, now + day, "pc").has_value());
+    RunRecord saved;
+    saved.started = now - day;
+    saved.finished = now - day + 10;
+    std::vector<RunRecord> back = history;
+    back.push_back(saved);
+    CHECK_FALSE(waiting_since(back, RunKind::Backup).has_value());
+    CHECK_FALSE(drive_missing_alert(s, j, back, RunKind::Backup, now + 5 * day, "pc").has_value());
+
+    // The second copy waits on its own: the backups ran, its drive stayed away.
+    std::vector<RunRecord> copy = {saved, waiting_for_drive_record(RunKind::Copy, now - 4 * day, "F:\\Copy"), saved};
+    CHECK_FALSE(waiting_since(copy, RunKind::Backup).has_value());
+    CHECK(waiting_since(copy, RunKind::Copy) == now - 4 * day);
+    const auto c = drive_missing_alert(s, j, copy, RunKind::Copy, now, "pc");
+    REQUIRE(c.has_value());
+    CHECK(c->title.find("second copy") != std::string::npos);
+
+    // A weekly job waits a week before it counts as missing.
+    j.schedule.kind = Schedule::Kind::Weekly;
+    j.schedule.weekdays = 1;  // Mondays
+    CHECK(drive_wait_alert_days(j) == 8);
+    CHECK_FALSE(drive_missing_alert(s, j, history, RunKind::Backup, now + 3 * day, "pc").has_value());
+
+    // At most once a day per job and kind; the others are not held up by it.
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "drive-missing", now));
+    CHECK_FALSE(alert_once_a_day(tmp.dir(), "docs", "drive-missing", now + day / 2));
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "password", now + day / 2));
+    CHECK(alert_once_a_day(tmp.dir(), "photos", "drive-missing", now + day / 2));
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "drive-missing", now + day));
+    CHECK_FALSE(alert_once_a_day(tmp.dir(), "docs", "drive-missing", now + day + 1));
+}
+
+TEST_CASE("alerts that repeat while their cause lasts go out once a day: password, unfinished check") {
+    AlertSettings s;
+    s.webhook_url = "https://example.com/hook";
+    const RunRecord pw = password_not_saved_record(5);
+    const auto a = alert_for_run(s, "Docs", pw, "pc");
+    REQUIRE(a.has_value());
+    CHECK(alert_repeats(a->event));
+    RunRecord check;
+    check.kind = RunKind::Check;
+    check.status = RunStatus::Failed;
+    const auto c = alert_for_run(s, "Docs", check, "pc");
+    REQUIRE(c.has_value());
+    CHECK(c->event == "check-failed");
+    CHECK(alert_repeats(c->event));
+    // Damage, a failed backup and ransomware signs are news every time.
+    CHECK_FALSE(alert_repeats("damage"));
+    CHECK_FALSE(alert_repeats("failed"));
+    CHECK_FALSE(alert_repeats("ransomware"));
+
+    constexpr std::uint64_t day = 864'000'000'000ull;
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    int sent = 0;
+    for (int run = 0; run < 24; ++run)  // hourly runs, all failing the same way
+        sent += alert_once_a_day(tmp.dir(), "docs", "password", 100 * day + static_cast<std::uint64_t>(run) * (day / 24));
+    CHECK(sent == 1);
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "password", 101 * day));
+    // A clock set back does not silence it for good.
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "check-failed", 200 * day));
+    CHECK(alert_once_a_day(tmp.dir(), "docs", "check-failed", 50 * day));
+}
+
 TEST_CASE("drive lock: two runs for the same drive take turns, other drives do not wait") {
     TempStore tmp;
     const std::string dir = tmp.dir();

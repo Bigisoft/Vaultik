@@ -2,6 +2,7 @@
 
 #include "vaultik/jobs/admin_jobs.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <thread>
@@ -75,8 +76,8 @@ std::string size_text(std::uint64_t bytes) {
 
 std::optional<Alert> alert_for_run(const AlertSettings& s, const std::string& job_name, const RunRecord& r,
                                    const std::string& computer) {
-    // Nothing to tell: no channel, or a run that only waited for its drive (the overdue reminder
-    // is what speaks up when that goes on too long).
+    // Nothing to tell: no channel, or a run that only waited for its drive (drive_missing_alert
+    // speaks up when that goes on too long).
     if (!s.any() || r.status == RunStatus::Waiting) return std::nullopt;
     Alert a;
     a.job = job_name;
@@ -144,6 +145,88 @@ std::optional<Alert> alert_for_run(const AlertSettings& s, const std::string& jo
     }
     a.title += " (" + computer + ")";
     return a;
+}
+
+std::optional<std::uint64_t> waiting_since(const std::vector<RunRecord>& history, RunKind kind) {
+    std::optional<std::uint64_t> since;
+    for (auto it = history.rbegin(); it != history.rend(); ++it) {
+        if (it->kind != kind) continue;
+        if (it->status != RunStatus::Waiting) break;  // the wait began after this run
+        since = it->started;
+    }
+    return since;
+}
+
+int drive_wait_alert_days(const Job& job) {
+    int days = 3;
+    if (job.schedule.kind == Schedule::Kind::Weekly) {
+        // The longest gap between the chosen weekdays, plus a day.
+        int gap = 0, longest = 0;
+        for (int i = 0; i < 14; ++i) {
+            if (job.schedule.weekdays & (1u << (i % 7))) {
+                longest = std::max(longest, gap);
+                gap = 1;
+            } else {
+                ++gap;
+            }
+        }
+        days = std::max(days, std::max(1, longest) + 1);
+    }
+    return days;
+}
+
+std::optional<Alert> drive_missing_alert(const AlertSettings& s, const Job& job, const std::vector<RunRecord>& history,
+                                         RunKind kind, std::uint64_t now, const std::string& computer) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;  // FILETIME ticks
+    if (!s.any() || !s.on_failure || job.schedule.paused) return std::nullopt;
+    const std::optional<std::uint64_t> since = waiting_since(history, kind);
+    if (!since || *since > now) return std::nullopt;
+    const std::uint64_t days = (now - *since) / kDay;
+    if (days < static_cast<std::uint64_t>(drive_wait_alert_days(job))) return std::nullopt;
+    Alert a;
+    a.job = job.name;
+    a.level = Alert::Level::Critical;
+    a.event = "drive-missing";
+    const std::string where = " Open Vaultik on " + computer + " for the details.";
+    if (kind == RunKind::Copy) {
+        a.title = "The drive of the second copy of " + job.name + " has been missing for " + std::to_string(days) + " days";
+        a.message = "The second copy is not up to date. Connect its drive so it can catch up." + where;
+    } else {
+        a.title = "The backup drive of " + job.name + " has been missing for " + std::to_string(days) + " days";
+        a.message = "No backup was saved since. Connect the drive, or check that it still works." + where;
+    }
+    a.title += " (" + computer + ")";
+    return a;
+}
+
+bool alert_repeats(const std::string& event) {
+    return event == "password" || event == "check-failed" || event == "drive-missing";
+}
+
+bool alert_once_a_day(const std::string& dir, const std::string& job_id, const std::string& event, std::uint64_t now) {
+    constexpr std::uint64_t kDay = 864'000'000'000ull;
+    const std::string path = os::join(dir, "alerts-sent.json");
+    nlohmann::json j = nlohmann::json::object();
+    try {
+        const Bytes b = os::read_file(path, 1 << 20);
+        j = nlohmann::json::parse(std::string(b.begin(), b.end()));
+        if (!j.is_object()) j = nlohmann::json::object();
+    } catch (const std::exception&) {
+        j = nlohmann::json::object();
+    }
+    const std::string key = job_id + "/" + event;
+    const auto it = j.find(key);
+    if (it != j.end() && it->is_number_unsigned()) {
+        const std::uint64_t last = it->get<std::uint64_t>();
+        if (last <= now && now - last < kDay) return false;
+    }
+    j[key] = now;
+    try {
+        os::write_file_atomic(path, bytes_of(j.dump() + "\n"), 0600);
+    } catch (const std::exception&) {
+        // Not remembered: the next one may go out again, which beats sending none.
+    }
+    return true;
 }
 
 AlertSettings load_alerts(const std::string& dir) {

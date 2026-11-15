@@ -3032,13 +3032,33 @@ int cmd_test_restore(const Args& a) {
     return code;
 }
 
+// Sends an alert of the job. One whose cause lasts across runs (a password that is not saved, a
+// check that cannot finish, a drive that stays away) goes out at most once a day.
+void send_job_alert(const jobs::Job& job, const jobs::Alert& a, const jobs::AlertSettings& s, const std::string& settings_dir) {
+    if (jobs::alert_repeats(a.event) && !jobs::alert_once_a_day(settings_dir, job.id, a.event, os::now())) return;
+    for (const std::string& f : jobs::send_alert(s, a, settings_dir)) warning("could not send the alert: " + f);
+}
+
 // Sends the alert a run calls for (see jobs/alerts.hpp), if the user set up alerts and wants this
 // kind. A failure to send is a warning, never a reason for the run to fail.
 void alert_for(const jobs::Job& job, const jobs::RunRecord& r, const std::string& settings_dir) {
     const jobs::AlertSettings s = jobs::load_alerts(settings_dir);
     const std::optional<jobs::Alert> a = jobs::alert_for_run(s, job.name, r, os::hostname());
     if (!a) return;
-    for (const std::string& f : jobs::send_alert(s, *a, settings_dir)) warning("could not send the alert: " + f);
+    send_job_alert(job, *a, s, settings_dir);
+}
+
+// Sends the alert for a backup drive (or the drive of the second copy) that has been away for
+// several days (see jobs::drive_missing_alert), once a day.
+void drive_missing_alert_for(const jobs::JobStore& store, const jobs::Job& job, jobs::RunKind kind) {
+    try {
+        const jobs::AlertSettings s = jobs::load_alerts(store.dir());
+        const std::optional<jobs::Alert> a = jobs::drive_missing_alert(s, job, jobs::combined_history(store, job.id, 50),
+                                                                       kind, os::now(), os::hostname());
+        if (a) send_job_alert(job, *a, s, store.dir());
+    } catch (const std::exception& e) {
+        warning(std::string("could not send the alert: ") + e.what());
+    }
 }
 
 // When the backup drive newly fills up within jobs::kFillWarnDays (the forecast after this run warns
@@ -3336,9 +3356,9 @@ int cmd_run_job(const Args& a) {
         else out("Job \"" + job->name + "\": " + record.message + "\n");
         return kExitOk;
     }
-    // The backup drive is elsewhere: no failure, the run waits for it (recorded quietly, never
-    // alerted; the drive's return runs it, and the overdue reminder is what escalates). A run of
-    // a job already waiting adds no second record.
+    // The backup drive is elsewhere: no failure, the run waits for it (recorded quietly; the
+    // drive's return runs it). A run of a job already waiting adds no second record. Once the
+    // wait has gone on for several days, it is alerted as a failure, once a day.
     if (!jobs::drive_connected(*job)) {
         const jobs::RunRecord waiting = jobs::waiting_for_drive_record(jobs::RunKind::Backup, os::now(), job->repository);
         try {
@@ -3347,6 +3367,7 @@ int cmd_run_job(const Args& a) {
         } catch (const std::exception& e) {
             warning(std::string("could not record the run: ") + e.what());
         }
+        drive_missing_alert_for(store, *job, jobs::RunKind::Backup);
         if (g_json) emit({{"event", "done"}, {"status", "waiting"}, {"reason", "drive"}, {"message", waiting.message}});
         else out("Job \"" + job->name + "\": " + waiting.message + "\n");
         return kExitWaiting;
@@ -3521,6 +3542,7 @@ int cmd_run_job(const Args& a) {
         } catch (const Error& e) {
             warning(std::string("could not record the second copy: ") + e.what());
         }
+        if (copy.status == jobs::RunStatus::Waiting) drive_missing_alert_for(store, *job, jobs::RunKind::Copy);
     }
 
     // Then the health check, when one is due. It never changes the backup's result: a problem

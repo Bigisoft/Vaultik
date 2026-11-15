@@ -56,6 +56,28 @@ struct Alert {
 std::optional<Alert> alert_for_run(const AlertSettings& settings, const std::string& job_name, const RunRecord& run,
                                    const std::string& computer);
 
+// A job whose backups (kind Backup) or second copy (kind Copy) have waited for their drive since
+// the first record of that wait (FILETIME ticks); nullopt when they are not waiting. Also for a
+// job that never saved a version.
+std::optional<std::uint64_t> waiting_since(const std::vector<RunRecord>& history, RunKind kind);
+// After how many days a wait for the drive is alerted: 3, or the longest gap between the job's
+// scheduled runs plus a day when that is longer.
+int drive_wait_alert_days(const Job& job);
+// The alert for a drive that has been away longer than that ("drive-missing"), if any: a quiet
+// wait becomes a failure alert, so a dead drive or a computer without the app running is noticed.
+// Sent at most once a day (see alert_once_a_day).
+std::optional<Alert> drive_missing_alert(const AlertSettings& settings, const Job& job,
+                                         const std::vector<RunRecord>& history, RunKind kind, std::uint64_t now,
+                                         const std::string& computer);
+
+// Alerts that would otherwise repeat on every run while their cause lasts: a password that is not
+// saved ("password"), a check that cannot finish ("check-failed"), a drive that stays away
+// ("drive-missing").
+bool alert_repeats(const std::string& event);
+// Whether such an alert of this job may go out now: at most one per job and kind a day. True notes
+// it in <dir>/alerts-sent.json (the run's own record is written either way).
+bool alert_once_a_day(const std::string& dir, const std::string& job_id, const std::string& event, std::uint64_t now);
+
 // The JSON a webhook receives (invalid UTF-8 in the texts is replaced, never refused).
 std::string webhook_body(const Alert& alert, const std::string& computer, const std::string& time);
 

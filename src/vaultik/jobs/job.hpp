@@ -237,8 +237,9 @@ const std::vector<ExclusionPreset>& exclusion_presets();
 HealthPolicy default_health(std::string_view repository);
 
 // Waiting: a run that found its backup drive not connected and did nothing. It is no failure (the
-// drive is simply elsewhere): recorded quietly, shown neutrally, never alerted; the run happens
-// once the drive is back (see missed_run_waiting), and the overdue reminder is what escalates.
+// drive is simply elsewhere): recorded quietly, shown neutrally, not alerted as a failure; the run
+// happens once the drive is back (see missed_run_waiting). A wait of several days is alerted
+// (see drive_missing_alert in alerts.hpp), as is an overdue backup by the app's reminder.
 enum class RunStatus { Success, Partial, Failed, Cancelled, Waiting };
 
 // What a run did: a backup, a health check that read a sample of the data or all of it, or the
