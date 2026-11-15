@@ -44,6 +44,9 @@ struct DiskInfo {
     int partitions = 0;
     std::string path;    // the device: "\\.\PhysicalDrive2", "/dev/sdb"
     std::string media;   // "SSD", "HDD", or empty when the drive does not say
+    // Linux: what the whole disk itself holds without a partition table (a file system, or
+    // "crypto_LUKS", ...), as udev knows it (ID_FS_TYPE); empty when nothing is known.
+    std::string filesystem;
     std::vector<DiskVolume> volumes;
 };
 

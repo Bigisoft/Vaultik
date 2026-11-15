@@ -84,6 +84,15 @@ ElevatedTaskDialog::ElevatedTaskDialog(const ElevatedTask& task, const QStringLi
     layout->addWidget(note_);
     layout->addStretch();
     auto* buttons = new QDialogButtonBox;
+    if (task_.action_code != 0 && !task_.action_label.isEmpty()) {
+        action_ = buttons->addButton(task_.action_label, QDialogButtonBox::ActionRole);
+        action_->hide();
+        connect(action_, &QPushButton::clicked, this, [this] {
+            if (running_) return;
+            result_.action = true;
+            accept();
+        });
+    }
     button_ = buttons->addButton(tr("Cancel"), QDialogButtonBox::RejectRole);
     connect(button_, &QPushButton::clicked, this, [this] {
         if (running_ && !may_close_) reject();
@@ -216,7 +225,7 @@ void ElevatedTaskDialog::on_connected() {
         note_->clear();
         note_->hide();
     }
-    button_->setEnabled(!task_.cancel_question.isEmpty());
+    button_->setEnabled(!task_.cancel_question.isEmpty() && can_cancel_);
 }
 
 void ElevatedTaskDialog::on_in_window() {
@@ -252,7 +261,12 @@ void ElevatedTaskDialog::on_line(const QString& line) {
     const TaskEvent e = parse_task_event(u8(line));
     switch (e.type) {
         case TaskEvent::Type::Progress: show_progress(e); break;
-        case TaskEvent::Type::Step: phase_->setText(qs(e.text)); break;
+        case TaskEvent::Type::Step:
+            if (!e.phase.empty())
+                for (const ElevatedPhase& p : task_.phases)
+                    if (p.name == qs(e.phase) && heading_->text() != p.working) start_phase(p);
+            phase_->setText(qs(e.text));
+            break;
         case TaskEvent::Type::Warning:
             note_->setText(note_->text().isEmpty() ? qs(e.text) : note_->text() + "\n" + qs(e.text));
             note_->show();
@@ -263,10 +277,37 @@ void ElevatedTaskDialog::on_line(const QString& line) {
         case TaskEvent::Type::Done:
             result_.status = qs(e.status);
             result_.message = qs(e.text);
+            result_.erased = e.erased;
+            result_.table_written = e.table_written;
+            result_.table_id = qs(e.table_id);
             if (e.status == "in_use" && result_.in_use.isEmpty())
                 for (const std::string& v : e.volumes) result_.in_use << qs(v);
+            if (e.status != "in_use")
+                for (const std::string& v : e.volumes) result_.volumes << qs(v);
             break;
         case TaskEvent::Type::Unknown: break;
+    }
+}
+
+// The next part of the task started (such as setting up the drive after it was erased): its
+// own heading, a busy bar until it tells how far it is, and no Cancel when it cannot be stopped.
+void ElevatedTaskDialog::start_phase(const ElevatedPhase& p) {
+    heading_->setText(p.working);
+    bar_->setRange(0, 0);
+    details_->clear();
+    rate_ = RateEstimator();
+    last_total_ = 0;
+    last_pass_ = -1;
+    last_verifying_ = false;
+    can_cancel_ = p.can_cancel;
+    if (!can_cancel_ && !lost_) {
+        button_->setEnabled(false);
+        if (cancelling_) {
+            // The stop came too late: the part before it had ended, and this one cannot be stopped.
+            cancelling_ = false;
+            note_->setText(tr("It could not be stopped any more: the previous part had finished."));
+            note_->show();
+        }
     }
 }
 
@@ -347,11 +388,22 @@ void ElevatedTaskDialog::on_finished(int code, const QString& error, bool starte
     bar_->setRange(0, 1000);
     if (result_.code == 0) {
         bar_->setValue(1000);
-        heading_->setText(task_.done);
-        details_->setText(result_.message);
+        const QString done = task_.done_text ? task_.done_text(result_) : QString();
+        heading_->setText(done.isEmpty() ? task_.done : done);
+        details_->setText(done.isEmpty() ? result_.message : QString());  // it says the same
         return;
     }
     bar_->setValue(0);
+    if (task_.action_code != 0 && result_.code == task_.action_code) {
+        heading_->setText(task_.action_heading);
+        details_->setText(result_.message);
+        if (action_ != nullptr) {
+            action_->show();
+            action_->setDefault(true);
+            button_->setDefault(false);
+        }
+        return;
+    }
     if (result_.code == kExitCancelled || result_.status == QLatin1String("cancelled")) {
         heading_->setText(tr("Stopped before the end."));
         details_->setText(result_.message);
@@ -370,7 +422,7 @@ void ElevatedTaskDialog::reject() {
         return;
     }
     if (cancelling_) return;
-    if (result_.in_window || task_.cancel_question.isEmpty() || !connected_) {
+    if (result_.in_window || task_.cancel_question.isEmpty() || !can_cancel_ || !connected_) {
 #ifdef _WIN32
         const bool own_window = result_.in_window;
 #else
@@ -389,6 +441,12 @@ void ElevatedTaskDialog::reject() {
     box.exec();
     if (box.clickedButton() != stop || !running_) return;
     if (lost_) return;  // it said so meanwhile
+    if (!can_cancel_) {
+        // A part that cannot be stopped began while the question was open.
+        note_->setText(tr("It could not be stopped any more: the previous part had finished."));
+        note_->show();
+        return;
+    }
     cancelling_ = true;
     cancel_ = true;
     button_->setEnabled(false);

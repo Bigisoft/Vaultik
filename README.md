@@ -470,7 +470,8 @@ Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished 
 were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
 tools) a drive is in use by another program (see [Drives in use](#drives-in-use)), `7` (Linux)
 the progress channel given with `--progress-pipe` cannot be used, so nothing was done, `8`
-(`run-job`) the backup drive is not connected, so the run waits for it (see below).
+(`run-job`) the backup drive is not connected, so the run waits for it (see below), `9`
+(`disk wipe --then-init`) the disk was erased, but setting it up again failed.
 
 ### Old snapshots and space
 
@@ -1253,7 +1254,34 @@ sudo vaultik disk init /dev/sdb --fs ext4 --label backups --mount /mnt/backups
 
 - **A whole disk:** every byte of it, then its partition table goes too, so Windows shows it as
   not initialised (Linux: no partitions). The same guards and typed `ERASE DISK <number>` as
-  above.
+  above. A disk without a partition table has no drive, so File Explorer does not show it; that
+  is why **When done, set the drive up again** is checked: right after the erase the disk is set
+  up for use again, in the same run and with the same approval prompt, so it comes back ready
+  (for example as `F:` named `Backup`, NTFS). You choose the partition table (GPT, or MBR on a
+  disk of 2 TB or less), the file system (NTFS or exFAT; on Linux ext4, NTFS or exFAT), the name
+  (the one the drive had, or `Backup`) and the drive letter (the one it had; when it had none,
+  any free letter, picked when the erase is done). A letter Windows has given to a drive that
+  shows nothing, such as an empty card reader slot, an empty DVD drive or a locked BitLocker
+  drive, counts as taken and is not offered. Should another drive have taken the letter you
+  chose by the time the erase ends, it stays with that drive: the new drive keeps the letter
+  Windows gave it and the window says so. A letter the disk's own drive has never counts as
+  taken, since setting the disk up removes that drive. This is
+  the same setup as **Set up a new disk...**, on the very disk that was erased: it is checked
+  again to be that disk (serial number, size, model and connection, and blank now, also without
+  a file system or encryption on the whole disk) before anything is written. A USB stick or SD
+  card that Windows treats as removable media keeps one drive (with its letter, but without a
+  file system) even when it has no partition table; that one drive counts as blank. On Linux, the
+  programs the setup needs (`sfdisk` and the `mkfs` tool of the file system chosen) are looked
+  for before anything is erased. The setup runs only after an erase that went through to the
+  end (and passed its check, with **Read the last pass back**); after an erase that was stopped
+  or failed, the drive is not set up, and the window says so. When the erase worked but the
+  setup failed, the window says why and offers **Set up the drive** to try the setup again: it
+  shows the disk once more and asks before it starts, and it works only on the same disk, still
+  blank, or with exactly the partition table the failed setup had written (when it failed while
+  writing that table: blank, or with exactly that table). It keeps the letter you chose, also
+  when the failed setup had already given it to the new drive. Should another drive have taken
+  that letter meanwhile, it stays with that drive: Windows gives the new drive a free letter
+  (you can change it later), and the window says so before it starts.
 - **One drive (volume):** only that partition (`ERASE E:`, Linux `ERASE sdb1`); never the one
   Windows or Vaultik runs from, nor one with a page or hibernation file, nor an EFI system,
   reserved, recovery or active partition, nor a volume on a dynamic disk or over several disks.
@@ -1281,8 +1309,15 @@ command line `--confirm` gives the confirmation beforehand, for scripts, and `--
 `--expect-serial` and `--expect-id` (which the Vaultik window passes along) make it stop when the
 disk or drive is another one by then.
 
+On the command line, `--then-init gpt` (or `mbr`) does the same after erasing a whole disk,
+with `--fs`, `--label` and `--letter` (Linux: `--mount`) as for `disk init`. It ends with exit
+code 9 when the disk was erased but setting it up failed; with `--json`, its `done` event then
+tells with `table_written` and `table_id` whether a new partition table had been written, so
+`disk init` with `--expect-id <table_id>` sets up that same disk again.
+
 ```
 vaultik disk wipe 2 --method dod3 --verify
+vaultik disk wipe 2 --then-init gpt --fs ntfs --label Backup --letter F
 vaultik disk wipe --volume E: --confirm "ERASE E:"
 vaultik disk wipe-free D:
 ```

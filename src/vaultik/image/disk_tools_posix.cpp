@@ -16,8 +16,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <span>
 #include <thread>
 
+#include "vaultik/crypto/crypto.hpp"
 #include "vaultik/image/disk_tools.hpp"
 #include "vaultik/platform/drive_health.hpp"
 #include "vaultik/platform/mounts_posix.hpp"
@@ -355,6 +357,8 @@ std::vector<DiskInfo> list_tool_disks() {
         } else {
             d.style = "RAW";
         }
+        // What the whole disk holds without a partition table (a file system, LUKS, ...).
+        if (table.empty()) d.filesystem = udev_value(sys, "ID_FS_TYPE");
         // The whole disk may itself hold a file system or be in use.
         if (auto use = use_of(sys, name, mounts, swaps)) {
             use->spans = multi_device_fs(name);
@@ -386,6 +390,14 @@ std::vector<DiskInfo> list_tool_disks() {
         out.push_back(std::move(d));
     }
     return out;
+}
+
+std::uint32_t used_drive_letters() {
+    return 0;  // no drive letters
+}
+
+std::string find_setup_tool(const std::string& name) {
+    return find_tool(name);
 }
 
 std::vector<int> protected_tool_disks() {
@@ -591,12 +603,13 @@ std::unique_ptr<FillFile> create_fill_file(const std::string& path) {
 
 NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, const std::vector<int>& protected_disks,
                      const NewDiskOptions& o) {
-    check_init_options(o);
+    check_init_options(o, chosen);
     const std::string fs = o.filesystem.empty() ? std::string("ext4") : o.filesystem;
-    const std::string sfdisk = need_tool("sfdisk", "util-linux");
-    const std::string mkfs = fs == "ext4"    ? need_tool("mkfs.ext4", "e2fsprogs")
-                             : fs == "ntfs"  ? need_tool("mkfs.ntfs", "ntfs-3g")
-                                             : need_tool("mkfs.exfat", "exfatprogs");
+    // Every program it runs, found before anything is written.
+    const std::vector<std::pair<std::string, std::string>> tools = setup_tools(fs, !o.mount.empty());
+    for (const auto& [tool, package] : tools) need_tool(tool, package);
+    const std::string sfdisk = need_tool(tools[0].first, tools[0].second);
+    const std::string mkfs = need_tool(tools[1].first, tools[1].second);
     const auto step = [&](const std::string& s) {
         if (o.on_step) o.on_step(s);
     };
@@ -619,10 +632,30 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
     // --no-reread because sfdisk's check whether the disk is in use would find this program's
     // own exclusive open, and only the holder of that open may have the kernel read the new
     // table (done below).
-    const std::string script = sfdisk_script(o.style, parts, sector, fs);
+    // The table's id is made here, so the disk can be known again by it (DiskInfo::id) when a
+    // later step fails and it is set up again.
+    std::uint8_t raw[16];
+    random_bytes(std::span<std::uint8_t>(raw, sizeof raw));
+    char text[40];
+    if (o.style == TableStyle::Gpt) {
+        raw[6] = static_cast<std::uint8_t>((raw[6] & 0x0F) | 0x40);  // a random (version 4) UUID
+        raw[8] = static_cast<std::uint8_t>((raw[8] & 0x3F) | 0x80);
+        std::snprintf(text, sizeof text, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", raw[0], raw[1],
+                      raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], raw[8], raw[9], raw[10], raw[11], raw[12], raw[13],
+                      raw[14], raw[15]);
+    } else {
+        if ((raw[0] | raw[1] | raw[2] | raw[3]) == 0) raw[3] = 1;  // 0 is no signature
+        std::snprintf(text, sizeof text, "%02X%02X%02X%02X", raw[0], raw[1], raw[2], raw[3]);
+    }
+    const std::string new_id = std::string(o.style == TableStyle::Gpt ? "gpt-" : "mbr-") + text;
+    const std::string script = sfdisk_script(o.style, parts, sector, fs, new_id);
+    // An sfdisk that fails part way may leave this table: the caller knows its id already.
+    if (o.on_table_planned) o.on_table_planned(new_id);
     run_tool({"/bin/sh", "-c", "printf '%s' \"$3\" | exec \"$1\" --wipe always --wipe-partitions always --no-reread -- \"$2\"",
               "sh", sfdisk, held, script},
              "sfdisk");
+    // From here on the disk is not blank any more, whatever fails later.
+    if (o.on_table) o.on_table(new_id);
     if (::fsync(dev->fd()) != 0) throw Error("writing " + d.path + ": " + std::strerror(errno));
     dev->forget_partition_table();  // the kernel reads the new table
     // Closed: mkfs opens the partitions exclusively, which the kernel refuses while the whole
@@ -670,7 +703,7 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
         if (i == 0 && !o.mount.empty()) {
             step("Mounting " + part + " on " + o.mount);
             os::make_dirs(o.mount);
-            run_tool({need_tool("mount", "util-linux"), part, o.mount}, "mount");
+            run_tool({need_tool(tools.back().first, tools.back().second), part, o.mount}, "mount");
             r.volumes.push_back(o.mount);
         } else {
             r.volumes.push_back(part);

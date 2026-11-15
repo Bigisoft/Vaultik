@@ -71,6 +71,7 @@ TaskEvent parse_task_event(std::string_view line) {
     } else if (type == "step") {
         e.type = TaskEvent::Type::Step;
         e.text = to_text(j, "message");
+        e.phase = to_text(j, "phase");
     } else if (type == "warning") {
         e.type = TaskEvent::Type::Warning;
         e.text = to_text(j, "message");
@@ -81,6 +82,11 @@ TaskEvent parse_task_event(std::string_view line) {
     } else if (type == "done") {
         e.type = TaskEvent::Type::Done;
         e.status = to_text(j, "status");
+        const auto erased = j.find("erased");
+        e.erased = erased != j.end() && erased->is_boolean() && erased->get<bool>();
+        const auto written = j.find("table_written");
+        e.table_written = written != j.end() && written->is_boolean() && written->get<bool>();
+        e.table_id = to_text(j, "table_id");
         e.text = to_text(j, "message");
         e.volumes = to_list(j, "volumes");
     }

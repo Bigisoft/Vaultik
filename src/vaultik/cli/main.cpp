@@ -114,6 +114,7 @@ constexpr int kExitLocked = 5;  // another run holds a conflicting repository lo
 constexpr int kExitInUse = 6;   // disk tools: a volume is in use by another program (--force-dismount forces it)
 constexpr int kExitNoChannel = 7;  // POSIX: --progress-pipe was given but cannot be used; nothing was done
 constexpr int kExitWaiting = 8;    // run-job: the backup drive is not connected; nothing was done
+constexpr int kExitSetupFailed = 9;  // disk wipe --then-init: erased completely, but setting the disk up failed
 
 // In pieces (the ")" R"(" joins below): Visual Studio 2022 refuses a single string literal over
 // 16 KB (error C2026); adjacent literals are joined into one string.
@@ -479,7 +480,7 @@ Disk images (Windows, administrator rights except image disks and --vhdx):
                                ERASE <drive>, or give --confirm)
   recovery                     The restore menu the recovery drive starts with
 
-Disk tools (administrator rights on Windows, root on Linux, except disk list and wipe-free):
+)" R"(Disk tools (administrator rights on Windows, root on Linux, except disk list and wipe-free):
   disk list                    The disks, with what keeps one from being erased
   disk init <disk>             Set up a blank or unwanted disk for use: a new
                                partition table, one partition over the whole disk,
@@ -513,6 +514,13 @@ Disk tools (administrator rights on Windows, root on Linux, except disk list and
       --method <m>             zeros (one pass, default), random (one pass), or
                                dod3 (random, random, zeros, as DoD 5220.22-M)
       --verify                 Read the last pass back and compare it
+      --then-init <gpt|mbr>    A whole disk: once it was erased completely (and
+                               checked, with --verify), set it up again for use in
+                               the same run, as disk init does: that partition
+                               table, one partition, formatted. Never after an
+                               erase that was stopped or failed
+      --fs, --label, --letter, --mount
+                               With --then-init: as for disk init
       --force-dismount         As for disk init: force a disk or volume in use closed
       --in-use-file <file>     disk init and disk wipe: when a drive is in use, also
                                write the drives in use there, one per line
@@ -589,7 +597,7 @@ const std::set<std::string> kValueOptions = {
     "--max-memory", "--read-limit", "--write-limit", "--job", "--lock-wait", "--vss", "--keep-last",
     "--keep-hourly", "--keep-daily", "--keep-weekly", "--keep-monthly", "--keep-yearly",
     "--user", "--from", "--account", "--only", "--keep-within", "--read-share", "--to", "--files", "--max-size", "--threads", "--uploads",
-    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--method", "--volume", "--jobs", "--in-use-file", "--progress-pipe", "--progress-user"};
+    "--read-threads", "--days", "--tier", "--month", "--html", "--snapshot", "--forget", "--ask", "--ask-job", "--wsl", "--wsl-running", "--hyperv", "--hyperv-staging", "--docker-volume", "--docker-image", "--database", "--image", "--name", "--report", "--vhdx", "--to-disk", "--confirm", "--expect-size", "--expect-serial", "--expect-id", "--disk-index", "--iso", "--usb", "--size", "--out", "--since", "--top", "--fs", "--label", "--letter", "--mount", "--then-init", "--method", "--volume", "--jobs", "--in-use-file", "--progress-pipe", "--progress-user"};
 const std::set<std::string> kFlagOptions = {"--json",    "--no-parent", "--overwrite", "--read-data", "--recursive",
                                               "--help",    "--version",   "--dry-run",   "--prune",     "--all",
                                               "--recovery-key", "--vss-skip-sql", "--admin", "--force",

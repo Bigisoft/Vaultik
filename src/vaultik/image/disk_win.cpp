@@ -1333,6 +1333,14 @@ std::vector<DiskInfo> list_tool_disks() {
     return list_disks();
 }
 
+std::uint32_t used_drive_letters() {
+    return static_cast<std::uint32_t>(GetLogicalDrives());
+}
+
+std::string find_setup_tool(const std::string&) {
+    return {};  // setup_tools lists none on Windows
+}
+
 std::vector<int> protected_tool_disks() {
     return os::disk_numbers(os::executable_path());
 }
@@ -1499,13 +1507,19 @@ std::unique_ptr<FillFile> create_fill_file(const std::string& path) {
 
 NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, const std::vector<int>& protected_disks,
                      const NewDiskOptions& o) {
-    check_init_options(o);
+    {
+        NewDiskOptions no_letter = o;  // the letter is checked below, against the disk as it is now
+        no_letter.letter = 0;
+        check_init_options(no_letter);
+    }
     const std::string fs = o.filesystem.empty() ? std::string("ntfs") : o.filesystem;
     const bool gpt = o.style == TableStyle::Gpt;
     const auto step = [&](const std::string& s) {
         if (o.on_step) o.on_step(s);
     };
     const DiskInfo d = recheck(chosen, expected, protected_disks);
+    // A letter of one of its own volumes counts as free: they are removed below.
+    check_init_options(o, d);
     const std::vector<NewPartition> parts = plan_partitions(d.size, d.sector_size, o.style, o.sizes, gpt);
     const std::string disk_name = "disk " + std::to_string(d.number);
     const std::string format = system_tool("format.com");
@@ -1537,8 +1551,12 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
             cd.PartitionStyle = PARTITION_STYLE_MBR;
             cd.Mbr.Signature = signature;
         }
+        // A write that fails part way may leave this table: the caller knows its id already.
+        if (o.on_table_planned) o.on_table_planned(new_id);
         if (!DeviceIoControl(h, IOCTL_DISK_CREATE_DISK, &cd, sizeof cd, nullptr, 0, &got, nullptr))
             throw_last_error("writing a new partition table on " + disk_name);
+        // From here on the disk is not blank any more, whatever fails later.
+        if (o.on_table) o.on_table(new_id);
         DeviceIoControl(h, IOCTL_DISK_UPDATE_PROPERTIES, nullptr, 0, nullptr, 0, &got, nullptr);
 
         // The new layout: the table Windows just wrote (for GPT its usable area), with the partitions.
@@ -1605,16 +1623,22 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
                 trim(now.serial) != trim(expected.serial) || upper(now.id) != upper(new_id))
                 throw Error(disk_name + " is not the disk that was set up any more; nothing was formatted");
         }
-        char letter = first && o.letter != 0 ? static_cast<char>(std::toupper(static_cast<unsigned char>(o.letter))) : 0;
-        if (letter == 0 && !vol->mount.empty() && vol->mount.size() <= 3) letter = vol->mount[0];
-        if (letter == 0) letter = free_letter();
-        if (letter == 0) throw Error("no drive letter is free for the new partition");
-        const std::string root = std::string(1, letter) + ":\\";
-        if (upper(vol->mount) != upper(root)) {
-            if (!vol->mount.empty()) DeleteVolumeMountPointW(widen(vol->mount).c_str());
-            if (!SetVolumeMountPointW(widen(root).c_str(), widen(vol->name).c_str()))
-                throw_last_error("giving the new partition the letter " + root.substr(0, 2));
-        }
+        const char wanted = first ? o.letter : 0;
+        // The letter Windows gave the volume by itself is removed only once the one asked for
+        // is set: a letter that cannot be given leaves it with that one (and a warning).
+        LetterSteps letters;
+        const std::wstring volume_name = widen(vol->name);
+        letters.add = [&](const std::string& root, std::string& why) {
+            if (SetVolumeMountPointW(widen(root).c_str(), volume_name.c_str())) return true;
+            why = win32_message(GetLastError());
+            return false;
+        };
+        letters.remove = [](const std::string& root) { DeleteVolumeMountPointW(widen(root).c_str()); };
+        letters.free = [] { return free_letter(); };
+        letters.in_use = [](const std::string& root) { return !letter_problem(root[0], used_drive_letters()).empty(); };
+        const LetterResult given = give_letter(wanted, vol->mount, letters);
+        if (!given.warning.empty()) r.warnings.push_back(given.warning);
+        const std::string root = given.root;
         step("Formatting " + root.substr(0, 2) + " as " + (fs == "ntfs" ? std::string("NTFS") : std::string("exFAT")));
         const std::string label = o.label.empty() ? std::string("New Volume") : o.label;
         std::string output;
