@@ -2943,6 +2943,35 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             CHECK(eject_busy());
             testing::set_drive_lock_hooks({});
         }
+        {
+            // nobody's own file in /run/lock counts only when no other account may open it and it
+            // is no hard link (where fs.protected_hardlinks is off, another account could link a
+            // file of nobody's that nobody holds for something else under that name).
+            const fs::path own = fs::path("/run/lock") / ("vaultik-use-" + name + ".65534.lock");
+            const fs::path other = fs::path("/run/lock") / ("vaultik-test-" + name + "-linked");
+            std::error_code ec;
+            fs::remove(own, ec);
+            make_as(other, 65534);
+            REQUIRE(::link(other.c_str(), own.c_str()) == 0);
+            {
+                OtherProcess holder("flock-sh", {}, {}, tmp.path, "65534", hold_files(other.string()));
+                REQUIRE(holder.held());
+                CHECK_FALSE(drive_claimed(key, root_dir));
+            }
+            fs::remove(other);
+            REQUIRE(::chmod(own.c_str(), 0644) == 0);
+            {
+                OtherProcess holder("flock-sh", {}, {}, tmp.path, "65534", hold_files(own.string()));
+                REQUIRE(holder.held());
+                CHECK_FALSE(drive_claimed(key, root_dir));
+            }
+            REQUIRE(::chmod(own.c_str(), 0600) == 0);
+            {
+                OtherProcess holder("flock-sh", {}, {}, tmp.path, "65534", hold_files(own.string()));
+                REQUIRE(holder.held());
+                CHECK(drive_claimed(key, root_dir));
+            }
+        }
         // Where /proc/locks cannot be read, root's eject cannot tell whether nobody's files are
         // held, and counts them as busy (fail closed).
         testing::DriveLockHooks hooks;
@@ -3521,6 +3550,7 @@ TEST_CASE("drive lock: a lock with the same inode on another device never makes 
     std::ofstream(own).close();
     fs::permissions(own, fs::perms::owner_read | fs::perms::owner_write);  // as a run makes it
     std::ofstream(foreign.own_drive()).close();
+    fs::permissions(foreign.own_drive(), fs::perms::owner_read | fs::perms::owner_write);  // as a run makes it
     const long self = static_cast<long>(::getpid());  // a process every command here descends from
     const auto stat_of = [](const fs::path& path) {
         struct stat st{};
@@ -3706,6 +3736,54 @@ TEST_CASE("drive lock: the marker alone never makes a run inherit the drive (Lin
         CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
     }
     os::set_env(kHeldDrivesVariable, "");
+}
+
+TEST_CASE("drive lock: root's mark counts by its name only when private and no hard link (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-mark-trust-" + tmp.path.filename().string();
+    const std::string mine = os::join(tmp.dir(), "mine");
+    const ForeignFiles foreign(drive_lock_name(key));
+    const fs::path mark = foreign.use_mark();
+    const fs::path elsewhere = fs::path("/run/lock") / ("vaultik-test-" + drive_lock_name(key) + "-elsewhere");
+    struct Remove {
+        fs::path path;
+        ~Remove() {
+            std::error_code ec;
+            fs::remove(path, ec);
+        }
+    } remove{elsewhere};
+    {
+        // A command of root's (here this account's processes stand in for root's): the account's
+        // eject counts it as busy.
+        OtherProcess root_claim("flock-sh", {}, {}, tmp.path, {}, hold_files(mark.string()));
+        REQUIRE(root_claim.held());
+        CHECK(drive_claimed(key, mine));
+    }
+    {
+        // A mark that other accounts may open, which any of them could hold, counts for nothing.
+        REQUIRE(::chmod(mark.c_str(), 0644) == 0);
+        OtherProcess held("flock-sh", {}, {}, tmp.path, {}, hold_files(mark.string()));
+        REQUIRE(held.held());
+        CHECK_FALSE(drive_claimed(key, mine));
+    }
+    {
+        // Nor does a hard link to another file (where fs.protected_hardlinks is off, another
+        // account may link a file of root's that root holds for something else under its name).
+        fs::remove(mark);
+        const int fd = ::open(elsewhere.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        REQUIRE(fd >= 0);
+        REQUIRE(::fchmod(fd, 0600) == 0);
+        ::close(fd);
+        REQUIRE(::link(elsewhere.c_str(), mark.c_str()) == 0);
+        OtherProcess held("flock-sh", {}, {}, tmp.path, {}, hold_files(elsewhere.string()));
+        REQUIRE(held.held());
+        CHECK_FALSE(drive_claimed(key, mine));
+    }
 }
 
 TEST_CASE("drive lock: an own lock file other accounts may open leaves it to the marker (Linux)") {

@@ -322,8 +322,16 @@ bool own_or_roots(const struct stat& st) {
     return ::geteuid() == 0 || st.st_uid == 0 || st.st_uid == ::geteuid();
 }
 
+// Whether a file found by its name (`uid`, `mode`, `links` as stat gives them) is one that only
+// `owner` can hold: `owner`'s, and no other account may open it; in a folder where any account may
+// make names (/run/lock), also no hard link, which another account may have put there (to a file
+// of `owner`'s that `owner` holds for something else, where fs.protected_hardlinks is off).
+bool private_by_name(uid_t uid, mode_t mode, std::uint64_t links, uid_t owner) {
+    return uid == owner && (mode & 077) == 0 && links == 1;
+}
+
 bool roots(const struct stat& st) {
-    return st.st_uid == 0;
+    return private_by_name(st.st_uid, st.st_mode, st.st_nlink, 0);
 }
 
 std::chrono::milliseconds other_account_wait() {
@@ -347,7 +355,7 @@ int open_lock_file(const std::string& name, const std::string& fallback_dir) {
 }
 
 bool mine(const struct stat& st) {
-    return st.st_uid == ::geteuid();
+    return private_by_name(st.st_uid, st.st_mode, st.st_nlink, ::geteuid());
 }
 
 // The folder of every account's runtime folder.
@@ -518,6 +526,7 @@ struct LockFile {
     ino_t ino = 0;
     uid_t uid = 0;
     mode_t mode = 0;
+    std::uint64_t links = 0;
     bool has_mount_id = false;  // statx gave its mount's ID
     std::uint64_t mount_id = 0;
     bool mount_known = false;  // the device of its mount could be told (see with_mount)
@@ -642,12 +651,14 @@ bool lock_file_at(int dirfd, const char* path, int flags, LockFile& f) {
         f.ino = st.st_ino;
         f.uid = st.st_uid;
         f.mode = st.st_mode;
+        f.links = st.st_nlink;
         return true;
     }
     f.dev = makedev(sx.stx_dev_major, sx.stx_dev_minor);
     f.ino = static_cast<ino_t>(sx.stx_ino);
     f.uid = sx.stx_uid;
     f.mode = sx.stx_mode;
+    f.links = sx.stx_nlink;
     f.has_mount_id = (sx.stx_mask & STATX_MNT_ID) != 0;
     f.mount_id = sx.stx_mnt_id;
     return true;
@@ -885,13 +896,15 @@ bool holds(long pid, long long account, const LockFile& file, const std::vector<
 }
 
 // Root's mark files `name`, in root's folder or, as earlier versions kept it, in /run/lock: only
-// the ones root owns, which only root may open, so only root can hold them.
+// the ones root owns that only root may open and that are no hard link (see private_by_name), so
+// only root can hold them.
 std::vector<LockFile> root_mark_files(const std::string& name, Mounts& mounts) {
     std::vector<LockFile> files;
     for (const std::string& dir : {root_dir(), std::string("/run/lock")}) {
         const std::string path = dir + "/" + name;
         LockFile f;
-        if (!lock_file_named(path, f, mounts) || f.uid != hooks().root_uid) continue;
+        if (!lock_file_named(path, f, mounts) || !private_by_name(f.uid, f.mode, f.links, hooks().root_uid))
+            continue;
         files.push_back(f);
     }
     return files;
@@ -972,8 +985,10 @@ std::string run_user_dir_of(long long uid, Mounts& mounts) {
 }
 
 // The own lock files of account `uid` for `name` (see open_own_files) that this process can see:
-// the one in its runtime folder and its file in /run/lock, each only when that account owns it,
-// so that no process of another account can hold it.
+// the one in its runtime folder and its file in /run/lock, each only when that account owns it and
+// no other account may open it, and the one in /run/lock only when it is no hard link either (see
+// private_by_name; only the account can make a name in its runtime folder), so that no process of
+// another account can hold it.
 std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mounts& mounts) {
     std::vector<LockFile> files;
     if (uid < 0) return files;
@@ -983,7 +998,9 @@ std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mount
     for (const std::string& path : paths) {
         if (mounts.fuse_at(path)) continue;
         LockFile f;
-        if (!lock_file_named(path, f, mounts) || static_cast<long long>(f.uid) != uid) continue;
+        if (!lock_file_named(path, f, mounts)) continue;
+        const std::uint64_t links = path.rfind("/run/lock/", 0) == 0 ? f.links : 1;  // see above
+        if (!private_by_name(f.uid, f.mode, links, static_cast<uid_t>(uid))) continue;
         files.push_back(f);
     }
     return files;
