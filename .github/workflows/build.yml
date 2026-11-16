@@ -37,13 +37,21 @@ jobs:
       # The drive lock, claims and eject tests that need root (they run as root and as other
       # accounts, and are skipped above) run again here as root, with the runner's sudo. From a
       # copy that every account may run: some start the test program again as another account,
-      # which may not look into the runner's home.
+      # which may not look into the runner's home. A root test that says it did not run (no root,
+      # /run/lock not writable, mounts refused) fails the step: it would pass with nothing tested.
+      # The copy is removed again however the step ends.
       - name: Test the drive locks as root
         run: |
+          set -o pipefail
           tests=$(mktemp -d)
+          trap 'sudo rm -rf "$tests"' EXIT
           chmod 755 "$tests"
           cp "$RUNNER_TEMP/build-${{ matrix.type }}/vaultik_tests" "$tests/"
-          sudo "$tests/vaultik_tests" '--test-case=drive lock*,drive claims*,eject*'
+          sudo "$tests/vaultik_tests" '--test-case=drive lock*,drive claims*,eject*' 2>&1 | tee "$tests/root.log"
+          if grep -q 'root test not run' "$tests/root.log"; then
+            echo "::error::a drive lock test that needs root did not run"
+            exit 1
+          fi
 
   sanitizers:
     name: Linux (sanitizers)
@@ -70,17 +78,24 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
           cmake --build "$build"
           "$build/vaultik_tests"
-      # The drive lock, claims and eject tests that need root, as in the jobs above.
+      # The drive lock, claims and eject tests that need root, as in the jobs above (also failing
+      # when one of them did not run).
       - name: Test the drive locks as root with AddressSanitizer and UndefinedBehaviorSanitizer
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:strict_string_checks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: |
+          set -o pipefail
           tests=$(mktemp -d)
+          trap 'sudo rm -rf "$tests"' EXIT
           chmod 755 "$tests"
           cp "$RUNNER_TEMP/build-sanitizers/vaultik_tests" "$tests/"
           sudo --preserve-env=ASAN_OPTIONS,UBSAN_OPTIONS "$tests/vaultik_tests" \
-            '--test-case=drive lock*,drive claims*,eject*'
+            '--test-case=drive lock*,drive claims*,eject*' 2>&1 | tee "$tests/root.log"
+          if grep -q 'root test not run' "$tests/root.log"; then
+            echo "::error::a drive lock test that needs root did not run"
+            exit 1
+          fi
 
   windows:
     name: Windows (release)

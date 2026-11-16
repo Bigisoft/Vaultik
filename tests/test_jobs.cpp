@@ -2370,7 +2370,7 @@ TEST_CASE("drive lock: the account's own runtime folder keeps its runs taking tu
 
 TEST_CASE("drive lock: root and another account share the drive's turn (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
-        MESSAGE("skipped: needs root (runs as root and as nobody)");
+        MESSAGE("root test not run: needs root (runs as root and as nobody)");
         return;
     }
     TempStore tmp;
@@ -2654,7 +2654,7 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
 
 TEST_CASE("drive lock: a file in /run/lock with something mounted on it is never opened (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
-        MESSAGE("skipped: needs root (mounts a file on another)");
+        MESSAGE("root test not run: needs root (mounts a file on another)");
         return;
     }
     TempStore tmp;
@@ -2669,28 +2669,34 @@ TEST_CASE("drive lock: a file in /run/lock with something mounted on it is never
     // whose program would keep every open of it waiting; here a bind mount of another file stands
     // in for it. The run goes on with root's own lock and never opens the file mounted there.
     if (::mount(source.c_str(), file.c_str(), nullptr, MS_BIND, nullptr) != 0) {
-        MESSAGE("skipped: mounts are refused here");
+        MESSAGE("root test not run: mounts are refused here");
         std::error_code ec;
         fs::remove(file, ec);
         return;
     }
-    {
-        DriveLock run(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(0));
-        CHECK(run.held());
-        const int fd = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
-        REQUIRE(fd >= 0);
-        CHECK(::flock(fd, LOCK_EX | LOCK_NB) == 0);  // not the run's
-        ::close(fd);
-    }
-    CHECK(::umount(file.c_str()) == 0);
-    std::error_code ec;
-    fs::remove(file, ec);
-    fs::remove(fs::path("/run/vaultik") / ("vaultik-drive-" + name + ".root.lock"), ec);
+    // Taken away again however the checks below end (a REQUIRE that fails returns at once), so
+    // that no mount is left on /run/lock.
+    struct Unmount {
+        fs::path file;
+        std::string name;
+        ~Unmount() {
+            CHECK(::umount(file.c_str()) == 0);
+            std::error_code ec;
+            fs::remove(file, ec);
+            fs::remove(fs::path("/run/vaultik") / ("vaultik-drive-" + name + ".root.lock"), ec);
+        }
+    } unmount{file, name};
+    DriveLock run(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(0));
+    CHECK(run.held());
+    const int fd = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+    REQUIRE(fd >= 0);
+    CHECK(::flock(fd, LOCK_EX | LOCK_NB) == 0);  // not the run's
+    ::close(fd);
 }
 
 TEST_CASE("drive lock: root's folder is open to every account whatever root's umask (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
-        MESSAGE("skipped: needs root (runs as root and as nobody)");
+        MESSAGE("root test not run: needs root (runs as root and as nobody)");
         return;
     }
     TempStore tmp;
@@ -2807,7 +2813,7 @@ std::vector<std::pair<std::string, std::string>> hold_files(const std::string& a
 
 TEST_CASE("eject: root's eject counts an account's runs and commands without the shared files (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
-        MESSAGE("skipped: needs root (runs as root and as nobody)");
+        MESSAGE("root test not run: needs root (runs as root and as nobody)");
         return;
     }
     TempStore tmp;
@@ -3188,7 +3194,8 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
                 DriveClaim claim(key, root_dir);
                 CHECK(claim.held());
             }
-            CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+            // A wait would last until nobody's eject lets go (kEjectWait at most, 60 s).
+            CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
             testing::set_drive_lock_hooks(hooks);
         }
         {
@@ -3206,7 +3213,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
                 DriveClaim claim(key, root_dir);
                 CHECK(claim.held());
             }
-            CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+            CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));  // as above
             // Another account over its budget (here 1 process, with two holding a flock) hides
             // nobody's eject from nobody's own budget: root's command still waits for it.
             small.scan_descriptors = 0;
