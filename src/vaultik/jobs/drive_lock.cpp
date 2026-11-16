@@ -575,18 +575,15 @@ struct Mounts {
     }
 };
 
-// Whether /proc/locks may give another device than stat for the file `path` relative to `dirfd`
-// (see with_mount): on btrfs (each subvolume has a device of its own) and overlayfs (stat gives
-// the overlay's device, /proc/locks the one of the file system below), or when that cannot be told.
-bool device_may_differ(int dirfd, const char* path, int flags) {
+// Whether /proc/locks may give another device than stat for the file of `fd` (see with_mount): on
+// btrfs (each subvolume has a device of its own) and overlayfs (stat gives the overlay's device,
+// /proc/locks the one of the file system below), or when that cannot be told.
+bool device_may_differ(int fd) {
     constexpr long kBtrfs = 0x9123683e;
     constexpr long kOverlay = 0x794c7630;
     if (hooks().btrfs) return true;
     struct statfs fs{};
-    const int r = (flags & AT_EMPTY_PATH) != 0 && path[0] == '\0' ? ::fstatfs(dirfd, &fs)
-                  : dirfd == AT_FDCWD                              ? ::statfs(path, &fs)
-                                                                   : -1;
-    if (r != 0) return true;
+    if (::fstatfs(fd, &fs) != 0) return true;
     const long type = static_cast<long>(fs.f_type);
     return type == kBtrfs || type == kOverlay;
 }
@@ -620,11 +617,11 @@ bool lock_file_at(int dirfd, const char* path, int flags, LockFile& f) {
     return true;
 }
 
-// Adds to `f` (of lock_file_at with the same `dirfd`, `path` and `flags`) the device of its mount,
-// where statx and /proc/self/mountinfo (`mounts`) tell it (Linux 5.8 and later). Where they cannot,
-// the device stat gives is the one /proc/locks gives, except on file systems where the two may
-// differ (see device_may_differ; a null `path`: may differ, without asking the file system).
-void with_mount(int dirfd, const char* path, int flags, LockFile& f, Mounts& mounts) {
+// Adds to `f` (of lock_file_at on `fd`) the device of its mount, where statx and
+// /proc/self/mountinfo (`mounts`) tell it (Linux 5.8 and later). Where they cannot, the device stat
+// gives is the one /proc/locks gives, except on file systems where the two may differ (see
+// device_may_differ; without `fd`, -1: may differ, without asking the file system).
+void with_mount(int fd, LockFile& f, Mounts& mounts) {
     const testing::DriveLockHooks set = hooks();
     if (f.has_mount_id && !set.no_mount_device)
         f.mount_known = mounts.device(f.mount_id, f.mount_major, f.mount_minor);
@@ -632,7 +629,7 @@ void with_mount(int dirfd, const char* path, int flags, LockFile& f, Mounts& mou
         f.mount_major ^= 0x800;
         f.mount_minor ^= 0x800;
     }
-    if (!f.mount_known && path != nullptr && !device_may_differ(dirfd, path, flags)) {
+    if (!f.mount_known && fd >= 0 && !device_may_differ(fd)) {
         f.mount_known = true;
         f.mount_major = major(f.dev);
         f.mount_minor = minor(f.dev);
@@ -642,8 +639,22 @@ void with_mount(int dirfd, const char* path, int flags, LockFile& f, Mounts& mou
 // The file of `fd`, with the device of its mount (see lock_file_at and with_mount).
 bool lock_file_of(int fd, LockFile& f, Mounts& mounts) {
     if (!lock_file_at(fd, "", AT_EMPTY_PATH, f)) return false;
-    with_mount(fd, "", AT_EMPTY_PATH, f, mounts);
+    with_mount(fd, f, mounts);
     return true;
+}
+
+// The regular file at `path`, never following a link, with the device of its mount: opened with
+// O_PATH first and then only looked at through that descriptor, so that it is the same file both
+// times, also when its owner swaps it for a link in between. False when it cannot be looked at, is
+// no regular file or is on a FUSE mount (see Mounts), whose file system is then never asked.
+bool lock_file_named(const std::string& path, LockFile& f, Mounts& mounts) {
+    const int fd = ::open(path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return false;
+    const bool ok =
+        lock_file_at(fd, "", AT_EMPTY_PATH, f) && S_ISREG(f.mode) && !(f.has_mount_id && mounts.fuse(f.mount_id));
+    if (ok) with_mount(fd, f, mounts);
+    ::close(fd);
+    return ok;
 }
 
 // How a line of /proc/locks is about a file.
@@ -772,7 +783,7 @@ std::vector<LockFile> private_files_of(long pid, long long account, const std::s
             unsure = true;
             continue;
         }
-        with_mount(AT_FDCWD, nullptr, 0, f, *table);
+        with_mount(-1, f, *table);
         files.push_back(f);
     }
     ::closedir(d);
@@ -810,10 +821,7 @@ std::vector<LockFile> root_mark_files(const std::string& name, Mounts& mounts) {
     for (const std::string& dir : {root_dir(), std::string("/run/lock")}) {
         const std::string path = dir + "/" + name;
         LockFile f;
-        if (!lock_file_at(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f) || !S_ISREG(f.mode) ||
-            f.uid != hooks().root_uid)
-            continue;
-        with_mount(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f, mounts);
+        if (!lock_file_named(path, f, mounts) || f.uid != hooks().root_uid) continue;
         files.push_back(f);
     }
     return files;
@@ -905,10 +913,7 @@ std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mount
     for (const std::string& path : paths) {
         if (mounts.fuse_at(path)) continue;
         LockFile f;
-        if (!lock_file_at(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f) || !S_ISREG(f.mode) ||
-            static_cast<long long>(f.uid) != uid)
-            continue;
-        with_mount(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f, mounts);
+        if (!lock_file_named(path, f, mounts) || static_cast<long long>(f.uid) != uid) continue;
         files.push_back(f);
     }
     return files;
