@@ -75,8 +75,20 @@
 // pid namespace (another container that shares /run/lock) cannot be seen in /proc at all, as
 // /proc/locks leaves it out: root's eject therefore also tries a flock on each own file of an
 // account that it finds by its name (never waiting, let go of at once, never made), and counts one
-// it cannot take as busy; a holder in another pid namespace of a file root finds only through the
-// process that has it open (the settings folder's) is not seen. Root does not look
+// it cannot take as busy. A holder in another pid namespace of a file root finds only through the
+// process that has it open (the settings folder's) is not seen. An eject counts every file of
+// these names that the right account (or root, for root's marks) owns, also one with a hard link or
+// that other accounts may open: where fs.protected_hardlinks is off, another account may add a hard
+// link to such a file while it is held, and must not hide it from an eject that way. Where a holder
+// is waited for or trusted (root's claims waiting for an account's eject, an account's runs and
+// claims waiting for root's mark, a command that inherits its run's drive), only a file no other
+// account may open counts, and in /run/lock only one with no other name (another account could
+// link a file its owner holds for something else under that name); the files in root's folder and
+// in an account's runtime folder, where no other account can make a name, need no such test. A run
+// keeps using its own file in /run/lock (root's mark there too) when it has another name, so the
+// runs of an account still take turns; the limit: where fs.protected_hardlinks is off, another
+// account may make that name first as a hard link to another file of the account's, which a run or
+// claim then waits for while it is held (never longer than its wait). Root does not look
 // at a runtime folder, or a file, on a FUSE mount that its mount table shows (another account's
 // FUSE program, mounted with allow_other, could keep it waiting for as long as it likes), so such a
 // file counts for nothing; for a file a process has open, its mount is looked up in root's mount

@@ -322,16 +322,27 @@ bool own_or_roots(const struct stat& st) {
     return ::geteuid() == 0 || st.st_uid == 0 || st.st_uid == ::geteuid();
 }
 
-// Whether a file found by its name (`uid`, `mode`, `links` as stat gives them) is one that only
-// `owner` can hold: `owner`'s, and no other account may open it; in a folder where any account may
-// make names (/run/lock), also no hard link, which another account may have put there (to a file
-// of `owner`'s that `owner` holds for something else, where fs.protected_hardlinks is off).
-bool private_by_name(uid_t uid, mode_t mode, std::uint64_t links, uid_t owner) {
-    return uid == owner && (mode & 077) == 0 && links == 1;
+// Whether a file (`uid`, `mode` as stat gives them) is `owner`'s, and no other account may open it.
+bool private_file(uid_t uid, mode_t mode, uid_t owner) {
+    return uid == owner && (mode & 077) == 0;
 }
 
+// Whether a file found by its name in a folder where any account may make names (/run/lock) is one
+// that only `owner` can hold: private (see private_file), and no hard link, which another account
+// may have put there (to a file of `owner`'s that `owner` holds for something else, where
+// fs.protected_hardlinks is off). Only where a holder is trusted or waited for (see
+// held_by_ancestor, and a claim waiting for an eject): an eject counts a file of `owner`'s by its
+// name also when it is not so (fail closed), as another account can add a hard link to `owner`'s
+// own file at any time.
+bool private_by_name(uid_t uid, mode_t mode, std::uint64_t links, uid_t owner) {
+    return private_file(uid, mode, owner) && links == 1;
+}
+
+// Root's mark in /run/lock, for open_root_mark to use: root's, and only root may open it. A hard
+// link to it (another account may add one at any time) does not keep root from using it: root would
+// otherwise remake it while another run of root's holds the one there.
 bool roots(const struct stat& st) {
-    return private_by_name(st.st_uid, st.st_mode, st.st_nlink, 0);
+    return private_file(st.st_uid, st.st_mode, 0);
 }
 
 std::chrono::milliseconds other_account_wait() {
@@ -354,8 +365,14 @@ int open_lock_file(const std::string& name, const std::string& fallback_dir) {
     return open_in_dir(name, fallback_dir);
 }
 
+// The account's own file in /run/lock, for open_own_files to use: the account's, and only it may
+// open it. A hard link to it (another account may add one at any time) does not keep the account
+// from using it: its runs would otherwise fall back to their settings folders and stop taking
+// turns. The limit: where fs.protected_hardlinks is off, another account may make that name first
+// as a hard link to another file of the account's, which a run then waits for while the account
+// holds that one for something else (it never waits longer than its wait).
 bool mine(const struct stat& st) {
-    return private_by_name(st.st_uid, st.st_mode, st.st_nlink, ::geteuid());
+    return private_file(st.st_uid, st.st_mode, ::geteuid());
 }
 
 // The folder of every account's runtime folder.
@@ -897,25 +914,29 @@ bool holds(long pid, long long account, const LockFile& file, const std::vector<
 }
 
 // Root's mark files `name`, in root's folder or, as earlier versions kept it, in /run/lock: only
-// the ones root owns that only root may open and that are no hard link (see private_by_name), so
-// only root can hold them.
-std::vector<LockFile> root_mark_files(const std::string& name, Mounts& mounts) {
+// the ones root owns that only root may open, and the one in /run/lock only when it is no hard link
+// either (see private_by_name; only root can make a name in its folder), so only root can hold
+// them. For an eject (`eject`), every file of root's by these names (fail closed: another account
+// can add a hard link to root's mark at any time).
+std::vector<LockFile> root_mark_files(const std::string& name, Mounts& mounts, bool eject) {
     std::vector<LockFile> files;
     for (const std::string& dir : {root_dir(), std::string("/run/lock")}) {
         const std::string path = dir + "/" + name;
         LockFile f;
-        if (!lock_file_named(path, f, mounts) || !private_by_name(f.uid, f.mode, f.links, hooks().root_uid))
-            continue;
+        if (!lock_file_named(path, f, mounts) || f.uid != hooks().root_uid) continue;
+        const std::uint64_t links = dir == "/run/lock" ? f.links : 1;  // see above
+        if (!eject && !private_by_name(f.uid, f.mode, links, hooks().root_uid)) continue;
         files.push_back(f);
     }
     return files;
 }
 
 // Whether root holds its mark `name` (`write_only`: holds it alone, as an eject does); every
-// account can see in /proc/locks that it is held. False when that cannot be told.
-bool root_holds(const std::string& name, bool write_only) {
+// account can see in /proc/locks that it is held. False when that cannot be told. `eject`: asked
+// for an eject (see root_mark_files).
+bool root_holds(const std::string& name, bool write_only, bool eject) {
     Mounts mounts;
-    const std::vector<LockFile> files = root_mark_files(name, mounts);
+    const std::vector<LockFile> files = root_mark_files(name, mounts, eject);
     if (files.empty()) return false;
     for (const HeldFlock& f : held_flocks())
         for (const LockFile& id : files)
@@ -989,8 +1010,10 @@ std::string run_user_dir_of(long long uid, Mounts& mounts) {
 // the one in its runtime folder and its file in /run/lock, each only when that account owns it and
 // no other account may open it, and the one in /run/lock only when it is no hard link either (see
 // private_by_name; only the account can make a name in its runtime folder), so that no process of
-// another account can hold it.
-std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mounts& mounts) {
+// another account can hold it. For an eject (`eject`), each one that account owns (fail closed:
+// another account can add a hard link to the account's own file at any time, also while it is
+// held).
+std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mounts& mounts, bool eject) {
     std::vector<LockFile> files;
     if (uid < 0) return files;
     const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
@@ -1001,19 +1024,21 @@ std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mount
         LockFile f;
         if (!lock_file_named(path, f, mounts)) continue;
         const std::uint64_t links = path.rfind("/run/lock/", 0) == 0 ? f.links : 1;  // see above
-        if (!private_by_name(f.uid, f.mode, links, static_cast<uid_t>(uid))) continue;
+        if (static_cast<long long>(f.uid) != uid) continue;
+        if (!eject && !private_by_name(f.uid, f.mode, links, static_cast<uid_t>(uid))) continue;
         files.push_back(f);
     }
     return files;
 }
 
-// Root only: the own lock files for `name` of every other account (see own_files_of) that are
-// there: each vaultik-...<uid>.lock in /run/lock and `name` in each account's runtime folder.
+// Root only: the own lock files for `name` of every other account (see own_files_of; `eject`: for
+// an eject) that are there: each vaultik-...<uid>.lock in /run/lock and `name` in each account's
+// runtime folder.
 // Within the look's time (`budget`; `unsure` is set when it runs out): any account can make many
 // names in /run/lock, so a name there counts only for the account that owns its file, the one
 // its own file can be, and each account adds one name at most however many it makes.
 std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts, const ScanBudget& budget,
-                                         bool& unsure) {
+                                         bool eject, bool& unsure) {
     std::vector<long long> uids;
     const auto add = [&](const std::string& text) {
         if (text.empty() || text.size() > 10 || !std::all_of(text.begin(), text.end(), [](char c) {
@@ -1054,7 +1079,7 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
     std::vector<LockFile> files;
     for (const long long uid : uids) {
         if (out_of_time()) break;
-        const std::vector<LockFile> own = own_files_of(uid, name, mounts);
+        const std::vector<LockFile> own = own_files_of(uid, name, mounts, eject);
         files.insert(files.end(), own.begin(), own.end());
     }
     return files;
@@ -1064,9 +1089,12 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
 // only; see accounts_own_files), which it may do without the file all accounts share (another
 // account held that one when it started, or made it first): busy when /proc/locks shows one held
 // (`write_only`: held alone, as by a run or an eject), unsure when that cannot be told
-// (/proc/locks cannot be read, or the device of a file's mount cannot). /proc/locks leaves out a
-// flock whose holder is in another pid namespace (another container that shares /run/lock), so
-// for an eject (not `write_only`) each of these files is also tried itself (see flock_busy).
+// (/proc/locks cannot be read, or the device of a file's mount cannot). For an eject (not
+// `write_only`) these are all the files of each account's own names that the account owns (see
+// own_files_of), also one with a hard link or that other accounts may open, so that no other
+// account can hide a held one from root's eject by linking it. /proc/locks leaves out a flock whose
+// holder is in another pid namespace (another container that shares /run/lock), so for an eject
+// each of these files is also tried itself (see flock_busy).
 //
 // Another account may also make an account's file in /run/lock first, so that a run of that
 // account without its runtime folder (started by cron, without a login) holds only the file in its
@@ -1084,7 +1112,7 @@ Use accounts_hold(const std::string& name, bool write_only) {
     ScanBudget budget;
     Mounts mounts;
     bool unsure = false;
-    const std::vector<LockFile> files = accounts_own_files(name, mounts, budget, unsure);
+    const std::vector<LockFile> files = accounts_own_files(name, mounts, budget, !write_only, unsure);
     if (!write_only)
         for (const LockFile& file : files)
             if (flock_busy(file, mounts)) return Use::busy;
@@ -1191,7 +1219,7 @@ enum class Holder {
 Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const std::string& mark) {
     const std::vector<HeldFlock> held = held_flocks();
     Mounts mounts;
-    std::vector<LockFile> trusted = root_mark_files(mark, mounts);
+    std::vector<LockFile> trusted = root_mark_files(mark, mounts, false);
     bool shared = false;
     bool loose = false;  // an own lock of this account that other accounts may open too
     LockFile target;
@@ -1227,7 +1255,7 @@ Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const st
         const long long account = account_of(pid);
         for (const LockFile& t : trusted)
             if (holds(pid, account, t, held, false, budget, unsure)) return true;
-        for (const LockFile& own : own_files_of(account, name, mounts))
+        for (const LockFile& own : own_files_of(account, name, mounts, false))
             if (holds(pid, account, own, held, false, budget, unsure)) return true;
         if (::geteuid() == 0) {
             for (const LockFile& f : private_files_of(pid, account, name, mounts, budget, unsure))
@@ -1530,12 +1558,12 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             bool by_root = false;
             bool busy = true;  // the shared lock itself (else only root's mark is held)
             if (shared < 0) {  // an account without the shared file: root's mark alone
-                by_root = root_holds(mark, false);
+                by_root = root_holds(mark, false, fail_closed);
                 if (!by_root) break;
                 busy = false;
             } else if (::flock(shared, LOCK_EX | LOCK_NB) == 0) {
                 if (root) break;
-                by_root = root_holds(mark, false);
+                by_root = root_holds(mark, false, fail_closed);
                 if (!by_root) break;
                 ::flock(shared, LOCK_UN);
                 busy = false;
@@ -1545,7 +1573,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 if (root) break;
                 continue;  // root's mark still counts
             } else {
-                by_root = !root && root_holds(mark, false);
+                by_root = !root && root_holds(mark, false, fail_closed);
             }
             // Held by the run that started this command (or root's mark is): whatever its own
             // lock, the command inherits the drive (one with root rights that an account's run
@@ -1692,7 +1720,7 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 const auto now = std::chrono::steady_clock::now();
                 // An account (bounded) waits on the file of another account only while root's eject
                 // holds its mark (and a moment after): another account may hold it alone for good.
-                if (bounded && root_holds(mark, true)) root_until = now + kRootLetGo;
+                if (bounded && root_holds(mark, true, false)) root_until = now + kRootLetGo;
                 else if (bounded && busy && first && root_holds_alone(fd)) root_until = now + kRootLetGo;
                 first = false;
                 if (!busy || now >= until || (bounded && now >= root_until)) {
@@ -1717,7 +1745,7 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         } else if (::geteuid() != 0) {
             // No claims file to share (another account made it first): root's eject is still
             // waited for while it holds its mark, at most until the claim's wait ends.
-            while (root_holds(mark, true) && std::chrono::steady_clock::now() < until)
+            while (root_holds(mark, true, false) && std::chrono::steady_clock::now() < until)
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         if (::geteuid() == 0) {
@@ -1836,7 +1864,7 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     if (shared >= 0 && ::flock(shared, LOCK_EX | LOCK_NB) != 0) {
         // Root: a claim of any account (fail closed). An account: a claim or eject of root's while
         // root's mark is held, else one of another account, passed by.
-        const bool busy = errno == EWOULDBLOCK && (root || root_holds(mark, false));
+        const bool busy = errno == EWOULDBLOCK && (root || root_holds(mark, false, true));
         ::close(shared);
         shared = -1;
         if (busy || own < 0) {
@@ -1851,7 +1879,7 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     // one (another account held that one when it started, or made it first), also where that
     // cannot be told (fail closed). Asked once root holds its own: a claim that starts later waits
     // for this eject.
-    if (root ? accounts_hold(name, false) != Use::free : root_holds(mark, false)) {
+    if (root ? accounts_hold(name, false) != Use::free : root_holds(mark, false, true)) {
         busy_ = true;
         close_all();
         return;

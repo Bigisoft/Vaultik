@@ -631,15 +631,23 @@ account made first), and is refused where Linux cannot tell whether those are in
 in another container that shares /run/lock cannot be seen holding a turn file at all, so an eject
 as root also tries the turn files it finds in /run/lock and /run/user for a moment itself (never
 waiting) and counts one it cannot take as in use; such a program holding only the turn file in its
-settings folder stays unseen. So that no account can keep it looking for long,
-it looks into at most 256 programs and 65536 open files of each account (and 3 seconds in all); an
-account with more counts as in use for an eject as root, and a command as root does not wait for
-it. An eject or command as root does not look at such files on a FUSE mount (an sshfs folder,
-say), whose program could keep it waiting; one whose mount it cannot find at all (a FUSE mount
-taken away with `umount -l`) it does not look at either, and counts as in use. A run kept from the
-shared turn may share the drive's speed with a run as root. A turn file in /run/lock that another
-account mounted something on (a FUSE file system, whose program could keep everybody who opens it
-waiting) is not opened at all (Linux 5.8 and later). Any other run gives up after waiting 12
+settings folder stays unseen. Where Linux lets an account make hard links to other accounts' files
+(`fs.protected_hardlinks` off), another account may link a turn file of yours or root's under
+another name; an eject still counts that file (it is refused rather than run beside it), while a
+command as root, or a run or command of yours waiting for root's turn, counts only a turn file no
+other account may open and that has no other name. Your runs keep using their own turn file in
+/run/lock when it has another name, so they still take turns; the limit there: another account
+may make that name first as a link to another turn file of yours, and your run or command then
+waits while that one is in use (never longer than its own wait). So that no account can keep an
+eject or command as root looking for long, it looks into at most 256 programs and 65536 open files
+of each account (and 3 seconds in all); an account with more counts as in use for an eject as root,
+and a command as root does not wait for it. An eject or command as root does not look at such
+files on a FUSE mount (an sshfs folder, say), whose program could keep it waiting; one whose mount
+it cannot find at all (a FUSE mount taken away with `umount -l`) it does not look at either, and
+counts as in use. A run kept from the shared turn may share the drive's speed with a run as root. A
+turn file in /run/lock that another account mounted something on (a FUSE file system, whose program
+could keep everybody who opens it waiting) is not opened at all (Linux 5.8 and later). Any other run
+gives up after waiting 12
 hours, and a run that cannot take its turn at all (the system refuses it) goes on rather than not
 backing up. While a run only waits, the computer may go to sleep. A run started on its own that
 waited behind a run of the same job does nothing once that run saved a version (and leaves neither
