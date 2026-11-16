@@ -348,15 +348,20 @@ int open_in_run_user(const std::string& name) {
 // it is a file the account owns (another account may have made one of that name first). Both
 // where both can be used, in that order: a run without the runtime folder (one started outside a
 // login, without systemd's user manager) still takes turns with the others in /run/lock. Where
-// neither can be used, the file in `lock_dir` instead. Empty when none can be opened.
+// the file in /run/lock cannot be used (a distribution whose /run/lock only root may write to), the
+// file in `lock_dir` too, after the one in the runtime folder: a run without the runtime folder
+// (or with another one, as a Flatpak's) then takes turns with the others through the settings
+// folder, as long as they use the same one. Every run takes them in this order, so none waits for
+// another that waits for it. Empty when none can be opened.
 std::vector<int> open_own_files(const std::string& name, const std::string& lock_dir) {
     std::vector<int> fds;
     if (!hooks().own_in_folder) {
         if (const int fd = open_in_run_user(name); fd >= 0) fds.push_back(fd);
         const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
-        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0)
+        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0) {
             fds.push_back(fd);
-        if (!fds.empty()) return fds;
+            return fds;
+        }
     }
     if (const int fd = open_in_dir(name, lock_dir); fd >= 0) fds.push_back(fd);
     return fds;

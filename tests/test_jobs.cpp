@@ -2233,31 +2233,63 @@ TEST_CASE("drive lock: the account's own runtime folder keeps its runs taking tu
         CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(1500)), DriveBusy);
     }
     // Something in the place of the account's file in /run/lock (another account may make one of
-    // that name first; here a link): the runs still take turns through the runtime folder, and do
-    // not fall back on their settings folders, which differ.
+    // that name first, or the account may not make files there; here a link): the runs still take
+    // turns through the runtime folder, and also through the settings folder, after the runtime
+    // folder's file.
     fs::remove(in_run_lock, ec);
     fs::remove(use_in_run_lock, ec);
     fs::create_symlink(tmp.path / "elsewhere", in_run_lock);
     fs::create_symlink(tmp.path / "elsewhere-use", use_in_run_lock);
+    const std::string installed_dir = os::join(tmp.dir(), "installed");
+    REQUIRE(::mkdir((tmp.path / "flatpak").c_str(), 0700) == 0);
+    REQUIRE(::chmod((tmp.path / "flatpak").c_str(), 0700) == 0);
     {
-        OtherProcess installed("lock", key, os::join(tmp.dir(), "installed"), tmp.path, {}, with_folder);
+        OtherProcess installed("lock", key, installed_dir, tmp.path, {}, with_folder);
         REQUIRE(installed.held());
         CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(1500)), DriveBusy);
         CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(0), {}, {},
                                   DriveLockMode::eject),
                         DriveBusy);
-        CHECK_FALSE(fs::exists(tmp.path / "installed"));
-        CHECK_FALSE(fs::exists(tmp.path / "portable"));
+        CHECK(fs::exists(tmp.path / "installed" / ("vaultik-drive-" + name + ".lock")));
         CHECK_FALSE(fs::exists(tmp.path / "elsewhere"));
+        // A run of the same settings folder without the runtime folder (started outside a login)
+        // or with another one (a Flatpak's): it takes turns through the settings folder, and its
+        // eject sees the run.
+        for (const auto& folder : {without_folder, std::vector<std::pair<std::string, std::string>>{
+                                                       {"VAULTIK_TEST_HOLD_RUN_USER", (tmp.path / "flatpak").string()}}}) {
+            OtherProcess outside("lock", key, installed_dir, tmp.path, {}, folder);
+            CHECK_FALSE(outside.held());
+            CHECK(outside.busy());
+            OtherProcess eject("eject", key, installed_dir, tmp.path, {}, folder);
+            CHECK(eject.busy());
+        }
+    }
+    {
+        // The other way round: a run without the runtime folder holds the drive, one with it waits.
+        OtherProcess outside("lock", key, installed_dir, tmp.path, {}, without_folder);
+        REQUIRE(outside.held());
+        CHECK_THROWS_AS(DriveLock(key, installed_dir, std::chrono::milliseconds(1500)), DriveBusy);
+        CHECK_THROWS_AS(DriveLock(key, installed_dir, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject),
+                        DriveBusy);
     }
     {
         // A command of the installed app: an eject from the portable one sees it.
-        OtherProcess command("claim", key, os::join(tmp.dir(), "installed"), tmp.path, {}, with_folder);
+        OtherProcess command("claim", key, installed_dir, tmp.path, {}, with_folder);
         REQUIRE(command.held());
         CHECK(drive_claimed(key, os::join(tmp.dir(), "portable")));
         CHECK_FALSE(fs::exists(tmp.path / "elsewhere-use"));
+        // And one from the same settings folder without the runtime folder.
+        OtherProcess eject("claimed", key, installed_dir, tmp.path, {}, without_folder);
+        CHECK(eject.held());
+    }
+    {
+        // A command without the runtime folder: an eject with it sees it.
+        OtherProcess command("claim", key, installed_dir, tmp.path, {}, without_folder);
+        REQUIRE(command.held());
+        CHECK(drive_claimed(key, installed_dir));
     }
     CHECK_FALSE(drive_claimed(key, os::join(tmp.dir(), "portable")));
+    CHECK_FALSE(drive_claimed(key, installed_dir));
     fs::remove(in_run_lock, ec);
     fs::remove(use_in_run_lock, ec);
     // A runtime folder others may look into: not used (the file in /run/lock instead).
