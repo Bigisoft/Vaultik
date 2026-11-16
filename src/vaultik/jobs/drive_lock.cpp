@@ -1201,8 +1201,9 @@ enum class Holder {
     unknown,  // no answer to use: the file shows no holder at all, or the processes above this one
               // cannot all be read (another pid namespace, /proc mounted with hidepid), or one of
               // them may hold a lock that /proc/locks cannot tell from another file's, or the busy
-              // file is an own lock of this account that other accounts may open too (never the
-              // file all accounts share, which root uses as its own where it has no mark)
+              // file is an own lock of this account that other accounts may open too or that has
+              // another name (never the file all accounts share, which root uses as its own where
+              // it has no mark)
 };
 
 // Whether a process this one descends from (its parent, or one further up: a run's before or
@@ -1219,13 +1220,16 @@ enum class Holder {
 // a process the victim's commands descend from, its login shell or sudo, say), and any account may
 // hold the file `name` all accounts share (`fd` may be that one): a holder of that file never
 // counts on its own. Which file `fd` is, is told by the file itself, never by its path: it counts
-// as a lock no other account can take only when this account owns it and no other account may open
-// it (see only_mine), as another account may make the shared file first, hold it and then move it
-// away, so that it is no longer the one at its path. One of this run's own locks (`own_file`, not
-// the file all accounts share) that this account owns but other accounts may open too (its
-// settings folder on FAT, exFAT, NTFS or CIFS, whose mode bits cannot be set so) is not trusted
-// either, but leaves no answer (unknown) where none of the files above makes the holder a parent,
-// so that the marker tells (never for an eject) instead of the command waiting for its own run.
+// as a lock no other account can take only when this account owns it, no other account may open
+// it (see only_mine) and it has no other name, as another account may make the shared file first,
+// hold it and then move it away, so that it is no longer the one at its path, or make the name
+// first as a hard link to another lock file of this account's (where fs.protected_hardlinks is
+// off), which a run above this one holds for another drive. One of this run's own locks
+// (`own_file`, not the file all accounts share) that this account owns but other accounts may open
+// too (its settings folder on FAT, exFAT, NTFS or CIFS, whose mode bits cannot be set so) or that
+// has another name is not trusted either, but leaves no answer (unknown) where none of the files
+// above makes the holder a parent, so that the marker tells (never for an eject) instead of the
+// command waiting for its own run.
 // Root's own lock where it has no mark is the file all accounts share (every account may open it):
 // a holder of it that is no parent is another (other), as for any holder of that file. `unseen` is
 // set when the busy file shows no holder at all in /proc/locks.
@@ -1253,7 +1257,11 @@ Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const st
     LockFile target;
     const bool busy_file = fd >= 0 && lock_file_of(fd, target, mounts);
     if (busy_file) {
-        shared = !only_mine(target) || shared_stand_in(fd, name);
+        // Trusted only with no other name: another account may have made the busy file's name (an
+        // own file's or the shared one's) first as a hard link to another lock file of this
+        // account's (where fs.protected_hardlinks is off), which a run above this one holds for
+        // another drive.
+        shared = !only_mine(target) || target.links != 1 || shared_stand_in(fd, name);
         loose = own_file && shared && target.uid == ::geteuid() && !run_lock_file(fd, name);
         if (!shared) trusted.push_back(target);
     }

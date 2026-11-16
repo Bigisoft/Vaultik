@@ -189,8 +189,9 @@ public:
     // Windows: that run is the one kHeldDrivesVariable names, when the lock is busy. Linux: a
     // process this one descends from (through any shell, sudo or pkexec) holds a lock file of the
     // drive, as /proc/locks shows, whatever the environment: the busy file itself when this account
-    // owns it and no other account may open it (told by the file, never by its path, which another
-    // account may move the shared file away from), root's mark, or an own file of the account that
+    // owns it, no other account may open it and it has no other name (told by the file, never by its
+    // path, which another account may move the shared file away from, or make first as a hard link
+    // to another lock file of this account's), root's mark, or an own file of the account that
     // process runs as now (never one of another account's, as /proc/locks still names a process
     // that took a lock after it ended, and its number may have gone to a process of another account
     // since), or for a command of root's the drive's file in that process's settings folder, which
@@ -208,9 +209,9 @@ public:
     // overlayfs cannot be told while a process above this one
     // may hold one with its inode, or the processes above this one cannot be read: another pid
     // namespace, hidepid; or the busy file is an own lock of this account that other accounts may
-    // open too, as in a settings folder on FAT, exFAT, NTFS or CIFS, which never makes a parent run
-    // on its own), kHeldDrivesVariable tells as on Windows, never for an eject; a holder of the
-    // file all accounts share that cannot be trusted is no such case.
+    // open too, as in a settings folder on FAT, exFAT, NTFS or CIFS, or that has another name, which
+    // never makes a parent run on its own), kHeldDrivesVariable tells as on Windows, never for an
+    // eject; a holder of the file all accounts share that cannot be trusted is no such case.
     // Either way, a lock that is free (the run that started the command has ended) is taken as
     // usual.
     // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see

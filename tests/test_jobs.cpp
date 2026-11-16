@@ -3720,6 +3720,60 @@ TEST_CASE("drive lock: a holder of the shared file is a parent run only with a l
     }
 }
 
+TEST_CASE("drive lock: a lock name linked to another drive's own file never makes a parent run (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string first = "test-alias-1-" + tmp.path.filename().string();
+    const std::string second = "test-alias-2-" + tmp.path.filename().string();
+    const std::string uid = std::to_string(::geteuid());
+    const auto in_run_lock = [](const std::string& key, const std::string& end) {
+        return fs::path("/run/lock") / ("vaultik-drive-" + drive_lock_name(key) + end);
+    };
+    struct Cleanup {
+        std::vector<fs::path> files;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const fs::path& f : files) fs::remove(f, ec);
+        }
+    } cleanup{{in_run_lock(first, ".lock"), in_run_lock(first, "." + uid + ".lock"), in_run_lock(second, ".lock"),
+               in_run_lock(second, "." + uid + ".lock")}};
+    // Without a runtime folder (as outside a login): the own file in /run/lock is the run's own lock.
+    const std::string no_run_user = (tmp.path / "no-run-user").string();
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(-1), {}, no_run_user});
+    std::vector<std::pair<std::string, std::string>> env = {{"VAULTIK_TEST_HOLD_RUN_USER", no_run_user}};
+    // The run that starts the command (this process) holds the first drive; its marker names that
+    // drive alone. Another account (where fs.protected_hardlinks is off; here this account itself)
+    // made a lock name of the second drive first as a hard link to the first drive's own file. A
+    // command for the second drive then never takes that held file for its parent run's lock of the
+    // second drive (which would let it run on that drive with no lock at all).
+    DriveLock run(first, os::join(tmp.dir(), "run"), std::chrono::milliseconds(0));
+    REQUIRE(run.held());
+    env.push_back({kHeldDrivesVariable, drive_lock_name(first) + ":parent"});
+    {
+        // The account's own name for the second drive.
+        REQUIRE(::link(in_run_lock(first, "." + uid + ".lock").c_str(), in_run_lock(second, "." + uid + ".lock").c_str()) ==
+                0);
+        OtherProcess command("lock", second, os::join(tmp.dir(), "command"), tmp.path, {}, env);
+        CHECK_FALSE(command.inherited());
+        fs::remove(in_run_lock(second, "." + uid + ".lock"));
+    }
+    {
+        // The name all accounts share for the second drive: another account's, as far as the
+        // command can tell (waited for, here with no wait of its own).
+        std::error_code ec;
+        fs::remove(in_run_lock(second, ".lock"), ec);  // made by the command above
+        REQUIRE(::link(in_run_lock(first, "." + uid + ".lock").c_str(), in_run_lock(second, ".lock").c_str()) == 0);
+        OtherProcess command("lock", second, os::join(tmp.dir(), "command"), tmp.path, {}, env);
+        CHECK_FALSE(command.inherited());
+        CHECK(command.busy());
+    }
+}
+
 TEST_CASE("drive lock: where /proc cannot tell who holds the drive, the marker of the parent run does (Linux)") {
     TempStore tmp;
     fs::create_directories(tmp.path);
