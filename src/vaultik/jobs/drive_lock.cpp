@@ -741,14 +741,13 @@ constexpr std::chrono::seconds kScanTime{3};
 struct ScanBudget {
     std::map<long long, std::pair<std::size_t, std::size_t>> used;  // per account: processes, descriptors
     std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + kScanTime;
+    std::size_t processes = hooks().scan_processes > 0 ? hooks().scan_processes : kScanProcesses;
+    std::size_t descriptors = hooks().scan_descriptors > 0 ? hooks().scan_descriptors : kScanDescriptors;
 
     bool in_time() const { return std::chrono::steady_clock::now() < until; }
 
     // Whether one more process (`descriptor` false) or descriptor of `account` may be looked into.
     bool take(long long account, bool descriptor) {
-        const testing::DriveLockHooks set = hooks();
-        const std::size_t processes = set.scan_processes > 0 ? set.scan_processes : kScanProcesses;
-        const std::size_t descriptors = set.scan_descriptors > 0 ? set.scan_descriptors : kScanDescriptors;
         std::pair<std::size_t, std::size_t>& u = used[account];
         if (!in_time()) return false;
         return descriptor ? ++u.second <= descriptors : ++u.first <= processes;
