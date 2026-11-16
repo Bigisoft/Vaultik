@@ -37,53 +37,54 @@
 // root's runs first take a lock of their own that only root may open, and an account's runs locks
 // of their own (vaultik-drive-<hash>.lock in the account's runtime folder /run/user/<uid>, used
 // when it is a folder of the account's alone, where no other account can make a file first, and
-// vaultik-drive-<hash>.<uid>.lock in /run/lock, used when it is a file the account owns; both
-// where both can be used, so that a run started outside a login, without the runtime folder,
-// takes turns too; where the account cannot use its file in /run/lock (a distribution whose
-// /run/lock only root may write to), the file in the given folder as well, after the runtime one,
-// so that such a run, or one with another runtime folder (a Flatpak's), takes turns with the
-// others as long as they use the same settings folder), so the runs of one account still take
-// turns, whatever settings folder each uses wherever /run/lock has their file; then each waits for
-// the shared one only a short while (kOtherAccountWait) while a run of another account may hold
-// it, and goes on with a warning. A run of root marks that it uses the drive with root's own lock
-// (vaultik-drive-<hash>.root.lock in /run/vaultik, a folder only root may write to, so no account
-// can put a file in its place, and that every account may look into (set so whatever root's
-// umask); /run/lock where that folder cannot be used; every account can see it held in
-// /proc/locks but none can take it): an account's run waits for the shared lock for as long as
-// that mark is held, then only the short while, and while the mark is held it counts the shared
-// lock as busy even when it is free (root's run may have passed it by) or cannot be used at all
-// (another account made the shared file first). The claims (vaultik-use-<hash>.lock) work the same
-// way with vaultik-use-<hash>.root.lock: an account's claim waits only for an eject of its own or
-// of root's, and its eject counts only the claims of its own and of root's as busy. So another
-// account can delay a run by kOtherAccountWait, never stop it, can delay a command of an account
-// by 2 seconds at most (a claim waits that long for a claims file a process of root's holds
-// alone, as root's eject does for a moment after its mark; only one whose four accounts, real,
-// effective, saved and file system, are all root's counts), and cannot keep its eject busy. Root's
-// ejects still count the runs and claims of every account, fail closed, and root's claims wait for
-// the ejects of every account (at most kEjectWait): through the shared files, and through each
-// account's own files that root can find (vaultik-drive-<hash>.<uid>.lock and
-// vaultik-use-<hash>.<uid>.lock in /run/lock, the files in each runtime folder /run/user/<uid>),
-// which an account's run, claim or eject holds also when it is left without the shared file
-// (another account held that one when it started, or made it first); an eject of root's counts each
-// one held, and each one there where /proc/locks cannot tell. As another account may make an
-// account's file in /run/lock first, so that a run of it without its runtime folder holds only the
-// file in its settings folder, root also looks into each process that /proc/locks shows holding a
-// flock, and counts one that holds a file of the drive's name there (/proc/<pid>/fd) that its
-// account owns and no other account may open; in one look at most 256 processes and 65536
-// descriptors of each account, and 3 seconds in all, so that no account can keep it looking for
-// long: an account over that (or a look over its time) cannot be told, nor can a flock held in
-// another pid namespace (which /proc/locks shows without its process), so root's eject fails
-// closed and root's claim does not wait for it. Root does not look at a runtime folder, or a file, on
-// a FUSE mount that its mount table shows (another account's FUSE program, mounted with
-// allow_other, could keep it waiting for as long as it likes), so such a file counts for nothing;
-// for a file a process has open, its mount is looked up in root's mount table and then in that
-// process's, and one in neither (a mount taken away with umount -l) is not looked at but cannot be
-// told (root's eject fails closed). The details of these files are read as the system has them at
-// hand (AT_STATX_DONT_SYNC), never asking their file system, which covers a file put in place of
-// another between two looks. The limit: root's runs do not wait
-// for an account's own files (a run of that account that waits for root's mark holds them, and
-// would keep root's run waiting in turn), so a run of an account left without the shared file may
-// share the drive's speed with a run of root's. A file in /run/lock with something mounted on it (another
+// vaultik-drive-<hash>.<uid>.lock in /run/lock, used when it is a file the account owns; both where
+// both can be used, so that a run started outside a login, without the runtime folder, takes turns
+// too; where the account cannot use its file in /run/lock (a distribution whose /run/lock only root
+// may write to), the file in the given folder as well, after the runtime one, so that such a run,
+// or one with another runtime folder (a Flatpak's), takes turns with the others as long as they use
+// the same settings folder), so the runs of one account still take turns, whatever settings folder
+// each uses wherever /run/lock has their file; then each waits for the shared one only a short
+// while (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning.
+// A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
+// in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
+// that every account may look into (set so whatever root's umask); /run/lock where that folder
+// cannot be used; every account can see it held in /proc/locks but none can take it): an account's
+// run waits for the shared lock for as long as that mark is held, then only the short while, and
+// while the mark is held it counts the shared lock as busy even when it is free (root's run may
+// have passed it by) or cannot be used at all (another account made the shared file first). The
+// claims (vaultik-use-<hash>.lock) work the same way with vaultik-use-<hash>.root.lock: an
+// account's claim waits only for an eject of its own or of root's, and its eject counts only the
+// claims of its own and of root's as busy. So another account can delay a run by kOtherAccountWait,
+// never stop it, can delay a command of an account by 2 seconds at most (a claim waits that long
+// for a claims file a process of root's holds alone, as root's eject does for a moment after its
+// mark; only one whose four accounts, real, effective, saved and file system, are all root's
+// counts), and cannot keep its eject busy. Root's ejects still count the runs and claims of every
+// account, fail closed, and root's claims wait for the ejects of every account (at most
+// kEjectWait): through the shared files, and through each account's own files that root can find
+// (vaultik-drive-<hash>.<uid>.lock and vaultik-use-<hash>.<uid>.lock in /run/lock, the files in
+// each runtime folder /run/user/<uid>), which an account's run, claim or eject holds also when it
+// is left without the shared file (another account held that one when it started, or made it
+// first); an eject of root's counts each one held, and each one there where /proc/locks cannot
+// tell. As another account may make an account's file in /run/lock first, so that a run of it
+// without its runtime folder holds only the file in its settings folder, root also looks into each
+// process that /proc/locks shows holding a flock, and counts one that holds a file of the drive's
+// name there (/proc/<pid>/fd) that its account owns and no other account may open; in one look at
+// most 256 processes and 65536 descriptors of each account, and 3 seconds in all, so that no
+// account can keep it looking for long: an account over that (or a look over its time) cannot be
+// told, nor can a flock held in another pid namespace (which /proc/locks shows without its
+// process), so root's eject fails closed and root's claim does not wait for it. Root does not look
+// at a runtime folder, or a file, on a FUSE mount that its mount table shows (another account's
+// FUSE program, mounted with allow_other, could keep it waiting for as long as it likes), so such a
+// file counts for nothing; for a file a process has open, its mount is looked up in root's mount
+// table and then in that process's, and one in neither (a mount taken away with umount -l) is not
+// looked at but cannot be told (root's eject fails closed). The details of these files are read as
+// the system has them at hand (AT_STATX_DONT_SYNC), never asking their file system, which covers a
+// file put in place of another between two looks; and a file root finds by its name is looked at
+// through one descriptor (O_PATH, never following a link), so that its owner cannot swap it for a
+// link between two looks. The limit: root's runs do not wait for an
+// account's own files (a run of that account that waits for root's mark holds them, and would keep
+// root's run waiting in turn), so a run of an account left without the shared file may share the
+// drive's speed with a run of root's. A file in /run/lock with something mounted on it (another
 // account's FUSE file system, mounted with allow_other on a file of its own there, whose program
 // could keep every open of it waiting) is never opened, where statx tells mounts (Linux 5.8 and
 // later): it counts as one that cannot be used. Where /run/lock cannot be used, a file in the given
