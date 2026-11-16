@@ -38,17 +38,21 @@
 // of their own (vaultik-drive-<hash>.lock in the account's runtime folder /run/user/<uid>, used
 // when it is a folder of the account's alone, where no other account can make a file first, and
 // vaultik-drive-<hash>.<uid>.lock in /run/lock, used when it is a file the account owns; both
-// where both can be used, so that a run started outside a login, without the runtime folder, takes
-// turns too; else the file in the given folder), so the runs of one account still take turns,
-// whatever settings folder each uses; then each waits for the shared one only a short while
-// (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning. A run
-// of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock in
-// /run/vaultik, a folder only root may write to, so no account can put a file in its place,
-// and that every account may look into (set so whatever root's umask); /run/lock where that
-// folder cannot be used; every account can see it held in /proc/locks but none
-// can take it): an account's run waits for the shared lock for as long as that mark is held, then
-// only the short while, and while the mark is held it counts the shared lock as busy even when it
-// is free (root's run may have passed it by). The claims (vaultik-use-<hash>.lock) work the same
+// where both can be used, so that a run started outside a login, without the runtime folder,
+// takes turns too; where the account cannot use its file in /run/lock (a distribution whose
+// /run/lock only root may write to), the file in the given folder as well, after the runtime one,
+// so that such a run, or one with another runtime folder (a Flatpak's), takes turns with the
+// others as long as they use the same settings folder), so the runs of one account still take
+// turns, whatever settings folder each uses wherever /run/lock has their file; then each waits for
+// the shared one only a short while (kOtherAccountWait) while a run of another account may hold
+// it, and goes on with a warning. A run of root marks that it uses the drive with root's own lock
+// (vaultik-drive-<hash>.root.lock in /run/vaultik, a folder only root may write to, so no account
+// can put a file in its place, and that every account may look into (set so whatever root's
+// umask); /run/lock where that folder cannot be used; every account can see it held in
+// /proc/locks but none can take it): an account's run waits for the shared lock for as long as
+// that mark is held, then only the short while, and while the mark is held it counts the shared
+// lock as busy even when it is free (root's run may have passed it by) or cannot be used at all
+// (another account made the shared file first). The claims (vaultik-use-<hash>.lock) work the same
 // way with vaultik-use-<hash>.root.lock: an account's claim waits only for an eject of its own or
 // of root's, and its eject counts only the claims of its own and of root's as busy. So another
 // account can delay a run by kOtherAccountWait, never stop it, can delay a command of an account
@@ -236,10 +240,11 @@ namespace testing {
 
 // For tests only (Linux; no-op elsewhere): lets a test without root stand in for other accounts
 // with processes of its own. `own_in_folder`: the account's own lock is the file in the given
-// folder, not the one in /run/lock (so a process of this account with another folder stands in
-// for another account); `root_uid`: the account whose marks (see above) count as root's;
-// `other_account_wait`: instead of kOtherAccountWait when not negative; `root_dir`: instead of
-// /run/vaultik when not empty; `run_user_dir`: instead of /run/user/<uid> when not empty;
+// folder alone, neither the one in its runtime folder nor the one in /run/lock (so a process of
+// this account with another folder stands in for another account); `root_uid`: the account
+// whose marks (see above) and processes count as root's; `other_account_wait`: instead of
+// kOtherAccountWait when not negative; `root_dir`: instead of /run/vaultik when not empty;
+// `run_user_dir`: instead of /run/user/<uid> when not empty;
 // `proc_locks`: instead of /proc/locks when not empty (a missing file: as if it could not be
 // read); `locks_other_device`: every line of /proc/locks carries another device than stat gives
 // (as on btrfs).
