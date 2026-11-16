@@ -2904,6 +2904,45 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             CHECK_FALSE(drive_claimed(key, root_dir));
             testing::set_drive_lock_hooks({});
         }
+        {
+            // A mount that the mount table read for the look does not show (one mounted since: a
+            // FUSE file system that another account mounted with allow_other on its own file in
+            // /run/lock, say) is never asked about (statfs would ask its program): the device of
+            // the file's mount stays unknown, so a lock on its inode on another device cannot be
+            // told from it, and root's eject fails closed. Here a line of /proc/locks for nobody's
+            // file on another device, and a copy of mountinfo without the mount of /run/lock.
+            const fs::path own = fs::path("/run/lock") / ("vaultik-drive-" + name + ".65534.lock");
+            struct stat st{};
+            REQUIRE(::stat(own.c_str(), &st) == 0);
+            const fs::path locks = tmp.path / "proc-locks-other-device";
+            std::ofstream(locks) << "1: FLOCK  ADVISORY  WRITE " << ::getpid() << " fe:42:" << st.st_ino << " 0 EOF\n";
+            testing::DriveLockHooks moved;
+            moved.proc_locks = locks.string();
+            testing::set_drive_lock_hooks(moved);
+            CHECK_FALSE(eject_busy());  // the device of its mount is known: a lock on another file
+            const int dir = ::open("/run/lock", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            REQUIRE(dir >= 0);
+            std::string mount_id;
+            {
+                std::ifstream info("/proc/self/fdinfo/" + std::to_string(dir));
+                for (std::string line; std::getline(info, line);)
+                    if (line.rfind("mnt_id:", 0) == 0) mount_id = line.substr(7);
+            }
+            ::close(dir);
+            mount_id.erase(0, mount_id.find_first_not_of(" \t"));
+            REQUIRE_FALSE(mount_id.empty());
+            const fs::path fake = tmp.path / "mountinfo-without-run-lock";
+            {
+                std::ifstream real("/proc/self/mountinfo");
+                std::ofstream out(fake);
+                for (std::string line; std::getline(real, line);)
+                    if (line.substr(0, line.find(' ')) != mount_id) out << line << "\n";
+            }
+            moved.mountinfo = fake.string();
+            testing::set_drive_lock_hooks(moved);
+            CHECK(eject_busy());
+            testing::set_drive_lock_hooks({});
+        }
         // Where /proc/locks cannot be read, root's eject cannot tell whether nobody's files are
         // held, and counts them as busy (fail closed).
         testing::DriveLockHooks hooks;

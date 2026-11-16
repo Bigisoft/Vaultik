@@ -682,13 +682,16 @@ bool lock_file_of(int fd, LockFile& f, Mounts& mounts) {
 // The regular file at `path`, never following a link, with the device of its mount: opened with
 // O_PATH first and then only looked at through that descriptor, so that it is the same file both
 // times, also when its owner swaps it for a link in between. False when it cannot be looked at, is
-// no regular file or is on a FUSE mount (see Mounts), whose file system is then never asked.
+// no regular file or is on a FUSE mount (see Mounts), whose file system is then never asked. On a
+// mount that `mounts` does not show (one mounted since they were read: a FUSE file system another
+// account mounted with allow_other on its own file in /run/lock, say), the device of the file's
+// mount is left unknown: its file system is not asked either (statfs would ask its program).
 bool lock_file_named(const std::string& path, LockFile& f, Mounts& mounts) {
     const int fd = ::open(path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) return false;
     const bool ok =
         lock_file_at(fd, "", AT_EMPTY_PATH, f) && S_ISREG(f.mode) && !(f.has_mount_id && mounts.fuse(f.mount_id));
-    if (ok) with_mount(fd, f, mounts);
+    if (ok) with_mount(f.has_mount_id && !mounts.has(f.mount_id) ? -1 : fd, f, mounts);
     ::close(fd);
     f.path = path;
     return ok;
