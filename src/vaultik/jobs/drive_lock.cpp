@@ -30,6 +30,7 @@
 
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #endif
@@ -489,34 +490,78 @@ struct LockFile {
     unsigned mount_minor = 0;
 };
 
-// The devices of the mounts, from /proc/self/mountinfo ("36 35 98:0 / /mnt ..."), read at most
-// once for one look at the drive's locks however many files it looks at.
+// The mounts, from /proc/self/mountinfo ("36 35 98:0 / /mnt rw - ext4 /dev/sda1 rw"), read at
+// most once for one look at the drive's locks however many files it looks at: the device of each,
+// and which are FUSE mounts, whose files root never looks at (a FUSE program of another account,
+// mounted with allow_other, could keep each look waiting for as long as it likes).
 struct Mounts {
     bool read = false;
     std::map<std::uint64_t, std::pair<unsigned, unsigned>> devices;
+    std::vector<std::uint64_t> fuse_ids;
+    std::vector<std::string> fuse_points;
+
+    void read_all() {
+        if (read) return;
+        read = true;
+        const std::string set = hooks().mountinfo;
+        std::ifstream in(set.empty() ? std::string("/proc/self/mountinfo") : set);
+        std::string line;
+        while (std::getline(in, line)) {
+            std::istringstream words(line);
+            std::uint64_t id = 0;
+            std::uint64_t parent = 0;
+            std::string dev, root, point, word;
+            unsigned a = 0;
+            unsigned b = 0;
+            if (!(words >> id >> parent >> dev >> root >> point)) continue;
+            if (std::sscanf(dev.c_str(), "%u:%u", &a, &b) == 2) devices[id] = {a, b};
+            while (words >> word && word != "-") {
+            }
+            std::string type;
+            if (!(words >> type) || (type != "fuse" && type != "fuseblk" && type.rfind("fuse.", 0) != 0)) continue;
+            fuse_ids.push_back(id);
+            fuse_points.push_back(unescape(point));
+        }
+    }
 
     // The device of the mount `mount_id`. False when it cannot be told.
     bool device(std::uint64_t mount_id, unsigned& major_of, unsigned& minor_of) {
-        if (!read) {
-            read = true;
-            std::ifstream in("/proc/self/mountinfo");
-            std::string line;
-            while (std::getline(in, line)) {
-                std::istringstream words(line);
-                std::uint64_t id = 0;
-                std::uint64_t parent = 0;
-                std::string dev;
-                unsigned a = 0;
-                unsigned b = 0;
-                if ((words >> id >> parent >> dev) && std::sscanf(dev.c_str(), "%u:%u", &a, &b) == 2)
-                    devices[id] = {a, b};
-            }
-        }
+        read_all();
         const auto it = devices.find(mount_id);
         if (it == devices.end()) return false;
         major_of = it->second.first;
         minor_of = it->second.second;
         return true;
+    }
+
+    // Whether the mount `mount_id` is a FUSE mount.
+    bool fuse(std::uint64_t mount_id) {
+        read_all();
+        return std::find(fuse_ids.begin(), fuse_ids.end(), mount_id) != fuse_ids.end();
+    }
+
+    // Whether a FUSE mount is mounted on `path` (a folder or file), so that looking at it would ask
+    // that FUSE program.
+    bool fuse_at(const std::string& path) {
+        read_all();
+        return std::find(fuse_points.begin(), fuse_points.end(), path) != fuse_points.end();
+    }
+
+    // A mount point as mountinfo writes it, with "\040" for a space and so on.
+    static std::string unescape(const std::string& text) {
+        std::string out;
+        for (std::size_t i = 0; i < text.size(); ++i) {
+            if (text[i] == '\\' && i + 3 < text.size()) {
+                const std::string digits = text.substr(i + 1, 3);
+                if (std::all_of(digits.begin(), digits.end(), [](char c) { return c >= '0' && c <= '7'; })) {
+                    out.push_back(static_cast<char>(std::stoi(digits, nullptr, 8)));
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push_back(text[i]);
+        }
+        return out;
     }
 };
 
@@ -631,7 +676,8 @@ bool open_files_of(long pid, std::vector<LockFile>& files) {
 // open_files_of) that the account owns and no other account may open (as open_in_dir and
 // open_in_run_user make them): its drive or claims file in its settings folder or runtime folder.
 // Each file is looked at only once its name matches, so a process with many files open costs a
-// readlink for each.
+// readlink for each; one on a FUSE mount (see Mounts) is not looked at, which /proc/<pid>/fdinfo tells
+// without asking the FUSE program.
 std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name, Mounts& mounts) {
     std::vector<LockFile> files;
     const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
@@ -646,6 +692,15 @@ std::vector<LockFile> private_files_of(long pid, long long account, const std::s
         if (path.size() <= name.size() || path.compare(path.size() - name.size(), name.size(), name) != 0 ||
             path[path.size() - name.size() - 1] != '/')
             continue;
+        std::ifstream info("/proc/" + std::to_string(pid) + "/fdinfo/" + e->d_name);
+        std::string line;
+        bool fuse = false;  // looked at when it cannot be told, so that an eject still counts it
+        while (std::getline(info, line))
+            if (line.rfind("mnt_id:", 0) == 0) {
+                fuse = mounts.fuse(std::strtoull(line.c_str() + 7, nullptr, 10));
+                break;
+            }
+        if (fuse) continue;
         LockFile f;
         if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f) || !S_ISREG(f.mode) ||
             static_cast<long long>(f.uid) != account || (f.mode & 077) != 0)
@@ -758,10 +813,12 @@ bool root_process(long pid) {
 }
 
 // The runtime folder of account `uid` (see run_user_dir) as far as this process can tell: empty
-// when it is no folder that account owns alone.
-std::string run_user_dir_of(long long uid) {
+// when it is no folder that account owns alone, or a FUSE mount (see Mounts), which is not looked
+// at.
+std::string run_user_dir_of(long long uid, Mounts& mounts) {
     if (uid == static_cast<long long>(::geteuid())) return run_user_dir();
     const std::string dir = run_user_root() + "/" + std::to_string(uid);
+    if (mounts.fuse_at(dir)) return {};
     struct stat st{};
     if (::lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || static_cast<long long>(st.st_uid) != uid ||
         (st.st_mode & 07777) != 0700)
@@ -777,8 +834,9 @@ std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mount
     if (uid < 0) return files;
     const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
     std::vector<std::string> paths = {"/run/lock/" + stem + "." + std::to_string(uid) + ".lock"};
-    if (const std::string dir = run_user_dir_of(uid); !dir.empty()) paths.push_back(dir + "/" + name);
+    if (const std::string dir = run_user_dir_of(uid, mounts); !dir.empty()) paths.push_back(dir + "/" + name);
     for (const std::string& path : paths) {
+        if (mounts.fuse_at(path)) continue;
         LockFile f;
         if (!lock_file_at(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f) || !S_ISREG(f.mode) ||
             static_cast<long long>(f.uid) != uid)

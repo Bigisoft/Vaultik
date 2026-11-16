@@ -69,10 +69,13 @@
 // account's file in /run/lock first, so that a run of it without its runtime folder holds only the
 // file in its settings folder, root also looks into each process that /proc/locks shows holding a
 // flock, and counts one that holds a file of the drive's name there (/proc/<pid>/fd) that its
-// account owns and no other account may open. The limit: root's runs do not wait for an account's
-// own files (a run of that account that waits for root's mark holds them, and would keep root's
-// run waiting in turn), so a run of an account left without the shared file may share the drive's
-// speed with a run of root's. Where /run/lock cannot be used, a file in the given folder instead.
+// account owns and no other account may open. Root never looks at a runtime folder, or a file, on
+// a FUSE mount (another account's FUSE program, mounted with allow_other, could keep it waiting
+// for as long as it likes), so such a file counts for nothing. The limit: root's runs do not wait
+// for an account's own files (a run of that account that waits for root's mark holds them, and
+// would keep root's run waiting in turn), so a run of an account left without the shared file may
+// share the drive's speed with a run of root's. Where /run/lock cannot be used, a file in the given
+// folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a
@@ -273,7 +276,8 @@ namespace testing {
 // the one /proc/self/mountinfo gives the file's mount (as on btrfs); `no_mount_device`: the device
 // of a file's mount cannot be told (as without statx's mount ID, before Linux 5.8); `btrfs`: every
 // file is on a file system where stat and /proc/locks may give different devices (btrfs, overlayfs);
-// `no_statx`: statx is refused (EPERM, as by older Docker seccomp filters).
+// `no_statx`: statx is refused (EPERM, as by older Docker seccomp filters); `mountinfo`: instead
+// of /proc/self/mountinfo when not empty.
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -286,6 +290,7 @@ struct DriveLockHooks {
     std::string run_user_root;
     bool btrfs = false;
     bool no_statx = false;
+    std::string mountinfo;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

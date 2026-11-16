@@ -2851,6 +2851,41 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         testing::set_drive_lock_hooks({});
     }
     {
+        // A FUSE mount on an account's runtime folder, or on its file there, is never looked at:
+        // its program (of another account, mounted with allow_other) could keep root waiting. Here
+        // a copy of mountinfo names them FUSE mounts, and nobody's claims file there is held under
+        // another name, so that root does not find it through the process that holds it either.
+        const fs::path runtime = tmp.path / "fuse-run-user";
+        const fs::path nobody = runtime / "65534";
+        REQUIRE(::mkdir(runtime.c_str(), 0755) == 0);
+        REQUIRE(::mkdir(nobody.c_str(), 0700) == 0);
+        REQUIRE(::chown(nobody.c_str(), 65534, 65534) == 0);
+        REQUIRE(::chmod(nobody.c_str(), 0700) == 0);
+        const fs::path file = nobody / ("vaultik-use-" + name + ".lock");
+        make_as(file, 65534);
+        const fs::path other_name = tmp.path / "held-under-another-name";
+        REQUIRE(::link(file.c_str(), other_name.c_str()) == 0);
+        OtherProcess holder("flock-ex", {}, {}, tmp.path, "65534", hold_files(other_name.string()));
+        REQUIRE(holder.held());
+        testing::DriveLockHooks hooks;
+        hooks.run_user_root = runtime.string();
+        testing::set_drive_lock_hooks(hooks);
+        CHECK(drive_claimed(key, root_dir));
+        std::ostringstream real;
+        real << std::ifstream("/proc/self/mountinfo").rdbuf();
+        const fs::path fake = tmp.path / "mountinfo";
+        hooks.mountinfo = fake.string();
+        testing::set_drive_lock_hooks(hooks);
+        std::ofstream(fake) << real.str();
+        CHECK(drive_claimed(key, root_dir));  // the copy alone changes nothing
+        std::ofstream(fake) << real.str() << "99999 1 0:4242 / " << nobody.string() << " rw - fuse.test test rw\n";
+        CHECK_FALSE(drive_claimed(key, root_dir));
+        std::ofstream(fake) << real.str() << "99999 1 0:4242 / " << file.string() << " rw - fuse test rw\n";
+        CHECK_FALSE(drive_claimed(key, root_dir));
+        testing::set_drive_lock_hooks({});
+        CHECK(holder.release() == 0);
+    }
+    {
         // Another account made nobody's own files in /run/lock first, and the shared files, and
         // nobody has no runtime folder (a run started by cron, without a login): its run, claim
         // and eject hold only the files in its settings folder, which root finds through the
@@ -2875,6 +2910,27 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             REQUIRE(run->held());
             CHECK(fs::exists(fs::path(user_dir) / ("vaultik-drive-" + name + ".lock")));
             CHECK(eject_busy());
+            {
+                // A file on a FUSE mount is not looked at (see above): here a copy of mountinfo
+                // that makes every mount one.
+                std::ifstream real("/proc/self/mountinfo");
+                const fs::path fake = tmp.path / "all-fuse-mountinfo";
+                std::ofstream out(fake);
+                for (std::string line; std::getline(real, line);) {
+                    const std::size_t dash = line.find(" - ");
+                    if (dash == std::string::npos) continue;
+                    const std::size_t type_end = line.find(' ', dash + 3);
+                    out << line.substr(0, dash + 3) << "fuse.test"
+                        << (type_end == std::string::npos ? std::string() : line.substr(type_end)) << "\n";
+                }
+                out.close();
+                testing::DriveLockHooks fuse = hooks;
+                fuse.mountinfo = fake.string();
+                testing::set_drive_lock_hooks(fuse);
+                CHECK_FALSE(eject_busy());
+                testing::set_drive_lock_hooks(hooks);
+                CHECK(eject_busy());
+            }
             CHECK(run->release() == 0);
             CHECK_FALSE(eject_busy());
         }
