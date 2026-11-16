@@ -784,35 +784,35 @@ enum class Holder {
 
 // Whether a process this one descends from (its parent, or one further up: a run's before or
 // after command reaches vaultik through a shell, sudo or pkexec, which keep no environment of
-// it) holds a flock on the file of `fd` (none when -1), on root's mark `mark` or on one of
-// `accounts` (root: every other account's own files, see accounts_own_files): then the run that
-// started this command holds the drive, and waits for the command to end. Never this process
-// itself (another DriveLock of it on the drive counts as busy), and never a process that is no
-// ancestor (a command that outlived its run, or another account's run).
+// it) holds a flock on the file of `fd` (none when -1), on root's mark `mark` or on one of its own
+// account's own files (see own_files_of): then the run that started this command holds the drive,
+// and waits for the command to end. Never this process itself (another DriveLock of it on the
+// drive counts as busy), and never a process that is no ancestor (a command that outlived its
+// run, or another account's run).
 //
 // /proc/locks names the process that took a flock, also after it ended while another process
-// still holds the file open, and any account may hold the file `name` all accounts share (`fd`
-// may be that one): a holder of that file counts only when it holds it alone (as a run does, not
-// a claim's shared lock) and the same process also holds a lock no other account can take, one of
-// its account's own files (see own_files_of), root's mark or, for root (a command run with sudo;
-// only root may look at the open files of another account's process), a file of that name it has
-// open (/proc/<pid>/fd) that its account owns and no other account may open: the settings
-// folder's, the only own file of a run without its runtime folder where only root may write to
-// /run/lock. Otherwise another account could take that file from a process whose number
-// then goes to a process the victim's commands descend from (its login shell, say): they would all
-// take it for their parent run and drop their turns. Holders of root's mark and of the accounts'
-// own files (only their owners may open them) count as they are. A holder of the shared file that
-// cannot be trusted so is an answer (other), never unknown.
+// still holds the file open: so an account's own file counts only for a process whose account is
+// that one now (another account may have taken a lock on its own file in a process whose number
+// then goes to a process the victim's commands descend from, its login shell or sudo, say), and
+// any account may hold the file `name` all accounts share (`fd` may be that one): a holder of
+// that file counts only when it holds it alone (as a run does, not a claim's shared lock) and the
+// same process also holds a lock no other account can take, one of its account's own files, root's
+// mark or, for root (a command run with sudo; only root may look at the open files of another
+// account's process), a file of that name it has open (/proc/<pid>/fd) that its account owns and
+// no other account may open: the settings folder's, the only own file of a run without its
+// runtime folder where only root may write to /run/lock. Otherwise another account could take
+// that file from a process whose number then goes to a process the victim's commands descend
+// from: they would all take it for their parent run and drop their turns. Holders of root's mark
+// (only root may open it) count as they are. A holder of the shared file that cannot be trusted so
+// is an answer (other), never unknown.
 //
 // Each lock counts only on the file's own device and inode (see Match): a line of /proc/locks with
 // the same inode on another device may be any file of any account (tmpfs inode numbers are easy to
 // match), so it never makes a parent; where the file's device cannot be told, such a line held by
 // a process above this one leaves no answer (unknown).
-Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark,
-                        const std::vector<LockFile>& accounts) {
+Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark) {
     const std::vector<HeldFlock> held = held_flocks();
     std::vector<LockFile> trusted = root_mark_files(mark);
-    trusted.insert(trusted.end(), accounts.begin(), accounts.end());
     bool shared = false;
     LockFile target;
     const bool busy_file = fd >= 0 && lock_file_of(fd, target);
@@ -826,27 +826,27 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
                        const Match m = match(f, target);
                        return m == Match::exact || m == Match::mount;
                    });
-    // The processes that may hold one of these files, on any device; each is asked about strictly
-    // when it is one above this process.
+    // The processes that hold a flock, on any file (one may be an own file of the holder's
+    // account); each is asked about strictly when it is one above this process.
     std::vector<long> holders;
     for (const HeldFlock& f : held) {
-        const bool of_trusted = std::any_of(trusted.begin(), trusted.end(),
-                                            [&](const LockFile& t) { return match(f, t) != Match::no; });
-        const bool of_shared = shared && f.write && match(f, target) != Match::no;
-        if (!of_trusted && !of_shared) continue;
-        if (f.pid > 0) holders.push_back(f.pid);
-        else if (of_trusted) unknown = true;  // in another pid namespace
+        if (f.pid > 0) {
+            holders.push_back(f.pid);
+            continue;
+        }
+        if (std::any_of(trusted.begin(), trusted.end(), [&](const LockFile& t) { return match(f, t) != Match::no; }))
+            unknown = true;  // in another pid namespace
     }
-    // Whether process `pid` holds one of the trusted files, or the shared file alone with a lock no
-    // other account can take.
+    // Whether process `pid` holds one of the trusted files or one of its account's own files, or
+    // the shared file alone with a file of that name it has open that only its account may open.
     const auto holds_drive = [&](long pid) {
         bool unsure = false;
         for (const LockFile& t : trusted)
             if (holds(pid, t, held, false, unsure)) return true;
+        const long long account = account_of(pid);
+        for (const LockFile& own : own_files_of(account, name))
+            if (holds(pid, own, held, false, unsure)) return true;
         if (shared && holds(pid, target, held, true, unsure)) {
-            const long long account = account_of(pid);
-            for (const LockFile& own : own_files_of(account, name))
-                if (holds(pid, own, held, false, unsure)) return true;
             std::vector<LockFile> open;
             std::vector<std::string> names;
             if (::geteuid() == 0 && open_files_of(pid, open, &names)) {
@@ -984,8 +984,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     // its commands tells instead (sudo and pkexec drop it, but they are rarely in between then),
     // never for an eject, which then waits as usual.
     const auto by_parent = [&](int fd) {
-        const Holder holder =
-            held_by_ancestor(fd, name, mark, ::geteuid() == 0 ? accounts_own_files(name) : std::vector<LockFile>{});
+        const Holder holder = held_by_ancestor(fd, name, mark);
         if (holder == Holder::other) return false;
         if (holder == Holder::unknown && (fail_closed || !named_by_parent(hash))) return false;
         if (!fail_closed) inherited_ = true;

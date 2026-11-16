@@ -1264,6 +1264,10 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
     const std::string what = os::get_env("VAULTIK_TEST_HOLD");
     if (what.empty()) return;  // only as such a helper
 #ifndef _WIN32
+    if (os::get_env("VAULTIK_TEST_HOLD_ROOT_AGAIN") == "1" && ::getuid() == 0) {
+        // Started by a test that runs as another account for a while (see AsAccount).
+        REQUIRE(::setresuid(0, 0, 0) == 0);
+    }
     if (const std::string uid = os::get_env("VAULTIK_TEST_HOLD_UID"); !uid.empty() && ::geteuid() == 0) {
         const auto id = static_cast<uid_t>(std::stoul(uid));
         REQUIRE(::setgroups(0, nullptr) == 0);
@@ -1404,6 +1408,18 @@ struct OtherProcess {
         }
     }
 };
+
+#ifndef _WIN32
+// Root only: this process runs as `uid` (its effective account, its real and saved ones staying
+// root's) until this goes away, as a process of that account would show in /proc. A helper it
+// starts with VAULTIK_TEST_HOLD_ROOT_AGAIN=1 becomes root again first.
+struct AsAccount {
+    explicit AsAccount(uid_t uid) { REQUIRE(::setresuid(static_cast<uid_t>(-1), uid, 0) == 0); }
+    ~AsAccount() { (void)::setresuid(static_cast<uid_t>(-1), 0, static_cast<uid_t>(-1)); }
+    AsAccount(const AsAccount&) = delete;
+    AsAccount& operator=(const AsAccount&) = delete;
+};
+#endif
 
 #ifdef _WIN32
 // A mutex of the drive's as a run with administrator rights leaves it: made by the system
@@ -2466,7 +2482,9 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
     {
         // A run of an account's that another account kept from the shared file (it holds that one)
         // holds only its own file: a command of root's it started still inherits the drive. Here
-        // this process stands in for that run, holding nobody's own file.
+        // this process stands in for that run, holding nobody's own file while it runs as nobody
+        // (its effective account; its real one stays root's, so that it can start the command as
+        // root and become root again).
         const fs::path own = fs::path("/run/lock") / ("vaultik-drive-" + name + ".65534.lock");
         const int own_fd = ::open(own.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
         REQUIRE(own_fd >= 0);
@@ -2475,15 +2493,32 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         REQUIRE(::chmod(file.c_str(), 0644) == 0);
         OtherProcess other("flock-ex", {}, {}, tmp.path, "65533", {{"VAULTIK_TEST_HOLD_FILES", file.string()}});
         REQUIRE(other.held());
+        const std::vector<std::pair<std::string, std::string>> as_root = {{"VAULTIK_TEST_HOLD_ROOT_AGAIN", "1"}};
         {
-            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+            const AsAccount nobody(65534);
+            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path, {}, as_root);
             CHECK_FALSE(child.inherited());
         }
         REQUIRE(::flock(own_fd, LOCK_EX | LOCK_NB) == 0);
         {
-            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+            const AsAccount nobody(65534);
+            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path, {}, as_root);
             CHECK(child.inherited());
             CHECK_FALSE(child.held());
+        }
+        {
+            // The same process holding nobody's own file while it runs as another account (root):
+            // no parent run. /proc/locks names the process that took a lock also after it ended,
+            // and its number may have gone to a process of another account since (the shell or
+            // sudo that a command of root's descends from), so another account's own file counts
+            // for nothing.
+            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+            CHECK_FALSE(child.inherited());
+            CHECK_FALSE(child.held());
+            const AsAccount other_account(65533);
+            OtherProcess child2("lock", key, os::join(tmp.dir(), "root"), tmp.path, {}, as_root);
+            CHECK_FALSE(child2.inherited());
+            CHECK_FALSE(child2.held());
         }
         ::close(own_fd);
         fs::remove(own);
@@ -2918,13 +2953,13 @@ TEST_CASE("drive lock: a holder of the shared file is a parent run only with a l
         CHECK_FALSE(eject.inherited());
     }
     {
-        // A lock of its own beside it, but only a shared one on the shared file (a claim's, never a
-        // run's): no parent run either.
+        // An own file of the account it runs as, which no other account can hold, held beside
+        // only a shared lock on the shared file: a parent run (the own file counts on its own).
         const Flocked stale(foreign.drive(), LOCK_SH);
         const Flocked own(foreign.own_drive(), LOCK_EX);
         OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
-        CHECK(child.busy());
-        CHECK_FALSE(child.inherited());
+        CHECK(child.inherited());
+        CHECK_FALSE(child.busy());
     }
     {
         // Alone on the shared file and on its account's own file in its runtime folder: a parent
