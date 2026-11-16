@@ -557,8 +557,8 @@ bool is_file(const HeldFlock& f, const LockFile& file) {
 }
 
 // The files process `pid` has open, from /proc/<pid>/fd (readable for the processes of this
-// account, and for root), with their names when `names` is given. False when they cannot be read.
-bool open_files_of(long pid, std::vector<LockFile>& files, std::vector<std::string>* names) {
+// account, and for root). False when they cannot be read.
+bool open_files_of(long pid, std::vector<LockFile>& files) {
     const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
     DIR* d = ::opendir(dir.c_str());
     if (d == nullptr) return false;
@@ -568,15 +568,37 @@ bool open_files_of(long pid, std::vector<LockFile>& files, std::vector<std::stri
         LockFile f;
         if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f)) continue;  // the file itself, not the link
         files.push_back(f);
-        if (names != nullptr) {
-            char target[4096];
-            const ssize_t n = ::readlink(entry.c_str(), target, sizeof target - 1);
-            const std::string path(target, n > 0 ? static_cast<std::size_t>(n) : 0);
-            names->push_back(path.substr(path.rfind('/') + 1));
-        }
     }
     ::closedir(d);
     return true;
+}
+
+// The files named `name` that process `pid` (of account `account`) has open (root only; see
+// open_files_of) that the account owns and no other account may open (as open_in_dir and
+// open_in_run_user make them): its drive or claims file in its settings folder or runtime folder.
+// Each file is looked at only once its name matches, so a process with many files open costs a
+// readlink for each.
+std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name) {
+    std::vector<LockFile> files;
+    const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
+    DIR* d = ::opendir(dir.c_str());
+    if (d == nullptr) return files;
+    while (const dirent* e = ::readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        const std::string entry = dir + "/" + e->d_name;
+        char target[4096];
+        const ssize_t n = ::readlink(entry.c_str(), target, sizeof target - 1);
+        const std::string path(target, n > 0 ? static_cast<std::size_t>(n) : 0);
+        if (path.size() <= name.size() || path.compare(path.size() - name.size(), name.size(), name) != 0 ||
+            path[path.size() - name.size() - 1] != '/')
+            continue;
+        LockFile f;
+        if (lock_file_at(AT_FDCWD, entry.c_str(), 0, f) && S_ISREG(f.mode) && static_cast<long long>(f.uid) == account &&
+            (f.mode & 077) == 0)
+            files.push_back(f);
+    }
+    ::closedir(d);
+    return files;
 }
 
 // Whether process `pid` holds a flock (`write_only`: holds it alone) on `file`, as /proc/locks
@@ -595,7 +617,7 @@ bool holds(long pid, const LockFile& file, const std::vector<HeldFlock>& held, b
     }
     if (!on_mount) return false;
     std::vector<LockFile> open;
-    if (!open_files_of(pid, open, nullptr)) {
+    if (!open_files_of(pid, open)) {
         unsure = true;
         return false;
     }
@@ -746,15 +768,22 @@ std::vector<LockFile> accounts_own_files(const std::string& name) {
 // account held that one when it started, or made it first): busy when /proc/locks shows one held
 // (`write_only`: held alone, as by a run or an eject), unsure when that cannot be told
 // (/proc/locks cannot be read, or the device of a file's mount cannot).
+//
+// Another account may also make an account's file in /run/lock first, so that a run of that
+// account without its runtime folder (started by cron, without a login) holds only the file in its
+// settings folder, which root cannot find by name: so every process that /proc/locks shows holding
+// a flock is looked into as well (/proc/<pid>/fd), and one holding a file `name` there that its
+// account owns and no other account may open (see private_files_of) counts as busy too. Never this
+// process, whose own locks and claims are counted apart.
 enum class Use { free, busy, unsure };
 
 Use accounts_hold(const std::string& name, bool write_only) {
     const std::vector<LockFile> files = accounts_own_files(name);
-    if (files.empty()) return Use::free;
     bool readable = false;
     const std::vector<HeldFlock> held = held_flocks(&readable);
-    if (!readable) return Use::unsure;
+    if (!readable) return files.empty() ? Use::free : Use::unsure;
     bool unsure = false;
+    std::vector<long> pids;
     for (const HeldFlock& f : held) {
         if (write_only && !f.write) continue;
         for (const LockFile& file : files) {
@@ -762,6 +791,15 @@ Use accounts_hold(const std::string& name, bool write_only) {
             if (m == Match::exact || m == Match::mount) return Use::busy;
             if (m == Match::maybe) unsure = true;
         }
+        if (f.pid > 0 && f.pid != static_cast<long>(::getpid())) pids.push_back(f.pid);
+    }
+    std::sort(pids.begin(), pids.end());
+    pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
+    for (const long pid : pids) {
+        bool maybe = false;
+        for (const LockFile& f : private_files_of(pid, account_of(pid), name))
+            if (holds(pid, f, held, write_only, maybe)) return Use::busy;
+        if (maybe) unsure = true;
     }
     return unsure ? Use::unsure : Use::free;
 }
@@ -846,18 +884,9 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
         const long long account = account_of(pid);
         for (const LockFile& own : own_files_of(account, name))
             if (holds(pid, own, held, false, unsure)) return true;
-        if (shared && holds(pid, target, held, true, unsure)) {
-            std::vector<LockFile> open;
-            std::vector<std::string> names;
-            if (::geteuid() == 0 && open_files_of(pid, open, &names)) {
-                for (std::size_t i = 0; i < open.size(); ++i) {
-                    const LockFile& f = open[i];
-                    if (names[i] == name && S_ISREG(f.mode) && static_cast<long long>(f.uid) == account &&
-                        (f.mode & 077) == 0 && !(f.dev == target.dev && f.ino == target.ino) &&
-                        holds(pid, f, held, false, unsure))
-                        return true;
-                }
-            }
+        if (shared && ::geteuid() == 0 && holds(pid, target, held, true, unsure)) {
+            for (const LockFile& f : private_files_of(pid, account, name))
+                if (!(f.dev == target.dev && f.ino == target.ino) && holds(pid, f, held, false, unsure)) return true;
         }
         if (unsure) unknown = true;
         return false;

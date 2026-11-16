@@ -625,9 +625,10 @@ then share a drive for a while. Another account cannot keep your eject refused, 
 command of yours wait 2 seconds at most; a command or eject as root still counts. An eject as root
 also counts the runs and commands of every account that another account kept from the turn all
 accounts share (by holding or making its file in /run/lock first), through their own files in
-/run/lock and /run/user, and is refused where Linux cannot tell whether those are in use. It cannot
-see one that has neither of these (no /run/user folder, and a /run/lock only root may write to), and
-such a run, or one kept from the shared turn, may share the drive's speed with a run as root. Any
+/run/lock and /run/user, and through the turn file in the settings folder that a program holding a
+turn has open (so also a run without a /run/user folder whose file in /run/lock another account
+made first), and is refused where Linux cannot tell whether those are in use. A run kept from the
+shared turn may share the drive's speed with a run as root. Any
 other run gives up after waiting 12 hours, and a run that cannot take its turn at all (the system
 refuses it) goes on rather than not backing up. While a run only waits, the computer may go to
 sleep. A run started on its own that waited behind a run of the same job does nothing once that run

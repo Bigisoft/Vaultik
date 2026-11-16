@@ -65,13 +65,14 @@
 // vaultik-use-<hash>.<uid>.lock in /run/lock, the files in each runtime folder /run/user/<uid>),
 // which an account's run, claim or eject holds also when it is left without the shared file
 // (another account held that one when it started, or made it first); an eject of root's counts each
-// one held, and each one there where /proc/locks cannot tell. The limits: root cannot find a file
-// in an account's settings folder, which the account uses only where it cannot use its file in
-// /run/lock, so an eject of root's does not see a run or command of an account that holds neither a
-// shared file nor a file in its runtime folder; and root's runs do not wait for an account's own
-// files (a run of that account that waits for root's mark holds them, and would keep root's run
-// waiting in turn), so a run of an account left without the shared file may share the drive's speed
-// with a run of root's. Where /run/lock cannot be used, a file in the given folder instead.
+// one held, and each one there where /proc/locks cannot tell. As another account may make an
+// account's file in /run/lock first, so that a run of it without its runtime folder holds only the
+// file in its settings folder, root also looks into each process that /proc/locks shows holding a
+// flock, and counts one that holds a file of the drive's name there (/proc/<pid>/fd) that its
+// account owns and no other account may open. The limit: root's runs do not wait for an account's
+// own files (a run of that account that waits for root's mark holds them, and would keep root's
+// run waiting in turn), so a run of an account left without the shared file may share the drive's
+// speed with a run of root's. Where /run/lock cannot be used, a file in the given folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a
