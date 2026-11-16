@@ -217,7 +217,11 @@ public:
     // namespace, hidepid; or the busy file is an own lock of this account that other accounts may
     // open too, as in a settings folder on FAT, exFAT, NTFS or CIFS, or that has another name, which
     // never makes a parent run on its own), kHeldDrivesVariable tells as on Windows, never for an
-    // eject; a holder of the file all accounts share that cannot be trusted is no such case.
+    // eject; a holder of the file all accounts share that cannot be trusted is no such case. So a
+    // command of root's under a run of root's that has no mark (neither root's folder nor /run/lock
+    // could hold it, so the run holds that shared file as its own lock) waits for its own run, for
+    // its whole wait, instead of inheriting the drive: a trade made on purpose, as any account may
+    // hold that file and nothing tells root's run apart from such a holder (it fails safe).
     // Either way, a lock that is free (the run that started the command has ended) is taken as
     // usual.
     // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see
