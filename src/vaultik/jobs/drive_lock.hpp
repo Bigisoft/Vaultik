@@ -145,11 +145,15 @@ public:
     // share counts only when that process holds it alone and also holds a lock no other account
     // can take (its account's own file, or root's mark), as any account may lock that file and
     // /proc/locks still names a process that took a lock after it ended. One that is no ancestor
-    // (a command that outlived its run, another account's run) is waited for as usual. Where
-    // /proc gives no answer to use (no holder of the busy file shows there, as on btrfs where its
-    // device differs and the inode alone is tried first, or the processes above this one cannot
-    // be read: another pid namespace, hidepid), kHeldDrivesVariable tells as on Windows, never for
-    // an eject; a holder of the file all accounts share that cannot be trusted is no such case.
+    // (a command that outlived its run, another account's run) is waited for as usual. A lock
+    // counts only on the file's own device and inode: /proc/locks gives the device of the file's
+    // mount (btrfs: not the subvolume's, which stat gives, so a process counts there only when it
+    // has that very file open), and a lock on another device with the same inode never makes a
+    // parent run. Where /proc gives no answer to use (no holder of the busy file shows there, the
+    // device of a file's mount cannot be told before Linux 5.8 while a process above this one may
+    // hold one with its inode, or the processes above this one cannot be read: another pid
+    // namespace, hidepid), kHeldDrivesVariable tells as on Windows, never for an eject; a holder of
+    // the file all accounts share that cannot be trusted is no such case.
     // Either way, a lock that is free (the run that started the command has ended) is taken as
     // usual.
     // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see
@@ -246,8 +250,9 @@ namespace testing {
 // kOtherAccountWait when not negative; `root_dir`: instead of /run/vaultik when not empty;
 // `run_user_dir`: instead of /run/user/<uid> when not empty;
 // `proc_locks`: instead of /proc/locks when not empty (a missing file: as if it could not be
-// read); `locks_other_device`: every line of /proc/locks carries another device than stat gives
-// (as on btrfs).
+// read); `locks_other_device`: every line of /proc/locks carries another device than stat gives,
+// the one /proc/self/mountinfo gives the file's mount (as on btrfs); `no_mount_device`: the device
+// of a file's mount cannot be told (as without statx's mount ID, before Linux 5.8).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -256,6 +261,7 @@ struct DriveLockHooks {
     std::string run_user_dir;
     std::string proc_locks;
     bool locks_other_device = false;
+    bool no_mount_device = false;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

@@ -634,9 +634,11 @@ was started from, also through a shell, `sudo` or `pkexec`), so it works whateve
 reaches the command. As any account can hold the turn all accounts share in /run/lock, a program
 holding only that one is taken for the command's run only when it also holds a turn no other
 account can take (its account's own, or root's): another account cannot make your commands skip
-their turn or keep your eject refused that way. Where Linux cannot tell who holds the turn (a
-settings folder on btrfs, `/proc` mounted with `hidepid`, a run in another container), a command
-goes by what the run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does.
+their turn or keep your eject refused that way. A turn counts only on its own drive: a lock that
+another account holds on a file of another drive with the same file number is never taken for the
+run's. Where Linux cannot tell who holds the turn (a settings folder on btrfs with Linux older than
+5.8, `/proc` mounted with `hidepid`, a run in another container), a command goes by what the run
+passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does.
 Cloud storage has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
