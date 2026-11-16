@@ -638,10 +638,17 @@ folder stays unseen. Where Linux lets an account make hard links to other accoun
 another name; an eject still counts that file (it is refused rather than run beside it), while a
 command as root, or a run or command of yours waiting for root's turn, counts only a turn file no
 other account may open and that has no other name. Your runs keep using their own turn file in
-/run/lock when it has another name, so they still take turns; the limit there: another account
-may make that name first as a link to another turn file of yours, and your run or command then
-waits while that one is in use (never longer than its own wait). So that no account can keep an
-eject or command as root looking for long, it looks into at most 256 programs and 65536 open files
+/run/lock when another account gives it a second name, so they still take turns: each turn file
+Vaultik makes there holds its own name, and one with several names is used only when it holds the
+name it is opened by. Another account that makes the name of one of your turn files first, as a
+link to another turn file of yours, therefore gains nothing: your run or command uses its turn file
+in the settings folder instead (as root, Vaultik removes such a name and makes its own). The limit
+there: a run of yours without a /run/user folder then takes turns only with the runs that use the
+same settings folder, and a turn file an older version of Vaultik made (which holds no name) is
+treated the same once it gets a second name. A command started by a run counts a busy turn file of
+its own as the run's only when that file has no other name; otherwise the drives the run names in
+`VAULTIK_HELD_DRIVES` tell (never for an eject). So that no account can keep an eject or command
+as root looking for long, it looks into at most 256 programs and 65536 open files
 of each account (and 3 seconds in all); an account with more counts as in use for an eject as root,
 and a command as root does not wait for it. An eject or command as root does not look at such
 files on a FUSE mount (an sshfs folder, say), whose program could keep it waiting; one whose mount

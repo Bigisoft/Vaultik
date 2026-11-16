@@ -87,10 +87,16 @@
 // account may open counts, and in /run/lock only one with no other name (another account could
 // link a file its owner holds for something else under that name); the files in root's folder and
 // in an account's runtime folder, where no other account can make a name, need no such test. A run
-// keeps using its own file in /run/lock (root's mark there too) when it has another name, so the
-// runs of an account still take turns; the limit: where fs.protected_hardlinks is off, another
-// account may make that name first as a hard link to another file of the account's, which a run or
-// claim then waits for while it is held (never longer than its wait). Root does not look
+// keeps using its own file in /run/lock (root's mark there too) when another account gives it
+// another name, so the runs of an account still take turns: each file Vaultik makes in /run/lock
+// holds its own name, and an own file or root's mark with more than one name is used only when it
+// holds the name it is opened by (only its owner or root can write it). Where
+// fs.protected_hardlinks is off, another account that makes such a name first as a hard link to
+// another file of the account's (another lock file, held for another drive or by a run while a
+// claim waits) or of root's gains nothing: the account uses the file in its settings folder instead,
+// root removes the name and makes its own mark. The limit: such a run without its runtime folder
+// then takes turns only with the runs that use the same settings folder, and a file an earlier
+// version made (which holds no name) is treated so too once it has another name. Root does not look
 // at a runtime folder, or a file, on a FUSE mount that its mount table shows (another account's
 // FUSE program, mounted with allow_other, could keep it waiting for as long as it likes), so such a
 // file counts for nothing; for a file a process has open, its mount is looked up in root's mount
