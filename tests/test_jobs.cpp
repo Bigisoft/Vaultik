@@ -22,6 +22,7 @@
 #include <grp.h>
 #include <sys/file.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
@@ -1276,6 +1277,9 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
         REQUIRE(::setgroups(0, nullptr) == 0);
         REQUIRE(::setgid(static_cast<gid_t>(id)) == 0);
         REQUIRE(::setuid(id) == 0);
+        // Dumpable again, as a process that account started itself is (setuid made it not), so
+        // that its /proc files are its own: the sanitizers' leak check reads them at exit.
+        REQUIRE(::prctl(PR_SET_DUMPABLE, 1) == 0);
     }
     if (const std::string uid = os::get_env("VAULTIK_TEST_HOLD_REAL_UID"); !uid.empty() && ::geteuid() == 0) {
         // Root only as its effective account, as a setuid-root program another account started.
