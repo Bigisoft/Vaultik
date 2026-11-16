@@ -202,8 +202,10 @@ public:
     // process counts there only when it has that very file open), and a lock on another device with
     // the same inode never makes a parent run. Where the device of a file's mount cannot be told
     // (before Linux 5.8, or where statx is refused), stat's device counts, except on btrfs and
-    // overlayfs. Where /proc gives no answer to use (no holder of the busy file shows there, the
-    // device of a file's mount on btrfs or overlayfs cannot be told while a process above this one
+    // overlayfs. Where /proc gives no answer to use (no holder of the busy file shows there, and
+    // for an own lock the file is still busy when tried once more a moment later, as root's eject
+    // may hold it just then to see whether it is held; the device of a file's mount on btrfs or
+    // overlayfs cannot be told while a process above this one
     // may hold one with its inode, or the processes above this one cannot be read: another pid
     // namespace, hidepid; or the busy file is an own lock of this account that other accounts may
     // open too, as in a settings folder on FAT, exFAT, NTFS or CIFS, which never makes a parent run

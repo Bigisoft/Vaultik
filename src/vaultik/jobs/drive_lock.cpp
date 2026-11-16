@@ -1217,6 +1217,7 @@ enum class Holder {
 // settings folder on FAT, exFAT, NTFS or CIFS, whose mode bits cannot be set so) is not trusted
 // either, but leaves no answer (unknown) where none of the files above makes the holder a parent,
 // so that the marker tells (never for an eject) instead of the command waiting for its own run.
+// `unseen` is set when the busy file shows no holder at all in /proc/locks.
 // A process counts when it holds a lock no other account can take, one of its account's own files,
 // root's mark or, for root (a command run with sudo; only root may look at the open files of
 // another account's process), a file of that name it
@@ -1232,7 +1233,7 @@ enum class Holder {
 // the same inode on another device may be any file of any account (tmpfs inode numbers are easy to
 // match), so it never makes a parent; where the file's device cannot be told, such a line held by
 // a process above this one leaves no answer (unknown).
-Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const std::string& mark) {
+Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const std::string& mark, bool& unseen) {
     const std::vector<HeldFlock> held = held_flocks();
     Mounts mounts;
     std::vector<LockFile> trusted = root_mark_files(mark, mounts, false);
@@ -1247,10 +1248,11 @@ Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const st
     }
     // The file of `fd` is busy (it is asked about only then), so a holder that does not show is
     // one /proc cannot tell.
-    bool unknown = busy_file && std::none_of(held.begin(), held.end(), [&](const HeldFlock& f) {
-                       const Match m = match(f, target);
-                       return m == Match::exact || m == Match::mount;
-                   });
+    unseen = busy_file && std::none_of(held.begin(), held.end(), [&](const HeldFlock& f) {
+                 const Match m = match(f, target);
+                 return m == Match::exact || m == Match::mount;
+             });
+    bool unknown = unseen;
     // The processes that hold a flock, on any file (one may be an own file of the holder's
     // account); each is asked about strictly when it is one above this process.
     std::vector<long> holders;
@@ -1403,9 +1405,20 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     constexpr bool parent = false;
     // Where /proc gives no answer to use (see Holder::unknown), the marker the run passes on to
     // its commands tells instead (sudo and pkexec drop it, but they are rarely in between then),
-    // never for an eject, which then waits as usual.
-    const auto by_parent = [&](int fd, bool own_file) {
-        const Holder holder = held_by_ancestor(fd, own_file, name, mark);
+    // never for an eject, which then waits as usual. With `taken` (an own lock): where its file
+    // shows no holder at all, its flock is tried once more after a moment first, as root's eject
+    // may have held it just then to see whether it is held (see flock_busy), which a command that
+    // outlived its run would otherwise take for its run's; `taken` is set when that got the lock.
+    const auto by_parent = [&](int fd, bool own_file, bool* taken = nullptr) {
+        bool unseen = false;
+        const Holder holder = held_by_ancestor(fd, own_file, name, mark, unseen);
+        if (holder == Holder::unknown && unseen && taken != nullptr) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            if (::flock(fd, LOCK_EX | LOCK_NB) == 0) {
+                *taken = true;
+                return false;
+            }
+        }
         if (holder == Holder::other) return false;
         if (holder == Holder::unknown && (fail_closed || !named_by_parent(hash))) return false;
         if (!fail_closed) inherited_ = true;
@@ -1537,7 +1550,10 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 close_all();
                 return false;
             }
-            if (by_parent(fd, true)) {
+            bool taken = false;
+            const bool parent_holds = by_parent(fd, true, &taken);
+            if (taken) return true;
+            if (parent_holds) {
                 close_all();
                 parent_busy();
                 return false;
