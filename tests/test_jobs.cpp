@@ -2747,9 +2747,10 @@ TEST_CASE("a run queued behind a run of the same job exits without a second back
     j.health.restore_test = false;
     store.save(j);
 
-    // Another run of the job holds the drive, and saves a version meanwhile.
-    HeldDrive other(drive_lock_key(*store.find(j.id)), os::join(tmp.dir(), "locks"));
-    REQUIRE(other.state == 1);
+    // Another run of the job holds the drive (from a process of its own: this one would be the
+    // parent of the queued run, which would then inherit the drive), and saves a version meanwhile.
+    OtherProcess other("lock", drive_lock_key(*store.find(j.id)), os::join(tmp.dir(), "locks"), tmp.path);
+    REQUIRE(other.held());
     RunRecord saved;
     saved.started = os::now() - 10;
     saved.finished = os::now() + 600'000'000ull;  // ends after the queued run started
