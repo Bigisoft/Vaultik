@@ -1326,7 +1326,11 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
             std::cout << "HOLD:busy" << std::endl;
         }
     } else if (what == "claim") {
+        // How long the claim took, apart from starting this process.
+        const auto started = std::chrono::steady_clock::now();
         claim = std::make_unique<DriveClaim>(key, dir);
+        const auto took = std::chrono::steady_clock::now() - started;
+        std::cout << "HOLD:took " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ";
         held = claim->held();
     } else if (what == "claimed") {
         held = drive_claimed(key, dir);
@@ -1373,6 +1377,11 @@ struct OtherProcess {
     bool held() const { return said.find("HOLD:held") != std::string::npos; }
     bool inherited() const { return said.find("HOLD:inherited") != std::string::npos; }
     bool busy() const { return said.find("HOLD:busy") != std::string::npos; }
+    // How long its claim took ("claim" only), apart from starting the process; -1 when not told.
+    std::chrono::milliseconds took() const {
+        const std::size_t at = said.find("HOLD:took ");
+        return std::chrono::milliseconds(at == std::string::npos ? -1 : std::stoll(said.substr(at + 10)));
+    }
     // Its process ID ("flock-ex" and "flock-sh" only; 0 when not told).
     long pid() const {
         const std::size_t at = said.find("HOLD:pid ");
@@ -2495,21 +2504,23 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         const int fd = ::open(use.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
         REQUIRE(fd >= 0);
         REQUIRE(::flock(fd, LOCK_EX | LOCK_NB) == 0);
-        auto started = std::chrono::steady_clock::now();
+        // How long each claim took is measured in its own process, apart from starting it, which
+        // may take a while under load: waited for, at least 1.8 of kRootLetGo's 2 seconds; not
+        // waited for, well under them.
         {
             OtherProcess claim("claim", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
             CHECK(claim.held());
-            CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1800));
+            CHECK(claim.took() >= std::chrono::milliseconds(1800));
         }
         ::close(fd);
         {
             OtherProcess squatter("flock-ex", {}, {}, tmp.path, "65533", {{"VAULTIK_TEST_HOLD_FILES", use.string()}});
             REQUIRE(squatter.held());
-            started = std::chrono::steady_clock::now();
             {
                 OtherProcess claim("claim", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
                 CHECK(claim.held());
-                CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1500));
+                CHECK(claim.took() >= std::chrono::milliseconds(0));
+                CHECK(claim.took() < std::chrono::milliseconds(1500));
             }
         }
         // By a setuid-root program of another account (root only as its effective account,
@@ -2517,11 +2528,11 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         OtherProcess setuid("flock-ex", {}, {}, tmp.path, {},
                             {{"VAULTIK_TEST_HOLD_FILES", use.string()}, {"VAULTIK_TEST_HOLD_REAL_UID", "65533"}});
         REQUIRE(setuid.held());
-        started = std::chrono::steady_clock::now();
         {
             OtherProcess claim("claim", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
             CHECK(claim.held());
-            CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1500));
+            CHECK(claim.took() >= std::chrono::milliseconds(0));
+            CHECK(claim.took() < std::chrono::milliseconds(1500));
         }
     }
     std::error_code ec;
@@ -2845,9 +2856,10 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
         });
         const auto started = std::chrono::steady_clock::now();
         DriveLock run(key, mine, std::chrono::milliseconds(20000));
+        const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
         CHECK(run.held());
-        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
+        CHECK(took >= std::chrono::milliseconds(500));
         CHECK_FALSE(run.other_account_skipped());
     }
     {
@@ -3203,9 +3215,10 @@ TEST_CASE("drive lock: an account that cannot use the shared files still sees ro
         });
         const auto started = std::chrono::steady_clock::now();
         DriveLock run(key, mine, std::chrono::milliseconds(20000));
+        const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
         CHECK(run.held());
-        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
+        CHECK(took >= std::chrono::milliseconds(500));
         CHECK_FALSE(run.other_account_skipped());
     }
     {
@@ -3235,9 +3248,10 @@ TEST_CASE("drive lock: an account that cannot use the shared files still sees ro
         });
         const auto started = std::chrono::steady_clock::now();
         DriveClaim claim(key, mine);
+        const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
         CHECK(claim.held());
-        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
+        CHECK(took >= std::chrono::milliseconds(500));
     }
     CHECK_FALSE(fs::exists(tmp.path / "elsewhere"));
     CHECK_FALSE(fs::exists(tmp.path / "elsewhere-use"));
@@ -3294,9 +3308,10 @@ TEST_CASE("drive claims: another account can neither delay a command nor keep an
         });
         const auto started = std::chrono::steady_clock::now();
         DriveClaim claim(key, mine);
+        const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
         CHECK(claim.held());
-        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
+        CHECK(took >= std::chrono::milliseconds(500));
         // Holding the shared claim too, which an eject of another account then sees.
         OtherProcess other("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.use()));
         CHECK_FALSE(other.held());
