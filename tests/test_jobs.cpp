@@ -2571,7 +2571,7 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         // holding the file), then moves the file away while the command waits for it: the command
         // trusts a file by what it is (only one of its own that no other account may open), never
         // by its path, so it does not take that holder for its parent run, and waits.
-        const fs::path moved = tmp.path / "moved-away";
+        const fs::path moved = fs::path("/run/lock") / ("vaultik-moved-" + name);  // the same file system
         std::error_code ec;
         fs::remove(file, ec);
         const int fd = ::open(file.c_str(), O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
