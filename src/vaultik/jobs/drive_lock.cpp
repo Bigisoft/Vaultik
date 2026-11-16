@@ -925,10 +925,20 @@ Use accounts_hold(const std::string& name, bool write_only) {
     return unsure ? Use::unsure : Use::free;
 }
 
-// Whether the file of `fd` is the file `name` in /run/lock that every account shares.
-bool is_shared_file(int fd, const std::string& name) {
+// Whether a holder of `file` may be trusted as the run that started this command: a file this
+// account owns that no other account may open (root's mark and fallback, an account's own files),
+// whatever its path. Any other file (the file all accounts share, or one that another account
+// made in its place and then moved away) any account may hold.
+bool only_mine(const LockFile& file) {
+    return file.uid == ::geteuid() && (file.mode & 077) == 0;
+}
+
+// Tests only (own_in_folder, where this account's processes stand in for other accounts): whether
+// the file of `fd` is the file `name` in /run/lock that every account shares, which then counts as
+// one other accounts may open.
+bool shared_stand_in(int fd, const std::string& name) {
     struct stat mine{}, there{};
-    return ::fstat(fd, &mine) == 0 && ::lstat(("/run/lock/" + name).c_str(), &there) == 0 && S_ISREG(there.st_mode) &&
+    return hooks().own_in_folder && ::fstat(fd, &mine) == 0 && ::lstat(("/run/lock/" + name).c_str(), &there) == 0 &&
            mine.st_dev == there.st_dev && mine.st_ino == there.st_ino;
 }
 
@@ -949,21 +959,24 @@ enum class Holder {
 // drive counts as busy), and never a process that is no ancestor (a command that outlived its
 // run, or another account's run).
 //
-// /proc/locks names the process that took a flock, also after it ended while another process
-// still holds the file open: so an account's own file counts only for a process whose account is
-// that one now (another account may have taken a lock on its own file in a process whose number
-// then goes to a process the victim's commands descend from, its login shell or sudo, say), and
-// any account may hold the file `name` all accounts share (`fd` may be that one): a holder of
-// that file never counts on its own: a process counts when it holds a lock no other account can
-// take, one of its account's own files, root's mark or, for root (a command run with sudo; only
-// root may look at the open files of another account's process), a file of that name it has open
-// (/proc/<pid>/fd) that its account owns and no other account may open: the settings folder's, the
-// only own file of a run without its runtime folder where only root may write to /run/lock or
-// where another account made its file there first, also when another account holds the shared
-// file. Otherwise another account could take the shared file from a process whose number then
-// goes to a process the victim's commands descend from: they would all take it for their parent
-// run and drop their turns. Holders of root's mark (only root may open it) count as they are. A
-// holder of the shared file that cannot be trusted so is an answer (other), never unknown.
+// /proc/locks names the process that took a flock, also after it ended while another process still
+// holds the file open: so an account's own file counts only for a process whose account is that one
+// now (another account may have taken a lock on its own file in a process whose number then goes to
+// a process the victim's commands descend from, its login shell or sudo, say), and any account may
+// hold the file `name` all accounts share (`fd` may be that one): a holder of that file never
+// counts on its own. Which file `fd` is, is told by the file itself, never by its path: it counts
+// as a lock no other account can take only when this account owns it and no other account may open
+// it (see only_mine), as another account may make the shared file first, hold it and then move it
+// away, so that it is no longer the one at its path. A process counts when it holds a lock no other
+// account can take, one of its account's own files, root's mark or, for root (a command run with
+// sudo; only root may look at the open files of another account's process), a file of that name it
+// has open (/proc/<pid>/fd) that its account owns and no other account may open: the settings
+// folder's, the only own file of a run without its runtime folder where only root may write to
+// /run/lock or where another account made its file there first, also when another account holds the
+// shared file. Otherwise another account could take the shared file from a process whose number
+// then goes to a process the victim's commands descend from: they would all take it for their
+// parent run and drop their turns. Holders of root's mark (only root may open it) count as they
+// are. A holder of the shared file that cannot be trusted so is an answer (other), never unknown.
 //
 // Each lock counts only on the file's own device and inode (see Match): a line of /proc/locks with
 // the same inode on another device may be any file of any account (tmpfs inode numbers are easy to
@@ -977,7 +990,7 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
     LockFile target;
     const bool busy_file = fd >= 0 && lock_file_of(fd, target, mounts);
     if (busy_file) {
-        shared = is_shared_file(fd, name);
+        shared = !only_mine(target) || shared_stand_in(fd, name);
         if (!shared) trusted.push_back(target);
     }
     // The file of `fd` is busy (it is asked about only then), so a holder that does not show is

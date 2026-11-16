@@ -148,31 +148,31 @@ constexpr const char* kHeldDrivesVariable = "VAULTIK_HELD_DRIVES";
 class DriveLock {
 public:
     // Takes the lock of `key` (see drive_lock_key; an empty key takes none), waiting up to `wait`
-    // while other runs hold it. `on_wait` is called once when it has to wait; `cancelled` is
-    // asked about once a second while waiting (true: throws Error "cancelled"). Throws DriveBusy
-    // when the wait ends without the lock. The run that started this command may hold the drive
-    // (a prune in its after command, say), and waits for the command to end: then nothing waits
-    // (inherited()), also when that run has other rights (Linux: root's command started by an
-    // account's run, or the other way round) and holds only the lock all accounts share, or only
-    // root's mark. Windows: that run is the one kHeldDrivesVariable names, when the lock is busy.
-    // Linux: a process this one descends from (through any shell, sudo or pkexec) holds a lock
-    // file of the drive, as /proc/locks shows, whatever the environment: the busy file itself,
-    // root's mark, or an own file of the account that process runs as now (never one of another
-    // account's, as /proc/locks still names a process that took a lock after it ended, and its
-    // number may have gone to a process of another account since), or for a command of root's the
-    // drive's file in that process's settings folder, which root sees it has open and that only
-    // its account may open (also when another account holds the file all accounts share); the
-    // file all accounts share never counts on its own, as any account may lock it.
-    // One that is no ancestor (a command that outlived its run, another account's run) is waited
-    // for as usual. A lock
-    // counts only on the file's own device and inode: /proc/locks gives the device of the file's
-    // mount (btrfs: not the subvolume's, which stat gives, so a process counts there only when it
-    // has that very file open), and a lock on another device with the same inode never makes a
-    // parent run. Where the device of a file's mount cannot be told (before Linux 5.8, or where
-    // statx is refused), stat's device counts, except on btrfs and overlayfs. Where /proc gives no
-    // answer to use (no holder of the busy file shows there, the device of a file's mount on btrfs
-    // or overlayfs cannot be told while a process above this one may hold one with its inode, or
-    // the processes above this one cannot be read: another pid
+    // while other runs hold it. `on_wait` is called once when it has to wait; `cancelled` is asked
+    // about once a second while waiting (true: throws Error "cancelled"). Throws DriveBusy when the
+    // wait ends without the lock. The run that started this command may hold the drive (a prune in
+    // its after command, say), and waits for the command to end: then nothing waits (inherited()),
+    // also when that run has other rights (Linux: root's command started by an account's run, or
+    // the other way round) and holds only the lock all accounts share, or only root's mark.
+    // Windows: that run is the one kHeldDrivesVariable names, when the lock is busy. Linux: a
+    // process this one descends from (through any shell, sudo or pkexec) holds a lock file of the
+    // drive, as /proc/locks shows, whatever the environment: the busy file itself when this account
+    // owns it and no other account may open it (told by the file, never by its path, which another
+    // account may move the shared file away from), root's mark, or an own file of the account that
+    // process runs as now (never one of another account's, as /proc/locks still names a process
+    // that took a lock after it ended, and its number may have gone to a process of another account
+    // since), or for a command of root's the drive's file in that process's settings folder, which
+    // root sees it has open and that only its account may open (also when another account holds the
+    // file all accounts share); the file all accounts share never counts on its own, as any account
+    // may lock it. One that is no ancestor (a command that outlived its run, another account's run)
+    // is waited for as usual. A lock counts only on the file's own device and inode: /proc/locks
+    // gives the device of the file's mount (btrfs: not the subvolume's, which stat gives, so a
+    // process counts there only when it has that very file open), and a lock on another device with
+    // the same inode never makes a parent run. Where the device of a file's mount cannot be told
+    // (before Linux 5.8, or where statx is refused), stat's device counts, except on btrfs and
+    // overlayfs. Where /proc gives no answer to use (no holder of the busy file shows there, the
+    // device of a file's mount on btrfs or overlayfs cannot be told while a process above this one
+    // may hold one with its inode, or the processes above this one cannot be read: another pid
     // namespace, hidepid), kHeldDrivesVariable tells as on Windows, never for an eject; a holder of
     // the file all accounts share that cannot be trusted is no such case.
     // Either way, a lock that is free (the run that started the command has ended) is taken as
@@ -266,7 +266,8 @@ namespace testing {
 // For tests only (Linux; no-op elsewhere): lets a test without root stand in for other accounts
 // with processes of its own. `own_in_folder`: the account's own lock is the file in the given
 // folder alone, neither the one in its runtime folder nor the one in /run/lock (so a process of
-// this account with another folder stands in for another account); `root_uid`: the account
+// this account with another folder stands in for another account, also on the file all accounts
+// share in /run/lock, which then counts as one other accounts may open); `root_uid`: the account
 // whose marks (see above) and processes count as root's; `other_account_wait`: instead of
 // kOtherAccountWait when not negative; `root_dir`: instead of /run/vaultik when not empty;
 // `run_user_dir`: instead of /run/user/<uid> when not empty; `run_user_root`: instead of /run/user,

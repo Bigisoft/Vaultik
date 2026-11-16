@@ -1259,7 +1259,8 @@ void init_test_repo(const fs::path& dir) {
 // VAULTIK_TEST_HOLD_RUN_USER the account's own runtime folder, VAULTIK_TEST_HOLD_PROC_LOCKS the
 // file read instead of /proc/locks and VAULTIK_TEST_HOLD_OTHER_DEVICE=1 another device on its lines,
 // VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE=1, VAULTIK_TEST_HOLD_BTRFS=1 and VAULTIK_TEST_HOLD_NO_STATX=1
-// the hooks of those names (see DriveLockHooks); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
+// the hooks of those names (see DriveLockHooks), VAULTIK_TEST_HOLD_WAIT_MS how long a "lock" or
+// "eject" waits (none when not set); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
 // missing) named in VAULTIK_TEST_HOLD_FILES, separated by ';', as another account (or root) would.
 TEST_CASE("drive lock helper: holds what another test asks for in a process of its own") {
     const std::string what = os::get_env("VAULTIK_TEST_HOLD");
@@ -1324,7 +1325,8 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
     bool held = false;
     if (what == "lock" || what == "eject") {
         try {
-            lock = std::make_unique<DriveLock>(key, dir, std::chrono::milliseconds(0), std::function<void()>{},
+            const std::chrono::milliseconds wait(std::stoll("0" + os::get_env("VAULTIK_TEST_HOLD_WAIT_MS")));
+            lock = std::make_unique<DriveLock>(key, dir, wait, std::function<void()>{},
                                                std::function<bool()>{},
                                                what == "eject" ? DriveLockMode::eject : DriveLockMode::run);
             held = lock->held();
@@ -2554,6 +2556,33 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         fs::remove(own);
     }
     {
+        // Another account made the shared file first and holds it from a process whose number went
+        // to the run that started a command of root's (here this process stands in for that run,
+        // holding the file), then moves the file away while the command waits for it: the command
+        // trusts a file by what it is (only one of its own that no other account may open), never
+        // by its path, so it does not take that holder for its parent run, and waits.
+        const fs::path moved = tmp.path / "moved-away";
+        std::error_code ec;
+        fs::remove(file, ec);
+        const int fd = ::open(file.c_str(), O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        REQUIRE(fd >= 0);
+        REQUIRE(::fchown(fd, 65533, 65533) == 0);
+        REQUIRE(::flock(fd, LOCK_SH | LOCK_NB) == 0);
+        std::thread later([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(600));
+            fs::rename(file, moved, ec);
+        });
+        OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path, {},
+                           {{"VAULTIK_TEST_HOLD_WAIT_MS", "1800"}});
+        later.join();
+        CHECK_FALSE(ec);
+        CHECK(child.busy());
+        CHECK_FALSE(child.inherited());
+        CHECK(child.release() == 0);
+        ::close(fd);
+        fs::remove(moved, ec);
+    }
+    {
         // A command of the account that a run of root's started (runuser in its after command):
         // the same.
         DriveLock run(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(0));
@@ -3236,6 +3265,7 @@ TEST_CASE("drive lock: a lock with the same inode on another device never makes 
     fs::create_directories(fs::u8path(mine));
     const fs::path own = fs::u8path(mine) / ("vaultik-drive-" + name + ".lock");
     std::ofstream(own).close();
+    fs::permissions(own, fs::perms::owner_read | fs::perms::owner_write);  // as a run makes it
     std::ofstream(foreign.own_drive()).close();
     const long self = static_cast<long>(::getpid());  // a process every command here descends from
     const auto stat_of = [](const fs::path& path) {
