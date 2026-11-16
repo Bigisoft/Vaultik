@@ -627,7 +627,10 @@ job's before or after command (a prune of the same drive, say), also one started
 `sudo`, does not wait for the run that started it; one that outlives that run takes the turn as
 usual. On Linux Vaultik tells this from which program holds the drive's turn (the run the command
 was started from, also through a shell, `sudo` or `pkexec`), so it works whatever environment
-reaches the command. Cloud storage has no such turns.
+reaches the command. As any account can hold the turn all accounts share in /run/lock, a program
+holding only that one is taken for the command's run only when it also holds a turn no other
+account can take (its account's own, or root's): another account cannot make your commands skip
+their turn or keep your eject refused that way. Cloud storage has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
 Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows

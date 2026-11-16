@@ -133,7 +133,10 @@ public:
     // account's run, or the other way round) and holds only the lock all accounts share, or only
     // root's mark. Windows: that run is the one kHeldDrivesVariable names, when the lock is busy.
     // Linux: a process this one descends from (through any shell, sudo or pkexec) holds a lock
-    // file of the drive, as /proc/locks shows, whatever the environment; one that is no ancestor
+    // file of the drive, as /proc/locks shows, whatever the environment; the file all accounts
+    // share counts only when that process holds it alone and also holds a lock no other account
+    // can take (its account's own file, or root's mark), as any account may lock that file and
+    // /proc/locks still names a process that took a lock after it ended. One that is no ancestor
     // (a command that outlived its run, another account's run) is waited for as usual. Either
     // way, a lock that is free (the run that started the command has ended) is taken as usual.
     // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see

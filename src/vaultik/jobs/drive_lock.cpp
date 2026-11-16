@@ -499,30 +499,6 @@ long parent_of(long pid) {
     return ppid;
 }
 
-// Whether a process this one descends from (its parent, or one further up: a run's before or
-// after command reaches vaultik through a shell, sudo or pkexec, which keep no environment of
-// it) holds a flock on the file of `fd` or on root's mark `mark`: then the run that started this
-// command holds the drive, and waits for the command to end. Never this process itself (another
-// DriveLock of it on the drive counts as busy), and never a process that is no ancestor (a
-// command that outlived its run, or another account's run). False when it cannot be told.
-bool held_by_ancestor(int fd, const std::string& mark) {
-    std::vector<FileId> files = root_mark_files(mark);
-    struct stat st{};
-    if (fd >= 0 && ::fstat(fd, &st) == 0) files.emplace_back(st.st_dev, st.st_ino);
-    std::vector<long> holders;
-    for (const HeldFlock& f : held_flocks())
-        for (const FileId& id : files)
-            if (is_file(f, id)) holders.push_back(f.pid);
-    if (holders.empty()) return false;
-    long pid = static_cast<long>(::getppid());
-    for (int depth = 0; depth < 64 && pid > 0; ++depth) {
-        if (std::find(holders.begin(), holders.end(), pid) != holders.end()) return true;
-        if (pid == 1) break;
-        pid = parent_of(pid);
-    }
-    return false;
-}
-
 // The effective account of process `pid`, from /proc/<pid>/status (readable by every account, and
 // true also for a process that made itself not dumpable, which /proc/<pid> itself shows as
 // root's). -1 when it cannot be told.
@@ -537,6 +513,94 @@ long long account_of(long pid) {
         return -1;
     }
     return -1;
+}
+
+// The runtime folder of account `uid` (see run_user_dir) as far as this process can tell: empty
+// when it is no folder that account owns alone.
+std::string run_user_dir_of(long long uid) {
+    if (uid == static_cast<long long>(::geteuid())) return run_user_dir();
+    const std::string dir = "/run/user/" + std::to_string(uid);
+    struct stat st{};
+    if (::lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || static_cast<long long>(st.st_uid) != uid ||
+        (st.st_mode & 07777) != 0700)
+        return {};
+    return dir;
+}
+
+// The own lock files of account `uid` for `name` (see open_own_files) that this process can see:
+// the one in its runtime folder and its file in /run/lock, each only when that account owns it,
+// so that no process of another account can hold it.
+std::vector<FileId> own_files_of(long long uid, const std::string& name) {
+    std::vector<FileId> files;
+    if (uid < 0) return files;
+    const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
+    std::vector<std::string> paths = {"/run/lock/" + stem + "." + std::to_string(uid) + ".lock"};
+    if (const std::string dir = run_user_dir_of(uid); !dir.empty()) paths.push_back(dir + "/" + name);
+    for (const std::string& path : paths) {
+        struct stat st{};
+        if (::lstat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode) && static_cast<long long>(st.st_uid) == uid)
+            files.emplace_back(st.st_dev, st.st_ino);
+    }
+    return files;
+}
+
+// Whether the file of `fd` is the file `name` in /run/lock that every account shares.
+bool is_shared_file(int fd, const std::string& name) {
+    struct stat mine{}, there{};
+    return ::fstat(fd, &mine) == 0 && ::lstat(("/run/lock/" + name).c_str(), &there) == 0 && S_ISREG(there.st_mode) &&
+           mine.st_dev == there.st_dev && mine.st_ino == there.st_ino;
+}
+
+// Whether a process this one descends from (its parent, or one further up: a run's before or
+// after command reaches vaultik through a shell, sudo or pkexec, which keep no environment of
+// it) holds a flock on the file of `fd` or on root's mark `mark`: then the run that started this
+// command holds the drive, and waits for the command to end. Never this process itself (another
+// DriveLock of it on the drive counts as busy), and never a process that is no ancestor (a
+// command that outlived its run, or another account's run). False when it cannot be told.
+//
+// /proc/locks names the process that took a flock, also after it ended while another process
+// still holds the file open, and any account may hold the file `name` all accounts share (`fd`
+// may be that one): a holder of that file counts only when it holds it alone (as a run does, not
+// a claim's shared lock) and the same process also holds a lock no other account can take, one of
+// its account's own files (see own_files_of) or root's mark. Otherwise another account could take
+// that file from a process whose number then goes to a process the victim's commands descend
+// from (its login shell, say): they would all take it for their parent run and drop their turns.
+// Holders of root's mark and of the account's own files (only their owners may open them) count
+// as they are.
+bool held_by_ancestor(int fd, const std::string& name, const std::string& mark) {
+    const std::vector<HeldFlock> held = held_flocks();
+    std::vector<FileId> trusted = root_mark_files(mark);
+    bool shared = false;
+    FileId target{};
+    struct stat st{};
+    if (fd >= 0 && ::fstat(fd, &st) == 0) {
+        target = FileId(st.st_dev, st.st_ino);
+        shared = is_shared_file(fd, name);
+        if (!shared) trusted.push_back(target);
+    }
+    std::vector<long> holders;
+    for (const HeldFlock& f : held)
+        for (const FileId& id : trusted)
+            if (is_file(f, id)) holders.push_back(f.pid);
+    if (shared) {
+        // Each holder of the shared file alone, if it also holds one of its account's own files.
+        for (const HeldFlock& f : held) {
+            if (!is_file(f, target) || !f.write || f.pid <= 0) continue;
+            const std::vector<FileId> own = own_files_of(account_of(f.pid), name);
+            const bool holds_own = std::any_of(held.begin(), held.end(), [&](const HeldFlock& g) {
+                return g.pid == f.pid && std::any_of(own.begin(), own.end(), [&](const FileId& id) { return is_file(g, id); });
+            });
+            if (holds_own) holders.push_back(f.pid);
+        }
+    }
+    if (holders.empty()) return false;
+    long pid = static_cast<long>(::getppid());
+    for (int depth = 0; depth < 64 && pid > 0; ++depth) {
+        if (std::find(holders.begin(), holders.end(), pid) != holders.end()) return true;
+        if (pid == 1) break;
+        pid = parent_of(pid);
+    }
+    return false;
 }
 
 // Whether a process of root's holds the file of `fd` alone (as root's eject holds the claims
@@ -638,10 +702,11 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     // run holds the drive and waits for this command to end, which inherits the drive instead
     // (an eject throws DriveBusy, fail closed). Free, or held by anybody else, the lock is taken
     // or waited for as usual.
+    const std::string name = "vaultik-drive-" + hash + ".lock";
     const std::string mark = "vaultik-drive-" + hash + ".root.lock";
     constexpr bool parent = false;
     const auto by_parent = [&](int fd) {
-        if (!held_by_ancestor(fd, mark)) return false;
+        if (!held_by_ancestor(fd, name, mark)) return false;
         if (!fail_closed) inherited_ = true;
         return true;
     };
@@ -736,7 +801,6 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         }
     }
 #else
-    const std::string name = "vaultik-drive-" + hash + ".lock";
     const bool root = ::geteuid() == 0;
     int own = -1;
     int own2 = -1;  // an account's second own lock (see open_own_files)

@@ -2350,17 +2350,29 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         // A command with root rights that a run of the account started (sudo vaultik in its after
         // command, which gets none of the run's environment): it inherits the drive at once
         // instead of waiting for its own parent. Here this process stands in for that run (it
-        // holds the lock all accounts share, as the account's run does), and the command is a
-        // process it starts.
+        // holds the lock all accounts share and its account's own file in /run/lock, as the
+        // account's run does), and the command is a process it starts.
+        const fs::path own = fs::path("/run/lock") / ("vaultik-drive-" + name + ".0.lock");
         const int fd = ::open(file.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+        const int own_fd = ::open(own.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
         REQUIRE(fd >= 0);
+        REQUIRE(own_fd >= 0);
         REQUIRE(::flock(fd, LOCK_EX | LOCK_NB) == 0);
+        {
+            // Without the account's own file: not the run that started it (another account may
+            // hold the shared file), waited for as usual.
+            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+            CHECK_FALSE(child.inherited());
+        }
+        REQUIRE(::flock(own_fd, LOCK_EX | LOCK_NB) == 0);
         {
             OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
             CHECK(child.inherited());
             CHECK_FALSE(child.held());
         }
+        ::close(own_fd);
         ::close(fd);
+        fs::remove(own);
     }
     {
         // A command of the account that a run of root's started (runuser in its after command):
@@ -2495,6 +2507,21 @@ struct ForeignFiles {
     std::string drive_mark() const { return files[1].string(); }
     std::string use() const { return files[2].string(); }
     std::string use_mark() const { return files[3].string(); }
+    std::string own_drive() const { return files[4].string(); }
+};
+
+// Holds a flock (`how`: LOCK_EX or LOCK_SH) on the file `path` (made when missing) in this process
+// until it goes away.
+struct Flocked {
+    int fd = -1;
+    Flocked(const std::string& path, int how) {
+        fd = ::open(path.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        REQUIRE(fd >= 0);
+        REQUIRE(::flock(fd, how | LOCK_NB) == 0);
+    }
+    ~Flocked() { ::close(fd); }
+    Flocked(const Flocked&) = delete;
+    Flocked& operator=(const Flocked&) = delete;
 };
 
 const std::vector<std::pair<std::string, std::string>> kForeign = {{"VAULTIK_TEST_HOLD_FOREIGN", "1"}};
@@ -2582,11 +2609,13 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
     }
     {
         // A command with other rights that a run started (this process, which holds the shared
-        // lock), without the run's environment: it inherits the drive at once, with a lock of its
-        // own free or not, instead of waiting the short while for its own parent (or giving up,
-        // with no wait of its own).
+        // lock and, as an account's run does, its account's own file in /run/lock), without the
+        // run's environment: it inherits the drive at once, with a lock of its own free or not,
+        // instead of waiting the short while for its own parent (or giving up, with no wait of its
+        // own).
         DriveLock run(key, os::join(tmp.dir(), "other"), std::chrono::milliseconds(0));
         REQUIRE(run.held());
+        const Flocked own(foreign.own_drive(), LOCK_EX);
         OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
         CHECK(child.inherited());
         CHECK_FALSE(child.held());
@@ -2605,6 +2634,63 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
         OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
         CHECK(child.inherited());
         ::close(fd);
+    }
+}
+
+TEST_CASE("drive lock: a holder of the shared file is a parent run only with a lock no other account can take (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-stale-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string mine = os::join(tmp.dir(), "mine");
+    const ForeignFiles foreign(name);
+    // This process stands in for a process the command descends from (a login shell, say) that
+    // /proc/locks names as a holder of the file all accounts share: another account took the lock
+    // from a process that ended and whose number this process got, and keeps the file open. Then
+    // the command waits for the shared lock as usual (and gives up here, with no wait of its own),
+    // never takes it for its parent run's and never drops its own turn.
+    for (const int how : {LOCK_SH, LOCK_EX}) {
+        const Flocked stale(foreign.drive(), how);
+        OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
+        CHECK(child.busy());
+        CHECK_FALSE(child.inherited());
+        OtherProcess eject("eject", key, mine, tmp.path, {}, kForeign);
+        CHECK(eject.held());
+        CHECK_FALSE(eject.inherited());
+    }
+    {
+        // A lock of its own beside it, but only a shared one on the shared file (a claim's, never a
+        // run's): no parent run either.
+        const Flocked stale(foreign.drive(), LOCK_SH);
+        const Flocked own(foreign.own_drive(), LOCK_EX);
+        OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
+        CHECK(child.busy());
+        CHECK_FALSE(child.inherited());
+    }
+    {
+        // Alone on the shared file and on its account's own file in its runtime folder: a parent
+        // run, whose command inherits the drive and whose eject does not take it.
+        const fs::path run_user = tmp.path / "run-user";
+        REQUIRE(::mkdir(run_user.c_str(), 0700) == 0);
+        REQUIRE(::chmod(run_user.c_str(), 0700) == 0);
+        auto env = kForeign;
+        env.push_back({"VAULTIK_TEST_HOLD_RUN_USER", run_user.string()});
+        const Flocked shared(foreign.drive(), LOCK_EX);
+        const Flocked own((run_user / ("vaultik-drive-" + name + ".lock")).string(), LOCK_EX);
+        OtherProcess child("lock", key, mine, tmp.path, {}, env);
+        CHECK(child.inherited());
+        OtherProcess eject("eject", key, mine, tmp.path, {}, env);
+        CHECK(eject.busy());
+        CHECK_FALSE(eject.inherited());
+        // A runtime folder others may look into is not the account's alone: no parent run.
+        REQUIRE(::chmod(run_user.c_str(), 0755) == 0);
+        OtherProcess open_folder("lock", key, mine, tmp.path, {}, env);
+        CHECK(open_folder.busy());
+        CHECK_FALSE(open_folder.inherited());
     }
 }
 
