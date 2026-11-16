@@ -2759,6 +2759,13 @@ TEST_CASE("drive lock: root's folder is open to every account whatever root's um
 
 namespace {
 
+// Whether statx gives the mount ID of a file here (Linux 5.8 and later, where statx is allowed).
+bool statx_mount_ids() {
+    struct statx sx{};
+    return ::statx(AT_FDCWD, "/run/lock", AT_STATX_DONT_SYNC, STATX_MNT_ID, &sx) == 0 &&
+           (sx.stx_mask & STATX_MNT_ID) != 0;
+}
+
 // For the tests below, without root: this account's own lock is the file in the settings folder
 // (not its file in /run/lock), so a process of this account with another settings folder (and
 // without these hooks) stands in for another account; this account's own files in /run/lock count
@@ -2947,6 +2954,16 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             moved.mountinfo = fake.string();
             testing::set_drive_lock_hooks(moved);
             CHECK(eject_busy());
+            // Nor is a file on such a mount tried with a flock (see the pid namespace above): with
+            // no line of /proc/locks about it at all, root's eject cannot tell whether a holder in
+            // another pid namespace has it, and fails closed. Where statx gives no mount IDs, the
+            // file is never tried, and /proc/locks alone tells (see the header).
+            const fs::path no_lines = tmp.path / "proc-locks-without-lines";
+            std::ofstream(no_lines).close();
+            moved.proc_locks = no_lines.string();
+            testing::set_drive_lock_hooks(moved);
+            if (statx_mount_ids()) CHECK(eject_busy());
+            else MESSAGE("not checked: statx gives no mount IDs here");
             testing::set_drive_lock_hooks({});
         }
         {

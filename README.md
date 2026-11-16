@@ -630,8 +630,10 @@ holding a turn has open (so also a run without a /run/user folder whose file in 
 account made first), and is refused where Linux cannot tell whether those are in use. A program
 in another container that shares /run/lock cannot be seen holding a turn file at all, so an eject
 as root also tries the turn files it finds in /run/lock and /run/user for a moment itself (never
-waiting) and counts one it cannot take as in use; such a program holding only the turn file in its
-settings folder stays unseen. Where Linux lets an account make hard links to other accounts' files
+waiting) and counts one it cannot take, or cannot try, as in use; this needs Linux 5.8 or later
+where statx is allowed (older kernels, or containers whose seccomp filter refuses statx, see only
+programs in the same container), and such a program holding only the turn file in its settings
+folder stays unseen. Where Linux lets an account make hard links to other accounts' files
 (`fs.protected_hardlinks` off), another account may link a turn file of yours or root's under
 another name; an eject still counts that file (it is refused rather than run beside it), while a
 command as root, or a run or command of yours waiting for root's turn, counts only a turn file no

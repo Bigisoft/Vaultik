@@ -75,8 +75,10 @@
 // pid namespace (another container that shares /run/lock) cannot be seen in /proc at all, as
 // /proc/locks leaves it out: root's eject therefore also tries a flock on each own file of an
 // account that it finds by its name (never waiting, let go of at once, never made), and counts one
-// it cannot take as busy. A holder in another pid namespace of a file root finds only through the
-// process that has it open (the settings folder's) is not seen. An eject counts every file of
+// it cannot take, or cannot try (fail closed), as busy; this needs statx's mount ID (Linux 5.8 and
+// later, where statx is allowed): without it these files are not tried, and only holders in the
+// same pid namespace are seen. A holder in another pid namespace of a file root finds only through
+// the process that has it open (the settings folder's) is not seen. An eject counts every file of
 // these names that the right account (or root, for root's marks) owns, also one with a hard link or
 // that other accounts may open: where fs.protected_hardlinks is off, another account may add a hard
 // link to such a file while it is held, and must not hide it from an eject that way. Where a holder

@@ -752,27 +752,38 @@ bool lock_file_named(const std::string& path, LockFile& f, Mounts& mounts) {
     return ok;
 }
 
+// What trying a flock on a file told (see flock_busy).
+enum class Probe {
+    free,      // taken and let go of at once
+    busy,      // held by another
+    untried,   // cannot be tried where statx gives no mount ID (before Linux 5.8, or refused)
+    unknown,   // could not be tried for another reason (the file was swapped or removed meanwhile,
+               // or is on a mount root's mount table does not show, or the open or flock failed)
+};
+
 // Root's eject: whether a process holds `file` (found by its name, see lock_file_named), told by
 // trying a flock on it that never waits and is let go of at once. This sees a holder in any pid
 // namespace (another container that shares the folder), which /proc/locks leaves out. The file is
 // opened only when it is still the same regular file, on a mount in root's mount table that is no
 // FUSE mount (whose program could keep the open waiting), never made, and never through a link.
-// False when it is free or cannot be tried so.
-bool flock_busy(const LockFile& file, Mounts& mounts) {
+// That needs the mount ID of statx (Linux 5.8 and later, where statx is allowed): without it, the
+// file is never tried (untried), and only /proc/locks tells.
+Probe flock_busy(const LockFile& file, Mounts& mounts) {
+    if (!file.has_mount_id) return Probe::untried;
     const int at = ::open(file.path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
-    if (at < 0) return false;
+    if (at < 0) return Probe::unknown;
     LockFile now;
     int fd = -1;
     if (lock_file_at(at, "", AT_EMPTY_PATH, now) && S_ISREG(now.mode) && now.dev == file.dev && now.ino == file.ino &&
         now.has_mount_id && mounts.has(now.mount_id) && !mounts.fuse(now.mount_id))
         fd = ::open(("/proc/self/fd/" + std::to_string(at)).c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
     ::close(at);
-    if (fd < 0) return false;
-    bool busy = false;
+    if (fd < 0) return Probe::unknown;
+    Probe probe = Probe::free;
     if (::flock(fd, LOCK_EX | LOCK_NB) == 0) ::flock(fd, LOCK_UN);
-    else busy = errno == EWOULDBLOCK;
+    else probe = errno == EWOULDBLOCK ? Probe::busy : Probe::unknown;
     ::close(fd);
-    return busy;
+    return probe;
 }
 
 // How a line of /proc/locks is about a file.
@@ -1094,7 +1105,9 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
 // own_files_of), also one with a hard link or that other accounts may open, so that no other
 // account can hide a held one from root's eject by linking it. /proc/locks leaves out a flock whose
 // holder is in another pid namespace (another container that shares /run/lock), so for an eject
-// each of these files is also tried itself (see flock_busy).
+// each of these files is also tried itself (see flock_busy); one that cannot be tried is unsure,
+// except where statx gives no mount ID at all (then /proc/locks alone tells, which sees no holder
+// in another pid namespace).
 //
 // Another account may also make an account's file in /run/lock first, so that a run of that
 // account without its runtime folder (started by cron, without a login) holds only the file in its
@@ -1114,8 +1127,11 @@ Use accounts_hold(const std::string& name, bool write_only) {
     bool unsure = false;
     const std::vector<LockFile> files = accounts_own_files(name, mounts, budget, !write_only, unsure);
     if (!write_only)
-        for (const LockFile& file : files)
-            if (flock_busy(file, mounts)) return Use::busy;
+        for (const LockFile& file : files) {
+            const Probe probe = flock_busy(file, mounts);
+            if (probe == Probe::busy) return Use::busy;
+            if (probe == Probe::unknown) unsure = true;
+        }
     bool readable = false;
     const std::vector<HeldFlock> held = held_flocks(&readable, &budget);
     if (!readable) return files.empty() && !unsure ? Use::free : Use::unsure;
