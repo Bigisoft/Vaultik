@@ -1313,6 +1313,7 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
     const std::string dir = os::get_env("VAULTIK_TEST_HOLD_DIR");
     std::unique_ptr<DriveLock> lock;
     std::unique_ptr<DriveClaim> claim;
+    std::unique_ptr<EjectHold> hold;
     bool held = false;
     if (what == "lock" || what == "eject") {
         try {
@@ -1329,6 +1330,9 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
         held = claim->held();
     } else if (what == "claimed") {
         held = drive_claimed(key, dir);
+    } else if (what == "eject-hold") {
+        hold = std::make_unique<EjectHold>(key, dir);
+        held = !hold->busy();
     }
     std::cout << (held ? "HOLD:held" : "HOLD:free") << std::endl;
     const fs::path until = fs::u8path(os::get_env("VAULTIK_TEST_HOLD_UNTIL"));
@@ -2592,6 +2596,131 @@ std::vector<std::pair<std::string, std::string>> hold_files(const std::string& a
 }
 
 }  // namespace
+
+TEST_CASE("eject: root's eject counts an account's runs and commands without the shared files (Linux, as root)") {
+    if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("skipped: needs root (runs as root and as nobody)");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    fs::permissions(tmp.path, fs::perms::all);  // nobody looks for its release file here
+    const std::string key = "test-root-eject-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string root_dir = os::join(tmp.dir(), "root");
+    const std::string user_dir = os::join(tmp.dir(), "nobody");
+    const fs::path drive = fs::path("/run/lock") / ("vaultik-drive-" + name + ".lock");
+    const fs::path use = fs::path("/run/lock") / ("vaultik-use-" + name + ".lock");
+    struct Cleanup {
+        std::string name;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const std::string dir : {"/run/lock", "/run/vaultik"})
+                for (const std::string kind : {"drive", "use"})
+                    for (const std::string end : {".lock", ".root.lock", ".65533.lock", ".65534.lock"})
+                        fs::remove(fs::path(dir) / ("vaultik-" + kind + "-" + name + end), ec);
+        }
+    } cleanup{name};
+    // A file of `uid`'s own that only it may open, as another account makes it first.
+    const auto make_as = [](const fs::path& file, uid_t uid) {
+        const int fd = ::open(file.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        REQUIRE(fd >= 0);
+        REQUIRE(::fchown(fd, uid, uid) == 0);
+        REQUIRE(::fchmod(fd, 0600) == 0);
+        ::close(fd);
+    };
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(key, root_dir, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    {
+        // Another account holds the claims file all accounts share when a command of nobody's
+        // starts: the command claims the drive on its own files alone, and once that account lets
+        // go, root's eject still counts the command.
+        const int fd = ::open(use.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+        REQUIRE(fd >= 0);
+        REQUIRE(::fchmod(fd, 0644) == 0);
+        ::close(fd);
+        OtherProcess other("flock-ex", {}, {}, tmp.path, "65533", hold_files(use.string()));
+        REQUIRE(other.held());
+        OtherProcess claim("claim", key, user_dir, tmp.path, "65534");
+        REQUIRE(claim.held());
+        CHECK(other.release() == 0);
+        CHECK(drive_claimed(key, root_dir));
+        {
+            EjectHold hold(key, root_dir);
+            CHECK(hold.busy());
+        }
+        CHECK(claim.release() == 0);
+        CHECK_FALSE(drive_claimed(key, root_dir));
+        fs::remove(use);
+    }
+    {
+        // Another account made the shared files first, of its own: nobody's run and command use
+        // their own files alone, and root's eject counts both.
+        make_as(drive, 65533);
+        make_as(use, 65533);
+        OtherProcess run("lock", key, user_dir, tmp.path, "65534");
+        REQUIRE(run.held());
+        CHECK(eject_busy());
+        CHECK(run.release() == 0);
+        CHECK_FALSE(eject_busy());
+        OtherProcess claim("claim", key, user_dir, tmp.path, "65534");
+        REQUIRE(claim.held());
+        CHECK(drive_claimed(key, root_dir));
+        CHECK(claim.release() == 0);
+        CHECK_FALSE(drive_claimed(key, root_dir));
+        // Where /proc/locks cannot be read, root's eject cannot tell whether nobody's files are
+        // held, and counts them as busy (fail closed).
+        testing::DriveLockHooks hooks;
+        hooks.proc_locks = (tmp.path / "no-proc-locks").string();
+        testing::set_drive_lock_hooks(hooks);
+        CHECK(drive_claimed(key, root_dir));
+        CHECK(eject_busy());
+        testing::set_drive_lock_hooks({});
+        CHECK_FALSE(drive_claimed(key, root_dir));
+    }
+    {
+        // An eject of nobody's under way without the shared file: a command of root's waits for it.
+        OtherProcess eject("eject-hold", key, user_dir, tmp.path, "65534");
+        REQUIRE(eject.held());
+        std::thread later([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            eject.release();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        DriveClaim claim(key, root_dir);
+        const auto took = std::chrono::steady_clock::now() - started;
+        later.join();
+        CHECK(claim.held());
+        CHECK(took >= std::chrono::milliseconds(500));
+    }
+    {
+        // Nobody's own file only in its runtime folder (its file in /run/lock is another
+        // account's): root looks in every account's runtime folder too.
+        make_as(fs::path("/run/lock") / ("vaultik-use-" + name + ".65534.lock"), 65533);
+        const fs::path runtime = tmp.path / "run-user";
+        const fs::path nobody = runtime / "65534";
+        REQUIRE(::mkdir(runtime.c_str(), 0755) == 0);
+        REQUIRE(::mkdir(nobody.c_str(), 0700) == 0);
+        REQUIRE(::chown(nobody.c_str(), 65534, 65534) == 0);
+        REQUIRE(::chmod(nobody.c_str(), 0700) == 0);
+        testing::DriveLockHooks hooks;
+        hooks.run_user_root = runtime.string();
+        testing::set_drive_lock_hooks(hooks);
+        OtherProcess claim("claim", key, user_dir, tmp.path, "65534", {{"VAULTIK_TEST_HOLD_RUN_USER", nobody.string()}});
+        REQUIRE(claim.held());
+        CHECK(fs::exists(nobody / ("vaultik-use-" + name + ".lock")));
+        CHECK(drive_claimed(key, root_dir));
+        CHECK(claim.release() == 0);
+        CHECK_FALSE(drive_claimed(key, root_dir));
+    }
+}
 
 TEST_CASE("drive lock: another account can delay an account's runs a short while, never stop them (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {

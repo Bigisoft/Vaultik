@@ -58,9 +58,20 @@
 // account can delay a run by kOtherAccountWait, never stop it, can delay a command of an account
 // by 2 seconds at most (a claim waits that long for a claims file a process of root's holds
 // alone, as root's eject does for a moment after its mark; only one whose real and effective
-// accounts are both root's counts), and cannot keep its eject busy (root's claims and ejects still
-// count every account's, fail closed). Where /run/lock cannot be used, a file in the given folder
-// instead.
+// accounts are both root's counts), and cannot keep its eject busy. Root's ejects still count the
+// runs and claims of every account, fail closed, and root's claims wait for the ejects of every
+// account (at most kEjectWait): through the shared files, and through each account's own files
+// that root can find (vaultik-drive-<hash>.<uid>.lock and vaultik-use-<hash>.<uid>.lock in
+// /run/lock, the files in each runtime folder /run/user/<uid>), which an account's run, claim or
+// eject holds also when it is left without the shared file (another account held that one when it
+// started, or made it first); an eject of root's counts each one held, and each one there where
+// /proc/locks cannot tell. The limits: root cannot find a file in an account's settings folder,
+// which the account uses only where it cannot use its file in /run/lock, so an eject of root's
+// does not see a run or command of an account that holds neither a shared file nor a file in its
+// runtime folder; and root's runs do not wait for an account's own files (a run of that account
+// that waits for root's mark holds them, and would keep root's run waiting in turn), so a run of
+// an account left without the shared file may share the drive's speed with a run of root's.
+// Where /run/lock cannot be used, a file in the given folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a
@@ -115,7 +126,7 @@ std::string drive_lock_sddl(const std::string& account);
 // a lock that cannot be shared and gives up (DriveBusy) when the wait ends. `admin_run`: the same
 // for a job with administrator rights, except that it goes on without the lock when the wait ends
 // (gave_up_waiting()). `eject`: fails closed: a lock that is there but cannot be shared, or one
-// the parent run holds, counts as busy.
+// the parent run holds, counts as busy (Linux, root: also an account's own lock, see above).
 enum class DriveLockMode { run, admin_run, eject };
 
 // The name part of the drive's lock objects (mutexes, files) for `key`: hex, the same for every
@@ -248,7 +259,8 @@ namespace testing {
 // this account with another folder stands in for another account); `root_uid`: the account
 // whose marks (see above) and processes count as root's; `other_account_wait`: instead of
 // kOtherAccountWait when not negative; `root_dir`: instead of /run/vaultik when not empty;
-// `run_user_dir`: instead of /run/user/<uid> when not empty;
+// `run_user_dir`: instead of /run/user/<uid> when not empty; `run_user_root`: instead of /run/user,
+// where root looks for every account's runtime folder, when not empty;
 // `proc_locks`: instead of /proc/locks when not empty (a missing file: as if it could not be
 // read); `locks_other_device`: every line of /proc/locks carries another device than stat gives,
 // the one /proc/self/mountinfo gives the file's mount (as on btrfs); `no_mount_device`: the device
@@ -262,6 +274,7 @@ struct DriveLockHooks {
     std::string proc_locks;
     bool locks_other_device = false;
     bool no_mount_device = false;
+    std::string run_user_root;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 
