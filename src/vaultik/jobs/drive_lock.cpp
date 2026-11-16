@@ -1110,7 +1110,8 @@ enum class Holder {
     other,    // only processes that are not
     unknown,  // no answer to use: the file shows no holder at all, or the processes above this one
               // cannot all be read (another pid namespace, /proc mounted with hidepid), or one of
-              // them may hold a lock that /proc/locks cannot tell from another file's
+              // them may hold a lock that /proc/locks cannot tell from another file's, or the busy
+              // file is an own lock of this account that other accounts may open too
 };
 
 // Whether a process this one descends from (its parent, or one further up: a run's before or
@@ -1129,9 +1130,14 @@ enum class Holder {
 // counts on its own. Which file `fd` is, is told by the file itself, never by its path: it counts
 // as a lock no other account can take only when this account owns it and no other account may open
 // it (see only_mine), as another account may make the shared file first, hold it and then move it
-// away, so that it is no longer the one at its path. A process counts when it holds a lock no other
-// account can take, one of its account's own files, root's mark or, for root (a command run with
-// sudo; only root may look at the open files of another account's process), a file of that name it
+// away, so that it is no longer the one at its path. One of this run's own locks (`own_file`, not
+// the file all accounts share) that this account owns but other accounts may open too (its
+// settings folder on FAT, exFAT, NTFS or CIFS, whose mode bits cannot be set so) is not trusted
+// either, but leaves no answer (unknown) where none of the files above makes the holder a parent,
+// so that the marker tells (never for an eject) instead of the command waiting for its own run.
+// A process counts when it holds a lock no other account can take, one of its account's own files,
+// root's mark or, for root (a command run with sudo; only root may look at the open files of
+// another account's process), a file of that name it
 // has open (/proc/<pid>/fd) that its account owns and no other account may open: the settings
 // folder's, the only own file of a run without its runtime folder where only root may write to
 // /run/lock or where another account made its file there first, also when another account holds the
@@ -1144,15 +1150,17 @@ enum class Holder {
 // the same inode on another device may be any file of any account (tmpfs inode numbers are easy to
 // match), so it never makes a parent; where the file's device cannot be told, such a line held by
 // a process above this one leaves no answer (unknown).
-Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark) {
+Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const std::string& mark) {
     const std::vector<HeldFlock> held = held_flocks();
     Mounts mounts;
     std::vector<LockFile> trusted = root_mark_files(mark, mounts);
     bool shared = false;
+    bool loose = false;  // an own lock of this account that other accounts may open too
     LockFile target;
     const bool busy_file = fd >= 0 && lock_file_of(fd, target, mounts);
     if (busy_file) {
         shared = !only_mine(target) || shared_stand_in(fd, name);
+        loose = own_file && shared && target.uid == ::geteuid() && !shared_stand_in(fd, name);
         if (!shared) trusted.push_back(target);
     }
     // The file of `fd` is busy (it is asked about only then), so a holder that does not show is
@@ -1206,7 +1214,7 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
         }
         if (!whole) unknown = true;
     }
-    return unknown ? Holder::unknown : Holder::other;
+    return unknown || loose ? Holder::unknown : Holder::other;
 }
 
 // Whether a process of root's (see root_process) holds the file of `fd` alone (as root's eject
@@ -1314,8 +1322,8 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     // Where /proc gives no answer to use (see Holder::unknown), the marker the run passes on to
     // its commands tells instead (sudo and pkexec drop it, but they are rarely in between then),
     // never for an eject, which then waits as usual.
-    const auto by_parent = [&](int fd) {
-        const Holder holder = held_by_ancestor(fd, name, mark);
+    const auto by_parent = [&](int fd, bool own_file) {
+        const Holder holder = held_by_ancestor(fd, own_file, name, mark);
         if (holder == Holder::other) return false;
         if (holder == Holder::unknown && (fail_closed || !named_by_parent(hash))) return false;
         if (!fail_closed) inherited_ = true;
@@ -1447,7 +1455,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 close_all();
                 return false;
             }
-            if (by_parent(fd)) {
+            if (by_parent(fd, true)) {
                 close_all();
                 parent_busy();
                 return false;
@@ -1504,7 +1512,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             // Held by the run that started this command (or root's mark is): whatever its own
             // lock, the command inherits the drive (one with root rights that an account's run
             // started, or the other way round) instead of waiting for its own parent.
-            if (by_parent(busy ? shared : -1)) {
+            if (by_parent(busy ? shared : -1, false)) {
                 close_all();
                 parent_busy();
                 return;

@@ -663,7 +663,8 @@ look at other accounts' programs (some containers), such a `sudo` command waits 
 run and then goes on beside it. A turn counts only on its own drive: a lock that another account
 holds on a file of another drive with the same file number is never taken for the run's. Where
 Linux cannot tell who holds the turn (a settings folder on btrfs or overlayfs with Linux older
-than 5.8, `/proc` mounted with `hidepid`, a run in another container), a command goes by what the
+than 5.8, a settings folder on FAT, exFAT, NTFS or a network share whose turn file every account
+may open, `/proc` mounted with `hidepid`, a run in another container), a command goes by what the
 run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does. Cloud storage
 has no such turns.
 

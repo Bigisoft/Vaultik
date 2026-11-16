@@ -3708,6 +3708,52 @@ TEST_CASE("drive lock: the marker alone never makes a run inherit the drive (Lin
     os::set_env(kHeldDrivesVariable, "");
 }
 
+TEST_CASE("drive lock: an own lock file other accounts may open leaves it to the marker (Linux)") {
+    if (::geteuid() == 0) {
+        MESSAGE("not run: needs an account other than root");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-loose-own-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string mine = os::join(tmp.dir(), "mine");
+    const ForeignFiles foreign(name);  // the account's own lock: the file in its settings folder alone
+    fs::create_directories(mine);
+    const fs::path own = fs::path(mine) / ("vaultik-drive-" + name + ".lock");
+    // A settings folder on FAT, exFAT, NTFS or CIFS: its files show modes that let every account
+    // open them, so the file cannot tell that the run holding it is the command's own.
+    std::ofstream(own).close();
+    REQUIRE(::chmod(own.c_str(), 0644) == 0);
+    using Env = std::vector<std::pair<std::string, std::string>>;
+    Env marked = kForeign;
+    marked.push_back({kHeldDrivesVariable, name + ":parent"});
+    {
+        // The run that started the command (this process) holds it: the marker that run passes
+        // on tells, so the command inherits the drive instead of waiting for its own run; without
+        // the marker it waits as usual (and gives up here, with no wait of its own). Never for an
+        // eject, which fails closed.
+        const Flocked parent(own.string(), LOCK_EX);
+        OtherProcess named("lock", key, mine, tmp.path, {}, marked);
+        CHECK(named.inherited());
+        CHECK_FALSE(named.held());
+        OtherProcess unnamed("lock", key, mine, tmp.path, {}, kForeign);
+        CHECK(unnamed.busy());
+        CHECK_FALSE(unnamed.inherited());
+        OtherProcess eject("eject", key, mine, tmp.path, {}, marked);
+        CHECK(eject.busy());
+        CHECK_FALSE(eject.inherited());
+    }
+    {
+        // A file no other account may open tells on its own, without the marker.
+        REQUIRE(::chmod(own.c_str(), 0600) == 0);
+        const Flocked parent(own.string(), LOCK_EX);
+        OtherProcess unnamed("lock", key, mine, tmp.path, {}, kForeign);
+        CHECK(unnamed.inherited());
+        CHECK_FALSE(unnamed.held());
+    }
+}
+
 TEST_CASE("drive lock: an account that cannot use the shared files still sees root's runs and claims (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");

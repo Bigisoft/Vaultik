@@ -191,8 +191,10 @@ public:
     // overlayfs. Where /proc gives no answer to use (no holder of the busy file shows there, the
     // device of a file's mount on btrfs or overlayfs cannot be told while a process above this one
     // may hold one with its inode, or the processes above this one cannot be read: another pid
-    // namespace, hidepid), kHeldDrivesVariable tells as on Windows, never for an eject; a holder of
-    // the file all accounts share that cannot be trusted is no such case.
+    // namespace, hidepid; or the busy file is an own lock of this account that other accounts may
+    // open too, as in a settings folder on FAT, exFAT, NTFS or CIFS, which never makes a parent run
+    // on its own), kHeldDrivesVariable tells as on Windows, never for an eject; a holder of the
+    // file all accounts share that cannot be trusted is no such case.
     // Either way, a lock that is free (the run that started the command has ended) is taken as
     // usual.
     // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see
