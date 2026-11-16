@@ -477,6 +477,32 @@ int open_root_mark(const std::string& name) {
     return open_in_run_lock(name, 0600, roots);
 }
 
+// What one look into other accounts' processes (root only; see private_files_of) may cost, so that
+// an account cannot keep root's claims and ejects waiting with many processes or many descriptors:
+// at most kScanProcesses processes and kScanDescriptors descriptors per account, each account
+// apart (one over its budget hides no other account's processes), and kScanTime in all; every
+// descriptor read counts, also when a process's open files are read again (see holds). An
+// account over its budget, or a look over its time, is one that cannot be told (unsure).
+constexpr std::size_t kScanProcesses = 256;
+constexpr std::size_t kScanDescriptors = 65536;
+constexpr std::chrono::seconds kScanTime{3};
+
+struct ScanBudget {
+    std::map<long long, std::pair<std::size_t, std::size_t>> used;  // per account: processes, descriptors
+    std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + kScanTime;
+    std::size_t processes = hooks().scan_processes > 0 ? hooks().scan_processes : kScanProcesses;
+    std::size_t descriptors = hooks().scan_descriptors > 0 ? hooks().scan_descriptors : kScanDescriptors;
+
+    bool in_time() const { return std::chrono::steady_clock::now() < until; }
+
+    // Whether one more process (`descriptor` false) or descriptor of `account` may be looked into.
+    bool take(long long account, bool descriptor) {
+        std::pair<std::size_t, std::size_t>& u = used[account];
+        if (!in_time()) return false;
+        return descriptor ? ++u.second <= descriptors : ++u.first <= processes;
+    }
+};
+
 // A flock held on a file, as /proc/locks shows it (every account may read it).
 struct HeldFlock {
     unsigned dev_major = 0;
@@ -487,14 +513,15 @@ struct HeldFlock {
 };
 
 // The flocks held now (not the ones waited for). Empty when /proc/locks cannot be read (then
-// `readable`, when given, is false).
-std::vector<HeldFlock> held_flocks(bool* readable = nullptr) {
+// `readable`, when given, is false). With `budget`, read only within its time (a long /proc/locks,
+// which any account can make with many flocks, is cut short; then the budget is out of time).
+std::vector<HeldFlock> held_flocks(bool* readable = nullptr, const ScanBudget* budget = nullptr) {
     std::vector<HeldFlock> out;
     const testing::DriveLockHooks set = hooks();
     std::ifstream in(set.proc_locks.empty() ? std::string("/proc/locks") : set.proc_locks);
     if (readable != nullptr) *readable = in.is_open();
     std::string line;
-    while (std::getline(in, line)) {
+    while ((budget == nullptr || budget->in_time()) && std::getline(in, line)) {
         // "1: FLOCK  ADVISORY  WRITE 1234 fe:00:5678 0 EOF"; "1: -> FLOCK ..." for one that waits.
         std::istringstream words(line);
         std::string id, kind, advisory, type, pid, where;
@@ -751,32 +778,6 @@ bool is_file(const HeldFlock& f, const LockFile& file) {
     return match(f, file) == Match::exact;
 }
 
-// What one look into other accounts' processes (root only; see private_files_of) may cost, so that
-// an account cannot keep root's claims and ejects waiting with many processes or many descriptors:
-// at most kScanProcesses processes and kScanDescriptors descriptors per account, each account
-// apart (one over its budget hides no other account's processes), and kScanTime in all; every
-// descriptor read counts, also when a process's open files are read again (see holds). An
-// account over its budget, or a look over its time, is one that cannot be told (unsure).
-constexpr std::size_t kScanProcesses = 256;
-constexpr std::size_t kScanDescriptors = 65536;
-constexpr std::chrono::seconds kScanTime{3};
-
-struct ScanBudget {
-    std::map<long long, std::pair<std::size_t, std::size_t>> used;  // per account: processes, descriptors
-    std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + kScanTime;
-    std::size_t processes = hooks().scan_processes > 0 ? hooks().scan_processes : kScanProcesses;
-    std::size_t descriptors = hooks().scan_descriptors > 0 ? hooks().scan_descriptors : kScanDescriptors;
-
-    bool in_time() const { return std::chrono::steady_clock::now() < until; }
-
-    // Whether one more process (`descriptor` false) or descriptor of `account` may be looked into.
-    bool take(long long account, bool descriptor) {
-        std::pair<std::size_t, std::size_t>& u = used[account];
-        if (!in_time()) return false;
-        return descriptor ? ++u.second <= descriptors : ++u.first <= processes;
-    }
-};
-
 // The files process `pid` (of account `account`) has open, from /proc/<pid>/fd (readable for the
 // processes of this account, and for root), without the devices of their mounts, each descriptor
 // within the account's budget (see ScanBudget). False when they cannot be read, or not within it.
@@ -1008,7 +1009,11 @@ std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mount
 
 // Root only: the own lock files for `name` of every other account (see own_files_of) that are
 // there: each vaultik-...<uid>.lock in /run/lock and `name` in each account's runtime folder.
-std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts) {
+// Within the look's time (`budget`; `unsure` is set when it runs out): any account can make many
+// names in /run/lock, so a name there counts only for the account that owns its file, the one
+// its own file can be, and each account adds one name at most however many it makes.
+std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts, const ScanBudget& budget,
+                                         bool& unsure) {
     std::vector<long long> uids;
     const auto add = [&](const std::string& text) {
         if (text.empty() || text.size() > 10 || !std::all_of(text.begin(), text.end(), [](char c) {
@@ -1019,23 +1024,36 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
     };
     const std::string prefix = name.substr(0, name.size() - std::string(".lock").size()) + ".";
     const std::string suffix = ".lock";
+    const auto out_of_time = [&] {
+        if (budget.in_time()) return false;
+        unsure = true;
+        return true;
+    };
     if (DIR* d = ::opendir("/run/lock")) {
         while (const dirent* e = ::readdir(d)) {
+            if (out_of_time()) break;
             const std::string entry = e->d_name;
-            if (entry.size() > prefix.size() + suffix.size() && entry.compare(0, prefix.size(), prefix) == 0 &&
-                entry.compare(entry.size() - suffix.size(), suffix.size(), suffix) == 0)
-                add(entry.substr(prefix.size(), entry.size() - prefix.size() - suffix.size()));
+            if (entry.size() <= prefix.size() + suffix.size() || entry.compare(0, prefix.size(), prefix) != 0 ||
+                entry.compare(entry.size() - suffix.size(), suffix.size(), suffix) != 0)
+                continue;
+            const std::string uid = entry.substr(prefix.size(), entry.size() - prefix.size() - suffix.size());
+            LockFile f;
+            if (lock_file_at(::dirfd(d), entry.c_str(), AT_SYMLINK_NOFOLLOW, f) && std::to_string(f.uid) == uid) add(uid);
         }
         ::closedir(d);
     }
     if (DIR* d = ::opendir(run_user_root().c_str())) {
-        while (const dirent* e = ::readdir(d)) add(e->d_name);
+        while (const dirent* e = ::readdir(d)) {
+            if (out_of_time()) break;
+            add(e->d_name);
+        }
         ::closedir(d);
     }
     std::sort(uids.begin(), uids.end());
     uids.erase(std::unique(uids.begin(), uids.end()), uids.end());
     std::vector<LockFile> files;
     for (const long long uid : uids) {
+        if (out_of_time()) break;
         const std::vector<LockFile> own = own_files_of(uid, name, mounts);
         files.insert(files.end(), own.begin(), own.end());
     }
@@ -1055,21 +1073,25 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
 // settings folder, which root cannot find by name: so every process that /proc/locks shows holding
 // a flock is looked into as well (/proc/<pid>/fd), and one holding a file `name` there that its
 // account owns and no other account may open (see private_files_of) counts as busy too, within
-// each account's budget (see ScanBudget; an account over it is unsure). A line without a process
-// (pid 0, which mainline Linux never shows: it leaves such a holder out) cannot be looked into,
-// and is unsure too. Never this process, whose own locks and claims are counted apart.
+// each account's budget (see ScanBudget; an account over it is unsure). The whole look, from the
+// names in /run/lock and /proc/locks on, stays within the budget's time (over it is unsure). A
+// line without a process (pid 0, which mainline Linux never shows: it leaves such a holder out)
+// cannot be looked into, and is unsure too. Never this process, whose own locks and claims are
+// counted apart.
 enum class Use { free, busy, unsure };
 
 Use accounts_hold(const std::string& name, bool write_only) {
+    ScanBudget budget;
     Mounts mounts;
-    const std::vector<LockFile> files = accounts_own_files(name, mounts);
+    bool unsure = false;
+    const std::vector<LockFile> files = accounts_own_files(name, mounts, budget, unsure);
     if (!write_only)
         for (const LockFile& file : files)
             if (flock_busy(file, mounts)) return Use::busy;
     bool readable = false;
-    const std::vector<HeldFlock> held = held_flocks(&readable);
-    if (!readable) return files.empty() ? Use::free : Use::unsure;
-    bool unsure = false;
+    const std::vector<HeldFlock> held = held_flocks(&readable, &budget);
+    if (!readable) return files.empty() && !unsure ? Use::free : Use::unsure;
+    if (!budget.in_time()) unsure = true;  // /proc/locks may have been cut short
     std::vector<long> pids;
     for (const HeldFlock& f : held) {
         if (write_only && !f.write) continue;
@@ -1083,7 +1105,6 @@ Use accounts_hold(const std::string& name, bool write_only) {
     }
     std::sort(pids.begin(), pids.end());
     pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
-    ScanBudget budget;
     for (const long pid : pids) {
         const long long account = account_of(pid);
         if (!budget.take(account, false)) {

@@ -2978,6 +2978,24 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
                 CHECK(drive_claimed(key, root_dir));
             }
         }
+        {
+            // Any account can make many names of the drive's in /run/lock: one counts only for the
+            // account that owns its file, so a name made by another account for each of many
+            // accounts adds nothing, and nobody's own file is still found among them.
+            std::vector<fs::path> padding;
+            for (int i = 0; i < 2000; ++i) {
+                padding.push_back(fs::path("/run/lock") /
+                                  ("vaultik-drive-" + name + "." + std::to_string(100000 + i) + ".lock"));
+                make_as(padding.back(), 65533);
+            }
+            CHECK_FALSE(eject_busy());
+            OtherProcess padded_run("lock", key, user_dir, tmp.path, "65534");
+            REQUIRE(padded_run.held());
+            CHECK(eject_busy());
+            CHECK(padded_run.release() == 0);
+            CHECK_FALSE(eject_busy());
+            for (const fs::path& p : padding) fs::remove(p);
+        }
         // Where /proc/locks cannot be read, root's eject cannot tell whether nobody's files are
         // held, and counts them as busy (fail closed).
         testing::DriveLockHooks hooks;
