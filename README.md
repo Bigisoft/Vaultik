@@ -630,7 +630,10 @@ was started from, also through a shell, `sudo` or `pkexec`), so it works whateve
 reaches the command. As any account can hold the turn all accounts share in /run/lock, a program
 holding only that one is taken for the command's run only when it also holds a turn no other
 account can take (its account's own, or root's): another account cannot make your commands skip
-their turn or keep your eject refused that way. Cloud storage has no such turns.
+their turn or keep your eject refused that way. Where Linux cannot tell who holds the turn (a
+settings folder on btrfs, `/proc` mounted with `hidepid`, a run in another container), a command
+goes by what the run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does.
+Cloud storage has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
 Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows

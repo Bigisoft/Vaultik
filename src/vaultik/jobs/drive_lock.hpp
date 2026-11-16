@@ -118,8 +118,9 @@ std::string drive_lock_name(const std::string& key);
 // The environment variable a run that holds drive locks passes to the commands it starts (its
 // before and after commands): the tokens of those locks, separated by ';'. Windows: a vaultik
 // command started by such a command for the same drive (a prune in an after command, say) then
-// does not wait for its own parent run, which waits for it to end. Linux: not looked at (sudo and
-// pkexec do not pass it on); the lock's holder tells instead (see DriveLock).
+// does not wait for its own parent run, which waits for it to end. Linux: the lock's holder tells
+// instead (see DriveLock), whatever reaches the command (sudo and pkexec do not pass it on); this
+// is looked at only where /proc cannot tell who holds a busy lock.
 constexpr const char* kHeldDrivesVariable = "VAULTIK_HELD_DRIVES";
 
 class DriveLock {
@@ -137,8 +138,13 @@ public:
     // share counts only when that process holds it alone and also holds a lock no other account
     // can take (its account's own file, or root's mark), as any account may lock that file and
     // /proc/locks still names a process that took a lock after it ended. One that is no ancestor
-    // (a command that outlived its run, another account's run) is waited for as usual. Either
-    // way, a lock that is free (the run that started the command has ended) is taken as usual.
+    // (a command that outlived its run, another account's run) is waited for as usual. Where
+    // /proc gives no answer to use (no holder of the busy file shows there, as on btrfs where its
+    // device differs and the inode alone is tried first, or the processes above this one cannot
+    // be read: another pid namespace, hidepid), kHeldDrivesVariable tells as on Windows, never for
+    // an eject; a holder of the file all accounts share that cannot be trusted is no such case.
+    // Either way, a lock that is free (the run that started the command has ended) is taken as
+    // usual.
     // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see
     // above. `mode`: see DriveLockMode.
     DriveLock(const std::string& key, const std::string& lock_dir, std::chrono::milliseconds wait,
@@ -230,13 +236,18 @@ namespace testing {
 // folder, not the one in /run/lock (so a process of this account with another folder stands in
 // for another account); `root_uid`: the account whose marks (see above) count as root's;
 // `other_account_wait`: instead of kOtherAccountWait when not negative; `root_dir`: instead of
-// /run/vaultik when not empty; `run_user_dir`: instead of /run/user/<uid> when not empty.
+// /run/vaultik when not empty; `run_user_dir`: instead of /run/user/<uid> when not empty;
+// `proc_locks`: instead of /proc/locks when not empty (a missing file: as if it could not be
+// read); `locks_other_device`: every line of /proc/locks carries another device than stat gives
+// (as on btrfs).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
     std::chrono::milliseconds other_account_wait{-1};
     std::string root_dir;
     std::string run_user_dir;
+    std::string proc_locks;
+    bool locks_other_device = false;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

@@ -1254,7 +1254,9 @@ void init_test_repo(const fs::path& dir) {
 // until the file VAULTIK_TEST_HOLD_UNTIL is there. POSIX: VAULTIK_TEST_HOLD_UID makes a helper
 // started as root go on as that account first; VAULTIK_TEST_HOLD_FOREIGN=1 sets the hooks of
 // ForeignFiles below, VAULTIK_TEST_HOLD_ROOT_DIR the folder of root's marks and
-// VAULTIK_TEST_HOLD_RUN_USER the account's own runtime folder (see DriveLockHooks); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
+// VAULTIK_TEST_HOLD_RUN_USER the account's own runtime folder, VAULTIK_TEST_HOLD_PROC_LOCKS the
+// file read instead of /proc/locks and VAULTIK_TEST_HOLD_OTHER_DEVICE=1 another device on its lines
+// (see DriveLockHooks); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
 // missing) named in VAULTIK_TEST_HOLD_FILES, separated by ';', as another account (or root) would.
 TEST_CASE("drive lock helper: holds what another test asks for in a process of its own") {
     const std::string what = os::get_env("VAULTIK_TEST_HOLD");
@@ -1271,6 +1273,8 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
         hooks = {true, static_cast<unsigned>(::geteuid()), std::chrono::milliseconds(300), {}};
     hooks.root_dir = os::get_env("VAULTIK_TEST_HOLD_ROOT_DIR");
     hooks.run_user_dir = os::get_env("VAULTIK_TEST_HOLD_RUN_USER");
+    hooks.proc_locks = os::get_env("VAULTIK_TEST_HOLD_PROC_LOCKS");
+    hooks.locks_other_device = os::get_env("VAULTIK_TEST_HOLD_OTHER_DEVICE") == "1";
     testing::set_drive_lock_hooks(hooks);
     std::vector<int> flocked;
     if (what == "flock-ex" || what == "flock-sh") {
@@ -2692,6 +2696,64 @@ TEST_CASE("drive lock: a holder of the shared file is a parent run only with a l
         CHECK(open_folder.busy());
         CHECK_FALSE(open_folder.inherited());
     }
+}
+
+TEST_CASE("drive lock: where /proc cannot tell who holds the drive, the marker of the parent run does (Linux)") {
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-no-proc-" + tmp.path.filename().string();
+    const std::string dir = os::join(tmp.dir(), "settings");
+    HeldDrive parent(key, dir);
+    REQUIRE(parent.state == 1);
+    const std::pair<std::string, std::string> marker = parent.env;
+    using Env = std::vector<std::pair<std::string, std::string>>;
+    const std::pair<std::string, std::string> unreadable = {"VAULTIK_TEST_HOLD_PROC_LOCKS",
+                                                            (tmp.path / "no-proc-locks").string()};
+    const std::pair<std::string, std::string> other_device = {"VAULTIK_TEST_HOLD_OTHER_DEVICE", "1"};
+    {
+        // /proc/locks cannot be read: the marker the parent run passed on tells, else the command
+        // waits as usual (and gives up here, with no wait of its own) instead of inheriting.
+        OtherProcess named("lock", key, dir, tmp.path, {}, Env{unreadable, marker});
+        CHECK(named.inherited());
+        CHECK_FALSE(named.held());
+        OtherProcess unnamed("lock", key, dir, tmp.path, {}, Env{unreadable});
+        CHECK(unnamed.busy());
+        CHECK_FALSE(unnamed.inherited());
+        // Never for an eject, which does not take the drive either.
+        OtherProcess eject("eject", key, dir, tmp.path, {}, Env{unreadable, marker});
+        CHECK(eject.busy());
+        CHECK_FALSE(eject.inherited());
+        CHECK_FALSE(eject.held());
+    }
+    {
+        // /proc/locks shows another device than stat (btrfs): the inode alone finds the parent run,
+        // also without the marker.
+        OtherProcess unnamed("lock", key, dir, tmp.path, {}, Env{other_device});
+        CHECK(unnamed.inherited());
+        CHECK_FALSE(unnamed.held());
+        OtherProcess eject("eject", key, dir, tmp.path, {}, Env{other_device, marker});
+        CHECK(eject.busy());
+        CHECK_FALSE(eject.inherited());
+    }
+    parent.release();
+    {
+        // The parent run has ended: free, so taken as usual whatever the marker says.
+        OtherProcess orphan("lock", key, dir, tmp.path, {}, Env{unreadable, marker});
+        CHECK(orphan.held());
+        CHECK_FALSE(orphan.inherited());
+    }
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) return;
+    // A holder of the file all accounts share that cannot be trusted (see the test above) is an
+    // answer, also found by the inode alone: the marker does not make the command inherit.
+    const std::string shared_key = key + "-shared";
+    const ForeignFiles foreign(drive_lock_name(shared_key));
+    const Flocked stale(foreign.drive(), LOCK_EX);
+    Env env = kForeign;
+    env.push_back(other_device);
+    env.push_back({kHeldDrivesVariable, drive_lock_name(shared_key) + ":parent"});
+    OtherProcess child("lock", shared_key, dir, tmp.path, {}, env);
+    CHECK(child.busy());
+    CHECK_FALSE(child.inherited());
 }
 
 TEST_CASE("drive lock: the marker alone never makes a run inherit the drive (Linux)") {
