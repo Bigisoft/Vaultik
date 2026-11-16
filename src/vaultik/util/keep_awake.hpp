@@ -25,6 +25,11 @@ public:
     virtual void release() = 0;
 };
 
+// Whether the command line's `command` (`sub`: its first argument, such as "wipe" for "disk")
+// can run for hours, so that it keeps the computer awake until it ends: a backup, check, restore,
+// prune, copy, disk image, a disk erase or an erase of free space, among others.
+bool command_keeps_awake(const std::string& command, const std::string& sub = {});
+
 // The platform's requester (see above).
 std::unique_ptr<PowerRequester> system_power_requester();
 

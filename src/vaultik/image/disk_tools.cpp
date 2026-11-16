@@ -1194,6 +1194,19 @@ bool only_whole_disk_raw_volume(const DiskInfo& d) {
     return !v.spans && v.offset == 0 && v.length > 0 && v.length <= d.size && (fs.empty() || fs == "RAW");
 }
 
+std::string format_letter_problem(const std::string& root, const std::string& expected, const std::string& bound) {
+    // "\\?\Volume{GUID}\" whatever its case, with or without the closing backslash.
+    const auto norm = [](std::string v) {
+        if (!v.empty() && v.back() == '\\') v.pop_back();
+        for (char& c : v) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return v;
+    };
+    const std::string drive = root.substr(0, 2);
+    if (expected.empty() || bound.empty() || norm(bound) != norm(expected))
+        return drive + " is not the drive letter of the new volume any more; nothing was formatted";
+    return {};
+}
+
 LetterResult give_letter(char wanted, const std::string& automatic, const LetterSteps& steps) {
     const auto is_letter = [](const std::string& m) { return m.size() >= 2 && m.size() <= 3 && m[1] == ':'; };
     const auto root_of = [](char c) {

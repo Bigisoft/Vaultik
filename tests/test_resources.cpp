@@ -158,3 +158,16 @@ TEST_CASE("keep awake: the power request is released on every way out of a run")
     // The real one never throws, whether or not the system offers one.
     { vaultik::KeepAwake awake("Vaultik test"); }
 }
+
+TEST_CASE("keep awake: long commands keep the computer awake, disk erases among them") {
+    for (const char* command : {"run-job", "check-job", "test-restore", "copy", "backup", "restore", "verify", "prune",
+                                "forget", "repair", "repair-data", "move-here", "image"})
+        CHECK(vaultik::command_keeps_awake(command));
+    // An erase of a whole disk or of a drive's free space takes hours on a large one.
+    CHECK(vaultik::command_keeps_awake("disk", "wipe"));
+    CHECK(vaultik::command_keeps_awake("disk", "wipe-free"));
+    CHECK_FALSE(vaultik::command_keeps_awake("disk", "list"));
+    CHECK_FALSE(vaultik::command_keeps_awake("disk"));
+    CHECK_FALSE(vaultik::command_keeps_awake("snapshots"));
+    CHECK_FALSE(vaultik::command_keeps_awake("jobs"));
+}

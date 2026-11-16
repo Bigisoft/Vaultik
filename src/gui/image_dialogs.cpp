@@ -32,6 +32,7 @@
 #include "vaultik/platform/drive_health.hpp"
 #include "vaultik/platform/os.hpp"
 #include "vaultik/repo/cloud.hpp"
+#include "vaultik/util/exit_codes.hpp"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -387,8 +388,8 @@ void ImageRestoreDialog::start() {
     confirm_->clear();
     if (r.left_running) status_->setText(tr("The restore goes on without Vaultik."));
     else if (!r.error.isEmpty()) status_->setText(tr("The restore did not start: %1").arg(r.error));
-    else if (r.code == 0) status_->setText(tr("Disk %1 was restored.").arg(n));
-    else if (r.code == 4) status_->setText(tr("The restore was stopped before the end; disk %1 is not usable as it is.").arg(n));
+    else if (r.code == kExitOk) status_->setText(tr("Disk %1 was restored.").arg(n));
+    else if (r.code == kExitCancelled) status_->setText(tr("The restore was stopped before the end; disk %1 is not usable as it is.").arg(n));
     else status_->setText(tr("The restore did not finish: %1").arg(not_finished_text(r)));
     disks_ = image::list_disks();
     fill_targets();

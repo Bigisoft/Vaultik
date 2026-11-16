@@ -19,6 +19,7 @@
 #include "vaultik/ops/backup.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/os.hpp"
+#include "vaultik/util/exit_codes.hpp"
 #include "vaultik/util/hex.hpp"
 #include "vaultik/util/task_events.hpp"
 
@@ -192,7 +193,11 @@ namespace {
 // `keep` is false), every write's offset and length, how many writes ran at the same time and
 // how many started after `stopped` was set (by the device when a write failed, or by the test
 // when it cancelled). It can fail the write that covers `fail_at`, return a corrupted sector at
-// `corrupt_at`, and make every write take `delay` (cut short by cancel()).
+// `corrupt_at`, make every write take `delay` (cut short by cancel()), and hold each write until
+// another one runs beside it (`overlap_wait`, the longest it waits; once two ran at the same time,
+// no write waits any more, and once one waited that long in vain, none waits either), so that
+// writes that may run at once are seen to, however slow the threads start under load, while
+// writes made one after another fail the test instead of hanging it.
 class ParallelDevice : public WipeDevice {
 public:
     explicit ParallelDevice(std::uint64_t size, bool keep = true) : size_(size), data(keep ? size : 0, 0xAB) {}
@@ -209,6 +214,11 @@ public:
             ParallelDevice& dev;
             ~Leave() { --dev.active; }
         } leave{*this};
+        if (overlap_wait.count() > 0) {
+            cv.notify_all();  // a write that waits for this one
+            if (!cv.wait_for(lock, overlap_wait, [&] { return max_active > 1 || cancelled; }))
+                overlap_wait = std::chrono::milliseconds(0);
+        }
         if (delay.count() > 0) {
             cv.wait_for(lock, delay, [&] { return cancelled; });
             if (cancelled) throw Error("writing the test device at byte " + std::to_string(offset) + ": cancelled");
@@ -253,6 +263,7 @@ public:
     std::uint64_t fail_at = ~0ull;
     std::uint64_t corrupt_at = ~0ull;
     std::chrono::milliseconds delay{0};
+    std::chrono::milliseconds overlap_wait{0};
 };
 
 }  // namespace
@@ -264,6 +275,7 @@ TEST_CASE("drive cleanser: several writes at once put the pattern on every byte,
 
     SUBCASE("three passes, verified: every write once per pass, at its place, and zeros everywhere") {
         ParallelDevice dev(size);
+        dev.overlap_wait = std::chrono::seconds(10);
         WipeOptions o;
         o.method = WipeMethod::Dod3;
         o.verify = true;
@@ -296,6 +308,7 @@ TEST_CASE("drive cleanser: several writes at once put the pattern on every byte,
     }
     SUBCASE("random, verified: no sector keeps its old bytes or is left zero") {
         ParallelDevice dev(size);
+        dev.overlap_wait = std::chrono::seconds(10);
         WipeOptions o;
         o.method = WipeMethod::Random;
         o.verify = true;
@@ -1759,6 +1772,21 @@ struct FakeLetters {
 
 }  // namespace
 
+TEST_CASE("new disk: a volume is formatted only while its letter is still bound to it") {
+    const std::string vol = "\\\\?\\Volume{1b2c3d4e-0000-0000-0000-100000000000}\\";
+    // Still bound: whatever the case, with or without the closing backslash.
+    CHECK(format_letter_problem("F:\\", vol, vol).empty());
+    CHECK(format_letter_problem("F:\\", vol, "\\\\?\\volume{1B2C3D4E-0000-0000-0000-100000000000}").empty());
+    // The letter was given to another drive meanwhile, or it cannot be told: nothing is formatted.
+    const std::string other = "\\\\?\\Volume{99999999-0000-0000-0000-100000000000}\\";
+    const std::string why = format_letter_problem("F:\\", vol, other);
+    CHECK(why.find("F:") != std::string::npos);
+    CHECK(why.find("nothing was formatted") != std::string::npos);
+    CHECK_FALSE(format_letter_problem("F:\\", vol, "").empty());
+    CHECK_FALSE(format_letter_problem("F:\\", "", "").empty());
+    CHECK_FALSE(format_letter_problem("F:\\", "", other).empty());
+}
+
 TEST_CASE("new disk: the automatic drive letter stays when the one asked for cannot be given") {
     for (const bool one_only : {false, true}) {
         CAPTURE(one_only);
@@ -1947,7 +1975,7 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
                                             "--expect-size", std::to_string(id.size), "--expect-serial", id.serial,
                                             "--expect-id", id.id, "--json"};
         std::string output;
-        CHECK(run_cli(args, output) == 6);
+        CHECK(run_cli(args, output) == kExitInUse);
         CAPTURE(output);
         CHECK(output.find("\"event\":\"in_use\"") != std::string::npos);
         CHECK(output.find("\"status\":\"in_use\"") != std::string::npos);
@@ -2023,7 +2051,7 @@ TEST_CASE("disk tools on a virtual disk (Windows, administrator, VAULTIK_TEST_VI
         auto held = std::make_unique<std::ifstream>(fs::path(std::u8string(root3.begin(), root3.end())) / "note.txt", std::ios::binary);
         REQUIRE(held->is_open());
         std::string output;
-        CHECK(run_cli(args, output) == 6);
+        CHECK(run_cli(args, output) == kExitInUse);
         CAPTURE(output);
         CHECK(read_all(os::join(root3, "note.txt")) == Bytes{'z'});
         const Bytes named = read_all(in_use_file);
@@ -2584,4 +2612,20 @@ TEST_CASE("drive cleanser: throughput (measured and logged, not checked)") {
     }
     attached.reset();
 #endif
+}
+
+TEST_CASE("exit codes: the values scripts rely on, each one in the help") {
+    // Never changed, only added to: scripts and the app read them.
+    static_assert(kExitOk == 0 && kExitError == 1 && kExitAuth == 2 && kExitPartial == 3 && kExitCancelled == 4);
+    static_assert(kExitLocked == 5 && kExitInUse == 6 && kExitNoChannel == 7 && kExitWaiting == 8);
+    static_assert(kExitSetupFailed == 9);
+    std::string output;
+    REQUIRE(run_cli({"--help"}, output) == kExitOk);
+    const std::size_t at = output.find("Exit codes:");
+    REQUIRE(at != std::string::npos);
+    std::string codes = output.substr(at);
+    for (char& c : codes)
+        if (c == '\n' || c == '\r') c = ' ';
+    for (int code = kExitOk; code <= kExitSetupFailed; ++code)
+        CHECK_MESSAGE(codes.find(" " + std::to_string(code) + " ") != std::string::npos, "exit code ", code);
 }

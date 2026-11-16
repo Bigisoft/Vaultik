@@ -136,7 +136,8 @@ Start `vaultik-gui`, then **New backup job**:
   Scheduled runs can skip while the computer runs on battery, wake the computer from sleep at
   their time, and, for cloud storage, skip over a metered connection such as mobile data (the
   skipped run shows in the Activity tab; the next scheduled one tries again). While a backup,
-  health check, cleanup or restore runs, the computer does not go to sleep (the display still
+  health check, cleanup, restore, disk image or an erase of a disk or of free space runs, the
+  computer does not go to sleep (the display still
   turns off and the screen still locks): Windows lists the run under `powercfg /requests`, and on
   Linux it holds a logind sleep inhibitor (`systemd-inhibit --list`) when logind is there. The
   computer may sleep again as soon as the run ends, however it ends. "Back up now"
@@ -470,7 +471,8 @@ Exit codes: `0` ok, `1` error, `2` wrong password or damaged data, `3` finished 
 were skipped (see warnings), `4` cancelled, `5` repository in use by another run, `6` (disk
 tools) a drive is in use by another program (see [Drives in use](#drives-in-use)), `7` (Linux)
 the progress channel given with `--progress-pipe` cannot be used, so nothing was done, `8`
-(`run-job`) the backup drive is not connected, so the run waits for it (see below), `9`
+(`run-job`, `copy`) the backup drive is not connected, so the run waits for it (see below;
+`copy` returns it when the drive of the job's second copy is not connected), `9`
 (`disk wipe --then-init`) the disk was erased, but setting it up again failed.
 
 ### Old snapshots and space
@@ -595,28 +597,72 @@ is plugged in (`run-job <job> --on-connect`, which does nothing when the job jus
 version or is already running), then says when the drive can be unplugged.
 
 Jobs that back up to the same drive take turns: a backup, health check, test restore or cleanup
-waits while another job uses that drive ("Waiting for another job on this drive" in the app),
-and starts when it is done, so three jobs on one USB drive do not share its speed and each take
-as long as all three together. The turn follows the drive's volume ID, not its letter, and holds
+waits while another job uses that drive ("Waiting for another job on this drive" in the app), and
+starts when it is done, so three jobs on one USB drive do not share its speed and each take as
+long as all three together. The turn follows the drive's volume ID, not its letter, and holds
 between runs started by Task Scheduler or a systemd timer and runs started in the app. On Windows
 jobs with administrator rights take turns with the runs of the account that set them up; other
 accounts cannot take or hold the turn, so they cannot hold up your backups. As a program of your
 own account could hold the turn, a job with administrator rights that waited the whole 12 hours
-goes on with a warning instead of giving up: it can be delayed, never stopped. A turn that
-another account made, or one your account may not open, is not waited for: the run goes on (and
-says so in its log), while an eject counts it as in use, as it does when another program took the
-turn's name for something else. On Linux root's runs take turns with
-the runs of every account through /run/lock, your own prune or eject too; as any account could
-hold that shared turn, a run waits for another account's run for 5 minutes at most and then goes
-on with a warning (both then share the drive's speed): it too can be delayed, never stopped. Your
-own runs still take turns with each other, and a run as root is waited for as long as it runs.
-Another account can neither make your commands wait nor keep your eject refused; a command or
-eject as root still counts. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
-all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
-go to sleep. A run started on its own that waited behind a run of the same job does nothing once
-that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a
-job's before or after command (a prune of the same drive, say) does not wait for the run that
-started it; one that outlives that run takes the turn as usual. Cloud storage has no such turns.
+goes on with a warning instead of giving up: it can be delayed, never stopped. A turn that another
+account made, or one your account may not open, is not waited for: the run goes on (and says so in
+its log), while an eject counts it as in use, as it does when another program took the turn's name
+for something else. On Linux root's runs take turns with the runs of every account through
+/run/lock, your own prune or eject too; as any account could hold that shared turn, a run waits
+for another account's run for 5 minutes at most and then goes on with a warning (both then share
+the drive's speed): it too can be delayed, never stopped. Your own runs still take turns with each
+other, whatever settings folder each uses (the installed app and a portable copy, say), through a
+file in your own /run/user folder, where no other account can put one first, and one in /run/lock
+(where your account cannot make that one, as on distributions whose /run/lock only root may write
+to, a file in your settings folder instead, so runs with and without the /run/user folder still
+take turns as long as they use the same settings folder), and a run as root is waited for as long
+as it runs, also one that went on beside another run of yours, and also when another account made
+the shared file in /run/lock first so that your account cannot use it (your eject then still
+counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other
+account can put files. Keep every copy of Vaultik on a computer (the installed one, a portable
+copy, an AppImage) on the same version: copies of different versions may not see each other's
+turns and may then share a drive for a while. Another account cannot keep your eject refused, and
+can make a command of yours wait 2 seconds at most; a command or eject as root still counts. An
+eject as root also counts the runs and commands of every account that another account kept from
+the turn all accounts share (by holding or making its file in /run/lock first), through their own
+files in /run/lock and /run/user, and through the turn file in the settings folder that a program
+holding a turn has open (so also a run without a /run/user folder whose file in /run/lock another
+account made first), and is refused where Linux cannot tell whether those are in use (also where a
+program in another container holds a turn file). So that no account can keep it looking for long,
+it looks into at most 256 programs and 65536 open files of each account (and 3 seconds in all); an
+account with more counts as in use for an eject as root, and a command as root does not wait for
+it. An eject or command as root does not look at such files on a FUSE mount (an sshfs folder,
+say), whose program could keep it waiting; one whose mount it cannot find at all (a FUSE mount
+taken away with `umount -l`) it does not look at either, and counts as in use. A run kept from the
+shared turn may share the drive's speed with a run as root. A turn file in /run/lock that another
+account mounted something on (a FUSE file system, whose program could keep everybody who opens it
+waiting) is not opened at all (Linux 5.8 and later). Any other run gives up after waiting 12
+hours, and a run that cannot take its turn at all (the system refuses it) goes on rather than not
+backing up. While a run only waits, the computer may go to sleep. A run started on its own that
+waited behind a run of the same job does nothing once that run saved a version (and leaves neither
+a record nor a log). A `vaultik` command started by a job's before or after command (a prune of
+the same drive, say), also one started there with `sudo`, does not wait for the run that started
+it; one that outlives that run takes the turn as usual. On Linux Vaultik tells this from which
+program holds the drive's turn (the run the command was started from, also through a shell, `sudo`
+or `pkexec`), so it works whatever environment reaches the command. As any account can hold the
+turn all accounts share in /run/lock, a program holding only that one is taken for the command's
+run only when it also holds a turn no other account can take (its account's own, or root's; for a
+command started with `sudo`, also the turn file in the run's settings folder, which a run without
+a /run/user folder uses where only root may write to /run/lock, and which root sees the run has
+open, also when another account holds the turn all accounts share). A turn file counts as one no
+other account can take by what the file is (your account's own, which no other account may open),
+never by its name, so another account that made the shared file first and moves it away while the
+command waits cannot pass it off as the run's. An account's own turn counts only for a program
+that runs as that account now: Linux keeps naming the program that took a turn after it ended, and
+its number may later go to a program of another account (your shell, or `sudo`). Another account
+cannot make your commands skip their turn or keep your eject refused that way. Where root may not
+look at other accounts' programs (some containers), such a `sudo` command waits 5 minutes for its
+run and then goes on beside it. A turn counts only on its own drive: a lock that another account
+holds on a file of another drive with the same file number is never taken for the run's. Where
+Linux cannot tell who holds the turn (a settings folder on btrfs or overlayfs with Linux older
+than 5.8, `/proc` mounted with `hidepid`, a run in another container), a command goes by what the
+run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does. Cloud storage
+has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
 Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows
@@ -637,7 +683,8 @@ finishes. No administrator rights are needed for a USB drive.
 When a run finds the backup drive not connected, that is no failure: the drive is simply
 elsewhere. The run is recorded once as "Waiting for the drive" (grey, not red; `"status":
 "waiting"` in the history, exit code `8`, Event Log id 104 as information), sends no alert or
-failure notification at first, and the Overview says since when it waits. As soon as the drive is plugged
+failure notification at first, and the Overview says since when it waits. **Back up now** with the
+drive away says the same in the status bar ("Waiting for the drive"), not "Backup failed". As soon as the drive is plugged
 in while Vaultik is open (or in the notification area), the missed backup runs, also for jobs
 without "Also back up when the destination drive is connected"; otherwise the next scheduled run
 does it. If the drive stays away too long, the overdue reminder ("not backed up for N days")
@@ -1237,7 +1284,10 @@ how far it is in a status window of Vaultik (see
 [Tasks with administrator rights](#tasks-with-administrator-rights)).
 Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
 `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` after locking and dismounting the disk's volumes, and formats
-with `format.com` (from the Windows system folder); Linux uses `sfdisk` (through the disk opened
+with `format.com` (from the Windows system folder), which gets the new volume's own name
+(`\\?\Volume{...}`, without the closing backslash, which it refuses), never a drive letter
+that another drive could take meanwhile; right before it runs, the letter given to the volume is
+checked too to still belong to it, and nothing is formatted when another drive has it now; Linux uses `sfdisk` (through the disk opened
 exclusively and checked) and `mkfs.ext4` (`mkfs.ntfs`, `mkfs.exfat`).
 
 ```

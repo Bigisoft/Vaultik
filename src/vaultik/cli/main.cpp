@@ -78,6 +78,7 @@
 #include "vaultik/ops/docker.hpp"
 #include "vaultik/ops/virt.hpp"
 #include "vaultik/util/hex.hpp"
+#include "vaultik/util/exit_codes.hpp"
 #include "vaultik/util/keep_awake.hpp"
 #include "vaultik/platform/acl.hpp"
 #include "vaultik/platform/drive_health.hpp"
@@ -103,18 +104,6 @@ namespace vaultik::cli {
 namespace {
 
 constexpr char kVersion[] = VAULTIK_VERSION;
-
-// Exit codes.
-constexpr int kExitOk = 0;
-constexpr int kExitError = 1;
-constexpr int kExitAuth = 2;
-constexpr int kExitPartial = 3;  // finished, but some files could not be read or written
-constexpr int kExitCancelled = 4;
-constexpr int kExitLocked = 5;  // another run holds a conflicting repository lock
-constexpr int kExitInUse = 6;   // disk tools: a volume is in use by another program (--force-dismount forces it)
-constexpr int kExitNoChannel = 7;  // POSIX: --progress-pipe was given but cannot be used; nothing was done
-constexpr int kExitWaiting = 8;    // run-job: the backup drive is not connected; nothing was done
-constexpr int kExitSetupFailed = 9;  // disk wipe --then-init: erased completely, but setting the disk up failed
 
 // In pieces (the ")" R"(" joins below): Visual Studio 2022 refuses a single string literal over
 // 16 KB (error C2026); adjacent literals are joined into one string.
@@ -567,8 +556,11 @@ Options:
   --version                    Show the version
 
 Exit codes: 0 ok, 1 error, 2 wrong password or damaged data, 3 finished with skipped files,
-4 cancelled, 5 repository in use by another run, 8 (run-job) the backup drive is not
-connected, so the run waits for it.
+4 cancelled, 5 repository in use by another run, 6 (disk tools) a drive is in use by
+another program, 7 (Linux) the progress channel of --progress-pipe cannot be used, so
+nothing was done, 8 (run-job, copy) the backup drive (or that of the second copy) is not
+connected, so the run waits for it, 9 (disk wipe --then-init) the disk was erased, but
+setting it up again failed.
 )";
 
 struct Args {
@@ -2892,7 +2884,8 @@ std::string drive_problem(const os::DriveHealth& d);  // below, with the drives 
 
 // After a job's backup: copies its new versions to the job's second destination (creating the
 // repository there on first use, with the job's password), then removes copies beyond the job's
-// retention there. Fills `record` (kind Copy) whatever happens; returns kExitOk or kExitError.
+// retention there. Fills `record` (kind Copy) whatever happens; returns kExitOk, kExitError, or
+// kExitWaiting when the drive of the second copy is not connected (the copy waits for it).
 int second_copy(const Args& a, const jobs::JobStore& store, const jobs::Job& job, Repository& source,
                 jobs::RunRecord& record, bool keep_old = false) {
     record.kind = jobs::RunKind::Copy;
@@ -5333,12 +5326,10 @@ int run(const std::vector<std::string>& argv) {
     connect_progress_channel(a);
     // Runs that can take hours keep the computer from going to sleep until they end (however they
     // end); the display still turns off as usual.
-    static const std::set<std::string> kLongRuns = {"run-job", "check-job", "test-restore", "copy",  "backup",
-                                                    "restore", "verify",    "prune",        "forget", "repair",
-                                                    "repair-data", "move-here", "image"};
     std::optional<KeepAwake> awake;
-    if (kLongRuns.contains(a.command)) {
-        g_awake_reason = "Vaultik is running " + a.command + "; it lets the computer sleep when done";
+    if (command_keeps_awake(a.command, a.positional.empty() ? std::string() : a.positional[0])) {
+        const std::string what = a.command == "disk" ? "disk " + a.positional[0] : a.command;
+        g_awake_reason = "Vaultik is running " + what + "; it lets the computer sleep when done";
         awake.emplace(g_awake_reason);
     }
     g_awake = &awake;
@@ -5432,6 +5423,7 @@ int fail(const char* status, const std::string& message, int code) {
 }
 
 int run_guarded(const std::vector<std::string>& args) {
+    using namespace vaultik;
     using namespace vaultik::cli;
     try {
         return run(args);
@@ -5490,7 +5482,7 @@ int run_main(const std::vector<std::string>& args) {
     // open until the result is read.
     // Not when a disk tool found a volume in use: the frontend that started it asks right away
     // whether to force it closed.
-    if (code != kExitInUse && (g_pause_at_end || std::find(args.begin(), args.end(), "--pause") != args.end())) {
+    if (code != vaultik::kExitInUse && (g_pause_at_end || std::find(args.begin(), args.end(), "--pause") != args.end())) {
         err("\nPress Enter to close this window.");
         std::string line;
         std::getline(std::cin, line);
