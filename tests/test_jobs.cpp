@@ -3004,6 +3004,43 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             CHECK(took >= std::chrono::milliseconds(500));
         }
         {
+            // A file whose mount shows neither in root's mount table nor in the holder's (a FUSE
+            // mount taken away with umount -l, whose program could keep root waiting) is never
+            // looked at, and cannot be told: root's eject fails closed, root's command does not
+            // wait for it. Here a copy of mountinfo without the mount of nobody's settings folder.
+            auto eject = hold("eject-hold");
+            REQUIRE(eject->held());
+            const int probe = ::open(user_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            REQUIRE(probe >= 0);
+            std::string mount_id;
+            {
+                std::ifstream info("/proc/self/fdinfo/" + std::to_string(probe));
+                for (std::string line; std::getline(info, line);)
+                    if (line.rfind("mnt_id:", 0) == 0) mount_id = line.substr(7);
+            }
+            ::close(probe);
+            mount_id.erase(0, mount_id.find_first_not_of(" \t"));
+            REQUIRE_FALSE(mount_id.empty());
+            const fs::path fake = tmp.path / "mountinfo-without";
+            {
+                std::ifstream real("/proc/self/mountinfo");
+                std::ofstream out(fake);
+                for (std::string line; std::getline(real, line);)
+                    if (line.substr(0, line.find(' ')) != mount_id) out << line << "\n";
+            }
+            testing::DriveLockHooks gone = hooks;
+            gone.mountinfo = fake.string();
+            testing::set_drive_lock_hooks(gone);
+            CHECK(drive_claimed(key, root_dir));
+            const auto started = std::chrono::steady_clock::now();
+            {
+                DriveClaim claim(key, root_dir);
+                CHECK(claim.held());
+            }
+            CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+            testing::set_drive_lock_hooks(hooks);
+        }
+        {
             // Root looks into at most so many processes and descriptors of each account in one
             // look (here 2 descriptors): an account over that cannot be told, so root's eject
             // counts it as busy (fail closed) and root's command does not wait for it.

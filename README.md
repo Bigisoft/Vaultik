@@ -631,7 +631,9 @@ made first), and is refused where Linux cannot tell whether those are in use. So
 keep it looking for long, it looks into at most 256 programs and 65536 open files of each account
 (and 3 seconds in all); an account with more counts as in use for an eject as root, and a command
 as root does not wait for it. It does not look at
-such files on a FUSE mount (an sshfs folder, say), whose program could keep it waiting. A run kept from the
+such files on a FUSE mount (an sshfs folder, say), whose program could keep it waiting; one whose
+mount it cannot find at all (a FUSE mount taken away with `umount -l`) it does not look at either,
+and counts as in use. A run kept from the
 shared turn may share the drive's speed with a run as root. Any
 other run gives up after waiting 12 hours, and a run that cannot take its turn at all (the system
 refuses it) goes on rather than not backing up. While a run only waits, the computer may go to

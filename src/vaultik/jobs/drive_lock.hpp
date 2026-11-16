@@ -72,9 +72,14 @@
 // account owns and no other account may open; in one look at most 256 processes and 65536
 // descriptors of each account, and 3 seconds in all, so that no account can keep it looking for
 // long: an account over that (or a look over its time) cannot be told, so root's eject fails
-// closed and root's claim does not wait for it. Root never looks at a runtime folder, or a file, on
-// a FUSE mount (another account's FUSE program, mounted with allow_other, could keep it waiting
-// for as long as it likes), so such a file counts for nothing. The limit: root's runs do not wait
+// closed and root's claim does not wait for it. Root does not look at a runtime folder, or a file, on
+// a FUSE mount that its mount table shows (another account's FUSE program, mounted with
+// allow_other, could keep it waiting for as long as it likes), so such a file counts for nothing;
+// for a file a process has open, its mount is looked up in root's mount table and then in that
+// process's, and one in neither (a mount taken away with umount -l) is not looked at but cannot be
+// told (root's eject fails closed). The details of these files are read as the system has them at
+// hand (AT_STATX_DONT_SYNC), never asking their file system, which covers a file put in place of
+// another between two looks. The limit: root's runs do not wait
 // for an account's own files (a run of that account that waits for root's mark holds them, and
 // would keep root's run waiting in turn), so a run of an account left without the shared file may
 // share the drive's speed with a run of root's. Where /run/lock cannot be used, a file in the given

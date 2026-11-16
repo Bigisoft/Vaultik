@@ -490,13 +490,16 @@ struct LockFile {
     unsigned mount_minor = 0;
 };
 
-// The mounts, from /proc/self/mountinfo ("36 35 98:0 / /mnt rw - ext4 /dev/sda1 rw"), read at
-// most once for one look at the drive's locks however many files it looks at: the device of each,
-// and which are FUSE mounts, whose files root never looks at (a FUSE program of another account,
-// mounted with allow_other, could keep each look waiting for as long as it likes).
+// The mounts, from /proc/self/mountinfo ("36 35 98:0 / /mnt rw - ext4 /dev/sda1 rw"; `file`: the
+// one of another process instead), read at most once for one look at the drive's locks however
+// many files it looks at: the device of each, and which are FUSE mounts, whose files root never
+// looks at (a FUSE program of another account, mounted with allow_other, could keep each look
+// waiting for as long as it likes).
 struct Mounts {
+    std::string file = "/proc/self/mountinfo";
     bool read = false;
     std::map<std::uint64_t, std::pair<unsigned, unsigned>> devices;
+    std::vector<std::uint64_t> ids;
     std::vector<std::uint64_t> fuse_ids;
     std::vector<std::string> fuse_points;
 
@@ -504,7 +507,7 @@ struct Mounts {
         if (read) return;
         read = true;
         const std::string set = hooks().mountinfo;
-        std::ifstream in(set.empty() ? std::string("/proc/self/mountinfo") : set);
+        std::ifstream in(set.empty() ? file : set);
         std::string line;
         while (std::getline(in, line)) {
             std::istringstream words(line);
@@ -514,6 +517,7 @@ struct Mounts {
             unsigned a = 0;
             unsigned b = 0;
             if (!(words >> id >> parent >> dev >> root >> point)) continue;
+            ids.push_back(id);
             if (std::sscanf(dev.c_str(), "%u:%u", &a, &b) == 2) devices[id] = {a, b};
             while (words >> word && word != "-") {
             }
@@ -532,6 +536,12 @@ struct Mounts {
         major_of = it->second.first;
         minor_of = it->second.second;
         return true;
+    }
+
+    // Whether the mount `mount_id` is one of these.
+    bool has(std::uint64_t mount_id) {
+        read_all();
+        return std::find(ids.begin(), ids.end(), mount_id) != ids.end();
     }
 
     // Whether the mount `mount_id` is a FUSE mount.
@@ -582,14 +592,15 @@ bool device_may_differ(int dirfd, const char* path, int flags) {
 }
 
 // The file `path` relative to `dirfd` (fstatat's `flags`), without the device of its mount (see
-// with_mount, asked only for a file that is of use). Where statx is refused (an older kernel, or a
-// seccomp filter, as older Docker versions have), as fstatat gives it. False when it cannot be
-// looked at.
+// with_mount, asked only for a file that is of use). statx takes what the system has at hand
+// (AT_STATX_DONT_SYNC), so that a file of a network or FUSE file system (another account's, say)
+// is never asked for. Where statx is refused (an older kernel, or a seccomp filter, as older Docker
+// versions have), as fstatat gives it. False when it cannot be looked at.
 bool lock_file_at(int dirfd, const char* path, int flags, LockFile& f) {
     f = LockFile{};
     struct statx sx{};
-    const int r =
-        hooks().no_statx ? (errno = EPERM, -1) : ::statx(dirfd, path, flags, STATX_BASIC_STATS | STATX_MNT_ID, &sx);
+    const int r = hooks().no_statx ? (errno = EPERM, -1)
+                                   : ::statx(dirfd, path, flags | AT_STATX_DONT_SYNC, STATX_BASIC_STATS | STATX_MNT_ID, &sx);
     if (r != 0) {
         if (errno != ENOSYS && errno != EPERM) return false;
         struct stat st{};
@@ -610,9 +621,9 @@ bool lock_file_at(int dirfd, const char* path, int flags, LockFile& f) {
 }
 
 // Adds to `f` (of lock_file_at with the same `dirfd`, `path` and `flags`) the device of its mount,
-// where statx and /proc/self/mountinfo tell it (Linux 5.8 and later). Where they cannot, the device
-// stat gives is the one /proc/locks gives, except on file systems where the two may differ (see
-// device_may_differ).
+// where statx and /proc/self/mountinfo (`mounts`) tell it (Linux 5.8 and later). Where they cannot,
+// the device stat gives is the one /proc/locks gives, except on file systems where the two may
+// differ (see device_may_differ; a null `path`: may differ, without asking the file system).
 void with_mount(int dirfd, const char* path, int flags, LockFile& f, Mounts& mounts) {
     const testing::DriveLockHooks set = hooks();
     if (f.has_mount_id && !set.no_mount_device)
@@ -621,7 +632,7 @@ void with_mount(int dirfd, const char* path, int flags, LockFile& f, Mounts& mou
         f.mount_major ^= 0x800;
         f.mount_minor ^= 0x800;
     }
-    if (!f.mount_known && !device_may_differ(dirfd, path, flags)) {
+    if (!f.mount_known && path != nullptr && !device_may_differ(dirfd, path, flags)) {
         f.mount_known = true;
         f.mount_major = major(f.dev);
         f.mount_minor = minor(f.dev);
@@ -703,14 +714,21 @@ struct ScanBudget {
 // open_in_run_user make them): its drive or claims file in its settings folder or runtime folder.
 // Each file is looked at only once its name matches, so a process with many files open costs a
 // readlink for each, within the account's budget (see ScanBudget; `unsure` is set when it runs
-// out); one on a FUSE mount (see Mounts) is not looked at, which /proc/<pid>/fdinfo tells without
-// asking the FUSE program.
+// out). One on a FUSE mount (see Mounts) is not looked at, which /proc/<pid>/fdinfo tells without
+// asking the FUSE program: its mount is looked up in this process's mounts, else in those of the
+// holder (another mount namespace); one in neither (a mount taken away with umount -l, which may
+// still be a FUSE one) is not looked at either, and leaves `unsure` set. A file swapped in after
+// that (dup2) is not asked for its details either (see lock_file_at), and one on another mount
+// than fdinfo said leaves `unsure` set too; the file system of these files is never asked about
+// (see with_mount).
 std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name, Mounts& mounts,
                                        ScanBudget& budget, bool& unsure) {
     std::vector<LockFile> files;
     const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
     DIR* d = ::opendir(dir.c_str());
     if (d == nullptr) return files;
+    Mounts theirs;  // the holder's mounts, read when needed
+    theirs.file.clear();
     while (const dirent* e = ::readdir(d)) {
         if (e->d_name[0] == '.') continue;
         if (!budget.take(account, true)) {
@@ -726,18 +744,35 @@ std::vector<LockFile> private_files_of(long pid, long long account, const std::s
             continue;
         std::ifstream info("/proc/" + std::to_string(pid) + "/fdinfo/" + e->d_name);
         std::string line;
-        bool fuse = false;  // looked at when it cannot be told, so that an eject still counts it
+        bool known = false;
+        std::uint64_t mount_id = 0;
         while (std::getline(info, line))
             if (line.rfind("mnt_id:", 0) == 0) {
-                fuse = mounts.fuse(std::strtoull(line.c_str() + 7, nullptr, 10));
+                known = true;
+                mount_id = std::strtoull(line.c_str() + 7, nullptr, 10);
                 break;
             }
-        if (fuse) continue;
+        Mounts* table = nullptr;
+        if (known && mounts.has(mount_id)) {
+            table = &mounts;
+        } else if (known) {
+            if (theirs.file.empty()) theirs.file = "/proc/" + std::to_string(pid) + "/mountinfo";
+            if (theirs.has(mount_id)) table = &theirs;
+        }
+        if (table == nullptr) {
+            unsure = true;
+            continue;
+        }
+        if (table->fuse(mount_id)) continue;
         LockFile f;
         if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f) || !S_ISREG(f.mode) ||
             static_cast<long long>(f.uid) != account || (f.mode & 077) != 0)
             continue;
-        with_mount(AT_FDCWD, entry.c_str(), 0, f, mounts);
+        if (f.has_mount_id && f.mount_id != mount_id) {
+            unsure = true;
+            continue;
+        }
+        with_mount(AT_FDCWD, nullptr, 0, f, *table);
         files.push_back(f);
     }
     ::closedir(d);
