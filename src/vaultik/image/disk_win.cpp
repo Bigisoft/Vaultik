@@ -1653,7 +1653,10 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
             if (!problem.empty()) throw Error(problem);
         }
         std::string output;
-        const int code = os::run_command({format, vol->name, fs == "ntfs" ? "/FS:NTFS" : "/FS:exFAT", "/Q",
+        // Without the closing backslash, which format.com refuses ("Invalid drive specification").
+        std::string target = vol->name;
+        if (!target.empty() && target.back() == '\\') target.pop_back();
+        const int code = os::run_command({format, target, fs == "ntfs" ? "/FS:NTFS" : "/FS:exFAT", "/Q",
                                           "/V:" + label, "/Y"},
                                          &output);
         if (code != 0) throw Error("format.com failed on " + root.substr(0, 2) + " (exit code " + std::to_string(code) + "): " + trim(output));
