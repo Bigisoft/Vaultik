@@ -621,8 +621,8 @@ on beside another run of yours. Root keeps its own marks in /run/vaultik, where 
 can put files. Keep every copy of Vaultik on a computer (the installed one, a portable copy, an
 AppImage) on the same version: copies of different versions may not see each other's turns and
 may then share a drive for a while.
-Another account can neither make your commands wait nor keep your eject refused; a command or
-eject as root still counts. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
+Another account cannot keep your eject refused, and can make a command of yours wait 2 seconds at
+most; a command or eject as root still counts. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
 all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
 go to sleep. A run started on its own that waited behind a run of the same job does nothing once
 that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a

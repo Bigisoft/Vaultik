@@ -51,9 +51,12 @@
 // is free (root's run may have passed it by). The claims (vaultik-use-<hash>.lock) work the same
 // way with vaultik-use-<hash>.root.lock: an account's claim waits only for an eject of its own or
 // of root's, and its eject counts only the claims of its own and of root's as busy. So another
-// account can delay a run by kOtherAccountWait, never stop it, and can neither delay a command of
-// an account nor keep its eject busy (root's claims and ejects still count every account's, fail
-// closed). Where /run/lock cannot be used, a file in the given folder instead.
+// account can delay a run by kOtherAccountWait, never stop it, can delay a command of an account
+// by 2 seconds at most (a claim waits that long for a claims file a process of root's holds
+// alone, as root's eject does for a moment after its mark; only one whose real and effective
+// accounts are both root's counts), and cannot keep its eject busy (root's claims and ejects still
+// count every account's, fail closed). Where /run/lock cannot be used, a file in the given folder
+// instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a

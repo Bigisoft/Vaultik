@@ -518,20 +518,37 @@ long parent_of(long pid) {
     return ppid;
 }
 
-// The effective account of process `pid`, from /proc/<pid>/status (readable by every account, and
-// true also for a process that made itself not dumpable, which /proc/<pid> itself shows as
-// root's). -1 when it cannot be told.
-long long account_of(long pid) {
+// The accounts of process `pid` (real, effective, saved, file system), from the Uid: line of
+// /proc/<pid>/status (readable by every account, and true also for a process that made itself not
+// dumpable, which /proc/<pid> itself shows as root's). Empty when they cannot be told.
+std::vector<long long> accounts_of(long pid) {
     std::ifstream in("/proc/" + std::to_string(pid) + "/status");
     std::string line;
     while (std::getline(in, line)) {
         if (line.rfind("Uid:", 0) != 0) continue;
-        std::istringstream ids(line.substr(4));
-        long long real = -1, effective = -1;
-        if (ids >> real >> effective) return effective;
-        return -1;
+        std::istringstream words(line.substr(4));
+        std::vector<long long> ids;
+        long long id = -1;
+        while (words >> id) ids.push_back(id);
+        if (ids.size() != 4 || !words.eof()) return {};
+        return ids;
     }
-    return -1;
+    return {};
+}
+
+// The effective account of process `pid`; -1 when it cannot be told.
+long long account_of(long pid) {
+    const std::vector<long long> ids = accounts_of(pid);
+    return ids.empty() ? -1 : ids[1];
+}
+
+// Whether process `pid` is root's through and through: its real account too, not only the
+// effective one, which a setuid-root program started by another account has as well (passwd or su
+// waiting at their prompt, with a descriptor of that account's kept open).
+bool root_process(long pid) {
+    const std::vector<long long> ids = accounts_of(pid);
+    const auto root = static_cast<long long>(hooks().root_uid);
+    return !ids.empty() && std::all_of(ids.begin(), ids.end(), [&](long long id) { return id == root; });
 }
 
 // The runtime folder of account `uid` (see run_user_dir) as far as this process can tell: empty
@@ -647,14 +664,14 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
     return unknown ? Holder::unknown : Holder::other;
 }
 
-// Whether a process of root's holds the file of `fd` alone (as root's eject holds the claims
-// file); only root can make that so.
+// Whether a process of root's (see root_process) holds the file of `fd` alone (as root's eject
+// holds the claims file); only root can make that so.
 bool root_holds_alone(int fd) {
     struct stat st{};
     if (::fstat(fd, &st) != 0) return false;
     const FileId id(st.st_dev, st.st_ino);
     for (const HeldFlock& f : held_flocks())
-        if (is_file(f, id) && f.write && account_of(f.pid) == static_cast<long long>(hooks().root_uid)) return true;
+        if (is_file(f, id) && f.write && root_process(f.pid)) return true;
     return false;
 }
 

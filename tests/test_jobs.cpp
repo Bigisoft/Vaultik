@@ -1252,7 +1252,8 @@ void init_test_repo(const fs::path& dir) {
 // the settings folder VAULTIK_TEST_HOLD_DIR, says "HOLD:held" or "HOLD:free" on its output (after
 // "HOLD:inherited" for a lock it inherited, "HOLD:busy" for one that threw DriveBusy), and keeps what it holds
 // until the file VAULTIK_TEST_HOLD_UNTIL is there. POSIX: VAULTIK_TEST_HOLD_UID makes a helper
-// started as root go on as that account first; VAULTIK_TEST_HOLD_FOREIGN=1 sets the hooks of
+// started as root go on as that account first, VAULTIK_TEST_HOLD_REAL_UID makes it go on with that
+// account as its real one only (root's as its effective one); VAULTIK_TEST_HOLD_FOREIGN=1 sets the hooks of
 // ForeignFiles below, VAULTIK_TEST_HOLD_ROOT_DIR the folder of root's marks and
 // VAULTIK_TEST_HOLD_RUN_USER the account's own runtime folder, VAULTIK_TEST_HOLD_PROC_LOCKS the
 // file read instead of /proc/locks and VAULTIK_TEST_HOLD_OTHER_DEVICE=1 another device on its lines
@@ -1267,6 +1268,10 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
         REQUIRE(::setgroups(0, nullptr) == 0);
         REQUIRE(::setgid(static_cast<gid_t>(id)) == 0);
         REQUIRE(::setuid(id) == 0);
+    }
+    if (const std::string uid = os::get_env("VAULTIK_TEST_HOLD_REAL_UID"); !uid.empty() && ::geteuid() == 0) {
+        // Root only as its effective account, as a setuid-root program another account started.
+        REQUIRE(::setresuid(static_cast<uid_t>(std::stoul(uid)), static_cast<uid_t>(-1), static_cast<uid_t>(-1)) == 0);
     }
     testing::DriveLockHooks hooks;
     if (os::get_env("VAULTIK_TEST_HOLD_FOREIGN") == "1")
@@ -2433,8 +2438,21 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
             CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1800));
         }
         ::close(fd);
-        OtherProcess squatter("flock-ex", {}, {}, tmp.path, "65533", {{"VAULTIK_TEST_HOLD_FILES", use.string()}});
-        REQUIRE(squatter.held());
+        {
+            OtherProcess squatter("flock-ex", {}, {}, tmp.path, "65533", {{"VAULTIK_TEST_HOLD_FILES", use.string()}});
+            REQUIRE(squatter.held());
+            started = std::chrono::steady_clock::now();
+            {
+                OtherProcess claim("claim", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
+                CHECK(claim.held());
+                CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1500));
+            }
+        }
+        // By a setuid-root program of another account (root only as its effective account,
+        // waiting at its prompt with the descriptor kept): not root's, not waited for either.
+        OtherProcess setuid("flock-ex", {}, {}, tmp.path, {},
+                            {{"VAULTIK_TEST_HOLD_FILES", use.string()}, {"VAULTIK_TEST_HOLD_REAL_UID", "65533"}});
+        REQUIRE(setuid.held());
         started = std::chrono::steady_clock::now();
         {
             OtherProcess claim("claim", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
