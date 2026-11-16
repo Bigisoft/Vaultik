@@ -672,19 +672,51 @@ bool open_files_of(long pid, std::vector<LockFile>& files) {
     return true;
 }
 
+// What one look into other accounts' processes (root only; see private_files_of) may cost, so that
+// an account cannot keep root's claims and ejects waiting with many processes or many descriptors:
+// at most kScanProcesses processes and kScanDescriptors descriptors per account, each account
+// apart (one over its budget hides no other account's processes), and kScanTime in all. An
+// account over its budget, or a look over its time, is one that cannot be told (unsure).
+constexpr std::size_t kScanProcesses = 256;
+constexpr std::size_t kScanDescriptors = 65536;
+constexpr std::chrono::seconds kScanTime{3};
+
+struct ScanBudget {
+    std::map<long long, std::pair<std::size_t, std::size_t>> used;  // per account: processes, descriptors
+    std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + kScanTime;
+
+    bool in_time() const { return std::chrono::steady_clock::now() < until; }
+
+    // Whether one more process (`descriptor` false) or descriptor of `account` may be looked into.
+    bool take(long long account, bool descriptor) {
+        const testing::DriveLockHooks set = hooks();
+        const std::size_t processes = set.scan_processes > 0 ? set.scan_processes : kScanProcesses;
+        const std::size_t descriptors = set.scan_descriptors > 0 ? set.scan_descriptors : kScanDescriptors;
+        std::pair<std::size_t, std::size_t>& u = used[account];
+        if (!in_time()) return false;
+        return descriptor ? ++u.second <= descriptors : ++u.first <= processes;
+    }
+};
+
 // The files named `name` that process `pid` (of account `account`) has open (root only; see
 // open_files_of) that the account owns and no other account may open (as open_in_dir and
 // open_in_run_user make them): its drive or claims file in its settings folder or runtime folder.
 // Each file is looked at only once its name matches, so a process with many files open costs a
-// readlink for each; one on a FUSE mount (see Mounts) is not looked at, which /proc/<pid>/fdinfo tells
-// without asking the FUSE program.
-std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name, Mounts& mounts) {
+// readlink for each, within the account's budget (see ScanBudget; `unsure` is set when it runs
+// out); one on a FUSE mount (see Mounts) is not looked at, which /proc/<pid>/fdinfo tells without
+// asking the FUSE program.
+std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name, Mounts& mounts,
+                                       ScanBudget& budget, bool& unsure) {
     std::vector<LockFile> files;
     const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
     DIR* d = ::opendir(dir.c_str());
     if (d == nullptr) return files;
     while (const dirent* e = ::readdir(d)) {
         if (e->d_name[0] == '.') continue;
+        if (!budget.take(account, true)) {
+            unsure = true;
+            break;
+        }
         const std::string entry = dir + "/" + e->d_name;
         char target[4096];
         const ssize_t n = ::readlink(entry.c_str(), target, sizeof target - 1);
@@ -893,8 +925,9 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
 // account without its runtime folder (started by cron, without a login) holds only the file in its
 // settings folder, which root cannot find by name: so every process that /proc/locks shows holding
 // a flock is looked into as well (/proc/<pid>/fd), and one holding a file `name` there that its
-// account owns and no other account may open (see private_files_of) counts as busy too. Never this
-// process, whose own locks and claims are counted apart.
+// account owns and no other account may open (see private_files_of) counts as busy too, within
+// each account's budget (see ScanBudget; an account over it is unsure). Never this process, whose
+// own locks and claims are counted apart.
 enum class Use { free, busy, unsure };
 
 Use accounts_hold(const std::string& name, bool write_only) {
@@ -916,9 +949,16 @@ Use accounts_hold(const std::string& name, bool write_only) {
     }
     std::sort(pids.begin(), pids.end());
     pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
+    ScanBudget budget;
     for (const long pid : pids) {
+        const long long account = account_of(pid);
+        if (!budget.take(account, false)) {
+            unsure = true;
+            if (!budget.in_time()) break;
+            continue;
+        }
         bool maybe = false;
-        for (const LockFile& f : private_files_of(pid, account_of(pid), name, mounts))
+        for (const LockFile& f : private_files_of(pid, account, name, mounts, budget, maybe))
             if (holds(pid, f, held, write_only, maybe)) return Use::busy;
         if (maybe) unsure = true;
     }
@@ -1021,7 +1061,8 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
         for (const LockFile& own : own_files_of(account, name, mounts))
             if (holds(pid, own, held, false, unsure)) return true;
         if (::geteuid() == 0) {
-            for (const LockFile& f : private_files_of(pid, account, name, mounts))
+            ScanBudget budget;
+            for (const LockFile& f : private_files_of(pid, account, name, mounts, budget, unsure))
                 if (!(shared && f.dev == target.dev && f.ino == target.ino) && holds(pid, f, held, false, unsure))
                     return true;
         }

@@ -69,7 +69,10 @@
 // account's file in /run/lock first, so that a run of it without its runtime folder holds only the
 // file in its settings folder, root also looks into each process that /proc/locks shows holding a
 // flock, and counts one that holds a file of the drive's name there (/proc/<pid>/fd) that its
-// account owns and no other account may open. Root never looks at a runtime folder, or a file, on
+// account owns and no other account may open; in one look at most 256 processes and 65536
+// descriptors of each account, and 3 seconds in all, so that no account can keep it looking for
+// long: an account over that (or a look over its time) cannot be told, so root's eject fails
+// closed and root's claim does not wait for it. Root never looks at a runtime folder, or a file, on
 // a FUSE mount (another account's FUSE program, mounted with allow_other, could keep it waiting
 // for as long as it likes), so such a file counts for nothing. The limit: root's runs do not wait
 // for an account's own files (a run of that account that waits for root's mark holds them, and
@@ -82,6 +85,7 @@
 // lock, because a backup that does not run is worse than two that share a drive.
 
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
@@ -278,7 +282,9 @@ namespace testing {
 // of a file's mount cannot be told (as without statx's mount ID, before Linux 5.8); `btrfs`: every
 // file is on a file system where stat and /proc/locks may give different devices (btrfs, overlayfs);
 // `no_statx`: statx is refused (EPERM, as by older Docker seccomp filters); `mountinfo`: instead
-// of /proc/self/mountinfo when not empty.
+// of /proc/self/mountinfo when not empty; `scan_processes` and `scan_descriptors`: when not 0,
+// how many processes and descriptors of each account root looks into at most in one look (see
+// the eject's limits above).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -292,6 +298,8 @@ struct DriveLockHooks {
     bool btrfs = false;
     bool no_statx = false;
     std::string mountinfo;
+    std::size_t scan_processes = 0;
+    std::size_t scan_descriptors = 0;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

@@ -627,7 +627,10 @@ also counts the runs and commands of every account that another account kept fro
 accounts share (by holding or making its file in /run/lock first), through their own files in
 /run/lock and /run/user, and through the turn file in the settings folder that a program holding a
 turn has open (so also a run without a /run/user folder whose file in /run/lock another account
-made first), and is refused where Linux cannot tell whether those are in use. It does not look at
+made first), and is refused where Linux cannot tell whether those are in use. So that no account can
+keep it looking for long, it looks into at most 256 programs and 65536 open files of each account
+(and 3 seconds in all); an account with more counts as in use for an eject as root, and a command
+as root does not wait for it. It does not look at
 such files on a FUSE mount (an sshfs folder, say), whose program could keep it waiting. A run kept from the
 shared turn may share the drive's speed with a run as root. Any
 other run gives up after waiting 12 hours, and a run that cannot take its turn at all (the system

@@ -3003,6 +3003,47 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             CHECK(claim.held());
             CHECK(took >= std::chrono::milliseconds(500));
         }
+        {
+            // Root looks into at most so many processes and descriptors of each account in one
+            // look (here 2 descriptors): an account over that cannot be told, so root's eject
+            // counts it as busy (fail closed) and root's command does not wait for it.
+            auto eject = hold("eject-hold");
+            REQUIRE(eject->held());
+            testing::DriveLockHooks small = hooks;
+            small.scan_descriptors = 2;
+            testing::set_drive_lock_hooks(small);
+            CHECK(drive_claimed(key, root_dir));
+            const auto started = std::chrono::steady_clock::now();
+            {
+                DriveClaim claim(key, root_dir);
+                CHECK(claim.held());
+            }
+            CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(500));
+            // Another account over its budget (here 1 process, with two holding a flock) hides
+            // nobody's eject from nobody's own budget: root's command still waits for it.
+            small.scan_descriptors = 0;
+            small.scan_processes = 1;
+            testing::set_drive_lock_hooks(small);
+            OtherProcess b1("flock-ex", {}, {}, tmp.path, "65533", hold_files((tmp.path / "b1").string()));
+            OtherProcess b2("flock-ex", {}, {}, tmp.path, "65533", hold_files((tmp.path / "b2").string()));
+            REQUIRE(b1.held());
+            REQUIRE(b2.held());
+            std::thread later([&] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(700));
+                eject->release();
+            });
+            const auto waited = std::chrono::steady_clock::now();
+            {
+                DriveClaim claim(key, root_dir);
+                CHECK(claim.held());
+            }
+            const auto took = std::chrono::steady_clock::now() - waited;
+            later.join();
+            CHECK(took >= std::chrono::milliseconds(500));
+            // That account alone, over its budget: root's eject cannot tell, and fails closed.
+            CHECK(drive_claimed(key, root_dir));
+            testing::set_drive_lock_hooks(hooks);
+        }
         testing::set_drive_lock_hooks({});
     }
 }
