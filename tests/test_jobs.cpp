@@ -2368,6 +2368,10 @@ TEST_CASE("drive lock: the account's own runtime folder keeps its runs taking tu
         fs::remove(f, ec);
 }
 
+// The tests "(Linux, as root)" below need root. One that cannot run (no root, /run/lock not
+// writable, mounts refused) must say so with a MESSAGE that starts with "root test not run": the CI
+// step that runs them as root fails on that text, so that it never passes with nothing tested. A
+// single check that cannot be made where it runs says so with a plain MESSAGE instead.
 TEST_CASE("drive lock: root and another account share the drive's turn (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("root test not run: needs root (runs as root and as nobody)");
@@ -2953,7 +2957,10 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             }
             moved.mountinfo = fake.string();
             testing::set_drive_lock_hooks(moved);
-            CHECK(eject_busy());
+            // Only where statx gives mount IDs: without them, the device of the file's mount is
+            // the one stat gives (tmpfs), which the line's device is not.
+            if (statx_mount_ids()) CHECK(eject_busy());
+            else MESSAGE("not checked: statx gives no mount IDs here");
             // Nor is a file on such a mount tried with a flock (see the pid namespace above): with
             // no line of /proc/locks about it at all, root's eject cannot tell whether a holder in
             // another pid namespace has it, and fails closed. Where statx gives no mount IDs, the
@@ -3018,7 +3025,13 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             // Any account can make many names of the drive's in /run/lock: one counts only for the
             // account that owns its file, so a name made by another account for each of many
             // accounts adds nothing, and nobody's own file is still found among them.
-            std::vector<fs::path> padding;
+            // Removed again however the checks below end (a REQUIRE that fails returns at once).
+            struct Padding : std::vector<fs::path> {
+                ~Padding() {
+                    std::error_code ec;
+                    for (const fs::path& p : *this) fs::remove(p, ec);
+                }
+            } padding;
             for (int i = 0; i < 2000; ++i) {
                 padding.push_back(fs::path("/run/lock") /
                                   ("vaultik-drive-" + name + "." + std::to_string(100000 + i) + ".lock"));
@@ -3030,7 +3043,6 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             CHECK(eject_busy());
             CHECK(padded_run.release() == 0);
             CHECK_FALSE(eject_busy());
-            for (const fs::path& p : padding) fs::remove(p);
         }
         // Where /proc/locks cannot be read, root's eject cannot tell whether nobody's files are
         // held, and counts them as busy (fail closed).
@@ -3058,11 +3070,11 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         // An eject of nobody's under way without the shared file: a command of root's waits for it.
         OtherProcess eject("eject-hold", key, user_dir, tmp.path, "65534");
         REQUIRE(eject.held());
+        const auto started = std::chrono::steady_clock::now();
         std::thread later([&] {
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
             eject.release();
         });
-        const auto started = std::chrono::steady_clock::now();
         DriveClaim claim(key, root_dir);
         const auto took = std::chrono::steady_clock::now() - started;
         later.join();
@@ -3203,11 +3215,11 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             // An eject of nobody's under way on those files alone: a command of root's waits for it.
             auto eject = hold("eject-hold");
             REQUIRE(eject->held());
+            const auto started = std::chrono::steady_clock::now();
             std::thread later([&] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(700));
                 eject->release();
             });
-            const auto started = std::chrono::steady_clock::now();
             DriveClaim claim(key, root_dir);
             const auto took = std::chrono::steady_clock::now() - started;
             later.join();
@@ -3277,11 +3289,11 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             OtherProcess b2("flock-ex", {}, {}, tmp.path, "65533", hold_files((tmp.path / "b2").string()));
             REQUIRE(b1.held());
             REQUIRE(b2.held());
+            const auto waited = std::chrono::steady_clock::now();
             std::thread later([&] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(700));
                 eject->release();
             });
-            const auto waited = std::chrono::steady_clock::now();
             {
                 DriveClaim claim(key, root_dir);
                 CHECK(claim.held());
@@ -3318,11 +3330,11 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
                 btrfs.scan_descriptors = 2 * descriptors(holder->pid());
                 testing::set_drive_lock_hooks(btrfs);
                 CHECK(drive_claimed(key, root_dir));
+                const auto started = std::chrono::steady_clock::now();
                 std::thread later([&] {
                     std::this_thread::sleep_for(std::chrono::milliseconds(700));
                     holder->release();
                 });
-                const auto started = std::chrono::steady_clock::now();
                 {
                     DriveClaim claim(key, root_dir);
                     CHECK(claim.held());
@@ -3609,11 +3621,11 @@ TEST_CASE("drive lock: another account can delay an account's runs a short while
         REQUIRE(root_run.held());
         CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(1500)), DriveBusy);
         CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+        const auto started = std::chrono::steady_clock::now();
         std::thread later([&] {
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
             root_run.release();
         });
-        const auto started = std::chrono::steady_clock::now();
         DriveLock run(key, mine, std::chrono::milliseconds(20000));
         const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
@@ -4154,11 +4166,11 @@ TEST_CASE("drive lock: an account that cannot use the shared files still sees ro
         REQUIRE(root_run.held());
         CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(1500)), DriveBusy);
         CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+        const auto started = std::chrono::steady_clock::now();
         std::thread later([&] {
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
             root_run.release();
         });
-        const auto started = std::chrono::steady_clock::now();
         DriveLock run(key, mine, std::chrono::milliseconds(20000));
         const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
@@ -4187,11 +4199,11 @@ TEST_CASE("drive lock: an account that cannot use the shared files still sees ro
         OtherProcess root_eject("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.use_mark()));
         REQUIRE(root_eject.held());
         CHECK(drive_claimed(key, mine));
+        const auto started = std::chrono::steady_clock::now();
         std::thread later([&] {
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
             root_eject.release();
         });
-        const auto started = std::chrono::steady_clock::now();
         DriveClaim claim(key, mine);
         const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
@@ -4247,11 +4259,11 @@ TEST_CASE("drive claims: another account can neither delay a command nor keep an
         OtherProcess root_eject("flock-ex", {}, {}, tmp.path, {}, env);
         REQUIRE(root_eject.held());
         CHECK(drive_claimed(key, mine));
+        const auto started = std::chrono::steady_clock::now();
         std::thread later([&] {
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
             root_eject.release();
         });
-        const auto started = std::chrono::steady_clock::now();
         DriveClaim claim(key, mine);
         const auto took = std::chrono::steady_clock::now() - started;  // before the join, which waits too
         later.join();
