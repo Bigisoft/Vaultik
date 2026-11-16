@@ -737,27 +737,11 @@ bool is_file(const HeldFlock& f, const LockFile& file) {
     return match(f, file) == Match::exact;
 }
 
-// The files process `pid` has open, from /proc/<pid>/fd (readable for the processes of this
-// account, and for root), without the devices of their mounts. False when they cannot be read.
-bool open_files_of(long pid, std::vector<LockFile>& files) {
-    const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
-    DIR* d = ::opendir(dir.c_str());
-    if (d == nullptr) return false;
-    while (const dirent* e = ::readdir(d)) {
-        const std::string entry = dir + "/" + e->d_name;
-        if (e->d_name[0] == '.') continue;
-        LockFile f;
-        if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f)) continue;  // the file itself, not the link
-        files.push_back(f);
-    }
-    ::closedir(d);
-    return true;
-}
-
 // What one look into other accounts' processes (root only; see private_files_of) may cost, so that
 // an account cannot keep root's claims and ejects waiting with many processes or many descriptors:
 // at most kScanProcesses processes and kScanDescriptors descriptors per account, each account
-// apart (one over its budget hides no other account's processes), and kScanTime in all. An
+// apart (one over its budget hides no other account's processes), and kScanTime in all; every
+// descriptor read counts, also when a process's open files are read again (see holds). An
 // account over its budget, or a look over its time, is one that cannot be told (unsure).
 constexpr std::size_t kScanProcesses = 256;
 constexpr std::size_t kScanDescriptors = 65536;
@@ -778,6 +762,28 @@ struct ScanBudget {
         return descriptor ? ++u.second <= descriptors : ++u.first <= processes;
     }
 };
+
+// The files process `pid` (of account `account`) has open, from /proc/<pid>/fd (readable for the
+// processes of this account, and for root), without the devices of their mounts, each descriptor
+// within the account's budget (see ScanBudget). False when they cannot be read, or not within it.
+bool open_files_of(long pid, long long account, ScanBudget& budget, std::vector<LockFile>& files) {
+    const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
+    DIR* d = ::opendir(dir.c_str());
+    if (d == nullptr) return false;
+    while (const dirent* e = ::readdir(d)) {
+        const std::string entry = dir + "/" + e->d_name;
+        if (e->d_name[0] == '.') continue;
+        if (!budget.take(account, true)) {
+            ::closedir(d);
+            return false;
+        }
+        LockFile f;
+        if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f)) continue;  // the file itself, not the link
+        files.push_back(f);
+    }
+    ::closedir(d);
+    return true;
+}
 
 // The files named `name` that process `pid` (of account `account`) has open (root only; see
 // open_files_of) that the account owns and no other account may open (as open_in_dir and
@@ -849,12 +855,14 @@ std::vector<LockFile> private_files_of(long pid, long long account, const std::s
     return files;
 }
 
-// Whether process `pid` holds a flock (`write_only`: holds it alone) on `file`, as /proc/locks
-// (`held`) names it: on the device and inode stat gives, or, where /proc/locks gives the file
-// system's device (btrfs), on that one when the process has this very file open (the inode alone
-// may be another subvolume's file). `unsure` is set where it may but that cannot be told (the
-// device of the file's mount cannot be told, or the open files of `pid` cannot be read).
-bool holds(long pid, const LockFile& file, const std::vector<HeldFlock>& held, bool write_only, bool& unsure) {
+// Whether process `pid` (of account `account`) holds a flock (`write_only`: holds it alone) on
+// `file`, as /proc/locks (`held`) names it: on the device and inode stat gives, or, where
+// /proc/locks gives the file system's device (btrfs), on that one when the process has this very
+// file open (the inode alone may be another subvolume's file; read within `budget`). `unsure` is
+// set where it may but that cannot be told (the device of the file's mount cannot be told, or the
+// open files of `pid` cannot be read, or not within the budget).
+bool holds(long pid, long long account, const LockFile& file, const std::vector<HeldFlock>& held, bool write_only,
+           ScanBudget& budget, bool& unsure) {
     bool on_mount = false;
     for (const HeldFlock& f : held) {
         if (f.pid != pid || (write_only && !f.write)) continue;
@@ -865,7 +873,7 @@ bool holds(long pid, const LockFile& file, const std::vector<HeldFlock>& held, b
     }
     if (!on_mount) return false;
     std::vector<LockFile> open;
-    if (!open_files_of(pid, open)) {
+    if (!open_files_of(pid, account, budget, open)) {
         unsure = true;
         return false;
     }
@@ -1064,8 +1072,13 @@ Use accounts_hold(const std::string& name, bool write_only) {
             continue;
         }
         bool maybe = false;
-        for (const LockFile& f : private_files_of(pid, account, name, mounts, budget, maybe))
-            if (holds(pid, f, held, write_only, maybe)) return Use::busy;
+        for (const LockFile& f : private_files_of(pid, account, name, mounts, budget, maybe)) {
+            if (!budget.in_time()) {
+                maybe = true;
+                break;
+            }
+            if (holds(pid, account, f, held, write_only, budget, maybe)) return Use::busy;
+        }
         if (maybe) unsure = true;
     }
     return unsure ? Use::unsure : Use::free;
@@ -1161,15 +1174,16 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
     // also holds the shared file (another account may hold that one).
     const auto holds_drive = [&](long pid) {
         bool unsure = false;
-        for (const LockFile& t : trusted)
-            if (holds(pid, t, held, false, unsure)) return true;
+        ScanBudget budget;
         const long long account = account_of(pid);
+        for (const LockFile& t : trusted)
+            if (holds(pid, account, t, held, false, budget, unsure)) return true;
         for (const LockFile& own : own_files_of(account, name, mounts))
-            if (holds(pid, own, held, false, unsure)) return true;
+            if (holds(pid, account, own, held, false, budget, unsure)) return true;
         if (::geteuid() == 0) {
-            ScanBudget budget;
             for (const LockFile& f : private_files_of(pid, account, name, mounts, budget, unsure))
-                if (!(shared && f.dev == target.dev && f.ino == target.ino) && holds(pid, f, held, false, unsure))
+                if (!(shared && f.dev == target.dev && f.ino == target.ino) &&
+                    holds(pid, account, f, held, false, budget, unsure))
                     return true;
         }
         if (unsure) unknown = true;

@@ -3164,6 +3164,60 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             CHECK(drive_claimed(key, root_dir));
             testing::set_drive_lock_hooks(hooks);
         }
+        {
+            // Where /proc/locks gives the file system's device (btrfs), root reads the open files of
+            // the holder once more to tell its file from another subvolume's with the same inode,
+            // within the same budget: with as many descriptors as the holder has, root finds the
+            // file but cannot read them again, so it cannot tell (root's eject fails closed, root's
+            // command does not wait); with twice as many it can.
+            const fs::path file = fs::path(user_dir) / ("vaultik-use-" + name + ".lock");
+            make_as(file, 65534);
+            const auto descriptors = [](long pid) {
+                std::size_t n = 0;
+                for (const auto& e : fs::directory_iterator("/proc/" + std::to_string(pid) + "/fd")) {
+                    (void)e;
+                    ++n;
+                }
+                return n;
+            };
+            testing::DriveLockHooks btrfs = hooks;
+            btrfs.locks_other_device = true;
+            {
+                auto holder = std::make_unique<OtherProcess>("flock-ex", std::string(), std::string(), tmp.path,
+                                                             "65534", hold_files(file.string()));
+                REQUIRE(holder->held());
+                btrfs.scan_descriptors = 2 * descriptors(holder->pid());
+                testing::set_drive_lock_hooks(btrfs);
+                CHECK(drive_claimed(key, root_dir));
+                std::thread later([&] {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+                    holder->release();
+                });
+                const auto started = std::chrono::steady_clock::now();
+                {
+                    DriveClaim claim(key, root_dir);
+                    CHECK(claim.held());
+                }
+                const auto took = std::chrono::steady_clock::now() - started;
+                later.join();
+                CHECK(took >= std::chrono::milliseconds(500));
+            }
+            {
+                OtherProcess holder("flock-ex", {}, {}, tmp.path, "65534", hold_files(file.string()));
+                REQUIRE(holder.held());
+                btrfs.scan_descriptors = descriptors(holder.pid());
+                testing::set_drive_lock_hooks(btrfs);
+                CHECK(drive_claimed(key, root_dir));
+                const auto started = std::chrono::steady_clock::now();
+                {
+                    DriveClaim claim(key, root_dir);
+                    CHECK(claim.held());
+                }
+                // A wait would last until the holder lets go (kEjectWait at most, 60 s).
+                CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(10));
+            }
+            testing::set_drive_lock_hooks(hooks);
+        }
         testing::set_drive_lock_hooks({});
     }
 }
