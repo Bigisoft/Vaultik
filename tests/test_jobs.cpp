@@ -3471,18 +3471,21 @@ TEST_CASE("eject: a hard link another account adds to a held lock file never let
         // Root's run and command hold root's marks in root's own folder, which no other account can
         // add a name to; but another account may add a hard link to a mark elsewhere on the same
         // file system (here in a folder every account may write to): nobody's eject still counts
-        // them as busy.
+        // them as busy. Root's run and command are processes of their own, no process nobody's
+        // eject descends from: so the eject sees them through root's marks (as busy for an eject),
+        // not as a parent run that holds the drive.
         const fs::path marks = tmp.path / "marks";
         testing::DriveLockHooks with_marks = hooks;
         with_marks.root_dir = marks.string();
         testing::set_drive_lock_hooks(with_marks);
         std::vector<std::pair<std::string, std::string>> env = no_run_user;
         env.push_back({"VAULTIK_TEST_HOLD_ROOT_DIR", marks.string()});
+        const std::vector<std::pair<std::string, std::string>> root_env = {{"VAULTIK_TEST_HOLD_ROOT_DIR", marks.string()}};
         const fs::path elsewhere = tmp.path / "anyone";
         fs::create_directories(elsewhere);
         fs::permissions(elsewhere, fs::perms::all);
         {
-            DriveLock run(key, root_dir, std::chrono::milliseconds(0));
+            OtherProcess run("lock", key, root_dir, tmp.path, {}, root_env);
             REQUIRE(run.held());
             const fs::path mark = marks / ("vaultik-drive-" + name + ".root.lock");
             REQUIRE(fs::exists(mark));
@@ -3495,7 +3498,7 @@ TEST_CASE("eject: a hard link another account adds to a held lock file never let
             CHECK(eject.busy());
         }
         {
-            DriveClaim claim(key, root_dir);
+            OtherProcess claim("claim", key, root_dir, tmp.path, {}, root_env);
             REQUIRE(claim.held());
             const fs::path mark = marks / ("vaultik-use-" + name + ".root.lock");
             REQUIRE(fs::exists(mark));
