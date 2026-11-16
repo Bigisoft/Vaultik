@@ -523,6 +523,7 @@ struct LockFile {
     bool mount_known = false;  // the device of its mount could be told (see with_mount)
     unsigned mount_major = 0;
     unsigned mount_minor = 0;
+    std::string path;  // where it was found by its name (see lock_file_named); empty otherwise
 };
 
 // The mounts, from /proc/self/mountinfo ("36 35 98:0 / /mnt rw - ext4 /dev/sda1 rw"; `file`: the
@@ -689,7 +690,31 @@ bool lock_file_named(const std::string& path, LockFile& f, Mounts& mounts) {
         lock_file_at(fd, "", AT_EMPTY_PATH, f) && S_ISREG(f.mode) && !(f.has_mount_id && mounts.fuse(f.mount_id));
     if (ok) with_mount(fd, f, mounts);
     ::close(fd);
+    f.path = path;
     return ok;
+}
+
+// Root's eject: whether a process holds `file` (found by its name, see lock_file_named), told by
+// trying a flock on it that never waits and is let go of at once. This sees a holder in any pid
+// namespace (another container that shares the folder), which /proc/locks leaves out. The file is
+// opened only when it is still the same regular file, on a mount in root's mount table that is no
+// FUSE mount (whose program could keep the open waiting), never made, and never through a link.
+// False when it is free or cannot be tried so.
+bool flock_busy(const LockFile& file, Mounts& mounts) {
+    const int at = ::open(file.path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (at < 0) return false;
+    LockFile now;
+    int fd = -1;
+    if (lock_file_at(at, "", AT_EMPTY_PATH, now) && S_ISREG(now.mode) && now.dev == file.dev && now.ino == file.ino &&
+        now.has_mount_id && mounts.has(now.mount_id) && !mounts.fuse(now.mount_id))
+        fd = ::open(("/proc/self/fd/" + std::to_string(at)).c_str(), O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    ::close(at);
+    if (fd < 0) return false;
+    bool busy = false;
+    if (::flock(fd, LOCK_EX | LOCK_NB) == 0) ::flock(fd, LOCK_UN);
+    else busy = errno == EWOULDBLOCK;
+    ::close(fd);
+    return busy;
 }
 
 // How a line of /proc/locks is about a file.
@@ -993,21 +1018,26 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
 // only; see accounts_own_files), which it may do without the file all accounts share (another
 // account held that one when it started, or made it first): busy when /proc/locks shows one held
 // (`write_only`: held alone, as by a run or an eject), unsure when that cannot be told
-// (/proc/locks cannot be read, or the device of a file's mount cannot).
+// (/proc/locks cannot be read, or the device of a file's mount cannot). /proc/locks leaves out a
+// flock whose holder is in another pid namespace (another container that shares /run/lock), so
+// for an eject (not `write_only`) each of these files is also tried itself (see flock_busy).
 //
 // Another account may also make an account's file in /run/lock first, so that a run of that
 // account without its runtime folder (started by cron, without a login) holds only the file in its
 // settings folder, which root cannot find by name: so every process that /proc/locks shows holding
 // a flock is looked into as well (/proc/<pid>/fd), and one holding a file `name` there that its
 // account owns and no other account may open (see private_files_of) counts as busy too, within
-// each account's budget (see ScanBudget; an account over it is unsure). A flock whose holder is in
-// another pid namespace (pid 0 in /proc/locks) cannot be looked into, and is unsure too. Never this
-// process, whose own locks and claims are counted apart.
+// each account's budget (see ScanBudget; an account over it is unsure). A line without a process
+// (pid 0, which mainline Linux never shows: it leaves such a holder out) cannot be looked into,
+// and is unsure too. Never this process, whose own locks and claims are counted apart.
 enum class Use { free, busy, unsure };
 
 Use accounts_hold(const std::string& name, bool write_only) {
     Mounts mounts;
     const std::vector<LockFile> files = accounts_own_files(name, mounts);
+    if (!write_only)
+        for (const LockFile& file : files)
+            if (flock_busy(file, mounts)) return Use::busy;
     bool readable = false;
     const std::vector<HeldFlock> held = held_flocks(&readable);
     if (!readable) return files.empty() ? Use::free : Use::unsure;
@@ -1020,7 +1050,7 @@ Use accounts_hold(const std::string& name, bool write_only) {
             if (m == Match::exact || m == Match::mount) return Use::busy;
             if (m == Match::maybe) unsure = true;
         }
-        if (f.pid <= 0) unsure = true;  // a holder in another pid namespace, which cannot be looked into
+        if (f.pid <= 0) unsure = true;  // a holder without a process to look into
         else if (f.pid != static_cast<long>(::getpid())) pids.push_back(f.pid);
     }
     std::sort(pids.begin(), pids.end());
@@ -1124,7 +1154,7 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
             continue;
         }
         if (std::any_of(trusted.begin(), trusted.end(), [&](const LockFile& t) { return match(f, t) != Match::no; }))
-            unknown = true;  // in another pid namespace
+            unknown = true;  // a line without a process to look into
     }
     // Whether process `pid` holds one of the trusted files or one of its account's own files, or
     // (root) a file of that name it has open that only its account may open, whether or not it

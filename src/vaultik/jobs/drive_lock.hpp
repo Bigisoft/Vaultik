@@ -71,8 +71,12 @@
 // name there (/proc/<pid>/fd) that its account owns and no other account may open; in one look at
 // most 256 processes and 65536 descriptors of each account, and 3 seconds in all, so that no
 // account can keep it looking for long: an account over that (or a look over its time) cannot be
-// told, nor can a flock held in another pid namespace (which /proc/locks shows without its
-// process), so root's eject fails closed and root's claim does not wait for it. Root does not look
+// told, so root's eject fails closed and root's claim does not wait for it. A flock held in another
+// pid namespace (another container that shares /run/lock) cannot be seen in /proc at all, as
+// /proc/locks leaves it out: root's eject therefore also tries a flock on each own file of an
+// account that it finds by its name (never waiting, let go of at once, never made), and counts one
+// it cannot take as busy; a holder in another pid namespace of a file root finds only through the
+// process that has it open (the settings folder's) is not seen. Root does not look
 // at a runtime folder, or a file, on a FUSE mount that its mount table shows (another account's
 // FUSE program, mounted with allow_other, could keep it waiting for as long as it likes), so such a
 // file counts for nothing; for a file a process has open, its mount is looked up in root's mount

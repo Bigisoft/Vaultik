@@ -2883,6 +2883,27 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         CHECK(drive_claimed(key, root_dir));
         CHECK(claim.release() == 0);
         CHECK_FALSE(drive_claimed(key, root_dir));
+        {
+            // A holder in another pid namespace (another container that shares /run/lock) does not
+            // show in /proc/locks at all (here an empty copy of it): root's eject still finds
+            // nobody's own files held, by trying a flock on them that never waits.
+            const fs::path empty = tmp.path / "empty-proc-locks";
+            std::ofstream(empty).close();
+            testing::DriveLockHooks hidden;
+            hidden.proc_locks = empty.string();
+            testing::set_drive_lock_hooks(hidden);
+            OtherProcess hidden_run("lock", key, user_dir, tmp.path, "65534");
+            REQUIRE(hidden_run.held());
+            CHECK(eject_busy());
+            CHECK(hidden_run.release() == 0);
+            CHECK_FALSE(eject_busy());
+            OtherProcess hidden_claim("claim", key, user_dir, tmp.path, "65534");
+            REQUIRE(hidden_claim.held());
+            CHECK(drive_claimed(key, root_dir));
+            CHECK(hidden_claim.release() == 0);
+            CHECK_FALSE(drive_claimed(key, root_dir));
+            testing::set_drive_lock_hooks({});
+        }
         // Where /proc/locks cannot be read, root's eject cannot tell whether nobody's files are
         // held, and counts them as busy (fail closed).
         testing::DriveLockHooks hooks;
@@ -2892,9 +2913,9 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         CHECK(eject_busy());
         testing::set_drive_lock_hooks({});
         CHECK_FALSE(drive_claimed(key, root_dir));
-        // A flock whose holder is in another pid namespace (pid 0 in /proc/locks) cannot be looked
-        // into: root's eject fails closed. The same line of a process it can look into counts for
-        // nothing (here this one's, whose own claims are counted apart).
+        // A line of /proc/locks without a process (pid 0, which mainline Linux never shows) cannot
+        // be looked into: root's eject fails closed. The same line of a process it can look into
+        // counts for nothing (here this one's, whose own claims are counted apart).
         const fs::path locks = tmp.path / "proc-locks";
         hooks.proc_locks = locks.string();
         testing::set_drive_lock_hooks(hooks);

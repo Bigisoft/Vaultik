@@ -627,8 +627,11 @@ eject as root also counts the runs and commands of every account that another ac
 the turn all accounts share (by holding or making its file in /run/lock first), through their own
 files in /run/lock and /run/user, and through the turn file in the settings folder that a program
 holding a turn has open (so also a run without a /run/user folder whose file in /run/lock another
-account made first), and is refused where Linux cannot tell whether those are in use (also where a
-program in another container holds a turn file). So that no account can keep it looking for long,
+account made first), and is refused where Linux cannot tell whether those are in use. A program
+in another container that shares /run/lock cannot be seen holding a turn file at all, so an eject
+as root also tries the turn files it finds in /run/lock and /run/user for a moment itself (never
+waiting) and counts one it cannot take as in use; such a program holding only the turn file in its
+settings folder stays unseen. So that no account can keep it looking for long,
 it looks into at most 256 programs and 65536 open files of each account (and 3 seconds in all); an
 account with more counts as in use for an eject as root, and a command as root does not wait for
 it. An eject or command as root does not look at such files on a FUSE mount (an sshfs folder,
