@@ -2371,6 +2371,29 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         CHECK(child.inherited());
         CHECK_FALSE(child.held());
     }
+    {
+        // The claims file held alone, as root's eject holds it a moment after its mark: by root, an
+        // account's claim waits a moment for it; by another account (for good), not at all.
+        const fs::path use = fs::path("/run/lock") / ("vaultik-use-" + name + ".lock");
+        const int fd = ::open(use.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+        REQUIRE(fd >= 0);
+        REQUIRE(::flock(fd, LOCK_EX | LOCK_NB) == 0);
+        auto started = std::chrono::steady_clock::now();
+        {
+            OtherProcess claim("claim", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
+            CHECK(claim.held());
+            CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(1800));
+        }
+        ::close(fd);
+        OtherProcess squatter("flock-ex", {}, {}, tmp.path, "65533", {{"VAULTIK_TEST_HOLD_FILES", use.string()}});
+        REQUIRE(squatter.held());
+        started = std::chrono::steady_clock::now();
+        {
+            OtherProcess claim("claim", key, os::join(tmp.dir(), "nobody"), tmp.path, "65534");
+            CHECK(claim.held());
+            CHECK(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1500));
+        }
+    }
     std::error_code ec;
     fs::remove(file, ec);
     fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".lock"), ec);
@@ -2687,6 +2710,21 @@ TEST_CASE("drive claims: another account can neither delay a command nor keep an
         CHECK(claim.held());
         CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
         // Holding the shared claim too, which an eject of another account then sees.
+        OtherProcess other("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.use()));
+        CHECK_FALSE(other.held());
+    }
+    {
+        // A claim that first looks after root's eject let go of its mark but not yet of the claims
+        // file: it still waits a moment for the file (a process of root's holds it alone).
+        OtherProcess root_eject("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.use()));
+        REQUIRE(root_eject.held());
+        std::thread later([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            root_eject.release();
+        });
+        DriveClaim claim(key, mine);
+        later.join();
+        CHECK(claim.held());
         OtherProcess other("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.use()));
         CHECK_FALSE(other.held());
     }

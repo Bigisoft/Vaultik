@@ -523,6 +523,33 @@ bool held_by_ancestor(int fd, const std::string& mark) {
     return false;
 }
 
+// The effective account of process `pid`, from /proc/<pid>/status (readable by every account, and
+// true also for a process that made itself not dumpable, which /proc/<pid> itself shows as
+// root's). -1 when it cannot be told.
+long long account_of(long pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/status");
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("Uid:", 0) != 0) continue;
+        std::istringstream ids(line.substr(4));
+        long long real = -1, effective = -1;
+        if (ids >> real >> effective) return effective;
+        return -1;
+    }
+    return -1;
+}
+
+// Whether a process of root's holds the file of `fd` alone (as root's eject holds the claims
+// file); only root can make that so.
+bool root_holds_alone(int fd) {
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) return false;
+    const FileId id(st.st_dev, st.st_ino);
+    for (const HeldFlock& f : held_flocks())
+        if (is_file(f, id) && f.write && account_of(f.pid) == static_cast<long long>(hooks().root_uid)) return true;
+    return false;
+}
+
 // How long a claim of an account still waits for the claims file after root's eject let go of its
 // mark (see DriveClaim).
 constexpr std::chrono::seconds kRootLetGo{2};
@@ -916,8 +943,12 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
             // Root's eject may let go of its mark a moment before the claims file (one that ends
             // without letting go, killed say, leaves both in the order it opened them, the mark
             // first): the file is waited for a little longer after the mark was last seen held, so
-            // that the claim is not taken without it, unseen by root's next eject.
+            // that the claim is not taken without it, unseen by root's next eject. A claim that
+            // first looks in between sees root's eject hold the claims file alone (only root's own
+            // processes count, so no other account can delay a command that way) and waits as
+            // long from then.
             auto root_until = std::chrono::steady_clock::time_point::min();
+            bool first = true;
             for (;;) {
                 if (::flock(fd, LOCK_SH | LOCK_NB) == 0) return;
                 const bool busy = errno == EWOULDBLOCK || errno == EINTR;
@@ -925,6 +956,8 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 // An account (bounded) waits on the file of another account only while root's eject
                 // holds its mark (and a moment after): another account may hold it alone for good.
                 if (bounded && root_holds(mark, true)) root_until = now + kRootLetGo;
+                else if (bounded && busy && first && root_holds_alone(fd)) root_until = now + kRootLetGo;
+                first = false;
                 if (!busy || now >= until || (bounded && now >= root_until)) {
                     ::close(fd);
                     fd = -1;
