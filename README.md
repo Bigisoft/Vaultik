@@ -1260,9 +1260,9 @@ how far it is in a status window of Vaultik (see
 Windows writes the partition table with `IOCTL_DISK_CREATE_DISK` and
 `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` after locking and dismounting the disk's volumes, and formats
 with `format.com` (from the Windows system folder), which gets the new volume's own name
-(`\\?\Volume{...}\`), never a drive letter that another drive could take meanwhile; right before it
-runs, the letter given to the volume is checked too to still belong to it, and nothing is
-formatted when another drive has it now; Linux uses `sfdisk` (through the disk opened
+(`\\?\Volume{...}`, without the closing backslash, which it refuses), never a drive letter
+that another drive could take meanwhile; right before it runs, the letter given to the volume is
+checked too to still belong to it, and nothing is formatted when another drive has it now; Linux uses `sfdisk` (through the disk opened
 exclusively and checked) and `mkfs.ext4` (`mkfs.ntfs`, `mkfs.exfat`).
 
 ```

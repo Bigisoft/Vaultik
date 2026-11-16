@@ -1641,10 +1641,11 @@ NewDiskResult init_disk(const DiskInfo& chosen, const DiskIdentity& expected, co
         const std::string root = given.root;
         step("Formatting " + root.substr(0, 2) + " as " + (fs == "ntfs" ? std::string("NTFS") : std::string("exFAT")));
         const std::string label = o.label.empty() ? std::string("New Volume") : o.label;
-        // format.com gets the volume's own name (\\?\Volume{GUID}\), which no other drive can
-        // take meanwhile, as a letter could. The letter is checked once more all the same, right
-        // before, to be bound to the volume just made on this disk (a letter given to another
-        // drive meanwhile means something changed under the setup, which then stops).
+        // format.com gets the volume's own name (\\?\Volume{GUID}, without the closing backslash),
+        // which no other drive can take meanwhile, as a letter could. The letter is checked once
+        // more all the same, right before, to be bound to the volume just made on this disk (a
+        // letter given to another drive meanwhile means something changed under the setup, which
+        // then stops).
         {
             wchar_t bound[MAX_PATH + 1] = {};
             const std::string now =
