@@ -892,7 +892,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             if (fd >= 0) ::close(fd);
         own = own2 = shared = -1;
     };
-    if (own < 0 && shared < 0) return;
+    if (own < 0 && shared < 0 && root) return;
     // Waits for `fd` (an own lock) and takes it; false when this returns without the lock (all
     // closed).
     const auto take_own = [&](int fd) {
@@ -921,14 +921,16 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     };
     for (const int fd : {own, own2})
         if (fd >= 0 && !take_own(fd)) return;
-    if (shared >= 0) {
+    if (shared >= 0 || !root) {
         // Root: every root run took root's own lock first, so whoever holds this one now is another
         // account. An account: this account's runs took its own first, so whoever holds it is root
         // (while root's mark is held) or another account. Another account is waited for only a
         // short while (or for the whole wait, when that is shorter); an eject of an account passes
         // it by at once, while root's eject counts it as busy (fail closed, root's runs take turns
         // with every account's). An account also waits while root's mark is held with this one
-        // free: a run of root's that passed by an account's run on it is still under way.
+        // free: a run of root's that passed by an account's run on it is still under way. So does
+        // an account that cannot use the shared file at all (another account made it first): it
+        // still waits for root's run, and its eject fails closed while root's mark is held.
         const auto bound = other_account_wait();
         auto other_deadline = std::min(deadline, std::chrono::steady_clock::now() + bound);
         for (;;) {
@@ -936,7 +938,11 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             // (an eject of an account's would pass by a lock it just saw root's run hold).
             bool by_root = false;
             bool busy = true;  // the shared lock itself (else only root's mark is held)
-            if (::flock(shared, LOCK_EX | LOCK_NB) == 0) {
+            if (shared < 0) {  // an account without the shared file: root's mark alone
+                by_root = root_holds(mark, false);
+                if (!by_root) break;
+                busy = false;
+            } else if (::flock(shared, LOCK_EX | LOCK_NB) == 0) {
                 if (root) break;
                 by_root = root_holds(mark, false);
                 if (!by_root) break;
@@ -945,7 +951,8 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             } else if (errno != EWOULDBLOCK && errno != EINTR) {
                 ::close(shared);
                 shared = -1;
-                break;
+                if (root) break;
+                continue;  // root's mark still counts
             } else {
                 by_root = !root && root_holds(mark, false);
             }
@@ -1107,7 +1114,14 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 return;
             }
         }
-        if (shared >= 0) take(shared, ::geteuid() != 0);
+        if (shared >= 0) {
+            take(shared, ::geteuid() != 0);
+        } else if (::geteuid() != 0) {
+            // No claims file to share (another account made it first): root's eject is still
+            // waited for while it holds its mark, at most until the claim's wait ends.
+            while (root_holds(mark, true) && std::chrono::steady_clock::now() < until)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
         if (own < 0) std::swap(own, shared);
         if (own < 0) return;
         handle_ = handle_of(own);
@@ -1226,6 +1240,13 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
             close_all();
             return;
         }
+    }
+    // An account: a claim or eject of root's while root's mark is held, whatever the shared file's
+    // state (also when it cannot use that file at all, another account having made it first).
+    if (!root && root_holds(mark, false)) {
+        busy_ = true;
+        close_all();
+        return;
     }
     if (own < 0) std::swap(own, shared);
     if (own < 0) return;

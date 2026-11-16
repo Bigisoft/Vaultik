@@ -616,8 +616,9 @@ and a portable copy, say), through a file in your own /run/user folder, where no
 put one first, and one in /run/lock (where your account cannot make that one, as on distributions
 whose /run/lock only root may write to, a file in your settings folder instead, so runs with and
 without the /run/user folder still take turns as long as they use the same settings folder), and a
-run as root is waited for as long as it runs, also one that went
-on beside another run of yours. Root keeps its own marks in /run/vaultik, where no other account
+run as root is waited for as long as it runs, also one that went on beside another run of yours,
+and also when another account made the shared file in /run/lock first so that your account cannot
+use it (your eject then still counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other account
 can put files. Keep every copy of Vaultik on a computer (the installed one, a portable copy, an
 AppImage) on the same version: copies of different versions may not see each other's turns and
 may then share a drive for a while.

@@ -2853,6 +2853,78 @@ TEST_CASE("drive lock: the marker alone never makes a run inherit the drive (Lin
     os::set_env(kHeldDrivesVariable, "");
 }
 
+TEST_CASE("drive lock: an account that cannot use the shared files still sees root's runs and claims (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-no-shared-" + tmp.path.filename().string();
+    const std::string mine = os::join(tmp.dir(), "mine");
+    const ForeignFiles foreign(drive_lock_name(key));
+    // Another account made the files all accounts share first (here links, which are never
+    // followed), so this account cannot use them; root's marks still count.
+    fs::create_symlink(tmp.path / "elsewhere", foreign.drive());
+    fs::create_symlink(tmp.path / "elsewhere-use", foreign.use());
+    {
+        // Nothing of root's: the run and the eject go on with the account's own locks.
+        DriveLock run(key, mine, std::chrono::milliseconds(0));
+        CHECK(run.held());
+        CHECK_FALSE(drive_claimed(key, mine));
+    }
+    {
+        // A run of root's: waited for, and an eject counts it as busy (fail closed).
+        OtherProcess root_run("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.drive_mark()));
+        REQUIRE(root_run.held());
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(1500)), DriveBusy);
+        CHECK_THROWS_AS(DriveLock(key, mine, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject), DriveBusy);
+        std::thread later([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            root_run.release();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        DriveLock run(key, mine, std::chrono::milliseconds(20000));
+        later.join();
+        CHECK(run.held());
+        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
+        CHECK_FALSE(run.other_account_skipped());
+    }
+    {
+        // A run of root's that started this command: inherited, not waited for.
+        const Flocked mark(foreign.drive_mark(), LOCK_EX);
+        OtherProcess child("lock", key, mine, tmp.path, {}, kForeign);
+        CHECK(child.inherited());
+        OtherProcess eject("eject", key, mine, tmp.path, {}, kForeign);
+        CHECK(eject.busy());
+    }
+    {
+        // A command of root's: the account's eject counts it as busy.
+        OtherProcess root_claim("flock-sh", {}, {}, tmp.path, {}, hold_files(foreign.use_mark()));
+        REQUIRE(root_claim.held());
+        CHECK(drive_claimed(key, mine));
+        EjectHold hold(key, mine);
+        CHECK(hold.busy());
+    }
+    {
+        // An eject of root's under way: a command waits for it.
+        OtherProcess root_eject("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.use_mark()));
+        REQUIRE(root_eject.held());
+        CHECK(drive_claimed(key, mine));
+        std::thread later([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(700));
+            root_eject.release();
+        });
+        const auto started = std::chrono::steady_clock::now();
+        DriveClaim claim(key, mine);
+        later.join();
+        CHECK(claim.held());
+        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(500));
+    }
+    CHECK_FALSE(fs::exists(tmp.path / "elsewhere"));
+    CHECK_FALSE(fs::exists(tmp.path / "elsewhere-use"));
+}
+
 TEST_CASE("drive claims: another account can neither delay a command nor keep an eject busy (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");
