@@ -482,29 +482,46 @@ struct LockFile {
     ino_t ino = 0;
     uid_t uid = 0;
     mode_t mode = 0;
-    bool mount_known = false;  // the device of its mount could be told
+    bool has_mount_id = false;  // statx gave its mount's ID
+    std::uint64_t mount_id = 0;
+    bool mount_known = false;  // the device of its mount could be told (see with_mount)
     unsigned mount_major = 0;
     unsigned mount_minor = 0;
 };
 
-// The device of the mount `mount_id`, from /proc/self/mountinfo ("36 35 98:0 / /mnt ..."). False
-// when it cannot be told.
-bool mount_device(std::uint64_t mount_id, unsigned& major_of, unsigned& minor_of) {
-    std::ifstream in("/proc/self/mountinfo");
-    std::string line;
-    while (std::getline(in, line)) {
-        std::istringstream words(line);
-        std::uint64_t id = 0;
-        std::uint64_t parent = 0;
-        std::string device;
-        if (!(words >> id >> parent >> device) || id != mount_id) continue;
-        return std::sscanf(device.c_str(), "%u:%u", &major_of, &minor_of) == 2;
+// The devices of the mounts, from /proc/self/mountinfo ("36 35 98:0 / /mnt ..."), read at most
+// once for one look at the drive's locks however many files it looks at.
+struct Mounts {
+    bool read = false;
+    std::map<std::uint64_t, std::pair<unsigned, unsigned>> devices;
+
+    // The device of the mount `mount_id`. False when it cannot be told.
+    bool device(std::uint64_t mount_id, unsigned& major_of, unsigned& minor_of) {
+        if (!read) {
+            read = true;
+            std::ifstream in("/proc/self/mountinfo");
+            std::string line;
+            while (std::getline(in, line)) {
+                std::istringstream words(line);
+                std::uint64_t id = 0;
+                std::uint64_t parent = 0;
+                std::string dev;
+                unsigned a = 0;
+                unsigned b = 0;
+                if ((words >> id >> parent >> dev) && std::sscanf(dev.c_str(), "%u:%u", &a, &b) == 2)
+                    devices[id] = {a, b};
+            }
+        }
+        const auto it = devices.find(mount_id);
+        if (it == devices.end()) return false;
+        major_of = it->second.first;
+        minor_of = it->second.second;
+        return true;
     }
-    return false;
-}
+};
 
 // Whether /proc/locks may give another device than stat for the file `path` relative to `dirfd`
-// (see lock_file_at): on btrfs (each subvolume has a device of its own) and overlayfs (stat gives
+// (see with_mount): on btrfs (each subvolume has a device of its own) and overlayfs (stat gives
 // the overlay's device, /proc/locks the one of the file system below), or when that cannot be told.
 bool device_may_differ(int dirfd, const char* path, int flags) {
     constexpr long kBtrfs = 0x9123683e;
@@ -519,16 +536,15 @@ bool device_may_differ(int dirfd, const char* path, int flags) {
     return type == kBtrfs || type == kOverlay;
 }
 
-// The file `path` relative to `dirfd` (fstatat's `flags`), with the device of its mount where
-// statx and /proc/self/mountinfo tell it (Linux 5.8 and later). Where they cannot (an older
-// kernel, or a seccomp filter that refuses statx, as older Docker versions do), the device stat
-// gives is the one /proc/locks gives, except on file systems where the two may differ (see
-// device_may_differ). False when it cannot be looked at.
+// The file `path` relative to `dirfd` (fstatat's `flags`), without the device of its mount (see
+// with_mount, asked only for a file that is of use). Where statx is refused (an older kernel, or a
+// seccomp filter, as older Docker versions have), as fstatat gives it. False when it cannot be
+// looked at.
 bool lock_file_at(int dirfd, const char* path, int flags, LockFile& f) {
     f = LockFile{};
-    const testing::DriveLockHooks set = hooks();
     struct statx sx{};
-    const int r = set.no_statx ? (errno = EPERM, -1) : ::statx(dirfd, path, flags, STATX_BASIC_STATS | STATX_MNT_ID, &sx);
+    const int r =
+        hooks().no_statx ? (errno = EPERM, -1) : ::statx(dirfd, path, flags, STATX_BASIC_STATS | STATX_MNT_ID, &sx);
     if (r != 0) {
         if (errno != ENOSYS && errno != EPERM) return false;
         struct stat st{};
@@ -537,29 +553,41 @@ bool lock_file_at(int dirfd, const char* path, int flags, LockFile& f) {
         f.ino = st.st_ino;
         f.uid = st.st_uid;
         f.mode = st.st_mode;
-    } else {
-        f.dev = makedev(sx.stx_dev_major, sx.stx_dev_minor);
-        f.ino = static_cast<ino_t>(sx.stx_ino);
-        f.uid = sx.stx_uid;
-        f.mode = sx.stx_mode;
-        if ((sx.stx_mask & STATX_MNT_ID) != 0 && !set.no_mount_device)
-            f.mount_known = mount_device(sx.stx_mnt_id, f.mount_major, f.mount_minor);
-        if (f.mount_known && set.locks_other_device) {  // as on btrfs, where it is /proc/locks's
-            f.mount_major ^= 0x800;
-            f.mount_minor ^= 0x800;
-        }
+        return true;
+    }
+    f.dev = makedev(sx.stx_dev_major, sx.stx_dev_minor);
+    f.ino = static_cast<ino_t>(sx.stx_ino);
+    f.uid = sx.stx_uid;
+    f.mode = sx.stx_mode;
+    f.has_mount_id = (sx.stx_mask & STATX_MNT_ID) != 0;
+    f.mount_id = sx.stx_mnt_id;
+    return true;
+}
+
+// Adds to `f` (of lock_file_at with the same `dirfd`, `path` and `flags`) the device of its mount,
+// where statx and /proc/self/mountinfo tell it (Linux 5.8 and later). Where they cannot, the device
+// stat gives is the one /proc/locks gives, except on file systems where the two may differ (see
+// device_may_differ).
+void with_mount(int dirfd, const char* path, int flags, LockFile& f, Mounts& mounts) {
+    const testing::DriveLockHooks set = hooks();
+    if (f.has_mount_id && !set.no_mount_device)
+        f.mount_known = mounts.device(f.mount_id, f.mount_major, f.mount_minor);
+    if (f.mount_known && set.locks_other_device) {  // as on btrfs, where it is /proc/locks's
+        f.mount_major ^= 0x800;
+        f.mount_minor ^= 0x800;
     }
     if (!f.mount_known && !device_may_differ(dirfd, path, flags)) {
         f.mount_known = true;
         f.mount_major = major(f.dev);
         f.mount_minor = minor(f.dev);
     }
-    return true;
 }
 
-// The file of `fd` (see lock_file_at).
-bool lock_file_of(int fd, LockFile& f) {
-    return lock_file_at(fd, "", AT_EMPTY_PATH, f);
+// The file of `fd`, with the device of its mount (see lock_file_at and with_mount).
+bool lock_file_of(int fd, LockFile& f, Mounts& mounts) {
+    if (!lock_file_at(fd, "", AT_EMPTY_PATH, f)) return false;
+    with_mount(fd, "", AT_EMPTY_PATH, f, mounts);
+    return true;
 }
 
 // How a line of /proc/locks is about a file.
@@ -583,7 +611,7 @@ bool is_file(const HeldFlock& f, const LockFile& file) {
 }
 
 // The files process `pid` has open, from /proc/<pid>/fd (readable for the processes of this
-// account, and for root). False when they cannot be read.
+// account, and for root), without the devices of their mounts. False when they cannot be read.
 bool open_files_of(long pid, std::vector<LockFile>& files) {
     const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
     DIR* d = ::opendir(dir.c_str());
@@ -604,7 +632,7 @@ bool open_files_of(long pid, std::vector<LockFile>& files) {
 // open_in_run_user make them): its drive or claims file in its settings folder or runtime folder.
 // Each file is looked at only once its name matches, so a process with many files open costs a
 // readlink for each.
-std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name) {
+std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name, Mounts& mounts) {
     std::vector<LockFile> files;
     const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
     DIR* d = ::opendir(dir.c_str());
@@ -619,9 +647,11 @@ std::vector<LockFile> private_files_of(long pid, long long account, const std::s
             path[path.size() - name.size() - 1] != '/')
             continue;
         LockFile f;
-        if (lock_file_at(AT_FDCWD, entry.c_str(), 0, f) && S_ISREG(f.mode) && static_cast<long long>(f.uid) == account &&
-            (f.mode & 077) == 0)
-            files.push_back(f);
+        if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f) || !S_ISREG(f.mode) ||
+            static_cast<long long>(f.uid) != account || (f.mode & 077) != 0)
+            continue;
+        with_mount(AT_FDCWD, entry.c_str(), 0, f, mounts);
+        files.push_back(f);
     }
     ::closedir(d);
     return files;
@@ -653,13 +683,16 @@ bool holds(long pid, const LockFile& file, const std::vector<HeldFlock>& held, b
 
 // Root's mark files `name`, in root's folder or, as earlier versions kept it, in /run/lock: only
 // the ones root owns, which only root may open, so only root can hold them.
-std::vector<LockFile> root_mark_files(const std::string& name) {
+std::vector<LockFile> root_mark_files(const std::string& name, Mounts& mounts) {
     std::vector<LockFile> files;
     for (const std::string& dir : {root_dir(), std::string("/run/lock")}) {
+        const std::string path = dir + "/" + name;
         LockFile f;
-        if (lock_file_at(AT_FDCWD, (dir + "/" + name).c_str(), AT_SYMLINK_NOFOLLOW, f) && S_ISREG(f.mode) &&
-            f.uid == hooks().root_uid)
-            files.push_back(f);
+        if (!lock_file_at(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f) || !S_ISREG(f.mode) ||
+            f.uid != hooks().root_uid)
+            continue;
+        with_mount(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f, mounts);
+        files.push_back(f);
     }
     return files;
 }
@@ -667,7 +700,8 @@ std::vector<LockFile> root_mark_files(const std::string& name) {
 // Whether root holds its mark `name` (`write_only`: holds it alone, as an eject does); every
 // account can see in /proc/locks that it is held. False when that cannot be told.
 bool root_holds(const std::string& name, bool write_only) {
-    const std::vector<LockFile> files = root_mark_files(name);
+    Mounts mounts;
+    const std::vector<LockFile> files = root_mark_files(name, mounts);
     if (files.empty()) return false;
     for (const HeldFlock& f : held_flocks())
         for (const LockFile& id : files)
@@ -738,7 +772,7 @@ std::string run_user_dir_of(long long uid) {
 // The own lock files of account `uid` for `name` (see open_own_files) that this process can see:
 // the one in its runtime folder and its file in /run/lock, each only when that account owns it,
 // so that no process of another account can hold it.
-std::vector<LockFile> own_files_of(long long uid, const std::string& name) {
+std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mounts& mounts) {
     std::vector<LockFile> files;
     if (uid < 0) return files;
     const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
@@ -746,16 +780,18 @@ std::vector<LockFile> own_files_of(long long uid, const std::string& name) {
     if (const std::string dir = run_user_dir_of(uid); !dir.empty()) paths.push_back(dir + "/" + name);
     for (const std::string& path : paths) {
         LockFile f;
-        if (lock_file_at(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f) && S_ISREG(f.mode) &&
-            static_cast<long long>(f.uid) == uid)
-            files.push_back(f);
+        if (!lock_file_at(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f) || !S_ISREG(f.mode) ||
+            static_cast<long long>(f.uid) != uid)
+            continue;
+        with_mount(AT_FDCWD, path.c_str(), AT_SYMLINK_NOFOLLOW, f, mounts);
+        files.push_back(f);
     }
     return files;
 }
 
 // Root only: the own lock files for `name` of every other account (see own_files_of) that are
 // there: each vaultik-...<uid>.lock in /run/lock and `name` in each account's runtime folder.
-std::vector<LockFile> accounts_own_files(const std::string& name) {
+std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts) {
     std::vector<long long> uids;
     const auto add = [&](const std::string& text) {
         if (text.empty() || text.size() > 10 || !std::all_of(text.begin(), text.end(), [](char c) {
@@ -783,7 +819,7 @@ std::vector<LockFile> accounts_own_files(const std::string& name) {
     uids.erase(std::unique(uids.begin(), uids.end()), uids.end());
     std::vector<LockFile> files;
     for (const long long uid : uids) {
-        const std::vector<LockFile> own = own_files_of(uid, name);
+        const std::vector<LockFile> own = own_files_of(uid, name, mounts);
         files.insert(files.end(), own.begin(), own.end());
     }
     return files;
@@ -804,7 +840,8 @@ std::vector<LockFile> accounts_own_files(const std::string& name) {
 enum class Use { free, busy, unsure };
 
 Use accounts_hold(const std::string& name, bool write_only) {
-    const std::vector<LockFile> files = accounts_own_files(name);
+    Mounts mounts;
+    const std::vector<LockFile> files = accounts_own_files(name, mounts);
     bool readable = false;
     const std::vector<HeldFlock> held = held_flocks(&readable);
     if (!readable) return files.empty() ? Use::free : Use::unsure;
@@ -823,7 +860,7 @@ Use accounts_hold(const std::string& name, bool write_only) {
     pids.erase(std::unique(pids.begin(), pids.end()), pids.end());
     for (const long pid : pids) {
         bool maybe = false;
-        for (const LockFile& f : private_files_of(pid, account_of(pid), name))
+        for (const LockFile& f : private_files_of(pid, account_of(pid), name, mounts))
             if (holds(pid, f, held, write_only, maybe)) return Use::busy;
         if (maybe) unsure = true;
     }
@@ -876,10 +913,11 @@ enum class Holder {
 // a process above this one leaves no answer (unknown).
 Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark) {
     const std::vector<HeldFlock> held = held_flocks();
-    std::vector<LockFile> trusted = root_mark_files(mark);
+    Mounts mounts;
+    std::vector<LockFile> trusted = root_mark_files(mark, mounts);
     bool shared = false;
     LockFile target;
-    const bool busy_file = fd >= 0 && lock_file_of(fd, target);
+    const bool busy_file = fd >= 0 && lock_file_of(fd, target, mounts);
     if (busy_file) {
         shared = is_shared_file(fd, name);
         if (!shared) trusted.push_back(target);
@@ -909,10 +947,10 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
         for (const LockFile& t : trusted)
             if (holds(pid, t, held, false, unsure)) return true;
         const long long account = account_of(pid);
-        for (const LockFile& own : own_files_of(account, name))
+        for (const LockFile& own : own_files_of(account, name, mounts))
             if (holds(pid, own, held, false, unsure)) return true;
         if (::geteuid() == 0) {
-            for (const LockFile& f : private_files_of(pid, account, name))
+            for (const LockFile& f : private_files_of(pid, account, name, mounts))
                 if (!(shared && f.dev == target.dev && f.ino == target.ino) && holds(pid, f, held, false, unsure))
                     return true;
         }
@@ -940,7 +978,8 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
 // holds the claims file); only root can make that so.
 bool root_holds_alone(int fd) {
     LockFile id;
-    if (!lock_file_of(fd, id)) return false;
+    Mounts mounts;
+    if (!lock_file_of(fd, id, mounts)) return false;
     for (const HeldFlock& f : held_flocks())
         if (is_file(f, id) && f.write && root_process(f.pid)) return true;
     return false;
