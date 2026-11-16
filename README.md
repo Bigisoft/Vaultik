@@ -607,47 +607,46 @@ own account could hold the turn, a job with administrator rights that waited the
 goes on with a warning instead of giving up: it can be delayed, never stopped. A turn that
 another account made, or one your account may not open, is not waited for: the run goes on (and
 says so in its log), while an eject counts it as in use, as it does when another program took the
-turn's name for something else. On Linux root's runs take turns with
-the runs of every account through /run/lock, your own prune or eject too; as any account could
-hold that shared turn, a run waits for another account's run for 5 minutes at most and then goes
-on with a warning (both then share the drive's speed): it too can be delayed, never stopped. Your
-own runs still take turns with each other, whatever settings folder each uses (the installed app
-and a portable copy, say), through a file in your own /run/user folder, where no other account can
-put one first, and one in /run/lock (where your account cannot make that one, as on distributions
-whose /run/lock only root may write to, a file in your settings folder instead, so runs with and
-without the /run/user folder still take turns as long as they use the same settings folder), and a
-run as root is waited for as long as it runs, also one that went on beside another run of yours,
-and also when another account made the shared file in /run/lock first so that your account cannot
-use it (your eject then still counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other account
+turn's name for something else. On Linux root's runs take turns with the runs of every account
+through /run/lock, your own prune or eject too; as any account could hold that shared turn, a run
+waits for another account's run for 5 minutes at most and then goes on with a warning (both then
+share the drive's speed): it too can be delayed, never stopped. Your own runs still take turns with
+each other, whatever settings folder each uses (the installed app and a portable copy, say), through
+a file in your own /run/user folder, where no other account can put one first, and one in /run/lock
+(where your account cannot make that one, as on distributions whose /run/lock only root may write
+to, a file in your settings folder instead, so runs with and without the /run/user folder still take
+turns as long as they use the same settings folder), and a run as root is waited for as long as it
+runs, also one that went on beside another run of yours, and also when another account made the
+shared file in /run/lock first so that your account cannot use it (your eject then still counts
+root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other account
 can put files. Keep every copy of Vaultik on a computer (the installed one, a portable copy, an
-AppImage) on the same version: copies of different versions may not see each other's turns and
-may then share a drive for a while.
-Another account cannot keep your eject refused, and can make a command of yours wait 2 seconds at
-most; a command or eject as root still counts. An eject as root also counts the runs and commands
-of every account that another account kept from the turn all accounts share (by holding or
-making its file in /run/lock first), through their own files in /run/lock and /run/user, and is
-refused where Linux cannot tell whether those are in use. It cannot see one that has neither of
-these (no /run/user folder, and a /run/lock only root may write to), and such a run, or one kept
-from the shared turn, may share the drive's speed with a run as root. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
-all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
-go to sleep. A run started on its own that waited behind a run of the same job does nothing once
-that run saved a version (and leaves neither a record nor a log). A `vaultik` command started by a
-job's before or after command (a prune of the same drive, say), also one started there with
-`sudo`, does not wait for the run that started it; one that outlives that run takes the turn as
-usual. On Linux Vaultik tells this from which program holds the drive's turn (the run the command
-was started from, also through a shell, `sudo` or `pkexec`), so it works whatever environment
-reaches the command. As any account can hold the turn all accounts share in /run/lock, a program
-holding only that one is taken for the command's run only when it also holds a turn no other
-account can take (its account's own, or root's; for a command started with `sudo`, also the turn
-file in the run's settings folder, which a run without a /run/user folder uses where only root may
-write to /run/lock, and which root sees the run has open): another account cannot make your
-commands skip their turn or keep your eject refused that way. Where root may not look at other
-accounts' programs (some containers), such a `sudo` command waits 5 minutes for its run and then
-goes on beside it. A turn counts only on its own drive: a lock that
-another account holds on a file of another drive with the same file number is never taken for the
-run's. Where Linux cannot tell who holds the turn (a settings folder on btrfs with Linux older than
-5.8, `/proc` mounted with `hidepid`, a run in another container), a command goes by what the run
-passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does.
+AppImage) on the same version: copies of different versions may not see each other's turns and may
+then share a drive for a while. Another account cannot keep your eject refused, and can make a
+command of yours wait 2 seconds at most; a command or eject as root still counts. An eject as root
+also counts the runs and commands of every account that another account kept from the turn all
+accounts share (by holding or making its file in /run/lock first), through their own files in
+/run/lock and /run/user, and is refused where Linux cannot tell whether those are in use. It cannot
+see one that has neither of these (no /run/user folder, and a /run/lock only root may write to), and
+such a run, or one kept from the shared turn, may share the drive's speed with a run as root. Any
+other run gives up after waiting 12 hours, and a run that cannot take its turn at all (the system
+refuses it) goes on rather than not backing up. While a run only waits, the computer may go to
+sleep. A run started on its own that waited behind a run of the same job does nothing once that run
+saved a version (and leaves neither a record nor a log). A `vaultik` command started by a job's
+before or after command (a prune of the same drive, say), also one started there with `sudo`, does
+not wait for the run that started it; one that outlives that run takes the turn as usual. On Linux
+Vaultik tells this from which program holds the drive's turn (the run the command was started from,
+also through a shell, `sudo` or `pkexec`), so it works whatever environment reaches the command. As
+any account can hold the turn all accounts share in /run/lock, a program holding only that one is
+taken for the command's run only when it also holds a turn no other account can take (its account's
+own, or root's; for a command started with `sudo`, also the turn file in the run's settings folder,
+which a run without a /run/user folder uses where only root may write to /run/lock, and which root
+sees the run has open): another account cannot make your commands skip their turn or keep your eject
+refused that way. Where root may not look at other accounts' programs (some containers), such a
+`sudo` command waits 5 minutes for its run and then goes on beside it. A turn counts only on its own
+drive: a lock that another account holds on a file of another drive with the same file number is
+never taken for the run's. Where Linux cannot tell who holds the turn (a settings folder on btrfs
+with Linux older than 5.8, `/proc` mounted with `hidepid`, a run in another container), a command
+goes by what the run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does.
 Cloud storage has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and

@@ -57,21 +57,21 @@
 // of root's, and its eject counts only the claims of its own and of root's as busy. So another
 // account can delay a run by kOtherAccountWait, never stop it, can delay a command of an account
 // by 2 seconds at most (a claim waits that long for a claims file a process of root's holds
-// alone, as root's eject does for a moment after its mark; only one whose real and effective
-// accounts are both root's counts), and cannot keep its eject busy. Root's ejects still count the
-// runs and claims of every account, fail closed, and root's claims wait for the ejects of every
-// account (at most kEjectWait): through the shared files, and through each account's own files
-// that root can find (vaultik-drive-<hash>.<uid>.lock and vaultik-use-<hash>.<uid>.lock in
-// /run/lock, the files in each runtime folder /run/user/<uid>), which an account's run, claim or
-// eject holds also when it is left without the shared file (another account held that one when it
-// started, or made it first); an eject of root's counts each one held, and each one there where
-// /proc/locks cannot tell. The limits: root cannot find a file in an account's settings folder,
-// which the account uses only where it cannot use its file in /run/lock, so an eject of root's
-// does not see a run or command of an account that holds neither a shared file nor a file in its
-// runtime folder; and root's runs do not wait for an account's own files (a run of that account
-// that waits for root's mark holds them, and would keep root's run waiting in turn), so a run of
-// an account left without the shared file may share the drive's speed with a run of root's.
-// Where /run/lock cannot be used, a file in the given folder instead.
+// alone, as root's eject does for a moment after its mark; only one whose four accounts, real,
+// effective, saved and file system, are all root's counts), and cannot keep its eject busy. Root's
+// ejects still count the runs and claims of every account, fail closed, and root's claims wait for
+// the ejects of every account (at most kEjectWait): through the shared files, and through each
+// account's own files that root can find (vaultik-drive-<hash>.<uid>.lock and
+// vaultik-use-<hash>.<uid>.lock in /run/lock, the files in each runtime folder /run/user/<uid>),
+// which an account's run, claim or eject holds also when it is left without the shared file
+// (another account held that one when it started, or made it first); an eject of root's counts each
+// one held, and each one there where /proc/locks cannot tell. The limits: root cannot find a file
+// in an account's settings folder, which the account uses only where it cannot use its file in
+// /run/lock, so an eject of root's does not see a run or command of an account that holds neither a
+// shared file nor a file in its runtime folder; and root's runs do not wait for an account's own
+// files (a run of that account that waits for root's mark holds them, and would keep root's run
+// waiting in turn), so a run of an account left without the shared file may share the drive's speed
+// with a run of root's. Where /run/lock cannot be used, a file in the given folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder
 // is not writable) never stops a run: the run goes on without it, as runs did before there was a
