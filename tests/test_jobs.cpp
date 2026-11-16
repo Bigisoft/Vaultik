@@ -3498,6 +3498,53 @@ TEST_CASE("eject: a hard link another account adds to a held lock file never let
     }
 }
 
+TEST_CASE("drive lock: root without its mark never takes another account's hold on the shared file for its run's (Linux, as root)") {
+    if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("root test not run: needs root (runs as root and as nobody)");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    fs::permissions(tmp.path, fs::perms::all);  // nobody looks for its release file here
+    const std::string key = "test-no-mark-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const fs::path drive = fs::path("/run/lock") / ("vaultik-drive-" + name + ".lock");
+    const fs::path mark = fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock");
+    struct Cleanup {
+        fs::path drive, mark;
+        ~Cleanup() {
+            std::error_code ec;
+            fs::remove(drive, ec);
+            fs::remove(mark, ec);
+        }
+    } cleanup{drive, mark};
+    // Root has no mark: its own folder cannot be used (here a path below a file), and the mark's
+    // name in /run/lock is taken by a folder, which root does not remove. Root's run then uses the
+    // file all accounts share (0644) as its own lock.
+    std::ofstream(tmp.path / "file").close();
+    REQUIRE(::mkdir(mark.c_str(), 0755) == 0);
+    const int fd = open_or_make(drive, 0644);
+    REQUIRE(fd >= 0);
+    REQUIRE(::fchmod(fd, 0644) == 0);
+    ::close(fd);
+    // Another account holds that file, which every account may open: a command of root's that a
+    // run passed the marker to (here a made-up one) still waits for it (and gives up, with no wait
+    // of its own), as nobody is no process it descends from, instead of inheriting the drive.
+    OtherProcess other("flock-ex", {}, {}, tmp.path, "65534", hold_files(drive.string()));
+    REQUIRE(other.held());
+    OtherProcess command("lock", key, os::join(tmp.dir(), "root"), tmp.path, {},
+                         {{"VAULTIK_TEST_HOLD_ROOT_DIR", (tmp.path / "file" / "marks").string()},
+                          {kHeldDrivesVariable, name + ":parent"}});
+    CHECK(command.busy());
+    CHECK_FALSE(command.inherited());
+    CHECK(command.release() == 0);
+    CHECK(other.release() == 0);
+    // Free again, the command takes it as usual.
+    OtherProcess free("lock", key, os::join(tmp.dir(), "root"), tmp.path, {},
+                      {{"VAULTIK_TEST_HOLD_ROOT_DIR", (tmp.path / "file" / "marks").string()}});
+    CHECK(free.held());
+}
+
 TEST_CASE("drive lock: another account can delay an account's runs a short while, never stop them (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");

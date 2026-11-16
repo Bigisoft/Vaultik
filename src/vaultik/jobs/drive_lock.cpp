@@ -1180,13 +1180,18 @@ bool only_mine(const LockFile& file) {
     return file.uid == ::geteuid() && (file.mode & 077) == 0;
 }
 
-// Tests only (own_in_folder, where this account's processes stand in for other accounts): whether
-// the file of `fd` is the file `name` in /run/lock that every account shares, which then counts as
-// one other accounts may open.
-bool shared_stand_in(int fd, const std::string& name) {
+// Whether the file of `fd` is the file `name` in /run/lock that every account shares (root uses it
+// as its own lock where it has no mark).
+bool run_lock_file(int fd, const std::string& name) {
     struct stat mine{}, there{};
-    return hooks().own_in_folder && ::fstat(fd, &mine) == 0 && ::lstat(("/run/lock/" + name).c_str(), &there) == 0 &&
+    return ::fstat(fd, &mine) == 0 && ::lstat(("/run/lock/" + name).c_str(), &there) == 0 &&
            mine.st_dev == there.st_dev && mine.st_ino == there.st_ino;
+}
+
+// Tests only (own_in_folder, where this account's processes stand in for other accounts): whether
+// the file of `fd` is that shared file, which then counts as one other accounts may open.
+bool shared_stand_in(int fd, const std::string& name) {
+    return hooks().own_in_folder && run_lock_file(fd, name);
 }
 
 // What /proc tells about who holds a lock (see held_by_ancestor).
@@ -1196,7 +1201,8 @@ enum class Holder {
     unknown,  // no answer to use: the file shows no holder at all, or the processes above this one
               // cannot all be read (another pid namespace, /proc mounted with hidepid), or one of
               // them may hold a lock that /proc/locks cannot tell from another file's, or the busy
-              // file is an own lock of this account that other accounts may open too
+              // file is an own lock of this account that other accounts may open too (never the
+              // file all accounts share, which root uses as its own where it has no mark)
 };
 
 // Whether a process this one descends from (its parent, or one further up: a run's before or
@@ -1220,7 +1226,9 @@ enum class Holder {
 // settings folder on FAT, exFAT, NTFS or CIFS, whose mode bits cannot be set so) is not trusted
 // either, but leaves no answer (unknown) where none of the files above makes the holder a parent,
 // so that the marker tells (never for an eject) instead of the command waiting for its own run.
-// `unseen` is set when the busy file shows no holder at all in /proc/locks.
+// Root's own lock where it has no mark is the file all accounts share (every account may open it):
+// a holder of it that is no parent is another (other), as for any holder of that file. `unseen` is
+// set when the busy file shows no holder at all in /proc/locks.
 // A process counts when it holds a lock no other account can take, one of its account's own files,
 // root's mark or, for root (a command run with sudo; only root may look at the open files of
 // another account's process), a file of that name it
@@ -1246,7 +1254,7 @@ Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const st
     const bool busy_file = fd >= 0 && lock_file_of(fd, target, mounts);
     if (busy_file) {
         shared = !only_mine(target) || shared_stand_in(fd, name);
-        loose = own_file && shared && target.uid == ::geteuid() && !shared_stand_in(fd, name);
+        loose = own_file && shared && target.uid == ::geteuid() && !run_lock_file(fd, name);
         if (!shared) trusted.push_back(target);
     }
     // The file of `fd` is busy (it is asked about only then), so a holder that does not show is
