@@ -25,6 +25,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -502,31 +503,56 @@ bool mount_device(std::uint64_t mount_id, unsigned& major_of, unsigned& minor_of
     return false;
 }
 
+// Whether /proc/locks may give another device than stat for the file `path` relative to `dirfd`
+// (see lock_file_at): on btrfs (each subvolume has a device of its own) and overlayfs (stat gives
+// the overlay's device, /proc/locks the one of the file system below), or when that cannot be told.
+bool device_may_differ(int dirfd, const char* path, int flags) {
+    constexpr long kBtrfs = 0x9123683e;
+    constexpr long kOverlay = 0x794c7630;
+    if (hooks().btrfs) return true;
+    struct statfs fs{};
+    const int r = (flags & AT_EMPTY_PATH) != 0 && path[0] == '\0' ? ::fstatfs(dirfd, &fs)
+                  : dirfd == AT_FDCWD                              ? ::statfs(path, &fs)
+                                                                   : -1;
+    if (r != 0) return true;
+    const long type = static_cast<long>(fs.f_type);
+    return type == kBtrfs || type == kOverlay;
+}
+
 // The file `path` relative to `dirfd` (fstatat's `flags`), with the device of its mount where
-// statx and /proc/self/mountinfo tell it (Linux 5.8 and later). False when it cannot be looked at.
+// statx and /proc/self/mountinfo tell it (Linux 5.8 and later). Where they cannot (an older
+// kernel, or a seccomp filter that refuses statx, as older Docker versions do), the device stat
+// gives is the one /proc/locks gives, except on file systems where the two may differ (see
+// device_may_differ). False when it cannot be looked at.
 bool lock_file_at(int dirfd, const char* path, int flags, LockFile& f) {
     f = LockFile{};
+    const testing::DriveLockHooks set = hooks();
     struct statx sx{};
-    if (::statx(dirfd, path, flags, STATX_BASIC_STATS | STATX_MNT_ID, &sx) != 0) {
-        if (errno != ENOSYS) return false;
+    const int r = set.no_statx ? (errno = EPERM, -1) : ::statx(dirfd, path, flags, STATX_BASIC_STATS | STATX_MNT_ID, &sx);
+    if (r != 0) {
+        if (errno != ENOSYS && errno != EPERM) return false;
         struct stat st{};
         if (::fstatat(dirfd, path, &st, flags) != 0) return false;
         f.dev = st.st_dev;
         f.ino = st.st_ino;
         f.uid = st.st_uid;
         f.mode = st.st_mode;
-        return true;
+    } else {
+        f.dev = makedev(sx.stx_dev_major, sx.stx_dev_minor);
+        f.ino = static_cast<ino_t>(sx.stx_ino);
+        f.uid = sx.stx_uid;
+        f.mode = sx.stx_mode;
+        if ((sx.stx_mask & STATX_MNT_ID) != 0 && !set.no_mount_device)
+            f.mount_known = mount_device(sx.stx_mnt_id, f.mount_major, f.mount_minor);
+        if (f.mount_known && set.locks_other_device) {  // as on btrfs, where it is /proc/locks's
+            f.mount_major ^= 0x800;
+            f.mount_minor ^= 0x800;
+        }
     }
-    f.dev = makedev(sx.stx_dev_major, sx.stx_dev_minor);
-    f.ino = static_cast<ino_t>(sx.stx_ino);
-    f.uid = sx.stx_uid;
-    f.mode = sx.stx_mode;
-    const testing::DriveLockHooks set = hooks();
-    if ((sx.stx_mask & STATX_MNT_ID) != 0 && !set.no_mount_device)
-        f.mount_known = mount_device(sx.stx_mnt_id, f.mount_major, f.mount_minor);
-    if (f.mount_known && set.locks_other_device) {  // as on btrfs, where it is /proc/locks's
-        f.mount_major ^= 0x800;
-        f.mount_minor ^= 0x800;
+    if (!f.mount_known && !device_may_differ(dirfd, path, flags)) {
+        f.mount_known = true;
+        f.mount_major = major(f.dev);
+        f.mount_minor = minor(f.dev);
     }
     return true;
 }

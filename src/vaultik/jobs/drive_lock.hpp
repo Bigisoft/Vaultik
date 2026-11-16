@@ -165,9 +165,11 @@ public:
     // counts only on the file's own device and inode: /proc/locks gives the device of the file's
     // mount (btrfs: not the subvolume's, which stat gives, so a process counts there only when it
     // has that very file open), and a lock on another device with the same inode never makes a
-    // parent run. Where /proc gives no answer to use (no holder of the busy file shows there, the
-    // device of a file's mount cannot be told before Linux 5.8 while a process above this one may
-    // hold one with its inode, or the processes above this one cannot be read: another pid
+    // parent run. Where the device of a file's mount cannot be told (before Linux 5.8, or where
+    // statx is refused), stat's device counts, except on btrfs and overlayfs. Where /proc gives no
+    // answer to use (no holder of the busy file shows there, the device of a file's mount on btrfs
+    // or overlayfs cannot be told while a process above this one may hold one with its inode, or
+    // the processes above this one cannot be read: another pid
     // namespace, hidepid), kHeldDrivesVariable tells as on Windows, never for an eject; a holder of
     // the file all accounts share that cannot be trusted is no such case.
     // Either way, a lock that is free (the run that started the command has ended) is taken as
@@ -269,7 +271,9 @@ namespace testing {
 // `proc_locks`: instead of /proc/locks when not empty (a missing file: as if it could not be
 // read); `locks_other_device`: every line of /proc/locks carries another device than stat gives,
 // the one /proc/self/mountinfo gives the file's mount (as on btrfs); `no_mount_device`: the device
-// of a file's mount cannot be told (as without statx's mount ID, before Linux 5.8).
+// of a file's mount cannot be told (as without statx's mount ID, before Linux 5.8); `btrfs`: every
+// file is on a file system where stat and /proc/locks may give different devices (btrfs, overlayfs);
+// `no_statx`: statx is refused (EPERM, as by older Docker seccomp filters).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -280,6 +284,8 @@ struct DriveLockHooks {
     bool locks_other_device = false;
     bool no_mount_device = false;
     std::string run_user_root;
+    bool btrfs = false;
+    bool no_statx = false;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

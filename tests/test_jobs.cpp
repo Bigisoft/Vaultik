@@ -1257,8 +1257,9 @@ void init_test_repo(const fs::path& dir) {
 // account as its real one only (root's as its effective one); VAULTIK_TEST_HOLD_FOREIGN=1 sets the hooks of
 // ForeignFiles below, VAULTIK_TEST_HOLD_ROOT_DIR the folder of root's marks and
 // VAULTIK_TEST_HOLD_RUN_USER the account's own runtime folder, VAULTIK_TEST_HOLD_PROC_LOCKS the
-// file read instead of /proc/locks and VAULTIK_TEST_HOLD_OTHER_DEVICE=1 another device on its lines
-// (see DriveLockHooks); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
+// file read instead of /proc/locks and VAULTIK_TEST_HOLD_OTHER_DEVICE=1 another device on its lines,
+// VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE=1, VAULTIK_TEST_HOLD_BTRFS=1 and VAULTIK_TEST_HOLD_NO_STATX=1
+// the hooks of those names (see DriveLockHooks); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
 // missing) named in VAULTIK_TEST_HOLD_FILES, separated by ';', as another account (or root) would.
 TEST_CASE("drive lock helper: holds what another test asks for in a process of its own") {
     const std::string what = os::get_env("VAULTIK_TEST_HOLD");
@@ -1286,6 +1287,8 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
     hooks.proc_locks = os::get_env("VAULTIK_TEST_HOLD_PROC_LOCKS");
     hooks.locks_other_device = os::get_env("VAULTIK_TEST_HOLD_OTHER_DEVICE") == "1";
     hooks.no_mount_device = os::get_env("VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE") == "1";
+    hooks.btrfs = os::get_env("VAULTIK_TEST_HOLD_BTRFS") == "1";
+    hooks.no_statx = os::get_env("VAULTIK_TEST_HOLD_NO_STATX") == "1";
     testing::set_drive_lock_hooks(hooks);
     std::vector<int> flocked;
     if (what == "flock-ex" || what == "flock-sh") {
@@ -3121,16 +3124,18 @@ TEST_CASE("drive lock: where /proc cannot tell who holds the drive, the marker o
         CHECK_FALSE(eject.inherited());
     }
     {
-        // The same where the device of the file's mount cannot be told (before Linux 5.8): the
-        // inode alone may be another file's, so it leaves no answer, and the marker tells.
+        // The same on btrfs where the device of the file's mount cannot be told (before Linux
+        // 5.8): the inode alone may be another file's, so it leaves no answer, and the marker
+        // tells.
         const std::pair<std::string, std::string> no_mount = {"VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE", "1"};
-        OtherProcess named("lock", key, dir, tmp.path, {}, Env{other_device, no_mount, marker});
+        const std::pair<std::string, std::string> btrfs = {"VAULTIK_TEST_HOLD_BTRFS", "1"};
+        OtherProcess named("lock", key, dir, tmp.path, {}, Env{other_device, no_mount, btrfs, marker});
         CHECK(named.inherited());
         CHECK_FALSE(named.held());
-        OtherProcess unnamed("lock", key, dir, tmp.path, {}, Env{other_device, no_mount});
+        OtherProcess unnamed("lock", key, dir, tmp.path, {}, Env{other_device, no_mount, btrfs});
         CHECK(unnamed.busy());
         CHECK_FALSE(unnamed.inherited());
-        OtherProcess eject("eject", key, dir, tmp.path, {}, Env{other_device, no_mount, marker});
+        OtherProcess eject("eject", key, dir, tmp.path, {}, Env{other_device, no_mount, btrfs, marker});
         CHECK(eject.busy());
         CHECK_FALSE(eject.inherited());
     }
@@ -3227,18 +3232,31 @@ TEST_CASE("drive lock: a lock with the same inode on another device never makes 
                                 line(mark, self, true));
         CHECK(c->busy());
         CHECK_FALSE(c->inherited());
-        // Where the device of the file's mount cannot be told, such a line by a process above the
-        // command leaves no answer: the marker tells, and without it the command waits.
+        // Where the device of the file's mount cannot be told on btrfs or overlayfs, such a line
+        // by a process above the command leaves no answer: the marker tells, and without it the
+        // command waits.
         const std::pair<std::string, std::string> no_mount = {"VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE", "1"};
+        const std::pair<std::string, std::string> btrfs = {"VAULTIK_TEST_HOLD_BTRFS", "1"};
         const std::string maybe = line(own, sibling.pid(), false) + line(own, self, true);
-        c = command("lock", maybe, Env{no_mount});
+        c = command("lock", maybe, Env{no_mount, btrfs});
         CHECK(c->busy());
         CHECK_FALSE(c->inherited());
-        c = command("lock", maybe, Env{no_mount, {kHeldDrivesVariable, name + ":parent"}});
+        c = command("lock", maybe, Env{no_mount, btrfs, {kHeldDrivesVariable, name + ":parent"}});
         CHECK(c->inherited());
-        c = command("eject", maybe, Env{no_mount, {kHeldDrivesVariable, name + ":parent"}});
+        c = command("eject", maybe, Env{no_mount, btrfs, {kHeldDrivesVariable, name + ":parent"}});
         CHECK(c->busy());
         CHECK_FALSE(c->inherited());
+        // On any other file system stat's device is the one /proc/locks gives: the line on another
+        // device is another file's, the answer is the true holder (no parent run), and the marker
+        // does not count; also where statx is refused altogether (older Docker versions).
+        for (const auto& no_statx : {std::pair<std::string, std::string>{"VAULTIK_TEST_HOLD_NO_STATX", "0"},
+                                     std::pair<std::string, std::string>{"VAULTIK_TEST_HOLD_NO_STATX", "1"}}) {
+            c = command("lock", maybe, Env{no_mount, no_statx, {kHeldDrivesVariable, name + ":parent"}});
+            CHECK(c->busy());
+            CHECK_FALSE(c->inherited());
+            c = command("lock", line(own, self, false), Env{no_mount, no_statx});
+            CHECK(c->inherited());
+        }
         // The process above on the file's own device: the parent run (the file is read as asked).
         c = command("lock", line(own, sibling.pid(), true) + line(own, self, false));
         CHECK(c->inherited());
@@ -3267,6 +3285,40 @@ TEST_CASE("drive lock: a lock with the same inode on another device never makes 
         CHECK(c->busy());
         CHECK_FALSE(c->inherited());
     }
+}
+
+TEST_CASE("drive lock: where statx is refused, root's runs and claims are still seen (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-no-statx-" + tmp.path.filename().string();
+    const std::string mine = os::join(tmp.dir(), "mine");
+    const ForeignFiles foreign(drive_lock_name(key));
+    // Older Docker versions refuse statx (EPERM), so stat tells instead: an account still sees
+    // root's mark held (another process of this account stands in for root's run here) and waits
+    // for it, and its eject counts it as busy.
+    auto env = kForeign;
+    env.push_back({"VAULTIK_TEST_HOLD_NO_STATX", "1"});
+    {
+        OtherProcess root_run("flock-ex", {}, {}, tmp.path, {}, hold_files(foreign.drive_mark()));
+        REQUIRE(root_run.held());
+        OtherProcess run("lock", key, mine, tmp.path, {}, env);
+        CHECK(run.busy());
+        CHECK_FALSE(run.held());
+        OtherProcess eject("eject", key, mine, tmp.path, {}, env);
+        CHECK(eject.busy());
+    }
+    {
+        OtherProcess root_claim("flock-sh", {}, {}, tmp.path, {}, hold_files(foreign.use_mark()));
+        REQUIRE(root_claim.held());
+        OtherProcess claimed("claimed", key, mine, tmp.path, {}, env);
+        CHECK(claimed.held());
+    }
+    OtherProcess free_run("lock", key, mine, tmp.path, {}, env);
+    CHECK(free_run.held());
 }
 
 TEST_CASE("drive lock: the marker alone never makes a run inherit the drive (Linux)") {

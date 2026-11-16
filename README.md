@@ -648,7 +648,7 @@ skip their turn or keep your eject refused that way. Where root may not look at 
 `sudo` command waits 5 minutes for its run and then goes on beside it. A turn counts only on its own
 drive: a lock that another account holds on a file of another drive with the same file number is
 never taken for the run's. Where Linux cannot tell who holds the turn (a settings folder on btrfs
-with Linux older than 5.8, `/proc` mounted with `hidepid`, a run in another container), a command
+or overlayfs with Linux older than 5.8, `/proc` mounted with `hidepid`, a run in another container), a command
 goes by what the run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does.
 Cloud storage has no such turns.
 
