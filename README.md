@@ -615,7 +615,9 @@ own runs still take turns with each other, whatever settings folder each uses (t
 and a portable copy, say), through a file in your own /run/user folder, where no other account can
 put one first, and one in /run/lock, and a run as root is waited for as long as it runs, also one that went
 on beside another run of yours. Root keeps its own marks in /run/vaultik, where no other account
-can put files.
+can put files. Keep every copy of Vaultik on a computer (the installed one, a portable copy, an
+AppImage) on the same version: copies of different versions may not see each other's turns and
+may then share a drive for a while.
 Another account can neither make your commands wait nor keep your eject refused; a command or
 eject as root still counts. Any other run gives up after waiting 12 hours, and a run that cannot take its turn at
 all (the system refuses it) goes on rather than not backing up. While a run only waits, the computer may
