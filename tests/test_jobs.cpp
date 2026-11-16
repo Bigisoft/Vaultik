@@ -2423,7 +2423,60 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
             CHECK_FALSE(child.held());
         }
         ::close(own_fd);
+        {
+            // A run without its runtime folder where only root may write to /run/lock holds the
+            // drive's file in its settings folder instead, of its account's alone: root sees that
+            // the run has it open and holds it.
+            const fs::path settings = tmp.path / "run-settings";
+            fs::create_directories(settings);
+            const fs::path file_there = settings / ("vaultik-drive-" + name + ".lock");
+            const int there = ::open(file_there.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+            REQUIRE(there >= 0);
+            {
+                // Open but not held: not the run that started it.
+                OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+                CHECK_FALSE(child.inherited());
+            }
+            REQUIRE(::flock(there, LOCK_EX | LOCK_NB) == 0);
+            {
+                OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+                CHECK(child.inherited());
+                CHECK_FALSE(child.held());
+            }
+            {
+                // One that other accounts may open counts for nothing.
+                REQUIRE(::fchmod(there, 0644) == 0);
+                OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+                CHECK_FALSE(child.inherited());
+            }
+            ::close(there);
+        }
         ::close(fd);
+        fs::remove(own);
+    }
+    {
+        // A run of an account's that another account kept from the shared file (it holds that one)
+        // holds only its own file: a command of root's it started still inherits the drive. Here
+        // this process stands in for that run, holding nobody's own file.
+        const fs::path own = fs::path("/run/lock") / ("vaultik-drive-" + name + ".65534.lock");
+        const int own_fd = ::open(own.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        REQUIRE(own_fd >= 0);
+        REQUIRE(::fchown(own_fd, 65534, 65534) == 0);
+        REQUIRE(::chown(file.c_str(), 0, 0) == 0);  // as root made it, so that every account may use it
+        REQUIRE(::chmod(file.c_str(), 0644) == 0);
+        OtherProcess other("flock-ex", {}, {}, tmp.path, "65533", {{"VAULTIK_TEST_HOLD_FILES", file.string()}});
+        REQUIRE(other.held());
+        {
+            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+            CHECK_FALSE(child.inherited());
+        }
+        REQUIRE(::flock(own_fd, LOCK_EX | LOCK_NB) == 0);
+        {
+            OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path);
+            CHECK(child.inherited());
+            CHECK_FALSE(child.held());
+        }
+        ::close(own_fd);
         fs::remove(own);
     }
     {

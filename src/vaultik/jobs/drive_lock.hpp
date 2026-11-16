@@ -152,11 +152,13 @@ public:
     // account's run, or the other way round) and holds only the lock all accounts share, or only
     // root's mark. Windows: that run is the one kHeldDrivesVariable names, when the lock is busy.
     // Linux: a process this one descends from (through any shell, sudo or pkexec) holds a lock
-    // file of the drive, as /proc/locks shows, whatever the environment; the file all accounts
-    // share counts only when that process holds it alone and also holds a lock no other account
-    // can take (its account's own file, or root's mark), as any account may lock that file and
-    // /proc/locks still names a process that took a lock after it ended. One that is no ancestor
-    // (a command that outlived its run, another account's run) is waited for as usual. A lock
+    // file of the drive, as /proc/locks shows, whatever the environment (for a command of root's,
+    // also the own file of any account); the file all accounts share counts only when that
+    // process holds it alone and also holds a lock no other account can take (its account's own
+    // file, root's mark, or for a command of root's the drive's file in that process's settings
+    // folder, which root sees it has open), as any account may lock that file and /proc/locks
+    // still names a process that took a lock after it ended. One that is no ancestor (a command
+    // that outlived its run, another account's run) is waited for as usual. A lock
     // counts only on the file's own device and inode: /proc/locks gives the device of the file's
     // mount (btrfs: not the subvolume's, which stat gives, so a process counts there only when it
     // has that very file open), and a lock on another device with the same inode never makes a
