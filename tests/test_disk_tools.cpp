@@ -193,7 +193,11 @@ namespace {
 // `keep` is false), every write's offset and length, how many writes ran at the same time and
 // how many started after `stopped` was set (by the device when a write failed, or by the test
 // when it cancelled). It can fail the write that covers `fail_at`, return a corrupted sector at
-// `corrupt_at`, and make every write take `delay` (cut short by cancel()).
+// `corrupt_at`, make every write take `delay` (cut short by cancel()), and hold each write until
+// another one runs beside it (`overlap_wait`, the longest it waits; once two ran at the same time,
+// no write waits any more, and once one waited that long in vain, none waits either), so that
+// writes that may run at once are seen to, however slow the threads start under load, while
+// writes made one after another fail the test instead of hanging it.
 class ParallelDevice : public WipeDevice {
 public:
     explicit ParallelDevice(std::uint64_t size, bool keep = true) : size_(size), data(keep ? size : 0, 0xAB) {}
@@ -210,6 +214,11 @@ public:
             ParallelDevice& dev;
             ~Leave() { --dev.active; }
         } leave{*this};
+        if (overlap_wait.count() > 0) {
+            cv.notify_all();  // a write that waits for this one
+            if (!cv.wait_for(lock, overlap_wait, [&] { return max_active > 1 || cancelled; }))
+                overlap_wait = std::chrono::milliseconds(0);
+        }
         if (delay.count() > 0) {
             cv.wait_for(lock, delay, [&] { return cancelled; });
             if (cancelled) throw Error("writing the test device at byte " + std::to_string(offset) + ": cancelled");
@@ -254,6 +263,7 @@ public:
     std::uint64_t fail_at = ~0ull;
     std::uint64_t corrupt_at = ~0ull;
     std::chrono::milliseconds delay{0};
+    std::chrono::milliseconds overlap_wait{0};
 };
 
 }  // namespace
@@ -265,6 +275,7 @@ TEST_CASE("drive cleanser: several writes at once put the pattern on every byte,
 
     SUBCASE("three passes, verified: every write once per pass, at its place, and zeros everywhere") {
         ParallelDevice dev(size);
+        dev.overlap_wait = std::chrono::seconds(10);
         WipeOptions o;
         o.method = WipeMethod::Dod3;
         o.verify = true;
@@ -297,6 +308,7 @@ TEST_CASE("drive cleanser: several writes at once put the pattern on every byte,
     }
     SUBCASE("random, verified: no sector keeps its old bytes or is left zero") {
         ParallelDevice dev(size);
+        dev.overlap_wait = std::chrono::seconds(10);
         WipeOptions o;
         o.method = WipeMethod::Random;
         o.verify = true;
