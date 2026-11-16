@@ -82,7 +82,10 @@
 // another between two looks. The limit: root's runs do not wait
 // for an account's own files (a run of that account that waits for root's mark holds them, and
 // would keep root's run waiting in turn), so a run of an account left without the shared file may
-// share the drive's speed with a run of root's. Where /run/lock cannot be used, a file in the given
+// share the drive's speed with a run of root's. A file in /run/lock with something mounted on it (another
+// account's FUSE file system, mounted with allow_other on a file of its own there, whose program
+// could keep every open of it waiting) is never opened, where statx tells mounts (Linux 5.8 and
+// later): it counts as one that cannot be used. Where /run/lock cannot be used, a file in the given
 // folder instead.
 //
 // A lock or claim that cannot be had for another reason (the system refuses the object, the folder

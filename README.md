@@ -634,7 +634,9 @@ as root does not wait for it. It does not look at
 such files on a FUSE mount (an sshfs folder, say), whose program could keep it waiting; one whose
 mount it cannot find at all (a FUSE mount taken away with `umount -l`) it does not look at either,
 and counts as in use. A run kept from the
-shared turn may share the drive's speed with a run as root. Any
+shared turn may share the drive's speed with a run as root. A turn file in /run/lock that another account mounted
+something on (a FUSE file system, whose program could keep everybody who opens it waiting) is not
+opened at all (Linux 5.8 and later). Any
 other run gives up after waiting 12 hours, and a run that cannot take its turn at all (the system
 refuses it) goes on rather than not backing up. While a run only waits, the computer may go to
 sleep. A run started on its own that waited behind a run of the same job does nothing once that run

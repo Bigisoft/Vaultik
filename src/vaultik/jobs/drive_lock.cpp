@@ -232,9 +232,60 @@ std::wstring eject_name(const std::string& hash) {
 // Root's own folder for its marks (see open_root_mark).
 constexpr char kRootMarkDir[] = "/run/vaultik";
 
+struct Hooks {
+    std::mutex mu;
+    testing::DriveLockHooks hooks;
+};
+
+Hooks& hooks_store() {
+    static Hooks* const h = new Hooks;
+    return *h;
+}
+
+testing::DriveLockHooks hooks() {
+    Hooks& h = hooks_store();
+    std::lock_guard<std::mutex> lock(h.mu);
+    return h.hooks;
+}
+
+// Opens `path` in /run/lock with `flags` only when nothing is mounted on it: another account could
+// mount a FUSE file system (with allow_other) on a file of its own there, so that opening that file
+// would wait on its program for as long as it likes. The file is first opened with O_PATH, which
+// asks no file system, and its mount compared with the folder's by statx, which does not either;
+// then it is opened through that descriptor (/proc/self/fd), so that it is the file looked at.
+// Where statx cannot tell mounts (refused, or before Linux 5.8), opened as it is. -1 with errno
+// otherwise (EBUSY: something is mounted on it; ELOOP: a link).
+int open_unmounted(const std::string& path, int flags) {
+    const int at = ::open(path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC);
+    if (at < 0) return -1;
+    constexpr int kLook = AT_STATX_DONT_SYNC | AT_SYMLINK_NOFOLLOW;
+    struct statx file{}, dir{};
+    const bool told = !hooks().no_statx &&
+                      ::statx(at, "", AT_EMPTY_PATH | kLook, STATX_TYPE | STATX_MNT_ID, &file) == 0 &&
+                      ::statx(AT_FDCWD, "/run/lock", kLook, STATX_MNT_ID, &dir) == 0 &&
+                      (file.stx_mask & dir.stx_mask & STATX_MNT_ID) != 0;
+    int error = 0;
+    int fd = -1;
+    if (!told) {
+        fd = ::open(path.c_str(), flags);
+    } else if (S_ISLNK(file.stx_mode)) {
+        errno = ELOOP;
+    } else if (file.stx_mnt_id != dir.stx_mnt_id) {
+        errno = EBUSY;
+    } else {
+        fd = ::open(("/proc/self/fd/" + std::to_string(at)).c_str(), flags & ~O_NOFOLLOW);
+        if (fd < 0 && errno == ENOENT) fd = ::open(path.c_str(), flags);  // no /proc
+    }
+    if (fd < 0) error = errno;
+    ::close(at);
+    errno = error;
+    return fd;
+}
+
 // The file `name` in /run/lock, shared by every account: the one there when `usable` accepts it,
-// or a new one with `mode` (made at most once, also when several runs start at once). Root
-// removes one it cannot use and makes its own. -1 when there is none to use.
+// or a new one with `mode` (made at most once, also when several runs start at once), never one
+// with something mounted on it (see open_unmounted). Root removes one it cannot use and makes its
+// own. -1 when there is none to use.
 int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(const struct stat&)) {
     struct stat dir{};
     if (::lstat("/run/lock", &dir) != 0 || !S_ISDIR(dir.st_mode)) return -1;
@@ -247,7 +298,7 @@ int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(const 
         // Without O_CREAT first: with fs.protected_regular, opening another account's file in a
         // sticky folder such as /run/lock with O_CREAT fails, also for root and also when the file
         // is there already.
-        int fd = ::open(path.c_str(), kFlags);
+        int fd = open_unmounted(path, kFlags);
         if (fd < 0 && errno == ENOENT) {
             fd = ::open(path.c_str(), kFlags | O_CREAT | O_EXCL, mode);
             if (fd < 0 && errno == EEXIST) continue;  // another run made it meanwhile: use that one
@@ -273,22 +324,6 @@ bool own_or_roots(const struct stat& st) {
 
 bool roots(const struct stat& st) {
     return st.st_uid == 0;
-}
-
-struct Hooks {
-    std::mutex mu;
-    testing::DriveLockHooks hooks;
-};
-
-Hooks& hooks_store() {
-    static Hooks* const h = new Hooks;
-    return *h;
-}
-
-testing::DriveLockHooks hooks() {
-    Hooks& h = hooks_store();
-    std::lock_guard<std::mutex> lock(h.mu);
-    return h.hooks;
 }
 
 std::chrono::milliseconds other_account_wait() {

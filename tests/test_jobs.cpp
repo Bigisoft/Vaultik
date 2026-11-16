@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <sys/file.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
@@ -2636,6 +2637,42 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
     fs::remove(fs::path("/run/lock") / ("vaultik-use-" + name + ".65534.lock"), ec);
     fs::remove(fs::path("/run/vaultik") / ("vaultik-drive-" + name + ".root.lock"), ec);
     fs::remove(fs::path("/run/vaultik") / ("vaultik-use-" + name + ".root.lock"), ec);
+}
+
+TEST_CASE("drive lock: a file in /run/lock with something mounted on it is never opened (Linux, as root)") {
+    if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("skipped: needs root (mounts a file on another)");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-mounted-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const fs::path file = fs::path("/run/lock") / ("vaultik-drive-" + name + ".lock");
+    const fs::path source = tmp.path / "mounted";
+    std::ofstream(source).close();
+    std::ofstream(file).close();
+    // Another account could mount a FUSE file system (with allow_other) on a file of its own there,
+    // whose program would keep every open of it waiting; here a bind mount of another file stands
+    // in for it. The run goes on with root's own lock and never opens the file mounted there.
+    if (::mount(source.c_str(), file.c_str(), nullptr, MS_BIND, nullptr) != 0) {
+        MESSAGE("skipped: mounts are refused here");
+        std::error_code ec;
+        fs::remove(file, ec);
+        return;
+    }
+    {
+        DriveLock run(key, os::join(tmp.dir(), "root"), std::chrono::milliseconds(0));
+        CHECK(run.held());
+        const int fd = ::open(source.c_str(), O_RDONLY | O_CLOEXEC);
+        REQUIRE(fd >= 0);
+        CHECK(::flock(fd, LOCK_EX | LOCK_NB) == 0);  // not the run's
+        ::close(fd);
+    }
+    CHECK(::umount(file.c_str()) == 0);
+    std::error_code ec;
+    fs::remove(file, ec);
+    fs::remove(fs::path("/run/vaultik") / ("vaultik-drive-" + name + ".root.lock"), ec);
 }
 
 TEST_CASE("drive lock: root's folder is open to every account whatever root's umask (Linux, as root)") {
