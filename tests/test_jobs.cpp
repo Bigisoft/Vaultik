@@ -1425,6 +1425,15 @@ struct AsAccount {
     AsAccount(const AsAccount&) = delete;
     AsAccount& operator=(const AsAccount&) = delete;
 };
+
+// Opens `path` read only, made with `mode` when missing: one that is there without O_CREAT, which
+// fs.protected_regular refuses (also to root) for another account's file in a sticky folder such as
+// /run/lock.
+int open_or_make(const fs::path& path, mode_t mode) {
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd >= 0 || errno != ENOENT) return fd;
+    return ::open(path.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, mode);
+}
 #endif
 
 #ifdef _WIN32
@@ -2436,8 +2445,8 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         // holds the lock all accounts share and its account's own file in /run/lock, as the
         // account's run does), and the command is a process it starts.
         const fs::path own = fs::path("/run/lock") / ("vaultik-drive-" + name + ".0.lock");
-        const int fd = ::open(file.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
-        const int own_fd = ::open(own.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        const int fd = open_or_make(file, 0644);
+        const int own_fd = open_or_make(own, 0600);
         REQUIRE(fd >= 0);
         REQUIRE(own_fd >= 0);
         REQUIRE(::flock(fd, LOCK_EX | LOCK_NB) == 0);
@@ -2492,7 +2501,7 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         // (its effective account; its real one stays root's, so that it can start the command as
         // root and become root again).
         const fs::path own = fs::path("/run/lock") / ("vaultik-drive-" + name + ".65534.lock");
-        const int own_fd = ::open(own.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        const int own_fd = open_or_make(own, 0600);
         REQUIRE(own_fd >= 0);
         REQUIRE(::fchown(own_fd, 65534, 65534) == 0);
         REQUIRE(::chown(file.c_str(), 0, 0) == 0);  // as root made it, so that every account may use it
@@ -2596,7 +2605,7 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
         // The claims file held alone, as root's eject holds it a moment after its mark: by root, an
         // account's claim waits a moment for it; by another account (for good), not at all.
         const fs::path use = fs::path("/run/lock") / ("vaultik-use-" + name + ".lock");
-        const int fd = ::open(use.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+        const int fd = open_or_make(use, 0644);
         REQUIRE(fd >= 0);
         REQUIRE(::flock(fd, LOCK_EX | LOCK_NB) == 0);
         // How long each claim took is measured in its own process, apart from starting it, which
@@ -2819,7 +2828,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
     } cleanup{name};
     // A file of `uid`'s own that only it may open, as another account makes it first.
     const auto make_as = [](const fs::path& file, uid_t uid) {
-        const int fd = ::open(file.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+        const int fd = open_or_make(file, 0600);
         REQUIRE(fd >= 0);
         REQUIRE(::fchown(fd, uid, uid) == 0);
         REQUIRE(::fchmod(fd, 0600) == 0);
@@ -2837,7 +2846,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         // Another account holds the claims file all accounts share when a command of nobody's
         // starts: the command claims the drive on its own files alone, and once that account lets
         // go, root's eject still counts the command.
-        const int fd = ::open(use.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0644);
+        const int fd = open_or_make(use, 0644);
         REQUIRE(fd >= 0);
         REQUIRE(::fchmod(fd, 0644) == 0);
         ::close(fd);
