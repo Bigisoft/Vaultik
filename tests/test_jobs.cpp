@@ -3557,6 +3557,79 @@ TEST_CASE("drive lock: root without its mark never takes another account's hold 
     CHECK(free.held());
 }
 
+TEST_CASE("drive lock: root never uses another file of root's linked under its mark's name in /run/lock (Linux, as root)") {
+    if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("root test not run: needs root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-mark-alias-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string settings = os::join(tmp.dir(), "root");
+    const fs::path other = fs::path("/run/lock") / ("vaultik-test-" + name + "-other");
+    const fs::path junk = fs::path("/run/lock") / ("vaultik-test-" + name + "-junk");
+    struct Cleanup {
+        std::string name;
+        std::vector<fs::path> files;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const fs::path& f : files) fs::remove(f, ec);
+            for (const std::string kind : {"drive", "use"})
+                for (const std::string end : {".lock", ".root.lock"})
+                    fs::remove(fs::path("/run/lock") / ("vaultik-" + kind + "-" + name + end), ec);
+        }
+    } cleanup{name, {other, junk}};
+    // Root's own folder cannot be used (here a path below a file): its marks go to /run/lock.
+    std::ofstream(tmp.path / "file").close();
+    testing::DriveLockHooks hooks;
+    hooks.root_dir = (tmp.path / "file" / "marks").string();
+    testing::set_drive_lock_hooks(hooks);
+    const auto inode = [](const fs::path& p) {
+        struct stat st{};
+        REQUIRE(::lstat(p.c_str(), &st) == 0);
+        return st.st_ino;
+    };
+    // Another file of root's that only root may open, which root holds for something else (as
+    // /run/xtables.lock, where /run/lock is on the /run tmpfs). Where fs.protected_hardlinks is off,
+    // another account may make a mark's name first as a hard link to it: root then removes that
+    // name and makes its own mark, never holding the other file for a whole run or command.
+    {
+        const int fd = ::open(other.c_str(), O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        REQUIRE(fd >= 0);
+        ::close(fd);
+    }
+    for (const std::string kind : {"drive", "use"}) {
+        const fs::path mark = fs::path("/run/lock") / ("vaultik-" + kind + "-" + name + ".root.lock");
+        REQUIRE(::link(other.c_str(), mark.c_str()) == 0);
+        std::unique_ptr<DriveLock> run;
+        std::unique_ptr<DriveClaim> claim;
+        if (kind == "drive") run = std::make_unique<DriveLock>(key, settings, std::chrono::milliseconds(0));
+        else claim = std::make_unique<DriveClaim>(key, settings);
+        CHECK((run ? run->held() : claim->held()));
+        CHECK(inode(mark) != inode(other));
+        const int fd = ::open(other.c_str(), O_RDONLY | O_CLOEXEC);
+        REQUIRE(fd >= 0);
+        CHECK(::flock(fd, LOCK_EX | LOCK_NB) == 0);
+        ::close(fd);
+    }
+    // Its own mark, which another account gave a name of its own as well: still used as it is
+    // (another run of root's may hold it), never removed and made again.
+    const fs::path mark = fs::path("/run/lock") / ("vaultik-drive-" + name + ".root.lock");
+    const auto before = inode(mark);
+    REQUIRE(::link(mark.c_str(), junk.c_str()) == 0);
+    {
+        DriveLock run(key, settings, std::chrono::milliseconds(0));
+        CHECK(run.held());
+        CHECK(inode(mark) == before);
+        const int fd = ::open(junk.c_str(), O_RDONLY | O_CLOEXEC);
+        REQUIRE(fd >= 0);
+        CHECK(::flock(fd, LOCK_EX | LOCK_NB) != 0);
+        ::close(fd);
+    }
+}
+
 TEST_CASE("drive lock: another account can delay an account's runs a short while, never stop them (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");
@@ -3772,6 +3845,49 @@ TEST_CASE("drive lock: a lock name linked to another drive's own file never make
         CHECK_FALSE(command.inherited());
         CHECK(command.busy());
     }
+}
+
+TEST_CASE("drive claims: a claims name linked to the account's held drive file is not used (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-use-alias-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string uid = std::to_string(::geteuid());
+    const std::string settings = os::join(tmp.dir(), "settings");
+    const fs::path own_drive = fs::path("/run/lock") / ("vaultik-drive-" + name + "." + uid + ".lock");
+    const fs::path own_use = fs::path("/run/lock") / ("vaultik-use-" + name + "." + uid + ".lock");
+    struct Cleanup {
+        std::vector<fs::path> files;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const fs::path& f : files) fs::remove(f, ec);
+        }
+    } cleanup{{own_drive, own_use, fs::path("/run/lock") / ("vaultik-drive-" + name + ".lock"),
+               fs::path("/run/lock") / ("vaultik-use-" + name + ".lock")}};
+    const std::string no_run_user = (tmp.path / "no-run-user").string();
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(-1), {}, no_run_user});
+    const std::vector<std::pair<std::string, std::string>> env = {{"VAULTIK_TEST_HOLD_RUN_USER", no_run_user}};
+    // A run of the account holds its own drive file in /run/lock. Another account (where
+    // fs.protected_hardlinks is off; here this account itself) made the account's claims name
+    // first as a hard link to that file. A command's claim never uses it: it would wait the whole
+    // claim's wait for the run and then hold no claim at all, and once the run ended an eject would
+    // pass under the command.
+    OtherProcess run("lock", key, settings, tmp.path, {}, env);
+    REQUIRE(run.held());
+    REQUIRE(fs::exists(own_drive));
+    REQUIRE(::link(own_drive.c_str(), own_use.c_str()) == 0);
+    OtherProcess command("claim", key, settings, tmp.path, {}, env);
+    CHECK(command.held());
+    CHECK(command.took() < std::chrono::seconds(10));  // a wait for the run would last kEjectWait
+    CHECK(run.release() == 0);
+    CHECK(drive_claimed(key, settings));  // the account's eject (root's sees it in /run/lock too)
+    CHECK(command.release() == 0);
+    CHECK_FALSE(drive_claimed(key, settings));
 }
 
 TEST_CASE("drive lock: where /proc cannot tell who holds the drive, the marker of the parent run does (Linux)") {

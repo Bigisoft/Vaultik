@@ -284,9 +284,9 @@ int open_unmounted(const std::string& path, int flags) {
 
 // The file `name` in /run/lock, shared by every account: the one there when `usable` accepts it,
 // or a new one with `mode` (made at most once, also when several runs start at once), never one
-// with something mounted on it (see open_unmounted). Root removes one it cannot use and makes its
-// own. -1 when there is none to use.
-int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(const struct stat&)) {
+// with something mounted on it (see open_unmounted). A file this makes holds its name (see named).
+// Root removes one it cannot use and makes its own. -1 when there is none to use.
+int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(int, const struct stat&, const std::string&)) {
     struct stat dir{};
     if (::lstat("/run/lock", &dir) != 0 || !S_ISDIR(dir.st_mode)) return -1;
     const std::string path = "/run/lock/" + name;
@@ -300,15 +300,20 @@ int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(const 
         // is there already.
         int fd = open_unmounted(path, kFlags);
         if (fd < 0 && errno == ENOENT) {
-            fd = ::open(path.c_str(), kFlags | O_CREAT | O_EXCL, mode);
+            // Writable, to write its name into it (see named); flock needs no more.
+            fd = ::open(path.c_str(), kFlags | O_RDWR | O_CREAT | O_EXCL, mode);
             if (fd < 0 && errno == EEXIST) continue;  // another run made it meanwhile: use that one
+            if (fd >= 0) {
+                const ssize_t written = ::write(fd, name.data(), name.size());
+                (void)written;  // one left empty is still used while it has no other name
+            }
         }
         if (fd < 0) {
             if ((errno == EACCES || errno == ELOOP) && root && ::unlink(path.c_str()) == 0) continue;
             return -1;
         }
         struct stat st{};
-        if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && usable(st)) {
+        if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && usable(fd, st, name)) {
             if (st.st_uid == ::geteuid()) (void)::fchmod(fd, mode);  // whatever the umask
             return fd;
         }
@@ -318,7 +323,7 @@ int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(const 
     return -1;
 }
 
-bool own_or_roots(const struct stat& st) {
+bool own_or_roots(int, const struct stat& st, const std::string&) {
     return ::geteuid() == 0 || st.st_uid == 0 || st.st_uid == ::geteuid();
 }
 
@@ -338,11 +343,29 @@ bool private_by_name(uid_t uid, mode_t mode, std::uint64_t links, uid_t owner) {
     return private_file(uid, mode, owner) && links == 1;
 }
 
-// Root's mark in /run/lock, for open_root_mark to use: root's, and only root may open it. A hard
-// link to it (another account may add one at any time) does not keep root from using it: root would
-// otherwise remake it while another run of root's holds the one there.
-bool roots(const struct stat& st) {
-    return private_file(st.st_uid, st.st_mode, 0);
+// Whether the file of `fd` (`st` as fstat gives it), found as `name` in /run/lock, is that lock
+// file: one with no other name, or one that holds `name` as open_in_run_lock writes it into each file
+// it makes (only the file's owner, or root, can write it). Where fs.protected_hardlinks is off,
+// another account may make a name its owner has not used yet first as a hard link to another file
+// of the owner's (another lock file, held for another drive or for a run while a claim waits; for
+// root, any file of root's on that file system, such as /run/xtables.lock), which then holds
+// another name or nothing; a hard link another account adds to the real file under a name of its
+// own keeps it usable. Read through `fd` (a regular file, never opened through a link; see
+// open_in_run_lock), at most one byte more than `name`.
+bool named(int fd, const struct stat& st, const std::string& name) {
+    if (st.st_nlink == 1) return true;
+    char text[256];
+    if (name.size() >= sizeof text) return false;
+    const ssize_t n = ::pread(fd, text, name.size() + 1, 0);
+    return n == static_cast<ssize_t>(name.size()) && name.compare(0, name.size(), text, name.size()) == 0;
+}
+
+// Root's mark in /run/lock, for open_root_mark to use: root's, only root may open it, and it is the
+// mark's own file (see named; otherwise root removes the name and makes its own). A hard link to it
+// (another account may add one at any time) does not keep root from using it: root would otherwise
+// remake it while another run of root's holds the one there.
+bool roots(int fd, const struct stat& st, const std::string& name) {
+    return private_file(st.st_uid, st.st_mode, 0) && named(fd, st, name);
 }
 
 std::chrono::milliseconds other_account_wait() {
@@ -365,14 +388,12 @@ int open_lock_file(const std::string& name, const std::string& fallback_dir) {
     return open_in_dir(name, fallback_dir);
 }
 
-// The account's own file in /run/lock, for open_own_files to use: the account's, and only it may
-// open it. A hard link to it (another account may add one at any time) does not keep the account
-// from using it: its runs would otherwise fall back to their settings folders and stop taking
-// turns. The limit: where fs.protected_hardlinks is off, another account may make that name first
-// as a hard link to another file of the account's, which a run then waits for while the account
-// holds that one for something else (it never waits longer than its wait).
-bool mine(const struct stat& st) {
-    return private_file(st.st_uid, st.st_mode, ::geteuid());
+// The account's own file in /run/lock, for open_own_files to use: the account's, only it may open
+// it, and it is that name's own file (see named; otherwise the file in the settings folder instead).
+// A hard link to it (another account may add one at any time) does not keep the account from using
+// it: its runs would otherwise fall back to their settings folders and stop taking turns.
+bool mine(int fd, const struct stat& st, const std::string& name) {
+    return private_file(st.st_uid, st.st_mode, ::geteuid()) && named(fd, st, name);
 }
 
 // The folder of every account's runtime folder.
