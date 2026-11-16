@@ -1073,6 +1073,9 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
                 entry.compare(entry.size() - suffix.size(), suffix.size(), suffix) != 0)
                 continue;
             const std::string uid = entry.substr(prefix.size(), entry.size() - prefix.size() - suffix.size());
+            // Never a file with a FUSE mount on it (see own_files_of): where statx is refused, its
+            // details would be asked of its program.
+            if (mounts.fuse_at("/run/lock/" + entry)) continue;
             LockFile f;
             if (lock_file_at(::dirfd(d), entry.c_str(), AT_SYMLINK_NOFOLLOW, f) && std::to_string(f.uid) == uid) add(uid);
         }
@@ -1266,10 +1269,11 @@ Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const st
     }
     // Whether process `pid` holds one of the trusted files or one of its account's own files, or
     // (root) a file of that name it has open that only its account may open, whether or not it
-    // also holds the shared file (another account may hold that one).
+    // also holds the shared file (another account may hold that one). One budget for the whole
+    // look (see ScanBudget), however many processes above this one are asked about.
+    ScanBudget budget;
     const auto holds_drive = [&](long pid) {
         bool unsure = false;
-        ScanBudget budget;
         const long long account = account_of(pid);
         for (const LockFile& t : trusted)
             if (holds(pid, account, t, held, false, budget, unsure)) return true;
