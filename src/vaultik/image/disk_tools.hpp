@@ -411,7 +411,8 @@ struct LetterResult {
 // letter. Throws Error only when it ends up without any letter.
 LetterResult give_letter(char wanted, const std::string& automatic, const LetterSteps& steps);
 
-// Right before a new volume is formatted (format.com takes a drive letter, not the volume): empty
+// Right before a new volume is formatted (format.com gets the volume's name; the letter it was
+// given must still be bound to it, or something changed under the setup): empty
 // when the letter `root` ("F:\") is still bound to the volume set up, `expected`
 // ("\\?\Volume{GUID}\"), as `bound` shows (what Windows says the letter is bound to now; empty
 // when it cannot tell, which counts as another volume); otherwise why nothing is formatted.
