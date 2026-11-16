@@ -156,10 +156,10 @@ public:
     // file of the drive, as /proc/locks shows, whatever the environment: the busy file itself,
     // root's mark, or an own file of the account that process runs as now (never one of another
     // account's, as /proc/locks still names a process that took a lock after it ended, and its
-    // number may have gone to a process of another account since); the file all accounts share
-    // counts only when that process holds it alone and also holds a lock no other account can take
-    // (its account's own file, root's mark, or for a command of root's the drive's file in that
-    // process's settings folder, which root sees it has open), as any account may lock that file.
+    // number may have gone to a process of another account since), or for a command of root's the
+    // drive's file in that process's settings folder, which root sees it has open and that only
+    // its account may open (also when another account holds the file all accounts share); the
+    // file all accounts share never counts on its own, as any account may lock it.
     // One that is no ancestor (a command that outlived its run, another account's run) is waited
     // for as usual. A lock
     // counts only on the file's own device and inode: /proc/locks gives the device of the file's

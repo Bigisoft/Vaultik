@@ -833,16 +833,16 @@ enum class Holder {
 // that one now (another account may have taken a lock on its own file in a process whose number
 // then goes to a process the victim's commands descend from, its login shell or sudo, say), and
 // any account may hold the file `name` all accounts share (`fd` may be that one): a holder of
-// that file counts only when it holds it alone (as a run does, not a claim's shared lock) and the
-// same process also holds a lock no other account can take, one of its account's own files, root's
-// mark or, for root (a command run with sudo; only root may look at the open files of another
-// account's process), a file of that name it has open (/proc/<pid>/fd) that its account owns and
-// no other account may open: the settings folder's, the only own file of a run without its
-// runtime folder where only root may write to /run/lock. Otherwise another account could take
-// that file from a process whose number then goes to a process the victim's commands descend
-// from: they would all take it for their parent run and drop their turns. Holders of root's mark
-// (only root may open it) count as they are. A holder of the shared file that cannot be trusted so
-// is an answer (other), never unknown.
+// that file never counts on its own: a process counts when it holds a lock no other account can
+// take, one of its account's own files, root's mark or, for root (a command run with sudo; only
+// root may look at the open files of another account's process), a file of that name it has open
+// (/proc/<pid>/fd) that its account owns and no other account may open: the settings folder's, the
+// only own file of a run without its runtime folder where only root may write to /run/lock or
+// where another account made its file there first, also when another account holds the shared
+// file. Otherwise another account could take the shared file from a process whose number then
+// goes to a process the victim's commands descend from: they would all take it for their parent
+// run and drop their turns. Holders of root's mark (only root may open it) count as they are. A
+// holder of the shared file that cannot be trusted so is an answer (other), never unknown.
 //
 // Each lock counts only on the file's own device and inode (see Match): a line of /proc/locks with
 // the same inode on another device may be any file of any account (tmpfs inode numbers are easy to
@@ -876,7 +876,8 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
             unknown = true;  // in another pid namespace
     }
     // Whether process `pid` holds one of the trusted files or one of its account's own files, or
-    // the shared file alone with a file of that name it has open that only its account may open.
+    // (root) a file of that name it has open that only its account may open, whether or not it
+    // also holds the shared file (another account may hold that one).
     const auto holds_drive = [&](long pid) {
         bool unsure = false;
         for (const LockFile& t : trusted)
@@ -884,9 +885,10 @@ Holder held_by_ancestor(int fd, const std::string& name, const std::string& mark
         const long long account = account_of(pid);
         for (const LockFile& own : own_files_of(account, name))
             if (holds(pid, own, held, false, unsure)) return true;
-        if (shared && ::geteuid() == 0 && holds(pid, target, held, true, unsure)) {
+        if (::geteuid() == 0) {
             for (const LockFile& f : private_files_of(pid, account, name))
-                if (!(f.dev == target.dev && f.ino == target.ino) && holds(pid, f, held, false, unsure)) return true;
+                if (!(shared && f.dev == target.dev && f.ino == target.ino) && holds(pid, f, held, false, unsure))
+                    return true;
         }
         if (unsure) unknown = true;
         return false;

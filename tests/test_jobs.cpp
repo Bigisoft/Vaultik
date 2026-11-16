@@ -2499,6 +2499,33 @@ TEST_CASE("drive lock: root and another account share the drive's turn (Linux, a
             OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path, {}, as_root);
             CHECK_FALSE(child.inherited());
         }
+        {
+            // A run of nobody's that holds only the drive's file in its settings folder (another
+            // account made its own file in /run/lock first, and it has no runtime folder) while
+            // another account holds the shared file: root sees the run has that file open and
+            // holds it, and its command inherits the drive instead of waiting beside it.
+            const fs::path settings = tmp.path / "nobody-settings";
+            fs::create_directories(settings);
+            const fs::path there = settings / ("vaultik-drive-" + name + ".lock");
+            const int fd_there = ::open(there.c_str(), O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+            REQUIRE(fd_there >= 0);
+            REQUIRE(::fchown(fd_there, 65534, 65534) == 0);
+            REQUIRE(::fchmod(fd_there, 0600) == 0);
+            REQUIRE(::flock(fd_there, LOCK_EX | LOCK_NB) == 0);
+            {
+                const AsAccount nobody(65534);
+                OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path, {}, as_root);
+                CHECK(child.inherited());
+                CHECK_FALSE(child.held());
+            }
+            {
+                // Held by a process of another account than the file's: no parent run.
+                const AsAccount other_account(65533);
+                OtherProcess child("lock", key, os::join(tmp.dir(), "root"), tmp.path, {}, as_root);
+                CHECK_FALSE(child.inherited());
+            }
+            ::close(fd_there);
+        }
         REQUIRE(::flock(own_fd, LOCK_EX | LOCK_NB) == 0);
         {
             const AsAccount nobody(65534);

@@ -641,7 +641,7 @@ any account can hold the turn all accounts share in /run/lock, a program holding
 taken for the command's run only when it also holds a turn no other account can take (its account's
 own, or root's; for a command started with `sudo`, also the turn file in the run's settings folder,
 which a run without a /run/user folder uses where only root may write to /run/lock, and which root
-sees the run has open). An account's own turn counts only for a program that runs as that account
+sees the run has open, also when another account holds the turn all accounts share). An account's own turn counts only for a program that runs as that account
 now: Linux keeps naming the program that took a turn after it ended, and its number may later go to
 a program of another account (your shell, or `sudo`). Another account cannot make your commands
 skip their turn or keep your eject refused that way. Where root may not look at other accounts' programs (some containers), such a
