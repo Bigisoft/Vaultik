@@ -1001,8 +1001,9 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
 // settings folder, which root cannot find by name: so every process that /proc/locks shows holding
 // a flock is looked into as well (/proc/<pid>/fd), and one holding a file `name` there that its
 // account owns and no other account may open (see private_files_of) counts as busy too, within
-// each account's budget (see ScanBudget; an account over it is unsure). Never this process, whose
-// own locks and claims are counted apart.
+// each account's budget (see ScanBudget; an account over it is unsure). A flock whose holder is in
+// another pid namespace (pid 0 in /proc/locks) cannot be looked into, and is unsure too. Never this
+// process, whose own locks and claims are counted apart.
 enum class Use { free, busy, unsure };
 
 Use accounts_hold(const std::string& name, bool write_only) {
@@ -1020,7 +1021,8 @@ Use accounts_hold(const std::string& name, bool write_only) {
             if (m == Match::exact || m == Match::mount) return Use::busy;
             if (m == Match::maybe) unsure = true;
         }
-        if (f.pid > 0 && f.pid != static_cast<long>(::getpid())) pids.push_back(f.pid);
+        if (f.pid <= 0) unsure = true;  // a holder in another pid namespace, which cannot be looked into
+        else if (f.pid != static_cast<long>(::getpid())) pids.push_back(f.pid);
     }
     std::sort(pids.begin(), pids.end());
     pids.erase(std::unique(pids.begin(), pids.end()), pids.end());

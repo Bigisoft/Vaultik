@@ -2879,6 +2879,18 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         CHECK(eject_busy());
         testing::set_drive_lock_hooks({});
         CHECK_FALSE(drive_claimed(key, root_dir));
+        // A flock whose holder is in another pid namespace (pid 0 in /proc/locks) cannot be looked
+        // into: root's eject fails closed. The same line of a process it can look into counts for
+        // nothing (here this one's, whose own claims are counted apart).
+        const fs::path locks = tmp.path / "proc-locks";
+        hooks.proc_locks = locks.string();
+        testing::set_drive_lock_hooks(hooks);
+        std::ofstream(locks) << "1: FLOCK  ADVISORY  WRITE " << ::getpid() << " 00:00:1 0 EOF\n";
+        CHECK_FALSE(drive_claimed(key, root_dir));
+        std::ofstream(locks) << "1: FLOCK  ADVISORY  WRITE 0 00:00:1 0 EOF\n";
+        CHECK(drive_claimed(key, root_dir));
+        CHECK(eject_busy());
+        testing::set_drive_lock_hooks({});
     }
     {
         // An eject of nobody's under way without the shared file: a command of root's waits for it.

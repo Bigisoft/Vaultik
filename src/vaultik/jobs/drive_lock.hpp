@@ -71,7 +71,8 @@
 // flock, and counts one that holds a file of the drive's name there (/proc/<pid>/fd) that its
 // account owns and no other account may open; in one look at most 256 processes and 65536
 // descriptors of each account, and 3 seconds in all, so that no account can keep it looking for
-// long: an account over that (or a look over its time) cannot be told, so root's eject fails
+// long: an account over that (or a look over its time) cannot be told, nor can a flock held in
+// another pid namespace (which /proc/locks shows without its process), so root's eject fails
 // closed and root's claim does not wait for it. Root does not look at a runtime folder, or a file, on
 // a FUSE mount that its mount table shows (another account's FUSE program, mounted with
 // allow_other, could keep it waiting for as long as it likes), so such a file counts for nothing;
