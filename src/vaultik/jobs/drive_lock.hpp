@@ -49,11 +49,21 @@
 // (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning. Where
 // no other account may open the file in the settings folder, no other account can hold it. Where
 // other accounts may open it too (a settings folder on FAT, exFAT, NTFS or CIFS, as a portable
-// copy's on a USB stick), another account may hold it for good: a run waits for it only
-// kOtherAccountWait (the shared file's wait included) and goes on with a warning, a claim at most
-// kEjectWait and goes on with its other files, and an eject counts it as busy (fail closed). So
-// there another account can delay the account's runs and commands and keep its ejects refused, and
-// two runs of the account that meet only there take turns for kOtherAccountWait at most.
+// copy's on a USB stick), another account may hold it for good. A run that already holds another
+// own file (in its runtime folder or in /run/lock, which the account's ejects see) then waits for
+// it only kOtherAccountWait (the shared file's wait included) and goes on with a warning, but only
+// while /proc/locks shows processes of other accounts alone holding it; held by a process of the
+// account, or where that cannot be told (/proc/locks cannot be read within 3 seconds, say), it is
+// waited for the whole wait, as any own file. A run with no other own file (no runtime folder, as
+// from cron, and no usable file in /run/lock) always waits for it the whole wait: the limit is that
+// another account that holds it can keep such a run waiting until it gives up (DriveBusy), which
+// fails safe. A claim waits for it at most kEjectWait and then goes on with its other files under
+// the same two conditions, else holds no claim; an eject counts it as busy (fail closed). So there
+// another account can delay the account's runs and commands, make a run with no other own file
+// give up, and keep the account's ejects refused. Two runs of the account still meet there, except
+// a run that holds its own file in /run/lock or its runtime folder and one that cannot use that
+// file (another account made its name first): once another account held the settings folder's
+// file for kOtherAccountWait, those two may share the drive's speed.
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
 // that every account may look into (set so whatever root's umask); /run/lock where that folder

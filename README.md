@@ -619,18 +619,25 @@ same settings folder always meet there, whatever happens in /run/lock (so do run
 the /run/user folder on distributions whose /run/lock only root may write to). Where only your
 account may open that file, nobody else can hold it. Where other accounts may open it too (a
 settings folder on FAT, exFAT, NTFS or a network share, such as a portable copy's on a USB stick),
-another account could hold it for good, so a run waits for it only the 5 minutes for another account
-and then goes on with a warning, a command waits for it at most 60 seconds (as for an eject) and
-then goes on, and an eject counts it as in use: there another account can delay your runs and
-commands and keep your ejects refused, and two runs of yours that meet only there (one of them
-without a /run/user folder and without its file in /run/lock) take turns for those 5 minutes at
-most; and a run as root is waited for as long as it runs (only the 5 minutes for another account
-while another account keeps /proc/locks too long to read in 3 seconds; an eject then counts the run
-as root as in use), also one
-that went on beside another run of yours, and also when another account made the shared file in
-/run/lock first so that your account cannot use it (your eject then still
-counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other
-account can put files. Keep every copy of Vaultik on a computer (the installed one, a portable
+another account could hold it for good. A run that already holds its file in /run/user or in
+/run/lock (which your ejects see) then waits for it only the 5 minutes for another account and goes
+on with a warning, but only while Linux shows that programs of other accounts alone hold it; held by
+a program of yours, or where that cannot be told, the run waits its whole wait, as for any of your
+own turns. A run without either file (started by cron without a login, where another account made
+your file in /run/lock first or only root may write there) always waits its whole wait for it, so
+another account that holds it can keep such a run waiting until it gives up (it fails safe). A
+command waits for it at most 60 seconds (as for an eject) and then goes on without it under the
+same two conditions (else without its claim on the drive), and an eject counts it as in use. So
+there another account can delay your runs and commands, make a run without those files give up,
+and keep your ejects refused; and two runs of yours, one with its file in /run/user or /run/lock
+and one that cannot use that file, may share the drive's speed once another account held the
+settings folder's file for those 5 minutes; and a run as root is waited for as long as it runs (only
+the 5 minutes for another account while another account keeps /proc/locks too long to read in 3
+seconds; an eject then counts the run as root as in use), also one that went on beside another run
+of yours, and also when another account made the shared file in /run/lock first so that your account
+cannot use it (your eject then still counts root's runs and commands as busy). Root keeps its own
+marks in /run/vaultik, where no other account can put files. Keep every copy of Vaultik on a
+computer (the installed one, a portable
 copy, an AppImage) on the same version: copies of different versions may not see each other's
 turns and may then share a drive for a while. Another account cannot keep your eject refused (except
 where your settings folder is one other accounts may open, see above, and where Linux lets an
