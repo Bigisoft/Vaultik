@@ -565,9 +565,10 @@ bool private_folder(const std::string& dir) {
 // other accounts may open that file (`loose`; see private_file): a settings folder on FAT, exFAT,
 // NTFS or CIFS, as a portable copy's on a USB stick. Another account could hold such a one for
 // good, so a run that holds another own file waits for it only a short while (kOtherAccountWait,
-// as for the shared file), and a claim at most its wait for an eject (kEjectWait), and then goes on
-// without it while another account's processes alone hold it (see other_account_holds); an eject
-// still counts it as busy (fail closed). Every process takes them in this order, so none waits for
+// as for the shared file) and then goes on without it while another account's processes alone
+// hold it (see other_account_holds), and a claim at most its wait for an eject (kEjectWait) and
+// then goes on without it whoever holds it (see DriveClaim); an eject still counts it as busy
+// (fail closed). Every process takes them in this order, so none waits for
 // another that waits for it.
 AccountFiles open_account_files(const std::string& name, const std::string& lock_dir) {
     AccountFiles f;
@@ -1549,7 +1550,7 @@ bool flock_held(int fd) {
 
 // Whether /proc/locks shows the file of `fd` held only by processes of other accounts (none of
 // whose four accounts, see accounts_of, is this one): the settings folder's file where other
-// accounts may open it (see open_account_files), which a run or claim may then pass by. False
+// accounts may open it (see open_account_files), which a run may then pass by. False
 // where that cannot be told (fail safe: it then keeps waiting): no holder shows, /proc/locks
 // cannot be read or reading it was cut short (within the time of a look, see ScanBudget, as any
 // account can make it long), a line may be about the file but that cannot be told (Match::mount or
@@ -2014,11 +2015,24 @@ std::pair<std::string, std::string> DriveLock::child_environment() const {
     return {kHeldDrivesVariable, value};
 }
 
+namespace {
+
+// How long a claim waits for an eject at most: kEjectWait (Linux tests may set it shorter).
+std::chrono::milliseconds claim_wait() {
+#ifndef _WIN32
+    const std::chrono::milliseconds set = hooks().eject_wait;
+    if (set.count() >= 0) return set;
+#endif
+    return kEjectWait;
+}
+
+}  // namespace
+
 DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
     if (key.empty()) return;
     try {
         const std::string hash = key_hash(key);
-        const auto until = std::chrono::steady_clock::now() + kEjectWait;
+        const auto until = std::chrono::steady_clock::now() + claim_wait();
 #ifdef _WIN32
         (void)lock_dir;
         // A claim takes one of a few slots; an eject looks at all of them.
@@ -2075,10 +2089,8 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         }
         // Shared with every other claim; only an eject holds one alone, until the drive is gone.
         // False when it gave up on `fd` (closed, -1) other than as the settings folder's file that
-        // its file system refuses flocks on (see folder_refused), or as one it may pass by
-        // (`passable`) that /proc/locks shows held by other accounts alone when the wait ends (see
-        // other_account_holds).
-        const auto take = [&](int& fd, bool bounded, bool passable) {
+        // its file system refuses flocks on (see folder_refused).
+        const auto take = [&](int& fd, bool bounded) {
             // Root's eject may let go of its mark a moment before the claims file (one that ends
             // without letting go, killed say, leaves both in the order it opened them, the mark
             // first): the file is waited for a little longer after the mark was last seen held, so
@@ -2102,32 +2114,29 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 else if (bounded && busy && first && root_holds_alone(fd)) root_until = now + kRootLetGo;
                 first = false;
                 if (!busy || now >= until || (bounded && now >= root_until)) {
-                    const bool passed = busy && passable && other_account_holds(fd);
                     ::close(fd);
                     fd = -1;
-                    return refused || passed;
+                    return refused;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         };
         // An eject kept one for the whole wait: no claim, except where that is the settings
         // folder's file that other accounts may open (see open_account_files), which another
-        // account may hold for good: the claim then goes on with the others, but only where it
-        // already holds another own file (the one in its runtime folder or in /run/lock, which the
-        // account's ejects see) and only another account's processes hold that file (see take).
+        // account may hold for good: the claim then always goes on with the files it holds and
+        // still takes the shared claims file, which an eject of the account then counts as busy
+        // (see EjectHold). Whoever holds that file: holding less is the unsafe outcome for a
+        // claim (an eject could pass), unlike a run, which then waits (see DriveLock).
         for (int* fd : {&own, &own2, &own3}) {
-            const int held[] = {own, own2, own3};
-            const bool loose = *fd >= 0 && *fd == files.folder && files.loose &&
-                               std::any_of(std::begin(held), std::end(held),
-                                           [&](int o) { return o >= 0 && o != *fd; });
-            if (*fd >= 0 && !take(*fd, false, loose)) {
+            const bool loose = *fd >= 0 && *fd == files.folder && files.loose;
+            if (*fd >= 0 && !take(*fd, false) && !loose) {
                 for (const int other : {own, own2, own3, shared})
                     if (other >= 0) ::close(other);
                 return;
             }
         }
         if (shared >= 0) {
-            take(shared, ::geteuid() != 0, false);
+            take(shared, ::geteuid() != 0);
         } else if (::geteuid() != 0) {
             // No claims file to share (another account made it first): root's eject is still
             // waited for while it holds its mark, at most until the claim's wait ends.
@@ -2266,10 +2275,11 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
         // Root: a claim of any account (fail closed). An account: a claim or eject of root's while
         // root's mark is held, else one of another account, passed by (the account's own files are
         // still looked at below, also when this eject holds none); but where other accounts may
-        // write to the settings folder (see AccountFiles), busy too (fail closed: a claim of the
-        // account may hold it and a settings folder's file that another account renamed away).
-        const bool busy =
-            errno == EWOULDBLOCK && (root || files.exposed || root_holds(mark, false, true));
+        // open or write to the settings folder's file (see AccountFiles), busy too (fail closed: a
+        // claim of the account may hold it alone, having gone on without a settings folder's file
+        // another account held, or holding one that another account renamed away).
+        const bool busy = errno == EWOULDBLOCK &&
+                          (root || files.loose || files.exposed || root_holds(mark, false, true));
         ::close(shared);
         shared = -1;
         if (busy) {

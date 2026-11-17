@@ -627,8 +627,13 @@ a program of yours, or where that cannot be told, the run waits its whole wait, 
 own turns. A run without either file (started by cron without a login, where another account made
 your file in /run/lock first or only root may write there) always waits its whole wait for it, so
 another account that holds it can keep such a run waiting until it gives up (it fails safe). A
-command waits for it at most 60 seconds (as for an eject) and then goes on without it under the
-same two conditions (else without its claim on the drive), and an eject counts it as in use. So
+command waits for it at most 60 seconds (as for an eject) and then always goes on with its other
+claims on the drive (in /run/user, in /run/lock and the one all accounts share), and an eject counts
+that file as in use, and there also the shared claim while it is held, so it still sees such a
+command. Only a command that has none of those (no /run/user folder, and another account made its
+files in /run/lock first or holds the shared one, or only root may write there) is then left
+without a claim, and once that account lets go of the file, an eject of yours could eject the
+drive under it. So
 there another account can delay your runs and commands, make a run without those files give up,
 and keep your ejects refused; and two runs of yours, one with its file in /run/user or /run/lock
 and one that cannot use that file, may share the drive's speed once another account held the

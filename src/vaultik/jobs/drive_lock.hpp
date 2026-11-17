@@ -58,8 +58,14 @@
 // waited for the whole wait, as any own file. A run with no other own file (no runtime folder, as
 // from cron, and no usable file in /run/lock) always waits for it the whole wait: the limit is that
 // another account that holds it can keep such a run waiting until it gives up (DriveBusy), which
-// fails safe. A claim waits for it at most kEjectWait and then goes on with its other files under
-// the same two conditions, else holds no claim; an eject counts it as busy (fail closed). So there
+// fails safe. A claim waits for it at most kEjectWait and then always goes on with the other files
+// it holds and the shared claims file, whoever holds it (for a claim, holding fewer files is the
+// unsafe outcome); an eject counts it as busy, and there also a busy shared claims file (fail
+// closed), so that a claim that holds only that one is still seen. The limit: a claim with neither
+// another own file nor the shared claims file (no runtime folder, and in /run/lock another account
+// made those names first or holds the shared one, or only root may write there) then holds no
+// claim, and once the other account lets go of the file, an eject of the account no longer sees
+// that command. So there
 // another account can delay the account's runs and commands, make a run with no other own file
 // give up, and keep the account's ejects refused. Two runs of the account still meet there, except
 // a run that holds its own file in /run/lock or its runtime folder and one that cannot use that
@@ -406,7 +412,8 @@ namespace testing {
 // how many processes and descriptors of each account root looks into at most in one look (see
 // the eject's limits above); `short_name_write`: writing a file's name into it in /run/lock (a
 // new one, or an earlier version's) writes nothing (as on a full /run/lock); `scan_time`: instead
-// of the look's 3 seconds when not negative (0: every look is cut short at once).
+// of the look's 3 seconds when not negative (0: every look is cut short at once); `eject_wait`:
+// instead of kEjectWait for a claim's wait when not negative.
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -424,6 +431,7 @@ struct DriveLockHooks {
     std::size_t scan_descriptors = 0;
     bool short_name_write = false;
     std::chrono::milliseconds scan_time{-1};
+    std::chrono::milliseconds eject_wait{-1};
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

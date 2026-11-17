@@ -4694,6 +4694,72 @@ TEST_CASE("eject: a run with no other own file never passes a loose settings fol
     CHECK(run->release() == 0);
 }
 
+TEST_CASE("drive claims: a claim keeps its other files past a loose settings folder file (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-loose-claim-");
+    const std::vector<fs::path> files = loose_folder_files(c);
+    const fs::path shared_use = fs::path("/run/lock") / ("vaultik-use-" + c.name + ".lock");
+    const std::string uid = std::to_string(::geteuid());
+    const fs::path own_use = fs::path("/run/lock") / ("vaultik-use-" + c.name + "." + uid + ".lock");
+    const fs::path run_user = c.tmp.path / "run-user";
+    fs::create_directories(run_user);
+    REQUIRE(::chmod(run_user.c_str(), 0700) == 0);
+    const fs::path in_run_user = run_user / ("vaultik-use-" + c.name + ".lock");
+    // Another account holds the settings folder's claims file for good (it may open it; here a
+    // process of this account stands in for it), and /proc/locks shows no holder of it (as for a
+    // shell's `flock -x 9` whose flock child has ended, or a /proc/locks that is long or hidden).
+    // A claim (its wait 1500 ms here) waits for that file its whole wait and then goes on with
+    // the claims it holds (in its runtime folder and in /run/lock) and the shared one, never with
+    // none: once the other account lets go, an eject of the account (a process of its own) must
+    // still be refused while the command runs.
+    const fs::path proc_locks = c.tmp.path / "locks";
+    std::ofstream(proc_locks).close();
+    testing::DriveLockHooks h = c.hooks();
+    h.run_user_dir = run_user.string();
+    h.proc_locks = proc_locks.string();
+    h.eject_wait = std::chrono::milliseconds(1500);
+    testing::set_drive_lock_hooks(h);
+    const std::vector<std::pair<std::string, std::string>> env = {
+        {"VAULTIK_TEST_HOLD_RUN_USER", run_user.string()}};
+    {
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files(files[1].string()));
+        REQUIRE(other.held());
+        DriveClaim claim(c.key, c.settings);
+        CHECK(claim.held());
+        CHECK(flock_taken(in_run_user));
+        CHECK(flock_taken(own_use));
+        CHECK(flock_taken(shared_use));
+        CHECK(other.release() == 0);
+        OtherProcess eject("eject-hold", c.key, c.settings, c.tmp.path, {}, env);
+        CHECK_FALSE(eject.held());
+    }
+    // Without any other own file (no runtime folder, as from cron, and another account made the
+    // account's own claims name in /run/lock first), the claim still takes the shared claims file,
+    // which an eject of the account counts as busy where other accounts may open the settings
+    // folder's file (fail closed), so that it is still refused while the command runs.
+    std::ofstream(own_use).close();
+    REQUIRE(::chmod(own_use.c_str(), 0644) == 0);
+    h.run_user_dir = c.no_run_user;
+    testing::set_drive_lock_hooks(h);
+    {
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files(files[1].string()));
+        REQUIRE(other.held());
+        DriveClaim claim(c.key, c.settings);
+        CHECK(claim.held());
+        CHECK(flock_taken(shared_use));
+        CHECK(other.release() == 0);
+        OtherProcess eject("eject-hold", c.key, c.settings, c.tmp.path, {}, c.env);
+        CHECK_FALSE(eject.held());
+    }
+    OtherProcess eject("eject-hold", c.key, c.settings, c.tmp.path, {}, c.env);
+    CHECK(eject.held());
+    CHECK(eject.release() == 0);
+    fs::remove(own_use);
+}
+
 TEST_CASE("eject: a settings folder other accounts may write keeps the shared file busy (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");
@@ -4713,15 +4779,17 @@ TEST_CASE("eject: a settings folder other accounts may write keeps the shared fi
         return false;
     };
     // Another account holds the shared files (here a process of this account stands in for it).
-    // With a settings folder only this account may write to, an eject of the account passes them
-    // by, as before; a run that holds no own file besides the settings folder's waits for them
-    // only the short while (200 ms here).
+    // With a settings folder only this account may write to, an eject of the account passes the
+    // shared drive file by, as before (the busy shared claims file counts, as other accounts may
+    // open the settings folder's files here: a claim may hold it alone, see DriveClaim); a run that
+    // holds no own file besides the settings folder's waits for them only the short while (200 ms
+    // here).
     {
         OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
                            hold_files(shared_drive.string(), shared_use.string()));
         REQUIRE(other.held());
         CHECK_FALSE(eject_busy());
-        CHECK_FALSE(EjectHold(c.key, c.settings).busy());
+        CHECK(EjectHold(c.key, c.settings).busy());
         fs::remove(c.own_drive);
         c.make_empty(0644);
         CHECK_FALSE(run_busy(c.key, c.settings, std::chrono::milliseconds(20000)));
@@ -4818,8 +4886,8 @@ TEST_CASE("eject: an own file the eject does not hold is busy where /proc/locks 
         return;
     }
     OwnFileCase c("test-own-unsure-");
-    const fs::path own_use =
-        fs::path("/run/lock") / ("vaultik-use-" + c.name + "." + std::to_string(::geteuid()) + ".lock");
+    const std::string uid = std::to_string(::geteuid());
+    const fs::path own_use = fs::path("/run/lock") / ("vaultik-use-" + c.name + "." + uid + ".lock");
     const auto eject_busy = [&] {
         try {
             DriveLock lock(c.key, c.settings, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject);
