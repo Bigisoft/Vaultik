@@ -76,12 +76,23 @@
 // makes it anew do not meet there: an eject of the account then counts a busy shared file as busy
 // (fail closed) instead of passing it by, and a run with no other own file waits for the shared
 // file its whole wait (another account that holds it can then make the run give up), so that such
-// a run always holds a file the account's ejects see. There another account can delay the
-// account's runs and commands and keep its ejects refused, but not hide a run from them, except
-// where the account cannot use the shared file at all (another account made it first, or only
-// root may write to /run/lock) and a run holds the settings folder's file alone; and it can hide a
-// command (a claim) that holds no other own file, as a claim waits for the shared claims file only
-// while root's eject holds its mark.
+// a run always holds a file the account's ejects see. As a run or command may still hold the
+// settings folder's file alone there (the account cannot use the shared file at all: another
+// account made it first, or only root may write to /run/lock), an eject of the account there also
+// counts as busy every flock that a process of the account other than the eject holds on a file
+// of the settings folder's file system, as /proc/locks shows it, whatever that file is named now
+// (a name there tells nothing), and where that cannot be told (/proc/locks cannot be read or
+// reading it was cut short at the look's 3 seconds, a holder's accounts cannot be read, as with
+// hidepid): so another account cannot hide a run or command of the account from its ejects. The
+// cost: such an eject is also refused while a process of the account holds any other flock on that
+// file system (a run for another drive from the same portable copy, say). There another account
+// can delay the account's runs and commands and keep its ejects refused; it can also make two runs
+// of the account that meet only there share the drive's speed (the second makes the file anew),
+// and a command that starts while such an eject is under way go on beside it instead of waiting
+// (the eject then fails while the command has files open on the drive, or the command finds the
+// drive gone). Not seen: a process of the account in another pid namespace (/proc/locks leaves it
+// out), and a settings folder that another account swaps for a link or a mount of its own (where
+// it may also write to the folder above).
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
 // that every account may look into (set so whatever root's umask); /run/lock where that folder

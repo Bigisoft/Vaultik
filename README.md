@@ -642,11 +642,22 @@ folder (a USB stick mounted with umask 000, say), they may rename or remove the 
 a run of yours that holds it and an eject that makes it anew do not meet: your eject then counts the
 turn all accounts share in /run/lock as in use when it is held, and a run without its files in
 /run/user and /run/lock waits for that shared turn its whole wait (another account holding it can
-make the run give up), so that the run always holds a turn your eject sees. There another account
-can delay your runs and commands and keep your ejects refused, but cannot hide a run from them,
-except where your account cannot use the shared turn file at all (another account made it first,
-or only root may write to /run/lock) and a run holds the settings folder's file alone; and it can
-hide a command of yours without those files from an eject. Your runs wait for a run as root as
+make the run give up), so that the run always holds a turn your eject sees. As a run or command
+of yours may still hold only the file in the settings folder there (your account cannot use the
+shared turn file at all: another account made it first, or only root may write to /run/lock), your
+eject there is also refused while any other program of yours holds a lock on a file of the file
+system your settings folder is on (Linux shows these in /proc/locks, whatever the file is named
+now), and where Linux cannot tell (/proc/locks cannot be read, or not within 3 seconds, or the
+account of a program holding a lock there is hidden): so another account cannot hide a run or
+command of yours from your eject. The cost: such an eject is also refused while a run of yours for
+another drive from the same portable copy (or another program of yours) holds a lock on that
+stick. There another account can delay your runs and commands and keep your ejects refused; it can
+also make two runs of yours that meet only there share the drive's speed, and let a command of
+yours that starts while such an eject is under way go on beside it instead of waiting (the eject
+then fails while the command has files open on the drive, or the command finds the drive gone).
+Not seen: a program of yours in another container (another pid namespace), and a settings folder
+that another account replaces with a link or a mount of its own (where it may also write to the
+folder above). Your runs wait for a run as root as
 long as it runs (only the 5 minutes for another account while another account keeps /proc/locks
 too long to read in 3 seconds; an eject then counts the run as root as in use), also one that went
 on beside another run of yours, and also when another account made the shared file in /run/lock

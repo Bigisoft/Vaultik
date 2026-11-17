@@ -4829,6 +4829,76 @@ TEST_CASE("eject: a settings folder other accounts may write keeps the shared fi
     CHECK_FALSE(eject_busy());
 }
 
+TEST_CASE("eject: a run or claim holding only a renamed settings folder file is seen (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-renamed-");
+    const std::vector<fs::path> files = loose_folder_files(c);
+    const std::string uid = std::to_string(::geteuid());
+    const fs::path own_use =
+        fs::path("/run/lock") / ("vaultik-use-" + c.name + "." + uid + ".lock");
+    const fs::path shared_drive = fs::path("/run/lock") / ("vaultik-drive-" + c.name + ".lock");
+    const fs::path shared_use = fs::path("/run/lock") / ("vaultik-use-" + c.name + ".lock");
+    // Other accounts may write to the settings folder (a USB stick mounted with umask 000). A run
+    // and a command of the account (from cron: no runtime folder, and another account made the
+    // account's own names in /run/lock first) hold the settings folder's files; they hold no
+    // shared file either (here the shared files are removed once taken, as where another account
+    // made those names first or only root may write to /run/lock). Another account renames the
+    // settings folder's files away: an eject of the account makes them anew and finds them free,
+    // and must still be refused while the run or the command is under way.
+    REQUIRE(::chmod(c.settings.c_str(), 0777) == 0);
+    c.make_empty(0644);
+    std::ofstream(own_use).close();
+    REQUIRE(::chmod(own_use.c_str(), 0644) == 0);
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, c.settings, std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    {
+        OtherProcess run("lock", c.key, c.settings, c.tmp.path, {}, c.env);
+        REQUIRE(run.held());
+        REQUIRE(flock_taken(files[0]));
+        fs::remove(shared_drive);
+        fs::rename(files[0], files[0].string() + ".moved");
+        CHECK(eject_busy());
+        CHECK(fs::exists(files[0]));  // the eject made it anew
+        CHECK(fs::exists(shared_drive));
+        CHECK(run.release() == 0);
+        CHECK_FALSE(eject_busy());
+    }
+    {
+        OtherProcess claim("claim", c.key, c.settings, c.tmp.path, {}, c.env);
+        REQUIRE(claim.held());
+        REQUIRE(flock_taken(files[1]));
+        fs::remove(shared_use);
+        fs::rename(files[1], files[1].string() + ".moved");
+        {
+            const EjectHold hold(c.key, c.settings);
+            CHECK(hold.busy());
+        }
+        CHECK(fs::exists(files[1]));  // the eject made it anew
+        CHECK(claim.release() == 0);
+        const EjectHold hold(c.key, c.settings);
+        CHECK_FALSE(hold.busy());
+    }
+    // Where /proc/locks cannot be read, such an eject cannot tell and is refused (fail closed),
+    // also with its own files in /run/lock.
+    fs::remove(own_use);
+    fs::remove(c.own_drive);
+    testing::DriveLockHooks h = c.hooks();
+    h.proc_locks = (c.tmp.path / "missing").string();
+    testing::set_drive_lock_hooks(h);
+    CHECK(eject_busy());
+    CHECK(EjectHold(c.key, c.settings).busy());
+}
+
 TEST_CASE("drive lock: a command under its run inherits the drive on a settings folder other accounts may open (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");

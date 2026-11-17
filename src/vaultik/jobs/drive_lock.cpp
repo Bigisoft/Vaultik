@@ -529,7 +529,8 @@ int open_in_run_user(const std::string& name) {
 // flocks (see folder_refused); `loose`: other accounts may open that one too (see
 // open_account_files), so a run and a claim may pass it by after a while; `exposed`: other
 // accounts may write to the settings folder itself (see private_folder), so they may also rename
-// or remove that file, and a run and an eject that meet only there may then not meet at all.
+// or remove that file, and a run and an eject that meet only there may then not meet at all
+// (an eject of the account then also looks at /proc/locks, see own_flock_on).
 struct AccountFiles {
     std::vector<int> own;
     int folder = -1;
@@ -1576,6 +1577,53 @@ bool other_account_holds(int fd) {
     return seen;
 }
 
+// An account's eject where other accounts may write to its settings folder `dir` (see
+// AccountFiles): whether a process of this account other than this one holds a flock on any file
+// of that folder's file system, as /proc/locks shows. Another account may rename or remove the
+// settings folder's lock or claims file there while a run or command holds it (perhaps alone, see
+// the header), so that this eject made and took a new one: the name tells nothing, so every flock
+// of the account's on that file system counts (also one for another drive, or of another program:
+// the eject is then refused, fail closed). A folder that is not there (or cannot be opened):
+// the nearest folder above it that can, on whose file system a file renamed away from there
+// stays. Busy also where that cannot be told: no such folder can be looked at, /proc/locks cannot
+// be read or reading it was cut short (within the time of a look, see ScanBudget, as any account
+// can make it long), the device of the folder's mount cannot be told (then every flock of the
+// account's counts), or a holder's accounts cannot be read (a holder without a process, or one
+// hidden, as with hidepid). A holder in another pid namespace, which /proc/locks leaves out, is
+// not seen.
+bool own_flock_on(const std::string& dir) {
+    std::string at = dir;
+    int fd = ::open(at.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    while (fd < 0 && at.size() > 1) {
+        const std::size_t slash = at.find_last_of('/');
+        if (slash == std::string::npos) break;
+        at.resize(slash == 0 ? 1 : slash);
+        fd = ::open(at.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    }
+    if (fd < 0) return true;
+    LockFile id;
+    Mounts mounts;
+    const bool known = lock_file_of(fd, id, mounts);
+    ::close(fd);
+    if (!known) return true;
+    const ScanBudget budget;
+    bool readable = false;
+    const std::vector<HeldFlock> held = held_flocks(&readable, &budget);
+    if (!readable || !budget.in_time()) return true;
+    const auto me = static_cast<long long>(::geteuid());
+    for (const HeldFlock& f : held) {
+        if (f.pid == static_cast<long>(::getpid())) continue;
+        const bool on = !id.mount_known ||
+                        (f.dev_major == major(id.dev) && f.dev_minor == minor(id.dev)) ||
+                        (f.dev_major == id.mount_major && f.dev_minor == id.mount_minor);
+        if (!on) continue;
+        if (f.pid <= 0 || !budget.in_time()) return true;
+        const std::vector<long long> ids = accounts_of(f.pid);
+        if (ids.empty() || std::find(ids.begin(), ids.end(), me) != ids.end()) return true;
+    }
+    return false;
+}
+
 // Whether a process of root's (see root_process) holds the file of `fd` alone (as root's eject
 // holds the claims file); only root can make that so. /proc/locks is read within the time of a
 // look (see ScanBudget), as any account can make it long: cut short, it may be so (fail closed),
@@ -1971,8 +2019,11 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     // also where that cannot be told (fail closed). An account's eject: a run of its own may hold
     // its own file in /run/lock that this eject did not use (another account gave it a second
     // name), so that one counts as busy too (see own_held_elsewhere).
-    if (fail_closed &&
-        (root ? accounts_hold(name, false) != Use::free : own_held_elsewhere(name, {own, own2, own3, shared}))) {
+    // An account's eject where other accounts may write to its settings folder: also any flock
+    // of the account's on that folder's file system (see own_flock_on).
+    if (fail_closed && (root ? accounts_hold(name, false) != Use::free
+                             : own_held_elsewhere(name, {own, own2, own3, shared}) ||
+                                   (files.exposed && own_flock_on(lock_dir)))) {
         close_all();
         throw DriveBusy("another Vaultik run uses the backup drive");
     }
@@ -2295,8 +2346,13 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     // hold without the shared one (another account held that one when it started, or made it
     // first), also where that cannot be told (fail closed). Asked once root holds its own: a claim
     // that starts later waits for this eject.
-    if (root ? accounts_hold(name, false) != Use::free
-             : root_holds(mark, false, true) || own_held_elsewhere(name, {own, own2, own3, shared})) {
+    // And where other accounts may write to the settings folder, any flock of the account's on
+    // that folder's file system (see own_flock_on): a claim of the account may hold a settings
+    // folder's file there that another account renamed away, perhaps alone.
+    const bool own_busy = !root && (root_holds(mark, false, true) ||
+                                    own_held_elsewhere(name, {own, own2, own3, shared}) ||
+                                    (files.exposed && own_flock_on(lock_dir)));
+    if (root ? accounts_hold(name, false) != Use::free : own_busy) {
         busy_ = true;
         close_all();
         return;
