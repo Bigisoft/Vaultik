@@ -103,7 +103,10 @@
 // (another run or claim of root's may hold an earlier mark, which other accounts' ejects look at by
 // its name): then root's eject counts it as busy, and root's runs and claims go on as without a
 // mark. The limit: such a run without its runtime folder then takes turns only with the runs that
-// use the same settings folder. A file an earlier version made (which holds no name) gets its name
+// use the same settings folder, and in the same way a claim and an eject of that account (without
+// the runtime folder) see each other only when they use the same settings folder: an eject from a
+// portable copy, or one with VAULTIK_CONFIG_DIR set, does not see a command of the installed app
+// then, and may eject the drive under it. A file an earlier version made (which holds no name) gets its name
 // written into it by the first run, claim or eject of its owner that opens it while it has no
 // other name; one that gets another name before that is treated as above (an eject of its owner
 // still counts it as busy while it is held). Root does not look

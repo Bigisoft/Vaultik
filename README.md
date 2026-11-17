@@ -647,7 +647,10 @@ name it is opened by. Another account that makes the name of one of your turn fi
 link to another turn file of yours, therefore gains nothing: your run or command uses its turn file
 in the settings folder instead (as root, Vaultik removes such a name and makes its own, but not
 while a program holds that file: then an eject as root is refused). The limit there: a run of yours
-without a /run/user folder then takes turns only with the runs that use the same settings folder. A
+without a /run/user folder then takes turns only with the runs that use the same settings folder, and
+the same goes for ejects: an eject of yours without a /run/user folder then sees your commands only
+when they use the same settings folder (an eject from a portable copy, or with `VAULTIK_CONFIG_DIR`
+set, does not see a command of the installed app then, so it could eject the drive under it). A
 turn file an older version of Vaultik made (which holds no name) gets its name written into it the
 first time a run, command or eject of its owner opens it; one that gets a second name before that is
 treated as above (your eject still counts it while it is in use). A command started by a run counts a busy turn file of
