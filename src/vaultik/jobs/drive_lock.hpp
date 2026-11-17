@@ -60,8 +60,9 @@
 // cannot be used; every account can see it held in /proc/locks but none can take it): an account's
 // run waits for the shared lock for as long as that mark is held, then only the short while, and
 // while the mark is held it counts the shared lock as busy even when it is free (root's run may
-// have passed it by) or cannot be used at all (another account made the shared file first). The
-// claims (vaultik-use-<hash>.lock) work the same way with vaultik-use-<hash>.root.lock: an
+// have passed it by) or cannot be used at all (another account made the shared file first). Where
+// /proc/locks cannot be read within 3 seconds (any account can make it long), the run counts the
+// mark as not held, and an eject as held (fail closed). The claims (vaultik-use-<hash>.lock) work the same way with vaultik-use-<hash>.root.lock: an
 // account's claim waits only for an eject of its own or of root's, and its eject counts only the
 // claims of its own and of root's as busy. So another account can delay a run by kOtherAccountWait,
 // never stop it, can delay a command of an account by 2 seconds at most (a claim waits that long

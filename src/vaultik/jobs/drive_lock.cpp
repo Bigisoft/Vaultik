@@ -1087,12 +1087,21 @@ std::vector<LockFile> root_mark_files(const std::string& name, Mounts& mounts, b
 
 // Whether root holds its mark `name` (`write_only`: holds it alone, as an eject does); every
 // account can see in /proc/locks that it is held. False when that cannot be told. `eject`: asked
-// for an eject (see root_mark_files).
+// for an eject (see root_mark_files). For an eject and a run, /proc/locks is read within the time
+// of a look (see ScanBudget), as any account can make it long and a run asks again every 250 ms:
+// cut short, the mark counts as held for an eject (fail closed) and as not held for a run, which
+// then waits for root's run only as for another account's (kOtherAccountWait), so that no account
+// can keep it waiting longer that way. A claim waiting for root's eject (`write_only`) reads it
+// whole, as before: cut short, it would either let a command start while root's eject is under way
+// or let another account delay every command by the claim's whole wait (kEjectWait).
 bool root_holds(const std::string& name, bool write_only, bool eject) {
     Mounts mounts;
     const std::vector<LockFile> files = root_mark_files(name, mounts, eject);
     if (files.empty()) return false;
-    for (const HeldFlock& f : held_flocks())
+    const ScanBudget budget;
+    const std::vector<HeldFlock> held = held_flocks(nullptr, write_only ? nullptr : &budget);
+    if (!write_only && !budget.in_time()) return eject;
+    for (const HeldFlock& f : held)
         for (const LockFile& id : files)
             if (is_file(f, id) && (!write_only || f.write)) return true;
     return false;
@@ -1429,6 +1438,9 @@ enum class Holder {
 // the same inode on another device may be any file of any account (tmpfs inode numbers are easy to
 // match), so it never makes a parent; where the file's device cannot be told, such a line held by
 // a process above this one leaves no answer (unknown).
+// /proc/locks is read whole here, not within a look's time: cut short, the command would have to
+// either wait for its own run (another account could then keep it waiting the whole wait) or leave
+// it to the marker (which may then make it inherit a drive its run no longer holds).
 Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const std::string& mark, bool& unseen) {
     const std::vector<HeldFlock> held = held_flocks();
     Mounts mounts;
@@ -1518,12 +1530,17 @@ bool flock_held(int fd) {
 }
 
 // Whether a process of root's (see root_process) holds the file of `fd` alone (as root's eject
-// holds the claims file); only root can make that so.
+// holds the claims file); only root can make that so. /proc/locks is read within the time of a
+// look (see ScanBudget), as any account can make it long: cut short, it may be so (fail closed),
+// which costs a claim kRootLetGo once (see DriveClaim).
 bool root_holds_alone(int fd) {
     LockFile id;
     Mounts mounts;
     if (!lock_file_of(fd, id, mounts)) return false;
-    for (const HeldFlock& f : held_flocks())
+    const ScanBudget budget;
+    const std::vector<HeldFlock> held = held_flocks(nullptr, &budget);
+    if (!budget.in_time()) return true;
+    for (const HeldFlock& f : held)
         if (is_file(f, id) && f.write && root_process(f.pid)) return true;
     return false;
 }

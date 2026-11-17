@@ -624,7 +624,9 @@ and then goes on with a warning, a command waits for it at most 60 seconds (as f
 then goes on, and an eject counts it as in use: there another account can delay your runs and
 commands and keep your ejects refused, and two runs of yours that meet only there (one of them
 without a /run/user folder and without its file in /run/lock) take turns for those 5 minutes at
-most; and a run as root is waited for as long as it runs, also one
+most; and a run as root is waited for as long as it runs (only the 5 minutes for another account
+while another account keeps /proc/locks too long to read in 3 seconds; an eject then counts the run
+as root as in use), also one
 that went on beside another run of yours, and also when another account made the shared file in
 /run/lock first so that your account cannot use it (your eject then still
 counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other
