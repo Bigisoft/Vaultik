@@ -4577,6 +4577,20 @@ TEST_CASE("drive lock: root never makes its mark in /run/lock again while a proc
         }
         CHECK(inode(mark) == before);
         CHECK(earlier.release() == 0);
+        // Not held any more, but /proc/locks cannot be read whole (cut short at the look's time,
+        // as another account can make it long): kept all the same (fail closed).
+        hooks.scan_time = std::chrono::milliseconds(0);
+        testing::set_drive_lock_hooks(hooks);
+        if (kind == "drive") {
+            DriveLock run(key, settings, std::chrono::milliseconds(0));
+            CHECK(run.held());
+        } else {
+            const DriveClaim claim(key, settings);
+            CHECK(claim.held());
+        }
+        CHECK(inode(mark) == before);
+        hooks.scan_time = std::chrono::milliseconds(-1);
+        testing::set_drive_lock_hooks(hooks);
         // Not held any more: removed and made again, holding its name.
         if (kind == "drive") {
             DriveLock run(key, settings, std::chrono::milliseconds(0));

@@ -648,7 +648,9 @@ used only when it holds the name it is opened by (or, one an older version of Va
 nothing and has no other name). Another account that makes the name of one of your turn files first,
 as a link to another turn file of yours, therefore gains nothing: your run or command uses its turn
 file in the settings folder alone (as root, Vaultik removes such a name and makes its own, but not
-while a program holds that file: then an eject as root is refused). The limit there: a run of yours
+while a program holds that file, or while Linux cannot tell whether one does: then an eject as root
+is refused, and a run as root goes on without that mark meanwhile, so a run of yours waits for it
+only the 5 minutes for another account). The limit there: a run of yours
 without a /run/user folder then takes turns only with the runs that use the same settings folder,
 and the same goes for ejects: an eject of yours without a /run/user folder then sees your commands
 only when they use the same settings folder (an eject from a portable copy, or with

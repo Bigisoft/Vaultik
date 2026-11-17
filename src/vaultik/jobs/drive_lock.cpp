@@ -365,6 +365,11 @@ int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(int, c
             if (st.st_uid == ::geteuid()) (void)::fchmod(fd, mode);  // whatever the umask
             return fd;
         }
+        // Root keeps a mark of its own that it cannot use while a process may hold it: removing it
+        // would hide that holder (another run or claim of root's on an earlier mark) from the
+        // ejects of other accounts, which look at the mark by its name. The trade-off: this run or
+        // claim of root's goes on without a mark meanwhile (on the shared file), so an account's
+        // run does not wait the whole while for it; only where root's own folder cannot be used.
         const bool keep = root && regular && st.st_uid == 0 && flock_held(fd);
         ::close(fd);
         if (keep) {
@@ -1459,18 +1464,18 @@ Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const st
 }
 
 // Whether /proc/locks shows a flock held on the file of `fd`, by any process; also when that
-// cannot be told (fail closed).
+// cannot be told (fail closed): /proc/locks cannot be read, reading it was cut short (within the
+// time of a look, see ScanBudget, as any account can make it long), or a line may be about the
+// file (Match::maybe).
 bool flock_held(int fd) {
     LockFile id;
     Mounts mounts;
     if (!lock_file_of(fd, id, mounts)) return true;
+    const ScanBudget budget;
     bool readable = false;
-    const std::vector<HeldFlock> held = held_flocks(&readable);
-    if (!readable) return true;
-    return std::any_of(held.begin(), held.end(), [&](const HeldFlock& f) {
-        const Match m = match(f, id);
-        return m == Match::exact || m == Match::mount;
-    });
+    const std::vector<HeldFlock> held = held_flocks(&readable, &budget);
+    if (!readable || !budget.in_time()) return true;
+    return std::any_of(held.begin(), held.end(), [&](const HeldFlock& f) { return match(f, id) != Match::no; });
 }
 
 // Whether a process of root's (see root_process) holds the file of `fd` alone (as root's eject

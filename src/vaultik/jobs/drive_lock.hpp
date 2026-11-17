@@ -107,8 +107,10 @@
 // claim waits) or of root's gains nothing: the account has the file in its settings folder alone
 // then, root removes the name and makes its own mark, but never while a process holds the file
 // there (another run or claim of root's may hold an earlier mark, which other accounts' ejects look
-// at by its name): then root's eject counts it as busy, and root's runs and claims go on as without
-// a mark. The limit: such a run without its runtime folder then takes turns only with the runs that
+// at by its name), or while /proc/locks cannot tell (it cannot be read, or reading it was cut short
+// at the look's 3 seconds): then root's eject counts it as busy, and root's runs and claims go on
+// as without a mark (so an account's run waits for such a run of root's only kOtherAccountWait).
+// The limit: such a run without its runtime folder then takes turns only with the runs that
 // use the same settings folder, and in the same way a claim and an eject of that account (without
 // the runtime folder) see each other only when they use the same settings folder: an eject from a
 // portable copy, or one with VAULTIK_CONFIG_DIR set, does not see a command of the installed app
