@@ -1730,6 +1730,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             }
             if (errno != EWOULDBLOCK && errno != EINTR) {
                 close_all();
+                if (fail_closed) throw DriveBusy("the backup drive's lock cannot be checked");
                 return false;
             }
             bool taken = false;
@@ -2095,19 +2096,20 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
                 *fd = -1;
                 continue;
             }
-            busy_ = errno == EWOULDBLOCK;
+            busy_ = true;  // held by a claim or eject, or it cannot be told (fail closed)
             close_all();
             return;
         }
     }
     if (shared >= 0 && ::flock(shared, LOCK_EX | LOCK_NB) != 0) {
         // Root: a claim of any account (fail closed). An account: a claim or eject of root's while
-        // root's mark is held, else one of another account, passed by.
+        // root's mark is held, else one of another account, passed by (the account's own files are
+        // still looked at below, also when this eject holds none).
         const bool busy = errno == EWOULDBLOCK && (root || root_holds(mark, false, true));
         ::close(shared);
         shared = -1;
-        if (busy || own < 0) {
-            busy_ = busy;
+        if (busy) {
+            busy_ = true;
             close_all();
             return;
         }

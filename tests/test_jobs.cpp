@@ -4463,6 +4463,43 @@ TEST_CASE("eject: an own file the eject does not hold is busy where /proc/locks 
     CHECK_FALSE(claimed());
 }
 
+TEST_CASE("eject: an eject without own files of its own still counts the account's held ones (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-no-own-");
+    // An eject that has no own file to hold (its settings folder cannot be had, here a path below a
+    // file, and its own names in /run/lock hold other names, so it does not use them) while another
+    // account holds the shared files: it passes those by, but must still count a run or command of
+    // the account that holds an own file of it (taken before that file got another name).
+    std::ofstream(c.tmp.path / "file").close();
+    const std::string settings = os::join((c.tmp.path / "file").string(), "settings");
+    for (const std::string kind : {"drive", "use"}) {
+        const std::string uid = std::to_string(::geteuid());
+        const fs::path own = fs::path("/run/lock") / ("vaultik-" + kind + "-" + c.name + "." + uid + ".lock");
+        const fs::path shared = fs::path("/run/lock") / ("vaultik-" + kind + "-" + c.name + ".lock");
+        std::ofstream(own, std::ios::binary) << "vaultik-drive-0123456789abcdef0123456789abcdef.lock";
+        REQUIRE(::chmod(own.c_str(), 0600) == 0);
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files(shared.string()));
+        REQUIRE(other.held());
+        const auto busy = [&] {
+            if (kind == "use") return EjectHold(c.key, settings).busy();
+            try {
+                DriveLock lock(c.key, settings, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject);
+            } catch (const DriveBusy&) {
+                return true;
+            }
+            return false;
+        };
+        CAPTURE(kind);
+        CHECK_FALSE(busy());
+        OtherProcess held("flock-sh", {}, {}, c.tmp.path, {}, hold_files(own.string()));
+        REQUIRE(held.held());
+        CHECK(busy());
+    }
+}
+
 TEST_CASE("drive lock: root never makes its mark in /run/lock again while a process holds the one there (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("root test not run: needs root (runs as root and as nobody)");
