@@ -991,6 +991,9 @@ bool open_files_of(long pid, long long account, ScanBudget& budget, std::vector<
 // The files named `name` that process `pid` (of account `account`) has open (root only; see
 // open_files_of) that the account owns and no other account may open (as open_in_dir and
 // open_in_run_user make them): its drive or claims file in its settings folder or runtime folder.
+// For an eject (`eject`), every regular file of that name, whoever owns it and whoever may open it
+// (fail closed: a run or command of the account may hold one alone in a settings folder that
+// other accounts may open, as a portable copy's on FAT or exFAT).
 // Each file is looked at only once its name matches, so a process with many files open costs a
 // readlink for each, within the account's budget (see ScanBudget; `unsure` is set when it runs
 // out). One on a FUSE mount (see Mounts) is not looked at, which /proc/<pid>/fdinfo tells without
@@ -1001,7 +1004,7 @@ bool open_files_of(long pid, long long account, ScanBudget& budget, std::vector<
 // than fdinfo said leaves `unsure` set too; the file system of these files is never asked about
 // (see with_mount).
 std::vector<LockFile> private_files_of(long pid, long long account, const std::string& name, Mounts& mounts,
-                                       ScanBudget& budget, bool& unsure) {
+                                       ScanBudget& budget, bool& unsure, bool eject = false) {
     std::vector<LockFile> files;
     const std::string dir = "/proc/" + std::to_string(pid) + "/fd";
     DIR* d = ::opendir(dir.c_str());
@@ -1045,7 +1048,7 @@ std::vector<LockFile> private_files_of(long pid, long long account, const std::s
         if (table->fuse(mount_id)) continue;
         LockFile f;
         if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f) || !S_ISREG(f.mode) ||
-            static_cast<long long>(f.uid) != account || (f.mode & 077) != 0)
+            (!eject && (static_cast<long long>(f.uid) != account || (f.mode & 077) != 0)))
             continue;
         if (f.has_mount_id && f.mount_id != mount_id) {
             unsure = true;
@@ -1285,12 +1288,13 @@ std::vector<LockFile> accounts_own_files(const std::string& name, Mounts& mounts
 // account without its runtime folder (started by cron, without a login) holds only the file in its
 // settings folder, which root cannot find by name: so every process that /proc/locks shows holding
 // a flock is looked into as well (/proc/<pid>/fd), and one holding a file `name` there that its
-// account owns and no other account may open (see private_files_of) counts as busy too, within
-// each account's budget (see ScanBudget; an account over it is unsure). The whole look, from the
-// names in /run/lock and /proc/locks on, stays within the budget's time (over it is unsure). A
-// line without a process (pid 0, which mainline Linux never shows: it leaves such a holder out)
-// cannot be looked into, and is unsure too. Never this process, whose own locks and claims are
-// counted apart.
+// account owns and no other account may open (for an eject, any file of that name: one in a
+// settings folder that other accounts may open too; see private_files_of) counts as busy too,
+// within each account's budget (see ScanBudget; an account over it is unsure). The whole look,
+// from the names in /run/lock and /proc/locks on, stays within the budget's time (over it is
+// unsure). A line without a process (pid 0, which mainline Linux never shows: it leaves such a
+// holder out) cannot be looked into, and is unsure too. Never this process, whose own locks and
+// claims are counted apart.
 enum class Use { free, busy, unsure };
 
 Use accounts_hold(const std::string& name, bool write_only) {
@@ -1329,7 +1333,9 @@ Use accounts_hold(const std::string& name, bool write_only) {
             continue;
         }
         bool maybe = false;
-        for (const LockFile& f : private_files_of(pid, account, name, mounts, budget, maybe)) {
+        const std::vector<LockFile> named =
+            private_files_of(pid, account, name, mounts, budget, maybe, !write_only);
+        for (const LockFile& f : named) {
             if (!budget.in_time()) {
                 maybe = true;
                 break;

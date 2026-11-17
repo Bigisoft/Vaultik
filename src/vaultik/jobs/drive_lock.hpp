@@ -130,7 +130,12 @@
 // tell. As another account may make an account's file in /run/lock first, so that a run of it
 // without its runtime folder holds only the file in its settings folder, root also looks into each
 // process that /proc/locks shows holding a flock, and counts one that holds a file of the drive's
-// name there (/proc/<pid>/fd) that its account owns and no other account may open; in one look at
+// name there (/proc/<pid>/fd) that its account owns and no other account may open (for root's
+// eject, any file of that name, whoever owns it and may open it, so that a run or command from a
+// portable copy on FAT or exFAT that holds only that file is seen too; root's claims do not wait
+// for such a one, as another account could hold it for good). A file there that another account
+// renamed or removed (where it may write to that settings folder) cannot be told by its name:
+// root's eject does not see a run or command that holds only such a file; in one look at
 // most 256 processes and 65536 descriptors of each account, and 3 seconds in all, so that no
 // account can keep it looking for long: an account over that (or a look over its time) cannot be
 // told, so root's eject fails closed and root's claim does not wait for it. A flock held in another

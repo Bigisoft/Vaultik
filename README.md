@@ -682,7 +682,10 @@ as root also counts the runs and commands of every account that another account 
 the turn all accounts share (by holding or making its file in /run/lock first), through their own
 files in /run/lock and /run/user, and through the turn file in the settings folder that a program
 holding a turn has open (so also a run without a /run/user folder whose file in /run/lock another
-account made first), and is refused where Linux cannot tell whether those are in use. A program
+account made first, and one from a portable copy whose turn file other accounts may open), and is
+refused where Linux cannot tell whether those are in use. A turn file that another account renamed
+or removed in a settings folder it may write to cannot be told by its name, so an eject as root
+does not see a run or command of yours that holds only such a file. A program
 in another container that shares /run/lock cannot be seen holding a turn file at all, so an eject
 as root also tries the turn files it finds in /run/lock and /run/user for a moment itself (never
 waiting) and counts one it cannot take, or cannot try, as in use; this needs Linux 5.8 or later
