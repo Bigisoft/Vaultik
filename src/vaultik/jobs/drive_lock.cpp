@@ -395,16 +395,18 @@ bool private_by_name(uid_t uid, mode_t mode, std::uint64_t links, uid_t owner) {
 }
 
 // Whether the file of `fd` (`st` as fstat gives it), found as `name` in /run/lock, is that lock
-// file: one with no other name, or one that holds `name` as open_in_run_lock writes it into each file
-// it makes (only the file's owner, or root, can write it). Where fs.protected_hardlinks is off,
-// another account may make a name its owner has not used yet first as a hard link to another file
-// of the owner's (another lock file, held for another drive or for a run while a claim waits; for
-// root, any file of root's on that file system, such as /run/xtables.lock), which then holds
-// another name or nothing; a hard link another account adds to the real file under a name of its
-// own keeps it usable. Read through `fd` (a regular file, never opened through a link; see
-// open_in_run_lock), at most one byte more than `name`.
+// file: one that holds `name` as open_in_run_lock writes it into each file it makes (only the
+// file's owner, or root, can write it), or an empty one with no other name (an earlier version's,
+// which open_in_run_lock gives its name). Where fs.protected_hardlinks is off, another account may
+// make a name its owner has not used yet first as a hard link to another file of the owner's
+// (another lock file, held for another drive or for a run while a claim waits; for root, any file
+// of root's on that file system, such as /run/xtables.lock), which then holds another name or
+// nothing; so does such a file after its owner or root removed its own name while that link was
+// there, which then has one name, but not its own. A hard link another account adds to the real
+// file under a name of its own keeps it usable. Read through `fd` (a regular file, never opened
+// through a link; see open_in_run_lock), at most one byte more than `name`.
 bool named(int fd, const struct stat& st, const std::string& name) {
-    if (st.st_nlink == 1) return true;
+    if (st.st_nlink == 1 && st.st_size == 0) return true;
     char text[256];
     if (name.size() >= sizeof text) return false;
     const ssize_t n = ::pread(fd, text, name.size() + 1, 0);

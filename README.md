@@ -635,27 +635,28 @@ where statx is allowed (older kernels, or containers whose seccomp filter refuse
 programs in the same container), and such a program holding only the turn file in its settings
 folder stays unseen. Where Linux lets an account make hard links to other accounts' files
 (`fs.protected_hardlinks` off), another account may link a turn file of yours or root's under
-another name; an eject still counts that file (it is refused rather than run beside it; your
-eject counts your own turn file in /run/lock while another program holds it, also when it has a
-second name), while a
-command as root, or a run or command of yours waiting for root's turn, counts only a turn file no
-other account may open and that has no other name. Your runs keep using their own turn file in
-/run/lock when another account gives it a second name, so they still take turns: each turn file
-Vaultik makes there holds its own name from the moment it is there (where the name cannot be written,
-as on a full /run/lock, the turn file in the settings folder is used instead), and one with several names is used only when it holds the
-name it is opened by. Another account that makes the name of one of your turn files first, as a
-link to another turn file of yours, therefore gains nothing: your run or command uses its turn file
-in the settings folder instead (as root, Vaultik removes such a name and makes its own, but not
+another name; an eject still counts that file (it is refused rather than run beside it; your eject
+counts your own turn file in /run/lock while another program holds it, also when it has a second
+name), while a command as root, or a run or command of yours waiting for root's turn, counts only a
+turn file no other account may open and that has no other name. Your runs keep using their own turn
+file in /run/lock when another account gives it a second name, so they still take turns: each turn
+file Vaultik makes there holds its own name from the moment it is there (where the name cannot be
+written, as on a full /run/lock, the turn file in the settings folder is used instead), and one is
+used only when it holds the name it is opened by (or, one an older version of Vaultik made, holds
+nothing and has no other name). Another account that makes the name of one of your turn files first,
+as a link to another turn file of yours, therefore gains nothing: your run or command uses its turn
+file in the settings folder instead (as root, Vaultik removes such a name and makes its own, but not
 while a program holds that file: then an eject as root is refused). The limit there: a run of yours
-without a /run/user folder then takes turns only with the runs that use the same settings folder, and
-the same goes for ejects: an eject of yours without a /run/user folder then sees your commands only
-when they use the same settings folder (an eject from a portable copy, or with `VAULTIK_CONFIG_DIR`
-set, does not see a command of the installed app then, so it could eject the drive under it). A
-turn file an older version of Vaultik made (which holds no name) gets its name written into it the
-first time a run, command or eject of its owner opens it; one that gets a second name before that is
-treated as above (your eject still counts it while it is in use). A command started by a run counts a busy turn file of
-its own as the run's only when that file has no other name; otherwise the drives the run names in
-`VAULTIK_HELD_DRIVES` tell (never for an eject). So that no account can keep an eject or command
+without a /run/user folder then takes turns only with the runs that use the same settings folder,
+and the same goes for ejects: an eject of yours without a /run/user folder then sees your commands
+only when they use the same settings folder (an eject from a portable copy, or with
+`VAULTIK_CONFIG_DIR` set, does not see a command of the installed app then, so it could eject the
+drive under it). A turn file an older version of Vaultik made (which holds no name) gets its name
+written into it the first time a run, command or eject of its owner opens it; one that gets a second
+name before that is treated as above (your eject still counts it while it is in use). A command
+started by a run counts a busy turn file of its own as the run's only when that file has no other
+name; otherwise the drives the run names in `VAULTIK_HELD_DRIVES` tell (never for an eject). So that
+no account can keep an eject or command
 as root looking for long, it looks into at most 256 programs and 65536 open files
 of each account (and 3 seconds in all); an account with more counts as in use for an eject as root,
 and a command as root does not wait for it. An eject or command as root does not look at such

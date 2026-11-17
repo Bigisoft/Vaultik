@@ -4131,6 +4131,45 @@ TEST_CASE("drive lock: an own lock file that holds no name gets it on first use,
     }
 }
 
+TEST_CASE("drive lock: an own lock file that holds another name is never used, whatever its links (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-other-name-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string uid = std::to_string(::geteuid());
+    const fs::path own_drive = fs::path("/run/lock") / ("vaultik-drive-" + name + "." + uid + ".lock");
+    struct Cleanup {
+        std::string name;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const std::string& f : run_lock_names(name)) fs::remove(fs::path("/run/lock") / f, ec);
+        }
+    } cleanup{name};
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(-1), {}, (tmp.path / "no-run-user").string()});
+    // Another account linked the account's own name for this drive to another lock file of the
+    // account's (where fs.protected_hardlinks is off), and the account (or root) then removed that
+    // file's own name: the file has one name again, but holds the other one. A run does not use it
+    // (it uses the settings folder), so it never holds a file that another drive's runs use.
+    {
+        std::ofstream out(own_drive, std::ios::binary);
+        out << "vaultik-drive-0123456789abcdef0123456789abcdef." << uid << ".lock";
+    }
+    REQUIRE(::chmod(own_drive.c_str(), 0600) == 0);
+    {
+        DriveLock run(key, os::join(tmp.dir(), "settings"), std::chrono::milliseconds(0));
+        CHECK(run.held());
+        const int fd = ::open(own_drive.c_str(), O_RDONLY | O_CLOEXEC);
+        REQUIRE(fd >= 0);
+        CHECK(::flock(fd, LOCK_EX | LOCK_NB) == 0);
+        ::close(fd);
+    }
+}
+
 TEST_CASE("drive lock: root never makes its mark in /run/lock again while a process holds the one there (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("root test not run: needs root (runs as root and as nobody)");

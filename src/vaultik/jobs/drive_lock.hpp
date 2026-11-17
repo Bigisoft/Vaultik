@@ -94,21 +94,22 @@
 // keeps using its own file in /run/lock (root's mark there too) when another account gives it
 // another name, so the runs of an account still take turns: each file Vaultik makes in /run/lock
 // holds its own name from the moment that name is there (written first, then linked under that
-// name; where it cannot be written whole, as on a full /run/lock, no file is made there), and an own file or root's mark with more than one name is used only when it
-// holds the name it is opened by (only its owner or root can write it). Where
+// name; where it cannot be written whole, as on a full /run/lock, no file is made there), and an
+// own file or root's mark is used only when it holds the name it is opened by (only its owner or
+// root can write it), or holds nothing and has no other name (an earlier version's). Where
 // fs.protected_hardlinks is off, another account that makes such a name first as a hard link to
 // another file of the account's (another lock file, held for another drive or by a run while a
-// claim waits) or of root's gains nothing: the account uses the file in its settings folder instead,
-// root removes the name and makes its own mark, but never while a process holds the file there
-// (another run or claim of root's may hold an earlier mark, which other accounts' ejects look at by
-// its name): then root's eject counts it as busy, and root's runs and claims go on as without a
-// mark. The limit: such a run without its runtime folder then takes turns only with the runs that
+// claim waits) or of root's gains nothing: the account uses the file in its settings folder
+// instead, root removes the name and makes its own mark, but never while a process holds the file
+// there (another run or claim of root's may hold an earlier mark, which other accounts' ejects look
+// at by its name): then root's eject counts it as busy, and root's runs and claims go on as without
+// a mark. The limit: such a run without its runtime folder then takes turns only with the runs that
 // use the same settings folder, and in the same way a claim and an eject of that account (without
 // the runtime folder) see each other only when they use the same settings folder: an eject from a
 // portable copy, or one with VAULTIK_CONFIG_DIR set, does not see a command of the installed app
-// then, and may eject the drive under it. A file an earlier version made (which holds no name) gets its name
-// written into it by the first run, claim or eject of its owner that opens it while it has no
-// other name; one that gets another name before that is treated as above (an eject of its owner
+// then, and may eject the drive under it. A file an earlier version made (which holds no name) gets
+// its name written into it by the first run, claim or eject of its owner that opens it while it has
+// no other name; one that gets another name before that is treated as above (an eject of its owner
 // still counts it as busy while it is held). Root does not look
 // at a runtime folder, or a file, on a FUSE mount that its mount table shows (another account's
 // FUSE program, mounted with allow_other, could keep it waiting for as long as it likes), so such a
