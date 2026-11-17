@@ -32,6 +32,8 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <fstream>
 #include <sstream>
 #endif
@@ -283,13 +285,40 @@ int open_unmounted(const std::string& path, int flags) {
     return fd;
 }
 
+// The prefix of the names make_named gives new files in /run/lock before they are lock files.
+constexpr char kNewPrefix[] = ".vaultik-new-";
+
+// Removes this account's files of make_named that a process killed between making one and removing
+// its name left in /run/lock: only regular files this account owns (looked at by name in the
+// folder, never through a link) that were last changed more than a minute ago (another process
+// may be making one now), each removed by its name in the folder. Another account cannot remove
+// or replace a file of this account's in sticky /run/lock. At most the first 4096 names there are
+// looked at, as any account can fill /run/lock with names.
+void remove_stale_new_files() {
+    DIR* d = ::opendir("/run/lock");
+    if (d == nullptr) return;
+    const std::time_t old = std::time(nullptr) - 60;
+    int left = 4096;
+    while (const dirent* e = ::readdir(d)) {
+        if (--left < 0) break;
+        if (std::strncmp(e->d_name, kNewPrefix, sizeof kNewPrefix - 1) != 0) continue;
+        struct stat st{};
+        if (::fstatat(::dirfd(d), e->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(st.st_mode) &&
+            st.st_uid == ::geteuid() && st.st_mtime < old)
+            (void)::unlinkat(::dirfd(d), e->d_name, 0);
+    }
+    ::closedir(d);
+}
+
 // Makes the file `path` (`name` in /run/lock) with `mode`, holding its name (see named) from the
 // moment that name is there: the name is written into a new file with a random name of its own
 // first, which is then linked as `path` (never over a file there) and its own name removed, so no
 // lock name ever points to a file without its name in it. -1 with errno otherwise (EEXIST: another
 // run made `path` meanwhile); a file whose name could not be written whole (a full /run/lock,
-// which another account may fill) is removed again.
+// which another account may fill) is removed again. A process killed in between leaves its new
+// file behind, which the next one this account makes removes (see remove_stale_new_files).
 int make_named(const std::string& path, const std::string& name, mode_t mode) {
+    remove_stale_new_files();
     std::uint8_t rnd[8];
     try {
         random_bytes(rnd);
@@ -297,7 +326,7 @@ int make_named(const std::string& path, const std::string& name, mode_t mode) {
         errno = EIO;
         return -1;
     }
-    const std::string temp = "/run/lock/.vaultik-new-" + to_hex(ByteSpan(rnd, sizeof rnd));
+    const std::string temp = std::string("/run/lock/") + kNewPrefix + to_hex(ByteSpan(rnd, sizeof rnd));
     // Writable, to write its name into it; flock needs no more.
     const int fd = ::open(temp.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, mode);
     if (fd < 0) return -1;

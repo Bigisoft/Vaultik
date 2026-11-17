@@ -3974,7 +3974,7 @@ TEST_CASE("drive lock: a lock file whose name cannot be written into it leaves n
         CHECK_FALSE(eject.busy());
     }
     CHECK(run_lock_names(name).empty());
-    CHECK(own_new_files() == new_files);
+    CHECK(own_new_files() <= new_files);
     // Written whole, each file in /run/lock holds its own name from the start.
     hooks.short_name_write = false;
     testing::set_drive_lock_hooks(hooks);
@@ -3987,7 +3987,55 @@ TEST_CASE("drive lock: a lock file whose name cannot be written into it leaves n
     const std::vector<std::string> names = run_lock_names(name);
     CHECK(names.size() == 4u);  // the shared files and own ones (root: its marks)
     for (const std::string& f : names) CHECK(file_text(fs::path("/run/lock") / f) == f);
-    CHECK(own_new_files() == new_files);
+    CHECK(own_new_files() <= new_files);
+}
+
+TEST_CASE("drive lock: a new lock file in /run/lock clears this account's stale unfinished ones (Linux)") {
+    if (::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-stale-new-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const fs::path stale = fs::path("/run/lock") / (".vaultik-new-" + name + "-stale");
+    const fs::path fresh = fs::path("/run/lock") / (".vaultik-new-" + name + "-fresh");
+    const fs::path link = fs::path("/run/lock") / (".vaultik-new-" + name + "-link");
+    const fs::path target = tmp.path / "target";
+    struct Cleanup {
+        std::string name;
+        std::vector<fs::path> files;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const fs::path& f : files) fs::remove(f, ec);
+            for (const std::string& f : run_lock_names(name)) fs::remove(fs::path("/run/lock") / f, ec);
+        }
+    } cleanup{name, {stale, fresh, link}};
+    // Files a process of this account left when it was killed while making a lock file (see
+    // make_named): one older than a minute, one just made (another process may be making it now),
+    // and a link of that kind of name to a file of the test's, which is never followed.
+    std::ofstream(target).close();
+    for (const fs::path& f : {stale, fresh}) std::ofstream(f).close();
+    REQUIRE(::symlink(target.c_str(), link.c_str()) == 0);
+    struct timespec old[2] = {{::time(nullptr) - 120, 0}, {::time(nullptr) - 120, 0}};
+    REQUIRE(::utimensat(AT_FDCWD, stale.c_str(), old, 0) == 0);
+    REQUIRE(::utimensat(AT_FDCWD, link.c_str(), old, AT_SYMLINK_NOFOLLOW) == 0);
+    // Without a runtime folder (and, root, its own folder), so that a new file is made in /run/lock.
+    std::ofstream(tmp.path / "file").close();
+    testing::DriveLockHooks hooks;
+    hooks.run_user_dir = (tmp.path / "no-run-user").string();
+    hooks.root_dir = (tmp.path / "file" / "marks").string();
+    testing::set_drive_lock_hooks(hooks);
+    {
+        DriveLock run(key, os::join(tmp.dir(), "settings"), std::chrono::milliseconds(0));
+        CHECK(run.held());
+    }
+    CHECK_FALSE(fs::exists(stale));
+    CHECK(fs::exists(fresh));
+    CHECK(fs::is_symlink(link));
+    CHECK(fs::exists(target));
 }
 
 TEST_CASE("eject: an own lock file held by a run or claim stays busy for the account's eject once it has another name (Linux)") {
