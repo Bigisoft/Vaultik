@@ -2564,11 +2564,13 @@ std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::s
         warning("another account (or a run this one cannot tell apart from one) kept the backup "
                 "drive's turn for " +
                 std::to_string(jobs::kOtherAccountWait.count()) +
-                " minutes; this run goes on without waiting for it (both then share the drive's speed)");
-    if (lock->gave_up_waiting())
-        warning("another run kept the backup drive's turn for " + std::to_string(jobs::kDriveLockWait.count()) +
-                " hours; this job with administrator rights goes on without waiting for it (both then share the "
+                " minutes; this run goes on without waiting for it (both then share the "
                 "drive's speed)");
+    if (lock->gave_up_waiting())
+        warning("another run kept the backup drive's turn for " +
+                std::to_string(jobs::kDriveLockWait.count()) +
+                " hours; this job with administrator rights goes on without waiting for it (both "
+                "then share the drive's speed)");
     if (lock->not_shared()) {
         // Not a warning: the run is as it was before runs shared their turn.
         const std::string msg = "could not share this drive's turn with another account's runs";
