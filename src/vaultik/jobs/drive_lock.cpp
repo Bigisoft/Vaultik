@@ -525,10 +525,12 @@ int open_in_run_user(const std::string& name) {
 // accounts share (when it can be used), which root's runs and those of other accounts may hold too
 // and which is waited for only a short while. Any may be missing (-1). `folder` is the one of `own`
 // in the settings folder (always the last), which is let go of where its file system refuses
-// flocks (see folder_refused).
+// flocks (see folder_refused); `loose`: other accounts may open that one too (see
+// open_account_files), so a run and a claim wait for it only a short while.
 struct AccountFiles {
     std::vector<int> own;
     int folder = -1;
+    bool loose = false;
     int shared = -1;
 };
 
@@ -545,22 +547,20 @@ struct AccountFiles {
 // so that no file is made or an earlier version's file gets no name, make the name first and
 // remove it again), so two processes of the account may find it usable one and not the other,
 // and they must still meet: those that use the same settings folder always do, there, whatever
-// happens in /run/lock (a distribution whose /run/lock only root may write to too). Always only
-// where that file is the account's and no other account may open it (see private_file): one other
-// accounts may open (a settings folder on FAT, exFAT, NTFS or CIFS, as a portable copy's on a USB
-// stick) another account could hold for good, and stop the account's runs; such a one is taken
-// only where the account's file in /run/lock cannot be used, as before. Every process takes them
-// in this order, so none waits for another that waits for it.
+// happens in /run/lock (a distribution whose /run/lock only root may write to too). Also where
+// other accounts may open that file (`loose`; see private_file): a settings folder on FAT, exFAT,
+// NTFS or CIFS, as a portable copy's on a USB stick. Another account could hold such a one for
+// good, so a run waits for it only a short while (kOtherAccountWait, as for the shared file) and
+// then goes on without it, and a claim at most its wait for an eject (kEjectWait); an eject still
+// counts it as busy (fail closed). Every process takes them in this order, so none waits for
+// another that waits for it.
 AccountFiles open_account_files(const std::string& name, const std::string& lock_dir) {
     AccountFiles f;
-    bool in_run_lock = false;
     if (!hooks().own_in_folder) {
         if (const int fd = open_in_run_user(name); fd >= 0) f.own.push_back(fd);
         const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
-        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0) {
+        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0)
             f.own.push_back(fd);
-            in_run_lock = true;
-        }
     }
     if (const int fd = open_in_dir(name, lock_dir); fd >= 0) {
         struct stat st{};
@@ -569,11 +569,12 @@ AccountFiles open_account_files(const std::string& name, const std::string& lock
                               return ::fstat(other, &o) == 0 && o.st_dev == st.st_dev && o.st_ino == st.st_ino;
                           });
         // Taken once where the settings folder is the runtime folder (VAULTIK_CONFIG_DIR).
-        if (same || (in_run_lock && !private_file(st.st_uid, st.st_mode, ::geteuid()))) {
+        if (same) {
             ::close(fd);
         } else {
             f.own.push_back(fd);
             f.folder = fd;
+            f.loose = !private_file(st.st_uid, st.st_mode, ::geteuid());
         }
     }
     f.shared = open_in_run_lock(name, 0600, own_or_roots);
@@ -1760,9 +1761,17 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         own = own2 = own3 = shared = -1;
     };
     if (own < 0 && shared < 0 && root) return;
+    // The end of the short wait for a lock another account may hold (see other_account_wait),
+    // from the first such wait on (the settings folder's file where other accounts may open it,
+    // then the shared one), so that the two together delay a run no longer than one.
+    const auto bound = other_account_wait();
+    std::chrono::steady_clock::time_point other_deadline{};
     // Waits for `fd` (an own lock) and takes it; false when this returns without the lock (all
     // closed). The settings folder's file where its file system refuses flocks: let go of (-1).
+    // That file where other accounts may open it (see open_account_files): a run waits for it only
+    // until the short wait ends and then goes on without it (-1); an eject counts it as busy.
     const auto take_own = [&](int& fd) {
+        const bool loose = fd == files.folder && files.loose && !fail_closed;
         for (;;) {
             if (::flock(fd, LOCK_EX | LOCK_NB) == 0) return true;
             if (folder_refused(fd, files)) {
@@ -1782,6 +1791,17 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
                 close_all();
                 parent_busy();
                 return false;
+            }
+            if (loose) {
+                const auto now = std::chrono::steady_clock::now();
+                if (other_deadline == std::chrono::steady_clock::time_point{})
+                    other_deadline = std::min(deadline, now + bound);
+                if (now >= other_deadline && other_deadline < deadline) {
+                    ::close(fd);
+                    fd = -1;
+                    skipped_ = true;
+                    return true;
+                }
             }
             try {
                 if (!waiting()) {
@@ -1807,8 +1827,8 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         // free: a run of root's that passed by an account's run on it is still under way. So does
         // an account that cannot use the shared file at all (another account made it first): it
         // still waits for root's run, and its eject fails closed while root's mark is held.
-        const auto bound = other_account_wait();
-        auto other_deadline = std::min(deadline, std::chrono::steady_clock::now() + bound);
+        if (other_deadline == std::chrono::steady_clock::time_point{})
+            other_deadline = std::min(deadline, std::chrono::steady_clock::now() + bound);
         for (;;) {
             // Asked once a turn: root's run may end between two looks, which would then disagree
             // (an eject of an account's would pass by a lock it just saw root's run hold).
@@ -2000,8 +2020,12 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         };
+        // An eject kept one for the whole wait: no claim, except where that is the settings
+        // folder's file that other accounts may open (see open_account_files), which another
+        // account may hold for good: the claim then goes on with the others.
         for (int* fd : {&own, &own2, &own3}) {
-            if (*fd >= 0 && !take(*fd, false)) {  // an eject kept it for the whole wait
+            const bool loose = *fd >= 0 && *fd == files.folder && files.loose;
+            if (*fd >= 0 && !take(*fd, false) && !loose) {
                 for (const int other : {own, own2, own3, shared})
                     if (other >= 0) ::close(other);
                 return;

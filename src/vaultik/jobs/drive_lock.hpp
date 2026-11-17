@@ -39,15 +39,21 @@
 // when it is a folder of the account's alone, where no other account can make a file first, and
 // vaultik-drive-<hash>.<uid>.lock in /run/lock, used when it is a file the account owns; both where
 // both can be used, so that a run started outside a login, without the runtime folder, takes turns
-// too; and always the file in the given folder as well (where no other account may open it), after
-// those, as whether the account can use its file in /run/lock depends on what other accounts do
-// there (see below): its runs, claims and ejects that use the same settings folder always meet
-// there, whatever happens in /run/lock, and so do runs on a distribution whose /run/lock only root
-// may write to, or with another runtime folder (a Flatpak's); one on a file system that refuses
-// flocks (NFS without its lock service) is left out, and one other accounts may open is taken
-// only where the file in /run/lock cannot be used), so the runs of one account still take turns,
-// whatever settings folder each uses wherever /run/lock has their file; then each waits for the shared one only a short
-// while (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning.
+// too; and always the file in the given folder as well, after those, as whether the account can use
+// its file in /run/lock depends on what other accounts do there (see below): its runs, claims and
+// ejects that use the same settings folder always meet there, whatever happens in /run/lock, and so
+// do runs on a distribution whose /run/lock only root may write to, or with another runtime folder
+// (a Flatpak's); one on a file system that refuses flocks (NFS without its lock service) is left
+// out), so the runs of one account still take turns, whatever settings folder each uses, wherever
+// /run/lock has their file; then each waits for the shared one only a short while
+// (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning. Where
+// no other account may open the file in the settings folder, no other account can hold it. Where
+// other accounts may open it too (a settings folder on FAT, exFAT, NTFS or CIFS, as a portable
+// copy's on a USB stick), another account may hold it for good: a run waits for it only
+// kOtherAccountWait (the shared file's wait included) and goes on with a warning, a claim at most
+// kEjectWait and goes on with its other files, and an eject counts it as busy (fail closed). So
+// there another account can delay the account's runs and commands and keep its ejects refused, and
+// two runs of the account that meet only there take turns for kOtherAccountWait at most.
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
 // that every account may look into (set so whatever root's umask); /run/lock where that folder
@@ -61,8 +67,10 @@
 // never stop it, can delay a command of an account by 2 seconds at most (a claim waits that long
 // for a claims file a process of root's holds alone, as root's eject does for a moment after its
 // mark; only one whose four accounts, real, effective, saved and file system, are all root's
-// counts), and cannot keep its eject busy. Root's ejects still count the runs and claims of every
-// account, fail closed, and root's claims wait for the ejects of every account (at most
+// counts), and cannot keep its eject busy, except where its settings folder is one other accounts
+// may open (see above: then a command by up to kEjectWait, and the eject busy). Root's ejects still
+// count the runs and claims of every account, fail closed, and root's claims wait for the ejects of
+// every account (at most
 // kEjectWait): through the shared files, and through each account's own files that root can find
 // (vaultik-drive-<hash>.<uid>.lock and vaultik-use-<hash>.<uid>.lock in /run/lock, the files in
 // each runtime folder /run/user/<uid>), which an account's run, claim or eject holds also when it
@@ -100,9 +108,10 @@
 // another name, so the runs of an account still take turns: each file Vaultik makes in /run/lock
 // holds its own name from the moment that name is there (written first, then linked under that
 // name; where it cannot be written whole, as on a full /run/lock, no file is made there, and the
-// account's processes still meet in their settings folder), and an
-// own file or root's mark is used only when it holds the name it is opened by (only its owner or
-// root can write it), or holds nothing and has no other name (an earlier version's). Where
+// account's processes still meet in their settings folder, for kOtherAccountWait at most where
+// other accounts may open the file there), and an own file or root's mark is used only when it
+// holds the name it is opened by (only its owner or root can write it), or holds nothing and has no
+// other name (an earlier version's). Where
 // fs.protected_hardlinks is off, another account that makes such a name first as a hard link to
 // another file of the account's (another lock file, held for another drive or by a run while a
 // claim waits) or of root's gains nothing: the account has the file in its settings folder alone
@@ -112,7 +121,8 @@
 // at the look's 3 seconds): then root's eject counts it as busy, and root's runs and claims go on
 // as without a mark (so an account's run waits for such a run of root's only kOtherAccountWait).
 // The limit: such a run without its runtime folder then takes turns only with the runs that
-// use the same settings folder, and in the same way a claim and an eject of that account (without
+// use the same settings folder (for kOtherAccountWait at most where other accounts may open the
+// file there), and in the same way a claim and an eject of that account (without
 // the runtime folder) see each other only when they use the same settings folder: an eject from a
 // portable copy, or one with VAULTIK_CONFIG_DIR set, does not see a command of the installed app
 // then, and may eject the drive under it. A file an earlier version made (which holds no name) gets
@@ -258,9 +268,10 @@ public:
     bool held() const { return handle_ != nullptr; }
     bool waited() const { return waited_; }
     bool inherited() const { return inherited_; }
-    // Linux: the lock all accounts share was held by another account for kOtherAccountWait, and
-    // the run goes on without it (holding the lock of its own account only). An eject of an
-    // account (not root) passes such a lock by at once.
+    // Linux: the lock all accounts share, or the file in the settings folder where other accounts
+    // may open it (see above), was held by another account for kOtherAccountWait, and the run goes
+    // on without it (holding its other locks only). An eject of an account (not root) passes the
+    // shared lock by at once, and counts that settings folder's file as busy.
     bool other_account_skipped() const { return skipped_; }
     // Windows: the drive's lock is there but cannot be shared with this run (another account made
     // it, or this account may not open it), and the run goes on without it.

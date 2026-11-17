@@ -613,19 +613,27 @@ for another account's run for 5 minutes at most and then goes on with a warning 
 the drive's speed): it too can be delayed, never stopped. Your own runs still take turns with each
 other, whatever settings folder each uses (the installed app and a portable copy, say), through a
 file in your own /run/user folder, where no other account can put one first, and one in /run/lock,
-and always also through a file in your settings folder where only your account may open it (not
-on FAT, exFAT, NTFS or a network share, say, where another account could hold it for good):
-whether your account can use its file in /run/lock depends on what other accounts do there, so
-your runs, commands and ejects that use the same settings folder always meet there, whatever
-happens in /run/lock (so do runs with and without the /run/user folder on distributions whose
-/run/lock only root may write to); and a run as root is waited for as long as it runs, also one
+and always also through a file in your settings folder: whether your account can use its file in
+/run/lock depends on what other accounts do there, so your runs, commands and ejects that use the
+same settings folder always meet there, whatever happens in /run/lock (so do runs with and without
+the /run/user folder on distributions whose /run/lock only root may write to). Where only your
+account may open that file, nobody else can hold it. Where other accounts may open it too (a
+settings folder on FAT, exFAT, NTFS or a network share, such as a portable copy's on a USB stick),
+another account could hold it for good, so a run waits for it only the 5 minutes for another account
+and then goes on with a warning, a command waits for it at most 60 seconds (as for an eject) and
+then goes on, and an eject counts it as in use: there another account can delay your runs and
+commands and keep your ejects refused, and two runs of yours that meet only there (one of them
+without a /run/user folder and without its file in /run/lock) take turns for those 5 minutes at
+most; and a run as root is waited for as long as it runs, also one
 that went on beside another run of yours, and also when another account made the shared file in
 /run/lock first so that your account cannot use it (your eject then still
 counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other
 account can put files. Keep every copy of Vaultik on a computer (the installed one, a portable
 copy, an AppImage) on the same version: copies of different versions may not see each other's
-turns and may then share a drive for a while. Another account cannot keep your eject refused, and
-can make a command of yours wait 2 seconds at most; a command or eject as root still counts. An
+turns and may then share a drive for a while. Another account cannot keep your eject refused (except
+where your settings folder is one other accounts may open, see above), and can make a command of
+yours wait 2 seconds at most (60 seconds where your settings folder is one other accounts may open);
+a command or eject as root still counts. An
 eject as root also counts the runs and commands of every account that another account kept from
 the turn all accounts share (by holding or making its file in /run/lock first), through their own
 files in /run/lock and /run/user, and through the turn file in the settings folder that a program
@@ -645,15 +653,17 @@ turn file no other account may open and that has no other name. Your runs keep u
 file in /run/lock when another account gives it a second name, so they still take turns: each turn
 file Vaultik makes there holds its own name from the moment it is there (where the name cannot be
 written, as on a full /run/lock, none is made, and the turn file in the settings folder, which is
-always used too, keeps your runs taking turns), and one is
-used only when it holds the name it is opened by (or, one an older version of Vaultik made, holds
-nothing and has no other name). Another account that makes the name of one of your turn files first,
+always used too, keeps your runs taking turns, for 5 minutes at most where other accounts may open
+it), and one is used only when it holds the name it is opened by (or, one an older version of
+Vaultik made, holds nothing and has no other name). Another account that makes the name of one of
+your turn files first,
 as a link to another turn file of yours, therefore gains nothing: your run or command uses its turn
 file in the settings folder alone (as root, Vaultik removes such a name and makes its own, but not
 while a program holds that file, or while Linux cannot tell whether one does: then an eject as root
 is refused, and a run as root goes on without that mark meanwhile, so a run of yours waits for it
 only the 5 minutes for another account). The limit there: a run of yours
-without a /run/user folder then takes turns only with the runs that use the same settings folder,
+without a /run/user folder then takes turns only with the runs that use the same settings folder
+(for 5 minutes at most where other accounts may open the file there),
 and the same goes for ejects: an eject of yours without a /run/user folder then sees your commands
 only when they use the same settings folder (an eject from a portable copy, or with
 `VAULTIK_CONFIG_DIR` set, does not see a command of the installed app then, so it could eject the
@@ -661,7 +671,8 @@ drive under it). A turn file an older version of Vaultik made (which holds no na
 written into it the first time a run, command or eject of its owner opens it; one that gets a second
 name before that is treated as above (your eject still counts it while it is in use). A command
 started by a run counts a busy turn file of its own as the run's only when that file has no other
-name; otherwise the drives the run names in `VAULTIK_HELD_DRIVES` tell (never for an eject). So that
+name and no other account may open it; otherwise the drives the run names in `VAULTIK_HELD_DRIVES`
+tell (never for an eject). So that
 no account can keep an eject or command
 as root looking for long, it looks into at most 256 programs and 65536 open files
 of each account (and 3 seconds in all); an account with more counts as in use for an eject as root,
