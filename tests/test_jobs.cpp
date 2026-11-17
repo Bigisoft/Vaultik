@@ -3986,6 +3986,72 @@ TEST_CASE("drive lock: a lock file whose name cannot be written into it leaves n
     CHECK(own_new_files() == new_files);
 }
 
+TEST_CASE("eject: an own lock file held by a run or claim stays busy for the account's eject once it has another name (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-empty-alias-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string uid = std::to_string(::geteuid());
+    const std::string settings = os::join(tmp.dir(), "settings");
+    const fs::path own_drive = fs::path("/run/lock") / ("vaultik-drive-" + name + "." + uid + ".lock");
+    const fs::path own_use = fs::path("/run/lock") / ("vaultik-use-" + name + "." + uid + ".lock");
+    const fs::path link = fs::path("/run/lock") / ("vaultik-test-" + name + "-link");
+    struct Cleanup {
+        std::string name;
+        fs::path link;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            fs::remove(link, ec);
+            for (const std::string& f : run_lock_names(name)) fs::remove(fs::path("/run/lock") / f, ec);
+        }
+    } cleanup{name, link};
+    // Without a runtime folder (as outside a login): the own file in /run/lock is the account's own.
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(-1), {}, (tmp.path / "no-run-user").string()});
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(key, settings, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    // A claim and a run of the account hold their own files in /run/lock, files that hold no name
+    // (as an earlier version made them, here processes that hold the flocks on files they make).
+    // Another account (where fs.protected_hardlinks is off; here this account itself) then gives
+    // the held file a second name, so that the account's eject no longer uses it: the eject still
+    // counts it as busy (it finds the file by its name and sees it held in /proc/locks), instead of
+    // ejecting under the claim's command or the run.
+    {
+        OtherProcess claim("flock-sh", {}, {}, tmp.path, {}, hold_files(own_use.string()));
+        REQUIRE(claim.held());
+        REQUIRE(fs::file_size(own_use) == 0);
+        REQUIRE(::link(own_use.c_str(), link.c_str()) == 0);
+        CHECK(drive_claimed(key, settings));
+        {
+            const EjectHold eject(key, settings);
+            CHECK(eject.busy());
+        }
+        CHECK(claim.release() == 0);
+        CHECK_FALSE(drive_claimed(key, settings));
+        fs::remove(link);
+    }
+    {
+        OtherProcess run("flock-ex", {}, {}, tmp.path, {}, hold_files(own_drive.string()));
+        REQUIRE(run.held());
+        REQUIRE(fs::file_size(own_drive) == 0);
+        REQUIRE(::link(own_drive.c_str(), link.c_str()) == 0);
+        CHECK(eject_busy());
+        CHECK(run.release() == 0);
+        CHECK_FALSE(eject_busy());
+        fs::remove(link);
+    }
+}
+
 TEST_CASE("drive lock: where /proc cannot tell who holds the drive, the marker of the parent run does (Linux)") {
     TempStore tmp;
     fs::create_directories(tmp.path);

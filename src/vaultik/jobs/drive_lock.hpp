@@ -81,7 +81,11 @@
 // the process that has it open (the settings folder's) is not seen. An eject counts every file of
 // these names that the right account (or root, for root's marks) owns, also one with a hard link or
 // that other accounts may open: where fs.protected_hardlinks is off, another account may add a hard
-// link to such a file while it is held, and must not hide it from an eject that way. Where a holder
+// link to such a file while it is held, and must not hide it from an eject that way. So an eject of
+// an account also counts its own file in /run/lock as busy while /proc/locks shows another process
+// holding it, also when the eject does not use that file itself (it has a second name and holds no
+// name, as an earlier version made it): never by taking its flock, so that a name linked to another
+// drive's file makes the eject report busy at most. Where a holder
 // is waited for or trusted (root's claims waiting for an account's eject, an account's runs and
 // claims waiting for root's mark, a command that inherits its run's drive), only a file no other
 // account may open counts, and in /run/lock only one with no other name (another account could

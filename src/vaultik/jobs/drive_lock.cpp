@@ -1217,6 +1217,30 @@ Use accounts_hold(const std::string& name, bool write_only) {
     return unsure ? Use::unsure : Use::free;
 }
 
+// An account's eject (not root): whether a process other than this one holds one of this
+// account's own files for `name` that it finds by its name (see own_files_of, for an eject: any
+// link count, also one its runs and claims no longer use as it has another name), as /proc/locks
+// shows (never by taking the flock, so that a name another account linked to another drive's file
+// never makes the eject hold that file). Fail closed: a run or claim of the account may hold such a
+// file, which another account linked under a second name after it was taken. False when
+// /proc/locks cannot be read, as for root's marks (see root_holds); read within the time of a
+// look (see ScanBudget). Not with own_in_folder (tests only), whose own lock is the folder's alone.
+bool own_held_elsewhere(const std::string& name) {
+    if (hooks().own_in_folder) return false;
+    Mounts mounts;
+    const std::vector<LockFile> files = own_files_of(static_cast<long long>(::geteuid()), name, mounts, true);
+    if (files.empty()) return false;
+    const ScanBudget budget;
+    for (const HeldFlock& f : held_flocks(nullptr, &budget)) {
+        if (f.pid == static_cast<long>(::getpid())) continue;
+        for (const LockFile& file : files) {
+            const Match m = match(f, file);
+            if (m == Match::exact || m == Match::mount) return true;
+        }
+    }
+    return false;
+}
+
 // Whether a holder of `file` may be trusted as the run that started this command: a file this
 // account owns that no other account may open (root's mark and fallback, an account's own files),
 // whatever its path. Any other file (the file all accounts share, or one that another account
@@ -1703,8 +1727,10 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     }
     // Root's eject: an account's run may hold its own locks without the shared one (another
     // account held that one when the run started, or made it first), so those count as busy too,
-    // also where that cannot be told (fail closed).
-    if (root && fail_closed && accounts_hold(name, false) != Use::free) {
+    // also where that cannot be told (fail closed). An account's eject: a run of its own may hold
+    // its own file in /run/lock that this eject did not use (another account gave it a second
+    // name), so that one counts as busy too (see own_held_elsewhere).
+    if (fail_closed && (root ? accounts_hold(name, false) != Use::free : own_held_elsewhere(name))) {
         close_all();
         throw DriveBusy("another Vaultik run uses the backup drive");
     }
@@ -1971,12 +1997,13 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
         }
     }
     // An account: a claim or eject of root's while root's mark is held, whatever the shared file's
-    // state (also when it cannot use that file at all, another account having made it first).
-    // Root: a claim or eject of any account on its own files, which it may hold without the shared
-    // one (another account held that one when it started, or made it first), also where that
-    // cannot be told (fail closed). Asked once root holds its own: a claim that starts later waits
-    // for this eject.
-    if (root ? accounts_hold(name, false) != Use::free : root_holds(mark, false, true)) {
+    // state (also when it cannot use that file at all, another account having made it first), and
+    // a claim or eject of its own on its own file in /run/lock that this eject did not use (see
+    // own_held_elsewhere). Root: a claim or eject of any account on its own files, which it may
+    // hold without the shared one (another account held that one when it started, or made it
+    // first), also where that cannot be told (fail closed). Asked once root holds its own: a claim
+    // that starts later waits for this eject.
+    if (root ? accounts_hold(name, false) != Use::free : root_holds(mark, false, true) || own_held_elsewhere(name)) {
         busy_ = true;
         close_all();
         return;
