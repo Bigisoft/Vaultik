@@ -86,8 +86,10 @@
 // link to such a file while it is held, and must not hide it from an eject that way. So an eject of
 // an account also counts its own file in /run/lock as busy while /proc/locks shows another process
 // holding it, also when the eject does not use that file itself (it has a second name and holds no
-// name, as an earlier version made it): never by taking its flock, so that a name linked to another
-// drive's file makes the eject report busy at most. Where a holder
+// name, as an earlier version made it), and also where /proc/locks cannot tell (it cannot be read,
+// reading it was cut short at the look's 3 seconds, or a line may be about that file) unless the
+// eject holds that file itself: never by taking its flock, so that a name linked to another drive's
+// file makes the eject report busy at most. Where a holder
 // is waited for or trusted (root's claims waiting for an account's eject, an account's runs and
 // claims waiting for root's mark, a command that inherits its run's drive), only a file no other
 // account may open counts, and in /run/lock only one with no other name (another account could
@@ -348,7 +350,8 @@ namespace testing {
 // of /proc/self/mountinfo when not empty; `scan_processes` and `scan_descriptors`: when not 0,
 // how many processes and descriptors of each account root looks into at most in one look (see
 // the eject's limits above); `short_name_write`: writing a file's name into it in /run/lock (a
-// new one, or an earlier version's) writes nothing (as on a full /run/lock).
+// new one, or an earlier version's) writes nothing (as on a full /run/lock); `scan_time`: instead
+// of the look's 3 seconds when not negative (0: every look is cut short at once).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -365,6 +368,7 @@ struct DriveLockHooks {
     std::size_t scan_processes = 0;
     std::size_t scan_descriptors = 0;
     bool short_name_write = false;
+    std::chrono::milliseconds scan_time{-1};
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <mutex>
 #include <thread>
@@ -601,7 +602,10 @@ constexpr std::chrono::seconds kScanTime{3};
 
 struct ScanBudget {
     std::map<long long, std::pair<std::size_t, std::size_t>> used;  // per account: processes, descriptors
-    std::chrono::steady_clock::time_point until = std::chrono::steady_clock::now() + kScanTime;
+    std::chrono::steady_clock::time_point until =
+        std::chrono::steady_clock::now() + (hooks().scan_time.count() >= 0
+                                                ? hooks().scan_time
+                                                : std::chrono::duration_cast<std::chrono::milliseconds>(kScanTime));
     std::size_t processes = hooks().scan_processes > 0 ? hooks().scan_processes : kScanProcesses;
     std::size_t descriptors = hooks().scan_descriptors > 0 ? hooks().scan_descriptors : kScanDescriptors;
 
@@ -1272,21 +1276,35 @@ Use accounts_hold(const std::string& name, bool write_only) {
 // link count, also one its runs and claims no longer use as it has another name), as /proc/locks
 // shows (never by taking the flock, so that a name another account linked to another drive's file
 // never makes the eject hold that file). Fail closed: a run or claim of the account may hold such a
-// file, which another account linked under a second name after it was taken. False when
-// /proc/locks cannot be read, as for root's marks (see root_holds); read within the time of a
-// look (see ScanBudget). Not with own_in_folder (tests only), whose own lock is the folder's alone.
-bool own_held_elsewhere(const std::string& name) {
+// file, which another account linked under a second name after it was taken. Files the eject holds
+// itself (`held`, its descriptors; told by device and inode) are left out, and when no other is
+// left, /proc/locks is not read at all (an eject where /proc is missing still goes on). Otherwise
+// busy also where /proc/locks cannot be read, where reading it was cut short (it is read within
+// the time of a look, see ScanBudget, and any account can make it long), and where a line may be
+// about such a file but that cannot be told (Match::maybe). Not with own_in_folder (tests only),
+// whose own lock is the folder's alone.
+bool own_held_elsewhere(const std::string& name, std::initializer_list<int> held) {
     if (hooks().own_in_folder) return false;
     Mounts mounts;
-    const std::vector<LockFile> files = own_files_of(static_cast<long long>(::geteuid()), name, mounts, true);
+    std::vector<LockFile> files = own_files_of(static_cast<long long>(::geteuid()), name, mounts, true);
+    files.erase(std::remove_if(files.begin(), files.end(),
+                               [&](const LockFile& file) {
+                                   return std::any_of(held.begin(), held.end(), [&](int fd) {
+                                       struct stat st{};
+                                       return fd >= 0 && ::fstat(fd, &st) == 0 && st.st_dev == file.dev &&
+                                              st.st_ino == file.ino;
+                                   });
+                               }),
+                files.end());
     if (files.empty()) return false;
     const ScanBudget budget;
-    for (const HeldFlock& f : held_flocks(nullptr, &budget)) {
+    bool readable = false;
+    const std::vector<HeldFlock> flocks = held_flocks(&readable, &budget);
+    if (!readable || !budget.in_time()) return true;
+    for (const HeldFlock& f : flocks) {
         if (f.pid == static_cast<long>(::getpid())) continue;
-        for (const LockFile& file : files) {
-            const Match m = match(f, file);
-            if (m == Match::exact || m == Match::mount) return true;
-        }
+        for (const LockFile& file : files)
+            if (match(f, file) != Match::no) return true;
     }
     return false;
 }
@@ -1805,7 +1823,8 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     // also where that cannot be told (fail closed). An account's eject: a run of its own may hold
     // its own file in /run/lock that this eject did not use (another account gave it a second
     // name), so that one counts as busy too (see own_held_elsewhere).
-    if (fail_closed && (root ? accounts_hold(name, false) != Use::free : own_held_elsewhere(name))) {
+    if (fail_closed &&
+        (root ? accounts_hold(name, false) != Use::free : own_held_elsewhere(name, {own, own2, own3, shared}))) {
         close_all();
         throw DriveBusy("another Vaultik run uses the backup drive");
     }
@@ -2100,7 +2119,8 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     // hold without the shared one (another account held that one when it started, or made it
     // first), also where that cannot be told (fail closed). Asked once root holds its own: a claim
     // that starts later waits for this eject.
-    if (root ? accounts_hold(name, false) != Use::free : root_holds(mark, false, true) || own_held_elsewhere(name)) {
+    if (root ? accounts_hold(name, false) != Use::free
+             : root_holds(mark, false, true) || own_held_elsewhere(name, {own, own2, own3, shared})) {
         busy_ = true;
         close_all();
         return;

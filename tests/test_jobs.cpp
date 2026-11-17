@@ -4400,6 +4400,69 @@ TEST_CASE("drive lock: a command started by its run still inherits the drive thr
     }
 }
 
+TEST_CASE("eject: an own file the eject does not hold is busy where /proc/locks cannot tell (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-own-unsure-");
+    const fs::path own_use =
+        fs::path("/run/lock") / ("vaultik-use-" + c.name + "." + std::to_string(::geteuid()) + ".lock");
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, c.settings, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    const auto claimed = [&] { return EjectHold(c.key, c.settings).busy(); };
+    const fs::path proc_locks = c.tmp.path / "locks";
+    testing::DriveLockHooks hooks = c.hooks();
+    // The account's own files, made and used by the eject itself: never asked about in /proc/locks,
+    // so an eject goes on where it cannot be read (no /proc).
+    hooks.proc_locks = (c.tmp.path / "missing").string();
+    testing::set_drive_lock_hooks(hooks);
+    CHECK_FALSE(eject_busy());
+    CHECK_FALSE(claimed());
+    // Own files the eject does not use (they hold another name, as a name another account linked to
+    // another file of the account's): a run or command of the account may hold them (see the tests
+    // above), so the eject is refused where /proc/locks cannot be read, where reading it was cut
+    // short (another account can make it long), and where a line of it may be about them but that
+    // cannot be told (the device of the file's mount is not known).
+    for (const fs::path& own : {c.own_drive, own_use}) {
+        fs::remove(own);
+        std::ofstream(own, std::ios::binary) << "vaultik-drive-0123456789abcdef0123456789abcdef.lock";
+        REQUIRE(::chmod(own.c_str(), 0600) == 0);
+    }
+    struct stat st{};
+    REQUIRE(::stat(c.own_drive.c_str(), &st) == 0);
+    struct stat use{};
+    REQUIRE(::stat(own_use.c_str(), &use) == 0);
+    {
+        std::ofstream out(proc_locks);
+        for (const auto ino : {st.st_ino, use.st_ino}) out << "1: FLOCK  ADVISORY  WRITE 1 ff:ff:" << ino << " 0 EOF\n";
+    }
+    for (int how = 0; how < 3; ++how) {
+        hooks = c.hooks();
+        if (how == 0) hooks.proc_locks = (c.tmp.path / "missing").string();
+        if (how == 1) hooks.scan_time = std::chrono::milliseconds(0);
+        if (how == 2) {
+            hooks.proc_locks = proc_locks.string();
+            hooks.no_mount_device = true;
+            hooks.btrfs = true;
+        }
+        testing::set_drive_lock_hooks(hooks);
+        CAPTURE(how);
+        CHECK(eject_busy());
+        CHECK(claimed());
+    }
+    // Where /proc/locks can be read whole and shows no holder of them: not busy.
+    c.hooks();
+    CHECK_FALSE(eject_busy());
+    CHECK_FALSE(claimed());
+}
+
 TEST_CASE("drive lock: root never makes its mark in /run/lock again while a process holds the one there (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("root test not run: needs root (runs as root and as nobody)");

@@ -638,7 +638,7 @@ folder stays unseen. Where Linux lets an account make hard links to other accoun
 (`fs.protected_hardlinks` off), another account may link a turn file of yours or root's under
 another name; an eject still counts that file (it is refused rather than run beside it; your eject
 counts your own turn file in /run/lock while another program holds it, also when it has a second
-name), while a command as root, or a run or command of yours waiting for root's turn, counts only a
+name, and where Linux cannot tell whether one holds it, unless the eject uses that file itself), while a command as root, or a run or command of yours waiting for root's turn, counts only a
 turn file no other account may open and that has no other name. Your runs keep using their own turn
 file in /run/lock when another account gives it a second name, so they still take turns: each turn
 file Vaultik makes there holds its own name from the moment it is there (where the name cannot be
