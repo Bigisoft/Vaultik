@@ -68,9 +68,12 @@
 // for a claims file a process of root's holds alone, as root's eject does for a moment after its
 // mark; only one whose four accounts, real, effective, saved and file system, are all root's
 // counts), and cannot keep its eject busy, except where its settings folder is one other accounts
-// may open (see above: then a command by up to kEjectWait, and the eject busy). Root's ejects still
-// count the runs and claims of every account, fail closed, and root's claims wait for the ejects of
-// every account (at most
+// may open (see above: then a command by up to kEjectWait, and the eject busy), and where
+// fs.protected_hardlinks is off: there it can give an earlier version's empty own file of the
+// account in /run/lock a second name, so that the eject does not use it but counts it, and make
+// /proc/locks take longer than the look's 3 seconds to read, so that the eject cannot tell whether
+// it is held and fails closed (as intended). Root's ejects still count the runs and claims of every
+// account, fail closed, and root's claims wait for the ejects of every account (at most
 // kEjectWait): through the shared files, and through each account's own files that root can find
 // (vaultik-drive-<hash>.<uid>.lock and vaultik-use-<hash>.<uid>.lock in /run/lock, the files in
 // each runtime folder /run/user/<uid>), which an account's run, claim or eject holds also when it

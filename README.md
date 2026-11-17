@@ -631,9 +631,13 @@ counts root's runs and commands as busy). Root keeps its own marks in /run/vault
 account can put files. Keep every copy of Vaultik on a computer (the installed one, a portable
 copy, an AppImage) on the same version: copies of different versions may not see each other's
 turns and may then share a drive for a while. Another account cannot keep your eject refused (except
-where your settings folder is one other accounts may open, see above), and can make a command of
-yours wait 2 seconds at most (60 seconds where your settings folder is one other accounts may open);
-a command or eject as root still counts. An
+where your settings folder is one other accounts may open, see above, and where Linux lets an
+account make hard links to other accounts' files, `fs.protected_hardlinks` off: there it can give an
+empty turn file of yours that an older version of Vaultik made in /run/lock a second name and make
+/proc/locks take longer than 3 seconds to read, and your eject is then refused, as it fails closed
+when it cannot tell whether that file is in use), and can make a command of yours wait 2 seconds at
+most (60 seconds where your settings folder is one other accounts may open); a command or eject as
+root still counts. An
 eject as root also counts the runs and commands of every account that another account kept from
 the turn all accounts share (by holding or making its file in /run/lock first), through their own
 files in /run/lock and /run/user, and through the turn file in the settings folder that a program
