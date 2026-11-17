@@ -4799,6 +4799,16 @@ TEST_CASE("drive lock: a command under its run inherits the drive on a settings 
         CHECK_FALSE(command.held());
         OtherProcess eject("eject", c.key, c.settings, c.tmp.path, {}, marked);
         CHECK(eject.busy());
+        // Without the marker too (sudo or pkexec in between): nothing tells the run apart from
+        // another account there, so the command waits for it its whole wait (1.5 s here, past the
+        // short wait for another account, 200 ms) and gives up, never goes on beside it.
+        std::vector<std::pair<std::string, std::string>> unmarked = c.env;
+        unmarked.push_back({"VAULTIK_TEST_HOLD_WAIT_MS", "1500"});
+        unmarked.push_back({"VAULTIK_TEST_HOLD_OTHER_WAIT_MS", "200"});
+        OtherProcess command_alone("lock", c.key, c.settings, c.tmp.path, {}, unmarked);
+        CHECK(command_alone.busy());
+        CHECK_FALSE(command_alone.inherited());
+        CHECK_FALSE(command_alone.held());
     }
 }
 

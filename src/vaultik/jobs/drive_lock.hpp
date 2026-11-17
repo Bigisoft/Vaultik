@@ -287,9 +287,14 @@ public:
     // command of root's under a run of root's that has no mark (neither root's folder nor /run/lock
     // could hold it, so the run holds that shared file as its own lock) waits for its own run, for
     // its whole wait, instead of inheriting the drive: a trade made on purpose, as any account may
-    // hold that file and nothing tells root's run apart from such a holder (it fails safe).
-    // Either way, a lock that is free (the run that started the command has ended) is taken as
-    // usual.
+    // hold that file and nothing tells root's run apart from such a holder (it fails safe). So
+    // does a command of an account under its run where the run holds no own file of the account
+    // but the settings folder's that other accounts may open (no runtime folder, no usable file in
+    // /run/lock) and kHeldDrivesVariable does not reach the command (sudo or pkexec in between):
+    // it waits for that file its whole wait and then gives up, never goes on beside its run (a
+    // command of root's there waits kOtherAccountWait, as for another account, and goes on with
+    // other_account_skipped()). Either way, a lock that is free (the run that started the command
+    // has ended) is taken as usual.
     // Another DriveLock of this process on the drive (any thread) counts as busy. `lock_dir`: see
     // above. `mode`: see DriveLockMode.
     DriveLock(const std::string& key, const std::string& lock_dir, std::chrono::milliseconds wait,
@@ -303,9 +308,11 @@ public:
     bool waited() const { return waited_; }
     bool inherited() const { return inherited_; }
     // Linux: the lock all accounts share, or the file in the settings folder where other accounts
-    // may open it (see above), was held by another account for kOtherAccountWait, and the run goes
-    // on without it (holding its other locks only). An eject of an account (not root) passes the
-    // shared lock by at once, and counts that settings folder's file as busy.
+    // may open it (see above), was held by another account (or, for the shared lock, a holder that
+    // cannot be told apart from one) for kOtherAccountWait, and the run goes on without it (holding
+    // its other locks only). An eject of an account (not root) passes the
+    // shared lock by at once (not where other accounts may write to its settings folder, see
+    // above), and counts that settings folder's file as busy.
     bool other_account_skipped() const { return skipped_; }
     // Windows: the drive's lock is there but cannot be shared with this run (another account made
     // it, or this account may not open it), and the run goes on without it.

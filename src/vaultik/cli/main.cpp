@@ -2561,7 +2561,9 @@ std::unique_ptr<jobs::DriveLock> lock_drive(const std::string& key, const std::s
     if (lock->waited() && g_awake != nullptr && !g_awake->has_value() && !g_awake_reason.empty())
         g_awake->emplace(g_awake_reason);
     if (lock->other_account_skipped())
-        warning("another account kept the backup drive's turn for " + std::to_string(jobs::kOtherAccountWait.count()) +
+        warning("another account (or a run this one cannot tell apart from one) kept the backup "
+                "drive's turn for " +
+                std::to_string(jobs::kOtherAccountWait.count()) +
                 " minutes; this run goes on without waiting for it (both then share the drive's speed)");
     if (lock->gave_up_waiting())
         warning("another run kept the backup drive's turn for " + std::to_string(jobs::kDriveLockWait.count()) +

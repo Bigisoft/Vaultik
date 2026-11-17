@@ -737,8 +737,13 @@ holds on a file of another drive with the same file number is never taken for th
 Linux cannot tell who holds the turn (a settings folder on btrfs or overlayfs with Linux older
 than 5.8, a settings folder on FAT, exFAT, NTFS or a network share whose turn file every account
 may open, `/proc` mounted with `hidepid`, a run in another container), a command goes by what the
-run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does. Cloud storage
-has no such turns.
+run passed on to it in `VAULTIK_HELD_DRIVES`, as on Windows; an eject never does. Where that does
+not reach the command either (`sudo` or `pkexec` in between) and the run holds no turn file of
+yours besides one in a settings folder every account may open (no /run/user folder, and no usable
+file in /run/lock), nothing tells the run apart from another account: a command of your own
+account then waits for its run its whole wait and gives up, never going on beside it, and a
+command as root waits 5 minutes, as for another account, and then goes on with a warning. Cloud
+storage has no such turns.
 
 A backup drive formatted with exFAT (or FAT), as most new USB drives are, has no journal, and
 Vaultik's atomic file replacement falls back to a plain move there. The Drives card then shows
