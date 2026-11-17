@@ -3893,6 +3893,99 @@ TEST_CASE("drive claims: a claims name linked to the account's held drive file i
     CHECK_FALSE(drive_claimed(key, settings));
 }
 
+namespace {
+
+// The names in /run/lock that hold `name` (a drive's, see drive_lock_name).
+std::vector<std::string> run_lock_names(const std::string& name) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    for (const fs::directory_entry& e : fs::directory_iterator("/run/lock", ec)) {
+        const std::string file = e.path().filename().string();
+        if (file.find(name) != std::string::npos) out.push_back(file);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+// How many files this account has made in /run/lock that are no lock files yet (see make_named).
+std::size_t own_new_files() {
+    std::size_t n = 0;
+    std::error_code ec;
+    for (const fs::directory_entry& e : fs::directory_iterator("/run/lock", ec)) {
+        struct stat st{};
+        if (e.path().filename().string().rfind(".vaultik-new-", 0) == 0 && ::lstat(e.path().c_str(), &st) == 0 &&
+            st.st_uid == ::geteuid())
+            ++n;
+    }
+    return n;
+}
+
+// What the file `path` holds.
+std::string file_text(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+}  // namespace
+
+TEST_CASE("drive lock: a lock file whose name cannot be written into it leaves no name in /run/lock (Linux)") {
+    if (::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-short-name-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string settings = os::join(tmp.dir(), "settings");
+    struct Cleanup {
+        std::string name;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const std::string& f : run_lock_names(name)) fs::remove(fs::path("/run/lock") / f, ec);
+        }
+    } cleanup{name};
+    // Without a runtime folder, and (root) without root's own folder (here a path below a file), so
+    // that every own file and mark is one in /run/lock.
+    std::ofstream(tmp.path / "file").close();
+    testing::DriveLockHooks hooks;
+    hooks.run_user_dir = (tmp.path / "no-run-user").string();
+    hooks.root_dir = (tmp.path / "file" / "marks").string();
+    hooks.short_name_write = true;
+    testing::set_drive_lock_hooks(hooks);
+    const std::size_t new_files = own_new_files();
+    // The name cannot be written into a new file (as on a /run/lock that another account filled):
+    // no name is left pointing to an empty file, which another account could later give another
+    // name so that the account's runs and ejects no longer agree on it. The runs, claims and ejects
+    // use their settings folder instead.
+    {
+        DriveLock run(key, settings, std::chrono::milliseconds(0));
+        CHECK(run.held());
+        const DriveClaim claim(key, settings);
+        CHECK(claim.held());
+    }
+    {
+        const EjectHold eject(key, settings);
+        CHECK_FALSE(eject.busy());
+    }
+    CHECK(run_lock_names(name).empty());
+    CHECK(own_new_files() == new_files);
+    // Written whole, each file in /run/lock holds its own name from the start.
+    hooks.short_name_write = false;
+    testing::set_drive_lock_hooks(hooks);
+    {
+        DriveLock run(key, settings, std::chrono::milliseconds(0));
+        CHECK(run.held());
+        const DriveClaim claim(key, settings);
+        CHECK(claim.held());
+    }
+    const std::vector<std::string> names = run_lock_names(name);
+    CHECK(names.size() == 4u);  // the shared files and own ones (root: its marks)
+    for (const std::string& f : names) CHECK(file_text(fs::path("/run/lock") / f) == f);
+    CHECK(own_new_files() == new_files);
+}
+
 TEST_CASE("drive lock: where /proc cannot tell who holds the drive, the marker of the parent run does (Linux)") {
     TempStore tmp;
     fs::create_directories(tmp.path);

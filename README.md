@@ -639,7 +639,8 @@ another name; an eject still counts that file (it is refused rather than run bes
 command as root, or a run or command of yours waiting for root's turn, counts only a turn file no
 other account may open and that has no other name. Your runs keep using their own turn file in
 /run/lock when another account gives it a second name, so they still take turns: each turn file
-Vaultik makes there holds its own name, and one with several names is used only when it holds the
+Vaultik makes there holds its own name from the moment it is there (where the name cannot be written,
+as on a full /run/lock, the turn file in the settings folder is used instead), and one with several names is used only when it holds the
 name it is opened by. Another account that makes the name of one of your turn files first, as a
 link to another turn file of yours, therefore gains nothing: your run or command uses its turn file
 in the settings folder instead (as root, Vaultik removes such a name and makes its own). The limit

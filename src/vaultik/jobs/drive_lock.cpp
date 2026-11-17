@@ -282,10 +282,39 @@ int open_unmounted(const std::string& path, int flags) {
     return fd;
 }
 
+// Makes the file `path` (`name` in /run/lock) with `mode`, holding its name (see named) from the
+// moment that name is there: the name is written into a new file with a random name of its own
+// first, which is then linked as `path` (never over a file there) and its own name removed, so no
+// lock name ever points to a file without its name in it. -1 with errno otherwise (EEXIST: another
+// run made `path` meanwhile); a file whose name could not be written whole (a full /run/lock,
+// which another account may fill) is removed again.
+int make_named(const std::string& path, const std::string& name, mode_t mode) {
+    std::uint8_t rnd[8];
+    try {
+        random_bytes(rnd);
+    } catch (const std::exception&) {
+        errno = EIO;
+        return -1;
+    }
+    const std::string temp = "/run/lock/.vaultik-new-" + to_hex(ByteSpan(rnd, sizeof rnd));
+    // Writable, to write its name into it; flock needs no more.
+    const int fd = ::open(temp.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, mode);
+    if (fd < 0) return -1;
+    const ssize_t written = hooks().short_name_write ? 0 : ::write(fd, name.data(), name.size());
+    int error = 0;
+    if (written != static_cast<ssize_t>(name.size())) error = written < 0 ? errno : ENOSPC;
+    else if (::link(temp.c_str(), path.c_str()) != 0) error = errno;
+    ::unlink(temp.c_str());
+    if (error == 0) return fd;
+    ::close(fd);
+    errno = error;
+    return -1;
+}
+
 // The file `name` in /run/lock, shared by every account: the one there when `usable` accepts it,
 // or a new one with `mode` (made at most once, also when several runs start at once), never one
-// with something mounted on it (see open_unmounted). A file this makes holds its name (see named).
-// Root removes one it cannot use and makes its own. -1 when there is none to use.
+// with something mounted on it (see open_unmounted). A file this makes holds its name (see named
+// and make_named). Root removes one it cannot use and makes its own. -1 when there is none to use.
 int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(int, const struct stat&, const std::string&)) {
     struct stat dir{};
     if (::lstat("/run/lock", &dir) != 0 || !S_ISDIR(dir.st_mode)) return -1;
@@ -300,13 +329,8 @@ int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(int, c
         // is there already.
         int fd = open_unmounted(path, kFlags);
         if (fd < 0 && errno == ENOENT) {
-            // Writable, to write its name into it (see named); flock needs no more.
-            fd = ::open(path.c_str(), kFlags | O_RDWR | O_CREAT | O_EXCL, mode);
+            fd = make_named(path, name, mode);
             if (fd < 0 && errno == EEXIST) continue;  // another run made it meanwhile: use that one
-            if (fd >= 0) {
-                const ssize_t written = ::write(fd, name.data(), name.size());
-                (void)written;  // one left empty is still used while it has no other name
-            }
         }
         if (fd < 0) {
             if ((errno == EACCES || errno == ELOOP) && root && ::unlink(path.c_str()) == 0) continue;

@@ -89,7 +89,8 @@
 // in an account's runtime folder, where no other account can make a name, need no such test. A run
 // keeps using its own file in /run/lock (root's mark there too) when another account gives it
 // another name, so the runs of an account still take turns: each file Vaultik makes in /run/lock
-// holds its own name, and an own file or root's mark with more than one name is used only when it
+// holds its own name from the moment that name is there (written first, then linked under that
+// name; where it cannot be written whole, as on a full /run/lock, no file is made there), and an own file or root's mark with more than one name is used only when it
 // holds the name it is opened by (only its owner or root can write it). Where
 // fs.protected_hardlinks is off, another account that makes such a name first as a hard link to
 // another file of the account's (another lock file, held for another drive or by a run while a
@@ -327,7 +328,8 @@ namespace testing {
 // `no_statx`: statx is refused (EPERM, as by older Docker seccomp filters); `mountinfo`: instead
 // of /proc/self/mountinfo when not empty; `scan_processes` and `scan_descriptors`: when not 0,
 // how many processes and descriptors of each account root looks into at most in one look (see
-// the eject's limits above).
+// the eject's limits above); `short_name_write`: writing a new file's name into it in /run/lock
+// writes nothing (as on a full /run/lock).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -343,6 +345,7 @@ struct DriveLockHooks {
     std::string mountinfo;
     std::size_t scan_processes = 0;
     std::size_t scan_descriptors = 0;
+    bool short_name_write = false;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 
