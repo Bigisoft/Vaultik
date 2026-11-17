@@ -39,11 +39,13 @@
 // when it is a folder of the account's alone, where no other account can make a file first, and
 // vaultik-drive-<hash>.<uid>.lock in /run/lock, used when it is a file the account owns; both where
 // both can be used, so that a run started outside a login, without the runtime folder, takes turns
-// too; where the account cannot use its file in /run/lock (a distribution whose /run/lock only root
-// may write to), the file in the given folder as well, after the runtime one, so that such a run,
-// or one with another runtime folder (a Flatpak's), takes turns with the others as long as they use
-// the same settings folder), so the runs of one account still take turns, whatever settings folder
-// each uses wherever /run/lock has their file; then each waits for the shared one only a short
+// too; and always the file in the given folder as well, after those, as whether the account can use
+// its file in /run/lock depends on what other accounts do there (see below): its runs, claims and
+// ejects that use the same settings folder always meet there, whatever happens in /run/lock, and so
+// do runs on a distribution whose /run/lock only root may write to, or with another runtime folder
+// (a Flatpak's); one on a file system that refuses flocks (NFS without its lock service) is left
+// out), so the runs of one account still take turns, whatever settings folder each uses wherever
+// /run/lock has their file; then each waits for the shared one only a short
 // while (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning.
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
@@ -94,13 +96,14 @@
 // keeps using its own file in /run/lock (root's mark there too) when another account gives it
 // another name, so the runs of an account still take turns: each file Vaultik makes in /run/lock
 // holds its own name from the moment that name is there (written first, then linked under that
-// name; where it cannot be written whole, as on a full /run/lock, no file is made there), and an
+// name; where it cannot be written whole, as on a full /run/lock, no file is made there, and the
+// account's processes still meet in their settings folder), and an
 // own file or root's mark is used only when it holds the name it is opened by (only its owner or
 // root can write it), or holds nothing and has no other name (an earlier version's). Where
 // fs.protected_hardlinks is off, another account that makes such a name first as a hard link to
 // another file of the account's (another lock file, held for another drive or by a run while a
-// claim waits) or of root's gains nothing: the account uses the file in its settings folder
-// instead, root removes the name and makes its own mark, but never while a process holds the file
+// claim waits) or of root's gains nothing: the account has the file in its settings folder alone
+// then, root removes the name and makes its own mark, but never while a process holds the file
 // there (another run or claim of root's may hold an earlier mark, which other accounts' ejects look
 // at by its name): then root's eject counts it as busy, and root's runs and claims go on as without
 // a mark. The limit: such a run without its runtime folder then takes turns only with the runs that
@@ -268,6 +271,7 @@ private:
     void* handle_ = nullptr;  // Windows: the mutex; POSIX: the descriptor + 1
     void* shared_ = nullptr;  // POSIX, root: the shared file's descriptor + 1
     void* own2_ = nullptr;    // POSIX, an account: its second own file's descriptor + 1
+    void* own3_ = nullptr;    // POSIX, an account: its third own file's descriptor + 1
     bool waited_ = false;
     bool inherited_ = false;
     bool skipped_ = false;
@@ -293,6 +297,7 @@ private:
     void* handle_ = nullptr;  // Windows: the slot's mutex; POSIX: the descriptor + 1
     void* shared_ = nullptr;  // POSIX: the shared file's descriptor + 1, besides an own one
     void* own2_ = nullptr;    // POSIX, an account: its second own file's descriptor + 1
+    void* own3_ = nullptr;    // POSIX, an account: its third own file's descriptor + 1
     std::string hash_;
 };
 
@@ -314,6 +319,7 @@ private:
     void* handle_ = nullptr;  // Windows: the eject mutex; POSIX: the descriptor + 1
     void* shared_ = nullptr;  // POSIX: the shared file's descriptor + 1, besides an own one
     void* own2_ = nullptr;    // POSIX, an account: its second own file's descriptor + 1
+    void* own3_ = nullptr;    // POSIX, an account: its third own file's descriptor + 1
     bool busy_ = false;
     std::string hash_;
 };
@@ -341,8 +347,8 @@ namespace testing {
 // `no_statx`: statx is refused (EPERM, as by older Docker seccomp filters); `mountinfo`: instead
 // of /proc/self/mountinfo when not empty; `scan_processes` and `scan_descriptors`: when not 0,
 // how many processes and descriptors of each account root looks into at most in one look (see
-// the eject's limits above); `short_name_write`: writing a new file's name into it in /run/lock
-// writes nothing (as on a full /run/lock).
+// the eject's limits above); `short_name_write`: writing a file's name into it in /run/lock (a
+// new one, or an earlier version's) writes nothing (as on a full /run/lock).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;

@@ -1260,8 +1260,9 @@ void init_test_repo(const fs::path& dir) {
 // ForeignFiles below, VAULTIK_TEST_HOLD_ROOT_DIR the folder of root's marks and
 // VAULTIK_TEST_HOLD_RUN_USER the account's own runtime folder, VAULTIK_TEST_HOLD_PROC_LOCKS the
 // file read instead of /proc/locks and VAULTIK_TEST_HOLD_OTHER_DEVICE=1 another device on its lines,
-// VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE=1, VAULTIK_TEST_HOLD_BTRFS=1 and VAULTIK_TEST_HOLD_NO_STATX=1
-// the hooks of those names (see DriveLockHooks), VAULTIK_TEST_HOLD_WAIT_MS how long a "lock" or
+// VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE=1, VAULTIK_TEST_HOLD_BTRFS=1, VAULTIK_TEST_HOLD_NO_STATX=1 and
+// VAULTIK_TEST_HOLD_SHORT_NAME_WRITE=1 the hooks of those names (see DriveLockHooks),
+// VAULTIK_TEST_HOLD_WAIT_MS how long a "lock" or
 // "eject" waits (none when not set); "flock-ex" and "flock-sh" hold a flock on each of the files (made when
 // missing) named in VAULTIK_TEST_HOLD_FILES, separated by ';', as another account (or root) would.
 TEST_CASE("drive lock helper: holds what another test asks for in a process of its own") {
@@ -1295,6 +1296,7 @@ TEST_CASE("drive lock helper: holds what another test asks for in a process of i
     hooks.no_mount_device = os::get_env("VAULTIK_TEST_HOLD_NO_MOUNT_DEVICE") == "1";
     hooks.btrfs = os::get_env("VAULTIK_TEST_HOLD_BTRFS") == "1";
     hooks.no_statx = os::get_env("VAULTIK_TEST_HOLD_NO_STATX") == "1";
+    hooks.short_name_write = os::get_env("VAULTIK_TEST_HOLD_SHORT_NAME_WRITE") == "1";
     testing::set_drive_lock_hooks(hooks);
     std::vector<int> flocked;
     if (what == "flock-ex" || what == "flock-sh") {
@@ -2147,7 +2149,8 @@ TEST_CASE("drive lock: the files in /run/lock are shared, opened without being m
         struct stat st{};
         REQUIRE(::stat(file.c_str(), &st) == 0);
         CHECK((st.st_mode & 0777) == (::geteuid() == 0 ? 0644 : 0600));
-        CHECK_FALSE(fs::exists(fs::path(tmp.path) / "a"));  // nothing in the settings folder
+        // Root: nothing in the settings folder; an account also always takes its own file there.
+        CHECK(fs::exists(fs::path(tmp.path) / "a") == (::geteuid() != 0));
         OtherProcess other("lock", key, os::join(tmp.dir(), "b"), tmp.path);
         CHECK_FALSE(other.held());
     }
@@ -2167,20 +2170,21 @@ TEST_CASE("drive lock: the files in /run/lock are shared, opened without being m
         int held = 0;
         for (const auto& r : runs) held += r->held() ? 1 : 0;
         CHECK(held == 1);
-        for (std::size_t i = 0; i < runs.size(); ++i) CHECK_FALSE(fs::exists(tmp.path / ("run" + std::to_string(i))));
+        for (std::size_t i = 0; i < runs.size(); ++i)
+            CHECK(fs::exists(tmp.path / ("run" + std::to_string(i))) == (::geteuid() != 0));
     }
     fs::remove(fs::path("/run/lock") / ("vaultik-drive-" + drive_lock_name(race) + ".lock"));
 
     // Something else in its place (a pipe, which an open would wait on for good): never waited
-    // on; the run holds its own lock (the account's own file in /run/lock, root's mark), so the
-    // settings folder is not needed either.
+    // on; the run holds its own lock (the account's own files, root's mark), so root needs nothing
+    // in the settings folder either.
     const std::string piped = "test-fifo-" + tmp.path.filename().string();
     const fs::path fifo = fs::path("/run/lock") / ("vaultik-drive-" + drive_lock_name(piped) + ".lock");
     REQUIRE(::mkfifo(fifo.c_str(), 0644) == 0);
     {
         DriveLock lock(piped, os::join(tmp.dir(), "c"), std::chrono::milliseconds(0));
         CHECK(lock.held());
-        CHECK_FALSE(fs::exists(tmp.path / "c"));
+        CHECK(fs::exists(tmp.path / "c") == (::geteuid() != 0));
     }
     std::error_code ec;
     fs::remove(fifo, ec);
@@ -2224,8 +2228,8 @@ TEST_CASE("drive lock: the runs of one account take turns, whatever settings fol
         CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(0), {}, {},
                                   DriveLockMode::eject),
                         DriveBusy);
-        CHECK_FALSE(fs::exists(tmp.path / "installed"));
-        CHECK_FALSE(fs::exists(tmp.path / "portable"));
+        // Each also holds its own file in its settings folder.
+        CHECK(fs::exists(tmp.path / "installed" / ("vaultik-drive-" + name + ".lock")));
     }
     {
         // A command of the installed app: an eject from the portable one sees it.
@@ -2273,8 +2277,8 @@ TEST_CASE("drive lock: the account's own runtime folder keeps its runs taking tu
     testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(300), {}, run_user.string()});
     std::error_code ec;
     {
-        // Both the file in the runtime folder (readable by the account alone) and the one in
-        // /run/lock are held, nothing in the settings folder.
+        // The file in the runtime folder (readable by the account alone), the one in /run/lock and
+        // the one in the settings folder are held.
         OtherProcess installed("lock", key, os::join(tmp.dir(), "installed"), tmp.path, {}, with_folder);
         REQUIRE(installed.held());
         struct stat st{};
@@ -2282,7 +2286,7 @@ TEST_CASE("drive lock: the account's own runtime folder keeps its runs taking tu
         CHECK(S_ISREG(st.st_mode));
         CHECK((st.st_mode & 0777) == 0600);
         CHECK(fs::exists(in_run_lock));
-        CHECK_FALSE(fs::exists(tmp.path / "installed"));
+        CHECK(fs::exists(tmp.path / "installed" / ("vaultik-drive-" + name + ".lock")));
         CHECK_THROWS_AS(DriveLock(key, os::join(tmp.dir(), "portable"), std::chrono::milliseconds(1500)), DriveBusy);
     }
     {
@@ -4220,6 +4224,179 @@ TEST_CASE("drive lock: an own lock file with a second name that holds its own na
         CHECK((run ? run->held() : claim->held()));
         CHECK(in_use(own));
         fs::remove(link);
+    }
+}
+
+namespace {
+
+// For the tests below (an account other than root, a writable /run/lock): the drive `key`'s own
+// file of this account in /run/lock, a name of the test's own there for a second name, and no
+// runtime folder (as outside a login, from cron), so that the own file in /run/lock and the one in
+// the settings folder are the account's only own locks. Removes them all again.
+struct OwnFileCase {
+    TempStore tmp;
+    std::string key;
+    std::string name;
+    std::string settings;
+    fs::path own_drive;
+    fs::path link;
+    std::string no_run_user;
+    std::vector<std::pair<std::string, std::string>> env;
+    explicit OwnFileCase(const std::string& prefix) {
+        fs::create_directories(tmp.path);
+        key = prefix + tmp.path.filename().string();
+        name = drive_lock_name(key);
+        settings = os::join(tmp.dir(), "settings");
+        own_drive = fs::path("/run/lock") / ("vaultik-drive-" + name + "." + std::to_string(::geteuid()) + ".lock");
+        link = fs::path("/run/lock") / ("vaultik-test-" + name + "-link");
+        no_run_user = (tmp.path / "no-run-user").string();
+        env = {{"VAULTIK_TEST_HOLD_RUN_USER", no_run_user}};
+        hooks();
+    }
+    ~OwnFileCase() {
+        testing::set_drive_lock_hooks({});
+        std::error_code ec;
+        fs::remove(link, ec);
+        for (const std::string& f : run_lock_names(name)) fs::remove(fs::path("/run/lock") / f, ec);
+    }
+    // Other accounts' runs are waited for 200 ms.
+    testing::DriveLockHooks hooks(bool short_name_write = false) {
+        testing::DriveLockHooks h;
+        h.other_account_wait = std::chrono::milliseconds(200);
+        h.run_user_dir = no_run_user;
+        h.short_name_write = short_name_write;
+        testing::set_drive_lock_hooks(h);
+        return h;
+    }
+    // An own file as an earlier version made it: empty, `mode`.
+    void make_empty(mode_t mode = 0600) const {
+        const int fd = ::open(own_drive.c_str(), O_RDONLY | O_CREAT | O_EXCL | O_CLOEXEC, mode);
+        REQUIRE(fd >= 0);
+        REQUIRE(::fchmod(fd, mode) == 0);
+        ::close(fd);
+    }
+};
+
+// Whether a run of `key` with `settings` cannot have the drive within `wait`.
+bool run_busy(const std::string& key, const std::string& settings, std::chrono::milliseconds wait) {
+    try {
+        DriveLock run(key, settings, wait);
+    } catch (const DriveBusy&) {
+        return true;
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("drive lock: a second name added and removed between an eject and a run never splits them (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-alias-gone-");
+    // An earlier version's empty own file, to which another account (where fs.protected_hardlinks
+    // is off; here this account itself) has added a second name: the account's eject does not use
+    // it and holds the file in its settings folder instead. The other account then removes its
+    // name again, so that the file is usable once more: a run of the account that starts now uses
+    // it, and must still take turns with the eject (in the settings folder, which every process of
+    // the account takes), instead of passing the shared file by after the short wait for another
+    // account and writing to the drive while it is ejected.
+    c.make_empty();
+    REQUIRE(::link(c.own_drive.c_str(), c.link.c_str()) == 0);
+    OtherProcess eject("eject", c.key, c.settings, c.tmp.path, {}, c.env);
+    REQUIRE(eject.held());
+    fs::remove(c.link);
+    CHECK(run_busy(c.key, c.settings, std::chrono::milliseconds(1500)));
+    CHECK(eject.release() == 0);
+    CHECK_FALSE(run_busy(c.key, c.settings, std::chrono::milliseconds(0)));
+}
+
+TEST_CASE("drive lock: an own file whose name cannot be written into it and then gets a second name never splits runs (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-unhealed-");
+    // An earlier version's empty own file; the first run cannot write its name into it (another
+    // account filled /run/lock), so it stays empty while that run holds it. Another account then
+    // gives it a second name, so that a second run of the account no longer uses it: the second
+    // run must still take turns with the first (in the settings folder), not share the drive.
+    c.make_empty();
+    std::vector<std::pair<std::string, std::string>> env = c.env;
+    env.push_back({"VAULTIK_TEST_HOLD_SHORT_NAME_WRITE", "1"});
+    OtherProcess first("lock", c.key, c.settings, c.tmp.path, {}, env);
+    REQUIRE(first.held());
+    REQUIRE(fs::file_size(c.own_drive) == 0);
+    REQUIRE(::link(c.own_drive.c_str(), c.link.c_str()) == 0);
+    CHECK(run_busy(c.key, c.settings, std::chrono::milliseconds(1500)));
+    CHECK(first.release() == 0);
+    CHECK_FALSE(run_busy(c.key, c.settings, std::chrono::milliseconds(0)));
+}
+
+TEST_CASE("eject: an own name another account took and then removed never lets an eject pass a run (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-squatted-");
+    // Another account made the account's own name in /run/lock first (here a file other accounts
+    // may open, which the account does not use either), so that a run of the account (from cron,
+    // without its runtime folder) holds the file in its settings folder. The other account then
+    // removes its file: an eject of the account makes its own file there and uses it, and must still
+    // see the run (in the settings folder), not pass the shared file by and eject under it.
+    c.make_empty(0644);
+    OtherProcess run("lock", c.key, c.settings, c.tmp.path, {}, c.env);
+    REQUIRE(run.held());
+    fs::remove(c.own_drive);
+    CHECK_THROWS_AS(DriveLock(c.key, c.settings, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject),
+                    DriveBusy);
+    CHECK(fs::exists(c.own_drive));  // the eject made and used it
+    {
+        const EjectHold hold(c.key, c.settings);  // the claims: the run holds none
+        CHECK_FALSE(hold.busy());
+    }
+    CHECK(run.release() == 0);
+    CHECK_NOTHROW(DriveLock(c.key, c.settings, std::chrono::milliseconds(0), {}, {}, DriveLockMode::eject));
+}
+
+TEST_CASE("drive lock: a command started by its run still inherits the drive through the settings folder (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-inherit-folder-");
+    // A run holds its own file in /run/lock, the one in its settings folder and the shared one; a
+    // command it starts (another process, here this test's helper) inherits the drive at once, and
+    // its eject is refused.
+    {
+        DriveLock run(c.key, c.settings, std::chrono::milliseconds(0));
+        REQUIRE(run.held());
+        const auto started = std::chrono::steady_clock::now();
+        OtherProcess command("lock", c.key, c.settings, c.tmp.path, {}, c.env);
+        CHECK(command.inherited());
+        CHECK_FALSE(command.held());
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(30));
+        OtherProcess eject("eject", c.key, c.settings, c.tmp.path, {}, c.env);
+        CHECK(eject.busy());
+    }
+    fs::remove(c.own_drive);
+    // The same where the command cannot use the own file in /run/lock (an earlier version's empty
+    // one, which the run could not write its name into, then given a second name by another
+    // account) and the shared file tells nothing (it has a second name too): it meets its run in
+    // the settings folder, which the run holds too.
+    c.make_empty();
+    c.hooks(true);
+    {
+        DriveLock run(c.key, c.settings, std::chrono::milliseconds(0));
+        REQUIRE(run.held());
+        REQUIRE(fs::file_size(c.own_drive) == 0);
+        REQUIRE(::link(c.own_drive.c_str(), c.link.c_str()) == 0);
+        const fs::path shared = fs::path("/run/lock") / ("vaultik-drive-" + c.name + ".lock");
+        REQUIRE(::link(shared.c_str(), (c.link.string() + "2").c_str()) == 0);
+        OtherProcess command("lock", c.key, c.settings, c.tmp.path, {}, c.env);
+        CHECK(command.inherited());
+        CHECK_FALSE(command.held());
     }
 }
 

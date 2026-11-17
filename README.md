@@ -612,11 +612,12 @@ for something else. On Linux root's runs take turns with the runs of every accou
 for another account's run for 5 minutes at most and then goes on with a warning (both then share
 the drive's speed): it too can be delayed, never stopped. Your own runs still take turns with each
 other, whatever settings folder each uses (the installed app and a portable copy, say), through a
-file in your own /run/user folder, where no other account can put one first, and one in /run/lock
-(where your account cannot make that one, as on distributions whose /run/lock only root may write
-to, a file in your settings folder instead, so runs with and without the /run/user folder still
-take turns as long as they use the same settings folder), and a run as root is waited for as long
-as it runs, also one that went on beside another run of yours, and also when another account made
+file in your own /run/user folder, where no other account can put one first, and one in /run/lock,
+and always also through a file in your settings folder: whether your account can use its file in
+/run/lock depends on what other accounts do there, so your runs, commands and ejects that use the
+same settings folder always meet there, whatever happens in /run/lock (so do runs with and without
+the /run/user folder on distributions whose /run/lock only root may write to); and a run as root is
+waited for as long as it runs, also one that went on beside another run of yours, and also when another account made
 the shared file in /run/lock first so that your account cannot use it (your eject then still
 counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other
 account can put files. Keep every copy of Vaultik on a computer (the installed one, a portable
@@ -641,11 +642,12 @@ name), while a command as root, or a run or command of yours waiting for root's 
 turn file no other account may open and that has no other name. Your runs keep using their own turn
 file in /run/lock when another account gives it a second name, so they still take turns: each turn
 file Vaultik makes there holds its own name from the moment it is there (where the name cannot be
-written, as on a full /run/lock, the turn file in the settings folder is used instead), and one is
+written, as on a full /run/lock, none is made, and the turn file in the settings folder, which is
+always used too, keeps your runs taking turns), and one is
 used only when it holds the name it is opened by (or, one an older version of Vaultik made, holds
 nothing and has no other name). Another account that makes the name of one of your turn files first,
 as a link to another turn file of yours, therefore gains nothing: your run or command uses its turn
-file in the settings folder instead (as root, Vaultik removes such a name and makes its own, but not
+file in the settings folder alone (as root, Vaultik removes such a name and makes its own, but not
 while a program holds that file: then an eject as root is refused). The limit there: a run of yours
 without a /run/user folder then takes turns only with the runs that use the same settings folder,
 and the same goes for ejects: an eject of yours without a /run/user folder then sees your commands
@@ -676,8 +678,8 @@ program holds the drive's turn (the run the command was started from, also throu
 or `pkexec`), so it works whatever environment reaches the command. As any account can hold the
 turn all accounts share in /run/lock, a program holding only that one is taken for the command's
 run only when it also holds a turn no other account can take (its account's own, or root's; for a
-command started with `sudo`, also the turn file in the run's settings folder, which a run without
-a /run/user folder uses where only root may write to /run/lock, and which root sees the run has
+command started with `sudo`, also the turn file in the run's settings folder, which every run of
+an account holds, and which root sees the run has
 open, also when another account holds the turn all accounts share). A turn file counts as one no
 other account can take by what the file is (your account's own, which no other account may open),
 never by its name, so another account that made the shared file first and moves it away while the

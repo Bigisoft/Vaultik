@@ -314,6 +314,7 @@ int make_named(const std::string& path, const std::string& name, mode_t mode) {
 // Writes `name` into the file of `fd` (opened read only), which is empty: through a descriptor of
 // its own to that very file. Left empty when it cannot be written whole.
 void write_name(int fd, const std::string& name) {
+    if (hooks().short_name_write) return;
     const int w = ::open(("/proc/self/fd/" + std::to_string(fd)).c_str(), O_WRONLY | O_CLOEXEC | O_NONBLOCK);
     if (w < 0) return;
     if (::pwrite(w, name.data(), name.size(), 0) != static_cast<ssize_t>(name.size())) (void)::ftruncate(w, 0);
@@ -483,47 +484,65 @@ int open_in_run_user(const std::string& name) {
     return -1;
 }
 
-// The account's own locks for `name` ("vaultik-drive-<hash>.lock"), which only runs of the
-// account can hold, so that every run of the account takes turns there, whatever settings folder
-// it uses (the installed app and a portable one, VAULTIK_CONFIG_DIR): the file `name` in its own
-// runtime folder (see run_user_dir), where no other account can make one first, and the file
-// "vaultik-drive-<hash>.<uid>.lock" in /run/lock, readable by the account alone and used only when
-// it is a file the account owns (another account may have made one of that name first). Both
-// where both can be used, in that order: a run without the runtime folder (one started outside a
-// login, without systemd's user manager) still takes turns with the others in /run/lock. Where
-// the file in /run/lock cannot be used (a distribution whose /run/lock only root may write to), the
-// file in `lock_dir` too, after the one in the runtime folder: a run without the runtime folder
-// (or with another one, as a Flatpak's) then takes turns with the others through the settings
-// folder, as long as they use the same one. Every run takes them in this order, so none waits for
-// another that waits for it. Empty when none can be opened.
-std::vector<int> open_own_files(const std::string& name, const std::string& lock_dir) {
-    std::vector<int> fds;
-    if (!hooks().own_in_folder) {
-        if (const int fd = open_in_run_user(name); fd >= 0) fds.push_back(fd);
-        const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
-        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0) {
-            fds.push_back(fd);
-            return fds;
-        }
-    }
-    if (const int fd = open_in_dir(name, lock_dir); fd >= 0) fds.push_back(fd);
-    return fds;
-}
-
-// What a run of an account (not root) locks for `name`: `own` (see open_own_files), which only
-// runs of this account can hold, then `shared`, the file all accounts share (when it can be used),
-// which root's runs and those of other accounts may hold too and which is waited for only a short
-// while. Either may be missing (-1, empty).
+// What a run of an account (not root) locks for `name` ("vaultik-drive-<hash>.lock"; see
+// open_account_files), in this order: `own`, the account's own locks, which only processes of the
+// account can hold, so that every run of the account takes turns there, then `shared`, the file all
+// accounts share (when it can be used), which root's runs and those of other accounts may hold too
+// and which is waited for only a short while. Any may be missing (-1). `folder` is the one of `own`
+// in the settings folder (always the last), which is let go of where its file system refuses
+// flocks (see folder_refused).
 struct AccountFiles {
     std::vector<int> own;
+    int folder = -1;
     int shared = -1;
 };
 
+// The account's own locks for `name`, so that its runs take turns whatever settings folder each
+// uses (the installed app and a portable one, VAULTIK_CONFIG_DIR): the file `name` in its own
+// runtime folder (see run_user_dir), where no other account can make one first, and the file
+// "vaultik-drive-<hash>.<uid>.lock" in /run/lock, readable by the account alone and used only when
+// it is a file the account owns that holds its name (see mine; another account may have made one
+// of that name first, or given an earlier version's empty one a second name): a run without the
+// runtime folder (one started outside a login, without systemd's user manager) still takes turns
+// with the others there. Then always the file `name` in `lock_dir` (the settings folder, one file
+// less where it is one of the others): whether the account can use its file in /run/lock depends
+// on what other accounts do there (they can add a name to it and remove it again, fill /run/lock
+// so that no file is made or an earlier version's file gets no name, make the name first and
+// remove it again), so two processes of the account may find it usable one and not the other,
+// and they must still meet: those that use the same settings folder always do, there, whatever
+// happens in /run/lock (a distribution whose /run/lock only root may write to too). Every process
+// takes them in this order, so none waits for another that waits for it.
 AccountFiles open_account_files(const std::string& name, const std::string& lock_dir) {
     AccountFiles f;
-    f.own = open_own_files(name, lock_dir);
+    if (!hooks().own_in_folder) {
+        if (const int fd = open_in_run_user(name); fd >= 0) f.own.push_back(fd);
+        const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
+        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0)
+            f.own.push_back(fd);
+    }
+    if (const int fd = open_in_dir(name, lock_dir); fd >= 0) {
+        struct stat st{};
+        const bool same = ::fstat(fd, &st) != 0 || std::any_of(f.own.begin(), f.own.end(), [&](int other) {
+                              struct stat o{};
+                              return ::fstat(other, &o) == 0 && o.st_dev == st.st_dev && o.st_ino == st.st_ino;
+                          });
+        if (same) {  // the settings folder is the runtime folder (VAULTIK_CONFIG_DIR): taken once
+            ::close(fd);
+        } else {
+            f.own.push_back(fd);
+            f.folder = fd;
+        }
+    }
     f.shared = open_in_run_lock(name, 0600, own_or_roots);
     return f;
+}
+
+// Whether a flock on the settings folder's file `fd` (see AccountFiles) failed as its file system
+// refuses flocks for good (a home folder on NFS without its lock service, say), not as another
+// process holds it: then no process can hold that file either, and it is let go of instead of
+// costing the run, claim or eject its other locks. Tells by errno, right after the flock.
+bool folder_refused(int fd, const AccountFiles& files) {
+    return fd >= 0 && fd == files.folder && errno != EWOULDBLOCK && errno != EINTR;
 }
 
 // The folder of root's marks (see open_root_mark).
@@ -1652,8 +1671,10 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
 #else
     const bool root = ::geteuid() == 0;
     int own = -1;
-    int own2 = -1;  // an account's second own lock (see open_own_files)
+    int own2 = -1;  // an account's second and third own locks (see open_account_files)
+    int own3 = -1;
     int shared = -1;
+    AccountFiles files;
     if (root) {
         // Its own lock first, which only root may open (and the mark of a root run), then the one
         // all accounts share. A mark in /run/lock that root cannot use while a process holds it
@@ -1668,22 +1689,27 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         }
     } else {
         // The account's own locks first, then the one all accounts share (see open_account_files).
-        const AccountFiles files = open_account_files(name, lock_dir);
-        if (!files.own.empty()) own = files.own[0];
-        if (files.own.size() > 1) own2 = files.own[1];
+        files = open_account_files(name, lock_dir);
+        int* const slots[] = {&own, &own2, &own3};
+        for (std::size_t i = 0; i < files.own.size() && i < 3; ++i) *slots[i] = files.own[i];
         shared = files.shared;
     }
     const auto close_all = [&] {
-        for (const int fd : {own, own2, shared})
+        for (const int fd : {own, own2, own3, shared})
             if (fd >= 0) ::close(fd);
-        own = own2 = shared = -1;
+        own = own2 = own3 = shared = -1;
     };
     if (own < 0 && shared < 0 && root) return;
     // Waits for `fd` (an own lock) and takes it; false when this returns without the lock (all
-    // closed).
-    const auto take_own = [&](int fd) {
+    // closed). The settings folder's file where its file system refuses flocks: let go of (-1).
+    const auto take_own = [&](int& fd) {
         for (;;) {
             if (::flock(fd, LOCK_EX | LOCK_NB) == 0) return true;
+            if (folder_refused(fd, files)) {
+                ::close(fd);
+                fd = -1;
+                return true;
+            }
             if (errno != EWOULDBLOCK && errno != EINTR) {
                 close_all();
                 return false;
@@ -1708,8 +1734,8 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             pause(std::chrono::milliseconds(250));
         }
     };
-    for (const int fd : {own, own2})
-        if (fd >= 0 && !take_own(fd)) return;
+    for (int* fd : {&own, &own2, &own3})
+        if (*fd >= 0 && !take_own(*fd)) return;
     if (shared >= 0 || !root) {
         // Root: every root run took root's own lock first, so whoever holds this one now is another
         // account. An account: this account's runs took its own first, so whoever holds it is root
@@ -1790,6 +1816,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     }
     handle_ = handle_of(own);
     if (own2 >= 0) own2_ = handle_of(own2);
+    if (own3 >= 0) own3_ = handle_of(own3);
     if (shared >= 0) shared_ = handle_of(shared);
     token_ = token;
     hash_ = hash;
@@ -1803,7 +1830,7 @@ DriveLock::~DriveLock() {
     ReleaseMutex(static_cast<HANDLE>(handle_));
     CloseHandle(static_cast<HANDLE>(handle_));
 #else
-    for (void* h : {shared_, own2_}) {
+    for (void* h : {shared_, own3_, own2_}) {
         if (h == nullptr) continue;
         ::flock(fd_of(h), LOCK_UN);
         ::close(fd_of(h));
@@ -1863,7 +1890,9 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         const std::string mark = "vaultik-use-" + hash + ".root.lock";
         int own = -1;
         int own2 = -1;
+        int own3 = -1;
         int shared = -1;
+        AccountFiles files;
         if (::geteuid() == 0) {
             // Root's mark first (an eject of root's holds it alone), then the claims file. A mark in
             // /run/lock that root cannot use while a process holds it: the claims file alone, as
@@ -1873,12 +1902,14 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
             shared = open_lock_file(name, lock_dir);
             if (own < 0) std::swap(own, shared);
         } else {
-            const AccountFiles files = open_account_files(name, lock_dir);
-            if (!files.own.empty()) own = files.own[0];
-            if (files.own.size() > 1) own2 = files.own[1];
+            files = open_account_files(name, lock_dir);
+            int* const slots[] = {&own, &own2, &own3};
+            for (std::size_t i = 0; i < files.own.size() && i < 3; ++i) *slots[i] = files.own[i];
             shared = files.shared;
         }
         // Shared with every other claim; only an eject holds one alone, until the drive is gone.
+        // False when it gave up on `fd` (closed, -1) other than as the settings folder's file that
+        // its file system refuses flocks on (see folder_refused).
         const auto take = [&](int& fd, bool bounded) {
             // Root's eject may let go of its mark a moment before the claims file (one that ends
             // without letting go, killed say, leaves both in the order it opened them, the mark
@@ -1890,7 +1921,8 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
             auto root_until = std::chrono::steady_clock::time_point::min();
             bool first = true;
             for (;;) {
-                if (::flock(fd, LOCK_SH | LOCK_NB) == 0) return;
+                if (::flock(fd, LOCK_SH | LOCK_NB) == 0) return true;
+                const bool refused = folder_refused(fd, files);
                 const bool busy = errno == EWOULDBLOCK || errno == EINTR;
                 const auto now = std::chrono::steady_clock::now();
                 // An account (bounded) waits on the file of another account only while root's eject
@@ -1901,16 +1933,14 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 if (!busy || now >= until || (bounded && now >= root_until)) {
                     ::close(fd);
                     fd = -1;
-                    return;
+                    return refused;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
         };
-        for (int* fd : {&own, &own2}) {
-            if (*fd < 0) continue;
-            take(*fd, false);
-            if (*fd < 0) {  // an eject kept it for the whole wait
-                for (const int other : {own, own2, shared})
+        for (int* fd : {&own, &own2, &own3}) {
+            if (*fd >= 0 && !take(*fd, false)) {  // an eject kept it for the whole wait
+                for (const int other : {own, own2, own3, shared})
                     if (other >= 0) ::close(other);
                 return;
             }
@@ -1933,6 +1963,7 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         if (own < 0) return;
         handle_ = handle_of(own);
         if (own2 >= 0) own2_ = handle_of(own2);
+        if (own3 >= 0) own3_ = handle_of(own3);
         if (shared >= 0) shared_ = handle_of(shared);
 #endif
         hash_ = hash;
@@ -1947,7 +1978,7 @@ DriveClaim::~DriveClaim() {
     ReleaseMutex(static_cast<HANDLE>(handle_));
     CloseHandle(static_cast<HANDLE>(handle_));
 #else
-    for (void* h : {shared_, own2_}) {
+    for (void* h : {shared_, own3_, own2_}) {
         if (h == nullptr) continue;
         ::flock(fd_of(h), LOCK_UN);
         ::close(fd_of(h));
@@ -2011,7 +2042,9 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     const bool root = ::geteuid() == 0;
     int own = -1;
     int own2 = -1;
+    int own3 = -1;
     int shared = -1;
+    AccountFiles files;
     if (root) {
         // Root's mark first (root's claims hold it), then the claims file of every account. A mark
         // in /run/lock that root cannot use while a process holds it (a claim of root's may): busy.
@@ -2024,19 +2057,25 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
         shared = open_lock_file(name, lock_dir);
         if (own < 0) std::swap(own, shared);
     } else {
-        const AccountFiles files = open_account_files(name, lock_dir);
-        if (!files.own.empty()) own = files.own[0];
-        if (files.own.size() > 1) own2 = files.own[1];
+        files = open_account_files(name, lock_dir);
+        int* const slots[] = {&own, &own2, &own3};
+        for (std::size_t i = 0; i < files.own.size() && i < 3; ++i) *slots[i] = files.own[i];
         shared = files.shared;
     }
     const auto close_all = [&] {
-        for (const int fd : {own, own2, shared})
+        for (const int fd : {own, own2, own3, shared})
             if (fd >= 0) ::close(fd);
-        own = own2 = shared = -1;
+        own = own2 = own3 = shared = -1;
     };
-    // Alone on them: no claim is held, and none can be taken until this lets go.
-    for (const int fd : {own, own2}) {
-        if (fd >= 0 && ::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    // Alone on them: no claim is held, and none can be taken until this lets go. The settings
+    // folder's file where its file system refuses flocks is let go of (see folder_refused).
+    for (int* fd : {&own, &own2, &own3}) {
+        if (*fd >= 0 && ::flock(*fd, LOCK_EX | LOCK_NB) != 0) {
+            if (folder_refused(*fd, files)) {
+                ::close(*fd);
+                *fd = -1;
+                continue;
+            }
             busy_ = errno == EWOULDBLOCK;
             close_all();
             return;
@@ -2070,6 +2109,7 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     if (own < 0) return;
     handle_ = handle_of(own);
     if (own2 >= 0) own2_ = handle_of(own2);
+    if (own3 >= 0) own3_ = handle_of(own3);
     if (shared >= 0) shared_ = handle_of(shared);
     hash_ = hash;
     count(in_process().ejects, hash_, 1);
@@ -2083,7 +2123,7 @@ EjectHold::~EjectHold() {
     ReleaseMutex(static_cast<HANDLE>(handle_));
     CloseHandle(static_cast<HANDLE>(handle_));
 #else
-    for (void* h : {shared_, own2_}) {
+    for (void* h : {shared_, own3_, own2_}) {
         if (h == nullptr) continue;
         ::flock(fd_of(h), LOCK_UN);
         ::close(fd_of(h));
