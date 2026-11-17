@@ -39,13 +39,14 @@
 // when it is a folder of the account's alone, where no other account can make a file first, and
 // vaultik-drive-<hash>.<uid>.lock in /run/lock, used when it is a file the account owns; both where
 // both can be used, so that a run started outside a login, without the runtime folder, takes turns
-// too; and always the file in the given folder as well, after those, as whether the account can use
-// its file in /run/lock depends on what other accounts do there (see below): its runs, claims and
-// ejects that use the same settings folder always meet there, whatever happens in /run/lock, and so
-// do runs on a distribution whose /run/lock only root may write to, or with another runtime folder
-// (a Flatpak's); one on a file system that refuses flocks (NFS without its lock service) is left
-// out), so the runs of one account still take turns, whatever settings folder each uses wherever
-// /run/lock has their file; then each waits for the shared one only a short
+// too; and always the file in the given folder as well (where no other account may open it), after
+// those, as whether the account can use its file in /run/lock depends on what other accounts do
+// there (see below): its runs, claims and ejects that use the same settings folder always meet
+// there, whatever happens in /run/lock, and so do runs on a distribution whose /run/lock only root
+// may write to, or with another runtime folder (a Flatpak's); one on a file system that refuses
+// flocks (NFS without its lock service) is left out, and one other accounts may open is taken
+// only where the file in /run/lock cannot be used), so the runs of one account still take turns,
+// whatever settings folder each uses wherever /run/lock has their file; then each waits for the shared one only a short
 // while (kOtherAccountWait) while a run of another account may hold it, and goes on with a warning.
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and

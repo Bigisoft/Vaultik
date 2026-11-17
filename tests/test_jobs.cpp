@@ -4448,6 +4448,55 @@ TEST_CASE("drive lock: a command started by its run still inherits the drive thr
     }
 }
 
+TEST_CASE("drive lock: a settings folder's lock file other accounts may open is not always taken (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-loose-folder-");
+    // A settings folder whose files every account may open (on FAT, exFAT, NTFS or CIFS, as a
+    // portable copy's on a USB stick; here a file made so): another account could hold its lock
+    // file for good, so a run, claim and eject that can use their own files in /run/lock do not
+    // take it; one that cannot still does, as before.
+    fs::create_directories(c.settings);
+    std::vector<fs::path> files;
+    for (const std::string kind : {"drive", "use"}) {
+        const fs::path f = fs::path(c.settings) / ("vaultik-" + kind + "-" + c.name + ".lock");
+        std::ofstream(f).close();
+        REQUIRE(::chmod(f.c_str(), 0666) == 0);
+        files.push_back(f);
+    }
+    const auto taken = [](const fs::path& f) {
+        const int fd = ::open(f.c_str(), O_RDONLY | O_CLOEXEC);
+        REQUIRE(fd >= 0);
+        const bool busy = ::flock(fd, LOCK_EX | LOCK_NB) != 0;
+        ::close(fd);
+        return busy;
+    };
+    {
+        DriveLock run(c.key, c.settings, std::chrono::milliseconds(0));
+        REQUIRE(run.held());
+        CHECK_FALSE(taken(files[0]));
+        const DriveClaim claim(c.key, c.settings);
+        REQUIRE(claim.held());
+        CHECK_FALSE(taken(files[1]));
+    }
+    {
+        const EjectHold eject(c.key, c.settings);
+        REQUIRE_FALSE(eject.busy());
+        CHECK_FALSE(taken(files[1]));
+    }
+    // The own file in /run/lock holds another name, so it is not used: the folder's file is.
+    fs::remove(c.own_drive);
+    std::ofstream(c.own_drive, std::ios::binary) << "vaultik-drive-0123456789abcdef0123456789abcdef.lock";
+    REQUIRE(::chmod(c.own_drive.c_str(), 0600) == 0);
+    {
+        DriveLock run(c.key, c.settings, std::chrono::milliseconds(0));
+        REQUIRE(run.held());
+        CHECK(taken(files[0]));
+    }
+}
+
 TEST_CASE("eject: an own file the eject does not hold is busy where /proc/locks cannot tell (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");

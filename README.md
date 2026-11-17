@@ -613,12 +613,14 @@ for another account's run for 5 minutes at most and then goes on with a warning 
 the drive's speed): it too can be delayed, never stopped. Your own runs still take turns with each
 other, whatever settings folder each uses (the installed app and a portable copy, say), through a
 file in your own /run/user folder, where no other account can put one first, and one in /run/lock,
-and always also through a file in your settings folder: whether your account can use its file in
-/run/lock depends on what other accounts do there, so your runs, commands and ejects that use the
-same settings folder always meet there, whatever happens in /run/lock (so do runs with and without
-the /run/user folder on distributions whose /run/lock only root may write to); and a run as root is
-waited for as long as it runs, also one that went on beside another run of yours, and also when another account made
-the shared file in /run/lock first so that your account cannot use it (your eject then still
+and always also through a file in your settings folder where only your account may open it (not
+on FAT, exFAT, NTFS or a network share, say, where another account could hold it for good):
+whether your account can use its file in /run/lock depends on what other accounts do there, so
+your runs, commands and ejects that use the same settings folder always meet there, whatever
+happens in /run/lock (so do runs with and without the /run/user folder on distributions whose
+/run/lock only root may write to); and a run as root is waited for as long as it runs, also one
+that went on beside another run of yours, and also when another account made the shared file in
+/run/lock first so that your account cannot use it (your eject then still
 counts root's runs and commands as busy). Root keeps its own marks in /run/vaultik, where no other
 account can put files. Keep every copy of Vaultik on a computer (the installed one, a portable
 copy, an AppImage) on the same version: copies of different versions may not see each other's

@@ -545,15 +545,22 @@ struct AccountFiles {
 // so that no file is made or an earlier version's file gets no name, make the name first and
 // remove it again), so two processes of the account may find it usable one and not the other,
 // and they must still meet: those that use the same settings folder always do, there, whatever
-// happens in /run/lock (a distribution whose /run/lock only root may write to too). Every process
-// takes them in this order, so none waits for another that waits for it.
+// happens in /run/lock (a distribution whose /run/lock only root may write to too). Always only
+// where that file is the account's and no other account may open it (see private_file): one other
+// accounts may open (a settings folder on FAT, exFAT, NTFS or CIFS, as a portable copy's on a USB
+// stick) another account could hold for good, and stop the account's runs; such a one is taken
+// only where the account's file in /run/lock cannot be used, as before. Every process takes them
+// in this order, so none waits for another that waits for it.
 AccountFiles open_account_files(const std::string& name, const std::string& lock_dir) {
     AccountFiles f;
+    bool in_run_lock = false;
     if (!hooks().own_in_folder) {
         if (const int fd = open_in_run_user(name); fd >= 0) f.own.push_back(fd);
         const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
-        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0)
+        if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0) {
             f.own.push_back(fd);
+            in_run_lock = true;
+        }
     }
     if (const int fd = open_in_dir(name, lock_dir); fd >= 0) {
         struct stat st{};
@@ -561,7 +568,8 @@ AccountFiles open_account_files(const std::string& name, const std::string& lock
                               struct stat o{};
                               return ::fstat(other, &o) == 0 && o.st_dev == st.st_dev && o.st_ino == st.st_ino;
                           });
-        if (same) {  // the settings folder is the runtime folder (VAULTIK_CONFIG_DIR): taken once
+        // Taken once where the settings folder is the runtime folder (VAULTIK_CONFIG_DIR).
+        if (same || (in_run_lock && !private_file(st.st_uid, st.st_mode, ::geteuid()))) {
             ::close(fd);
         } else {
             f.own.push_back(fd);
