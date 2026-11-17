@@ -311,11 +311,28 @@ int make_named(const std::string& path, const std::string& name, mode_t mode) {
     return -1;
 }
 
+// Writes `name` into the file of `fd` (opened read only), which is empty: through a descriptor of
+// its own to that very file. Left empty when it cannot be written whole.
+void write_name(int fd, const std::string& name) {
+    const int w = ::open(("/proc/self/fd/" + std::to_string(fd)).c_str(), O_WRONLY | O_CLOEXEC | O_NONBLOCK);
+    if (w < 0) return;
+    if (::pwrite(w, name.data(), name.size(), 0) != static_cast<ssize_t>(name.size())) (void)::ftruncate(w, 0);
+    ::close(w);
+}
+
+bool flock_held(int fd);
+
 // The file `name` in /run/lock, shared by every account: the one there when `usable` accepts it,
 // or a new one with `mode` (made at most once, also when several runs start at once), never one
 // with something mounted on it (see open_unmounted). A file this makes holds its name (see named
-// and make_named). Root removes one it cannot use and makes its own. -1 when there is none to use.
-int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(int, const struct stat&, const std::string&)) {
+// and make_named); one of this account's that an earlier version made, which holds no name, gets
+// its name written into it here while it has no other name, so that a second name another account
+// gives it later leaves it usable. Root removes one it cannot use and makes its own, except a file
+// of root's that a process holds (see flock_held): another run of root's may hold its mark there,
+// which must stay the one other accounts see; then `held` (when given) is set. -1 when there is
+// none to use.
+int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(int, const struct stat&, const std::string&),
+                     bool* held = nullptr) {
     struct stat dir{};
     if (::lstat("/run/lock", &dir) != 0 || !S_ISDIR(dir.st_mode)) return -1;
     const std::string path = "/run/lock/" + name;
@@ -337,11 +354,21 @@ int open_in_run_lock(const std::string& name, mode_t mode, bool (*usable)(int, c
             return -1;
         }
         struct stat st{};
-        if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && usable(fd, st, name)) {
+        const bool regular = ::fstat(fd, &st) == 0 && S_ISREG(st.st_mode);
+        if (regular && st.st_uid == ::geteuid() && st.st_nlink == 1 && st.st_size == 0) {
+            write_name(fd, name);
+            if (::fstat(fd, &st) != 0) st.st_nlink = 0;  // not to be used
+        }
+        if (regular && st.st_nlink > 0 && usable(fd, st, name)) {
             if (st.st_uid == ::geteuid()) (void)::fchmod(fd, mode);  // whatever the umask
             return fd;
         }
+        const bool keep = root && regular && st.st_uid == 0 && flock_held(fd);
         ::close(fd);
+        if (keep) {
+            if (held != nullptr) *held = true;
+            return -1;
+        }
         if (!root || ::unlink(path.c_str()) != 0) return -1;
     }
     return -1;
@@ -524,8 +551,10 @@ bool usable_root_dir(const std::string& dir) {
 
 // Root's mark `name` (root only; see the header): in root's own folder, where no account can make
 // a file in its place (in sticky /run/lock, an account that kept making one there could keep root
-// from its mark). Where that folder cannot be used, in /run/lock as before. -1 when neither can.
-int open_root_mark(const std::string& name) {
+// from its mark). Where that folder cannot be used, in /run/lock as before. -1 when neither can;
+// then `held` is set when the one in /run/lock cannot be used but a process holds it (see
+// open_in_run_lock), which an eject counts as busy.
+int open_root_mark(const std::string& name, bool& held) {
     const std::string dir = root_dir();
     if (usable_root_dir(dir)) {
         const int fd = ::open((dir + "/" + name).c_str(), O_RDONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
@@ -536,7 +565,7 @@ int open_root_mark(const std::string& name) {
         }
         if (fd >= 0) ::close(fd);
     }
-    return open_in_run_lock(name, 0600, roots);
+    return open_in_run_lock(name, 0600, roots, &held);
 }
 
 // What one look into other accounts' processes (root only; see private_files_of) may cost, so that
@@ -1390,6 +1419,21 @@ Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const st
     return unknown || loose ? Holder::unknown : Holder::other;
 }
 
+// Whether /proc/locks shows a flock held on the file of `fd`, by any process; also when that
+// cannot be told (fail closed).
+bool flock_held(int fd) {
+    LockFile id;
+    Mounts mounts;
+    if (!lock_file_of(fd, id, mounts)) return true;
+    bool readable = false;
+    const std::vector<HeldFlock> held = held_flocks(&readable);
+    if (!readable) return true;
+    return std::any_of(held.begin(), held.end(), [&](const HeldFlock& f) {
+        const Match m = match(f, id);
+        return m == Match::exact || m == Match::mount;
+    });
+}
+
 // Whether a process of root's (see root_process) holds the file of `fd` alone (as root's eject
 // holds the claims file); only root can make that so.
 bool root_holds_alone(int fd) {
@@ -1610,8 +1654,11 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     int shared = -1;
     if (root) {
         // Its own lock first, which only root may open (and the mark of a root run), then the one
-        // all accounts share.
-        own = open_root_mark(mark);
+        // all accounts share. A mark in /run/lock that root cannot use while a process holds it
+        // (another run of root's may) fails an eject closed; a run goes on as without a mark.
+        bool mark_held = false;
+        own = open_root_mark(mark, mark_held);
+        if (mark_held && fail_closed) throw DriveBusy("another Vaultik run uses the backup drive");
         shared = open_in_run_lock(name, 0644, own_or_roots);
         if (own < 0) {
             own = shared >= 0 ? shared : open_lock_file(name, lock_dir);
@@ -1816,8 +1863,11 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         int own2 = -1;
         int shared = -1;
         if (::geteuid() == 0) {
-            // Root's mark first (an eject of root's holds it alone), then the claims file.
-            own = open_root_mark(mark);
+            // Root's mark first (an eject of root's holds it alone), then the claims file. A mark in
+            // /run/lock that root cannot use while a process holds it: the claims file alone, as
+            // without a mark (an eject of root's that holds that mark holds the claims file too).
+            bool mark_held = false;
+            own = open_root_mark(mark, mark_held);
             shared = open_lock_file(name, lock_dir);
             if (own < 0) std::swap(own, shared);
         } else {
@@ -1961,8 +2011,14 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     int own2 = -1;
     int shared = -1;
     if (root) {
-        // Root's mark first (root's claims hold it), then the claims file of every account.
-        own = open_root_mark(mark);
+        // Root's mark first (root's claims hold it), then the claims file of every account. A mark
+        // in /run/lock that root cannot use while a process holds it (a claim of root's may): busy.
+        bool mark_held = false;
+        own = open_root_mark(mark, mark_held);
+        if (mark_held) {
+            busy_ = true;
+            return;
+        }
         shared = open_lock_file(name, lock_dir);
         if (own < 0) std::swap(own, shared);
     } else {

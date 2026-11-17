@@ -99,9 +99,14 @@
 // fs.protected_hardlinks is off, another account that makes such a name first as a hard link to
 // another file of the account's (another lock file, held for another drive or by a run while a
 // claim waits) or of root's gains nothing: the account uses the file in its settings folder instead,
-// root removes the name and makes its own mark. The limit: such a run without its runtime folder
-// then takes turns only with the runs that use the same settings folder, and a file an earlier
-// version made (which holds no name) is treated so too once it has another name. Root does not look
+// root removes the name and makes its own mark, but never while a process holds the file there
+// (another run or claim of root's may hold an earlier mark, which other accounts' ejects look at by
+// its name): then root's eject counts it as busy, and root's runs and claims go on as without a
+// mark. The limit: such a run without its runtime folder then takes turns only with the runs that
+// use the same settings folder. A file an earlier version made (which holds no name) gets its name
+// written into it by the first run, claim or eject of its owner that opens it while it has no
+// other name; one that gets another name before that is treated as above (an eject of its owner
+// still counts it as busy while it is held). Root does not look
 // at a runtime folder, or a file, on a FUSE mount that its mount table shows (another account's
 // FUSE program, mounted with allow_other, could keep it waiting for as long as it likes), so such a
 // file counts for nothing; for a file a process has open, its mount is looked up in root's mount
