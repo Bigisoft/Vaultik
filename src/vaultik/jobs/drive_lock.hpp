@@ -41,7 +41,8 @@
 // both can be used, so that a run started outside a login, without the runtime folder, takes turns
 // too; and always the file in the given folder as well, after those, as whether the account can use
 // its file in /run/lock depends on what other accounts do there (see below): its runs, claims and
-// ejects that use the same settings folder always meet there, whatever happens in /run/lock, and so
+// ejects that use the same settings folder meet there, whatever happens in /run/lock, as long as no
+// other account may write to that folder (see below), and so
 // do runs on a distribution whose /run/lock only root may write to, or with another runtime folder
 // (a Flatpak's); one on a file system that refuses flocks (NFS without its lock service) is left
 // out), so the runs of one account still take turns, whatever settings folder each uses, wherever
@@ -63,7 +64,18 @@
 // give up, and keep the account's ejects refused. Two runs of the account still meet there, except
 // a run that holds its own file in /run/lock or its runtime folder and one that cannot use that
 // file (another account made its name first): once another account held the settings folder's
-// file for kOtherAccountWait, those two may share the drive's speed.
+// file for kOtherAccountWait, those two may share the drive's speed. Where other accounts may also
+// write to the settings folder (FAT, exFAT or NTFS mounted with umask 000, or a folder the account
+// does not own), they may rename or remove its file, so that a run that holds it and an eject that
+// makes it anew do not meet there: an eject of the account then counts a busy shared file as busy
+// (fail closed) instead of passing it by, and a run with no other own file waits for the shared
+// file its whole wait (another account that holds it can then make the run give up), so that such
+// a run always holds a file the account's ejects see. There another account can delay the
+// account's runs and commands and keep its ejects refused, but not hide a run from them, except
+// where the account cannot use the shared file at all (another account made it first, or only
+// root may write to /run/lock) and a run holds the settings folder's file alone; and it can hide a
+// command (a claim) that holds no other own file, as a claim waits for the shared claims file only
+// while root's eject holds its mark.
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
 // that every account may look into (set so whatever root's umask); /run/lock where that folder

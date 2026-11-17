@@ -527,13 +527,25 @@ int open_in_run_user(const std::string& name) {
 // and which is waited for only a short while. Any may be missing (-1). `folder` is the one of `own`
 // in the settings folder (always the last), which is let go of where its file system refuses
 // flocks (see folder_refused); `loose`: other accounts may open that one too (see
-// open_account_files), so a run and a claim may pass it by after a while.
+// open_account_files), so a run and a claim may pass it by after a while; `exposed`: other
+// accounts may write to the settings folder itself (see private_folder), so they may also rename
+// or remove that file, and a run and an eject that meet only there may then not meet at all.
 struct AccountFiles {
     std::vector<int> own;
     int folder = -1;
     bool loose = false;
+    bool exposed = false;
     int shared = -1;
 };
+
+// Whether only this account may make, rename or remove names in folder `dir`: it owns it, and
+// neither other accounts nor a group other than its own may write to it. False when that cannot
+// be told. A settings folder on FAT, exFAT or NTFS mounted with umask 000 is not.
+bool private_folder(const std::string& dir) {
+    struct stat st{};
+    return ::stat(dir.c_str(), &st) == 0 && st.st_uid == ::geteuid() && (st.st_mode & 002) == 0 &&
+           ((st.st_mode & 020) == 0 || st.st_gid == ::getegid());
+}
 
 // The account's own locks for `name`, so that its runs take turns whatever settings folder each
 // uses (the installed app and a portable one, VAULTIK_CONFIG_DIR): the file `name` in its own
@@ -547,8 +559,9 @@ struct AccountFiles {
 // on what other accounts do there (they can add a name to it and remove it again, fill /run/lock
 // so that no file is made or an earlier version's file gets no name, make the name first and
 // remove it again), so two processes of the account may find it usable one and not the other,
-// and they must still meet: those that use the same settings folder always do, there, whatever
-// happens in /run/lock (a distribution whose /run/lock only root may write to too). Also where
+// and they must still meet: those that use the same settings folder do, there, whatever happens in
+// /run/lock (a distribution whose /run/lock only root may write to too), as long as no other
+// account may write to that folder (see AccountFiles). Also where
 // other accounts may open that file (`loose`; see private_file): a settings folder on FAT, exFAT,
 // NTFS or CIFS, as a portable copy's on a USB stick. Another account could hold such a one for
 // good, so a run that holds another own file waits for it only a short while (kOtherAccountWait,
@@ -579,6 +592,7 @@ AccountFiles open_account_files(const std::string& name, const std::string& lock
             f.loose = !private_file(st.st_uid, st.st_mode, ::geteuid());
         }
     }
+    f.exposed = !private_folder(lock_dir);
     f.shared = open_in_run_lock(name, 0600, own_or_roots);
     return f;
 }
@@ -1872,12 +1886,22 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     };
     for (int* fd : {&own, &own2, &own3})
         if (*fd >= 0 && !take_own(*fd)) return;
+    // Where other accounts may write to the settings folder (see AccountFiles), they may rename its
+    // file away, so that a run that holds it and an eject that makes it anew do not meet there: an
+    // eject of the account then counts the shared file as busy (fail closed) instead of passing it
+    // by, and a run that holds no other own file waits for the shared file its whole wait, so that
+    // the account's ejects still see it there.
+    const int held_own[] = {own, own2, own3};
+    const bool folder_only =
+        files.exposed && std::none_of(std::begin(held_own), std::end(held_own),
+                                      [&](int o) { return o >= 0 && o != files.folder; });
     if (shared >= 0 || !root) {
         // Root: every root run took root's own lock first, so whoever holds this one now is another
         // account. An account: this account's runs took its own first, so whoever holds it is root
         // (while root's mark is held) or another account. Another account is waited for only a
         // short while (or for the whole wait, when that is shorter); an eject of an account passes
-        // it by at once, while root's eject counts it as busy (fail closed, root's runs take turns
+        // it by at once (not where other accounts may write to its settings folder, see
+        // folder_only), while root's eject counts it as busy (fail closed, root's runs take turns
         // with every account's). An account also waits while root's mark is held with this one
         // free: a run of root's that passed by an account's run on it is still under way. So does
         // an account that cannot use the shared file at all (another account made it first): it
@@ -1917,7 +1941,9 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
             }
             const auto now = std::chrono::steady_clock::now();
             if (by_root) other_deadline = std::min(deadline, now + bound);
-            const bool pass = !by_root && (fail_closed ? !root : now >= other_deadline && other_deadline < deadline);
+            const bool waited_out = now >= other_deadline && other_deadline < deadline;
+            const bool pass =
+                !by_root && (fail_closed ? !root && !files.exposed : !folder_only && waited_out);
             if (pass) {
                 ::close(shared);
                 shared = -1;
@@ -2233,8 +2259,11 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     if (shared >= 0 && ::flock(shared, LOCK_EX | LOCK_NB) != 0) {
         // Root: a claim of any account (fail closed). An account: a claim or eject of root's while
         // root's mark is held, else one of another account, passed by (the account's own files are
-        // still looked at below, also when this eject holds none).
-        const bool busy = errno == EWOULDBLOCK && (root || root_holds(mark, false, true));
+        // still looked at below, also when this eject holds none); but where other accounts may
+        // write to the settings folder (see AccountFiles), busy too (fail closed: a claim of the
+        // account may hold it and a settings folder's file that another account renamed away).
+        const bool busy =
+            errno == EWOULDBLOCK && (root || files.exposed || root_holds(mark, false, true));
         ::close(shared);
         shared = -1;
         if (busy) {

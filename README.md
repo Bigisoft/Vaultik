@@ -615,8 +615,9 @@ other, whatever settings folder each uses (the installed app and a portable copy
 file in your own /run/user folder, where no other account can put one first, and one in /run/lock,
 and always also through a file in your settings folder: whether your account can use its file in
 /run/lock depends on what other accounts do there, so your runs, commands and ejects that use the
-same settings folder always meet there, whatever happens in /run/lock (so do runs with and without
-the /run/user folder on distributions whose /run/lock only root may write to). Where only your
+same settings folder meet there, whatever happens in /run/lock, as long as no other account may
+write to that folder (so do runs with and without the /run/user folder on distributions whose
+/run/lock only root may write to). Where only your
 account may open that file, nobody else can hold it. Where other accounts may open it too (a
 settings folder on FAT, exFAT, NTFS or a network share, such as a portable copy's on a USB stick),
 another account could hold it for good. A run that already holds its file in /run/user or in
@@ -631,11 +632,21 @@ same two conditions (else without its claim on the drive), and an eject counts i
 there another account can delay your runs and commands, make a run without those files give up,
 and keep your ejects refused; and two runs of yours, one with its file in /run/user or /run/lock
 and one that cannot use that file, may share the drive's speed once another account held the
-settings folder's file for those 5 minutes; and a run as root is waited for as long as it runs (only
-the 5 minutes for another account while another account keeps /proc/locks too long to read in 3
-seconds; an eject then counts the run as root as in use), also one that went on beside another run
-of yours, and also when another account made the shared file in /run/lock first so that your account
-cannot use it (your eject then still counts root's runs and commands as busy). Root keeps its own
+settings folder's file for those 5 minutes. Where other accounts may also write to your settings
+folder (a USB stick mounted with umask 000, say), they may rename or remove the file there, so that
+a run of yours that holds it and an eject that makes it anew do not meet: your eject then counts the
+turn all accounts share in /run/lock as in use when it is held, and a run without its files in
+/run/user and /run/lock waits for that shared turn its whole wait (another account holding it can
+make the run give up), so that the run always holds a turn your eject sees. There another account
+can delay your runs and commands and keep your ejects refused, but cannot hide a run from them,
+except where your account cannot use the shared turn file at all (another account made it first,
+or only root may write to /run/lock) and a run holds the settings folder's file alone; and it can
+hide a command of yours without those files from an eject. Your runs wait for a run as root as
+long as it runs (only the 5 minutes for another account while another account keeps /proc/locks
+too long to read in 3 seconds; an eject then counts the run as root as in use), also one that went
+on beside another run of yours, and also when another account made the shared file in /run/lock
+first so that your account cannot use it (your eject then still counts root's runs and commands as
+busy). Root keeps its own
 marks in /run/vaultik, where no other account can put files. Keep every copy of Vaultik on a
 computer (the installed one, a portable
 copy, an AppImage) on the same version: copies of different versions may not see each other's

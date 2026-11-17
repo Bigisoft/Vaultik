@@ -4694,6 +4694,73 @@ TEST_CASE("eject: a run with no other own file never passes a loose settings fol
     CHECK(run->release() == 0);
 }
 
+TEST_CASE("eject: a settings folder other accounts may write keeps the shared file busy (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-loose-open-");
+    const std::vector<fs::path> files = loose_folder_files(c);
+    const fs::path shared_drive = fs::path("/run/lock") / ("vaultik-drive-" + c.name + ".lock");
+    const fs::path shared_use = fs::path("/run/lock") / ("vaultik-use-" + c.name + ".lock");
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, c.settings, std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    // Another account holds the shared files (here a process of this account stands in for it).
+    // With a settings folder only this account may write to, an eject of the account passes them
+    // by, as before; a run that holds no own file besides the settings folder's waits for them
+    // only the short while (200 ms here).
+    {
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
+                           hold_files(shared_drive.string(), shared_use.string()));
+        REQUIRE(other.held());
+        CHECK_FALSE(eject_busy());
+        CHECK_FALSE(EjectHold(c.key, c.settings).busy());
+        fs::remove(c.own_drive);
+        c.make_empty(0644);
+        CHECK_FALSE(run_busy(c.key, c.settings, std::chrono::milliseconds(20000)));
+        fs::remove(c.own_drive);
+    }
+    // Where other accounts may write to the settings folder (a USB stick mounted with umask 000),
+    // they may rename its files away, so an eject of the account counts the busy shared files as
+    // busy (fail closed), and such a run waits for the shared file its whole wait.
+    REQUIRE(::chmod(c.settings.c_str(), 0777) == 0);
+    {
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
+                           hold_files(shared_drive.string(), shared_use.string()));
+        REQUIRE(other.held());
+        CHECK(eject_busy());
+        CHECK(EjectHold(c.key, c.settings).busy());
+        fs::remove(c.own_drive);
+        c.make_empty(0644);
+        CHECK(run_busy(c.key, c.settings, std::chrono::milliseconds(1500)));
+        // A run with its own file in /run/lock, which the account's ejects see, still goes on.
+        fs::remove(c.own_drive);
+        CHECK_FALSE(run_busy(c.key, c.settings, std::chrono::milliseconds(20000)));
+        fs::remove(c.own_drive);
+    }
+    // A run of the account (from cron: no runtime folder, and another account made its name in
+    // /run/lock first) holds the settings folder's file and the shared one; another account
+    // renames the settings folder's file away. An eject of the account makes that file anew, finds
+    // it free, and must still not eject under the run.
+    fs::remove(c.own_drive);
+    c.make_empty(0644);
+    OtherProcess run("lock", c.key, c.settings, c.tmp.path, {}, c.env);
+    REQUIRE(run.held());
+    REQUIRE(flock_taken(files[0]));
+    fs::rename(files[0], files[0].string() + ".moved");
+    CHECK(eject_busy());
+    CHECK(fs::exists(files[0]));  // the eject made it anew
+    CHECK(run.release() == 0);
+    CHECK_FALSE(eject_busy());
+}
+
 TEST_CASE("drive lock: a command under its run inherits the drive on a settings folder other accounts may open (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");
@@ -4805,9 +4872,10 @@ TEST_CASE("eject: an eject without own files of its own still counts the account
     }
     OwnFileCase c("test-no-own-");
     // An eject that has no own file to hold (its settings folder cannot be had, here a path below a
-    // file, and its own names in /run/lock hold other names, so it does not use them) while another
-    // account holds the shared files: it passes those by, but must still count a run or command of
-    // the account that holds an own file of it (taken before that file got another name).
+    // file, and its own names in /run/lock hold other names, so it does not use them): it must
+    // still count a run or command of the account that holds an own file of it (taken before that
+    // file got another name). While another account holds the shared files it counts them as busy
+    // too (fail closed): whether other accounts may write to its settings folder cannot be told.
     std::ofstream(c.tmp.path / "file").close();
     const std::string settings = os::join((c.tmp.path / "file").string(), "settings");
     for (const std::string kind : {"drive", "use"}) {
@@ -4828,6 +4896,8 @@ TEST_CASE("eject: an eject without own files of its own still counts the account
             return false;
         };
         CAPTURE(kind);
+        CHECK(busy());
+        CHECK(other.release() == 0);
         CHECK_FALSE(busy());
         OtherProcess held("flock-sh", {}, {}, c.tmp.path, {}, hold_files(own.string()));
         REQUIRE(held.held());
