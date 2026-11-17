@@ -650,15 +650,19 @@ busy). Root keeps its own
 marks in /run/vaultik, where no other account can put files. Keep every copy of Vaultik on a
 computer (the installed one, a portable
 copy, an AppImage) on the same version: copies of different versions may not see each other's
-turns and may then share a drive for a while. Another account cannot keep your eject refused (except
-where your settings folder is one other accounts may open, see above, and where Linux lets an
-account make hard links to other accounts' files, `fs.protected_hardlinks` off: there it can give an
-empty turn file of yours that an older version of Vaultik made in /run/lock a second name and make
-/proc/locks take longer than 3 seconds to read, and your eject is then refused, as it fails closed
-when it cannot tell whether that file is in use), and can make a command of yours wait 2 seconds at
-most (60 seconds where your settings folder is one other accounts may open); a command or eject as
-root still counts. An
-eject as root also counts the runs and commands of every account that another account kept from
+turns and may then share a drive for a while. Another account cannot keep your eject refused,
+except where your settings folder is one other accounts may open or write to (see above); where
+Linux lets an account make hard links to other accounts' files (`fs.protected_hardlinks` off),
+where it can give an empty turn file of yours that an older version of Vaultik made in /run/lock a
+second name and make /proc/locks take longer than 3 seconds to read, and your eject is then
+refused, as it fails closed when it cannot tell whether that file is in use; and once root has used
+the drive since the computer started (root's marks for it stay until then), where an account that
+makes /proc/locks take longer than 3 seconds to read keeps every account's eject of that drive
+refused, as an eject then cannot tell whether root still uses the drive and fails closed. It can
+make a command of yours wait about 2 seconds plus the time Linux takes to read /proc/locks (which
+it can make long), at most about 60 seconds plus one such read (the whole 60 seconds where your
+settings folder is one other accounts may open); a command or eject as root still counts. An eject
+as root also counts the runs and commands of every account that another account kept from
 the turn all accounts share (by holding or making its file in /run/lock first), through their own
 files in /run/lock and /run/user, and through the turn file in the settings folder that a program
 holding a turn has open (so also a run without a /run/user folder whose file in /run/lock another
