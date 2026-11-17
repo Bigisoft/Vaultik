@@ -1455,7 +1455,10 @@ enum class Holder {
 // a process above this one leaves no answer (unknown).
 // /proc/locks is read whole here, not within a look's time: cut short, the command would have to
 // either wait for its own run (another account could then keep it waiting the whole wait) or leave
-// it to the marker (which may then make it inherit a drive its run no longer holds).
+// it to the marker (which may then make it inherit a drive its run no longer holds). A run asks
+// this on each 250 ms turn of its wait, so where another account makes /proc/locks long, each turn
+// takes that much longer: a cancel is seen later, and the wait may end past its deadline by up to
+// one read.
 Holder held_by_ancestor(int fd, bool own_file, const std::string& name, const std::string& mark, bool& unseen) {
     const std::vector<HeldFlock> held = held_flocks();
     Mounts mounts;
@@ -2092,6 +2095,9 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 const auto now = std::chrono::steady_clock::now();
                 // An account (bounded) waits on the file of another account only while root's eject
                 // holds its mark (and a moment after): another account may hold it alone for good.
+                // root_holds reads /proc/locks whole on each 50 ms turn, so a long one (another
+                // account can make it so) makes each turn that much longer, and the wait may end
+                // past `until` and root_until by up to one read.
                 if (bounded && root_holds(mark, true, false)) root_until = now + kRootLetGo;
                 else if (bounded && busy && first && root_holds_alone(fd)) root_until = now + kRootLetGo;
                 first = false;
