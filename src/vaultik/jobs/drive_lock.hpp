@@ -81,11 +81,13 @@
 // account made it first, or only root may write to /run/lock), an eject of the account there also
 // counts as busy every flock that a process of the account other than the eject holds on a file
 // of the settings folder's file system, as /proc/locks shows it, whatever that file is named now
-// (a name there tells nothing), and where that cannot be told (/proc/locks cannot be read or
-// reading it was cut short at the look's 3 seconds, a holder's accounts cannot be read, as with
-// hidepid): so another account cannot hide a run or command of the account from its ejects. The
-// cost: such an eject is also refused while a process of the account holds any other flock on that
-// file system (a run for another drive from the same portable copy, say). There another account
+// (a name there tells nothing), that is now in a folder an account other than itself and root may
+// write to (the settings folder too: another account can move a file only into such a folder, on
+// the same file system) or removed, and where that cannot be told (/proc/locks cannot be read or
+// reading it or the holder's open files ran over the look's budget, a holder's accounts cannot be
+// read, as with hidepid): so another account cannot hide a run or command of the account from its
+// ejects. The cost: such an eject is also refused while a process of the account holds another
+// such flock (a run for another drive from the same portable copy, say). There another account
 // can delay the account's runs and commands and keep its ejects refused; it can also make two runs
 // of the account that meet only there share the drive's speed (the second makes the file anew),
 // and a command that starts while such an eject is under way go on beside it instead of waiting

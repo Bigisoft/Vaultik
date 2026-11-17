@@ -4880,6 +4880,22 @@ TEST_CASE("eject: a run or claim holding only a renamed settings folder file is 
         return false;
     };
     {
+        // A flock of another program of the account on that file system, on a file in a folder
+        // only the account may write to (another account could not have moved a file there),
+        // does not count; one on a file in a folder other accounts may write to does.
+        const fs::path own_dir = c.tmp.path / "private";
+        fs::create_directories(own_dir);
+        REQUIRE(::chmod(own_dir.c_str(), 0700) == 0);
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
+                           hold_files((own_dir / "x").string()));
+        REQUIRE(other.held());
+        CHECK_FALSE(eject_busy());
+        CHECK_FALSE(EjectHold(c.key, c.settings).busy());
+        REQUIRE(::chmod(own_dir.c_str(), 0777) == 0);
+        CHECK(eject_busy());
+        CHECK(other.release() == 0);
+    }
+    {
         OtherProcess run("lock", c.key, c.settings, c.tmp.path, {}, c.env);
         REQUIRE(run.held());
         REQUIRE(flock_taken(files[0]));

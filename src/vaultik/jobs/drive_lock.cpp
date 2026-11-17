@@ -1584,19 +1584,23 @@ bool other_account_holds(int fd) {
 }
 
 // An account's eject where other accounts may write to its settings folder `dir` (see
-// AccountFiles): whether a process of this account other than this one holds a flock on any file
-// of that folder's file system, as /proc/locks shows. Another account may rename or remove the
-// settings folder's lock or claims file there while a run or command holds it (perhaps alone, see
-// the header), so that this eject made and took a new one: the name tells nothing, so every flock
-// of the account's on that file system counts (also one for another drive, or of another program:
-// the eject is then refused, fail closed). A folder that is not there (or cannot be opened):
-// the nearest folder above it that can, on whose file system a file renamed away from there
-// stays. Busy also where that cannot be told: no such folder can be looked at, /proc/locks cannot
-// be read or reading it was cut short (within the time of a look, see ScanBudget, as any account
-// can make it long), the device of the folder's mount cannot be told (then every flock of the
-// account's counts), or a holder's accounts cannot be read (a holder without a process, or one
-// hidden, as with hidepid). A holder in another pid namespace, which /proc/locks leaves out, is
-// not seen.
+// AccountFiles): whether a process of this account other than this one holds a flock on a file of
+// that folder's file system that another account may have renamed or removed, as /proc/locks
+// shows. Another account may rename or remove the settings folder's lock or claims file there
+// while a run or command holds it (perhaps alone, see the header), so that this eject made and
+// took a new one: the name tells nothing, but such a file stays on that file system, in a folder
+// that other account may write to (or is removed). So each such flock counts whose file the
+// holder has open (/proc/<pid>/fd) in a folder that an account other than this one and root may
+// write to (the settings folder itself too), or removed, or where that cannot be told (also one
+// for another drive, or of another program: the eject is then refused, fail closed). A folder
+// that is not there (or cannot be opened): the nearest folder above it that can, on whose file
+// system a file renamed away from there stays. Busy also where that cannot be told: no such
+// folder can be looked at, /proc/locks cannot be read, reading it or the holders' open files ran
+// over the look's budget (see ScanBudget, as any account can make /proc/locks long), the device
+// of the folder's mount cannot be told (then every flock of the account's counts), a holder's
+// accounts cannot be read (a holder without a process, or one hidden, as with hidepid), or the
+// holder's descriptor of a held file cannot be found. A holder in another pid namespace, which
+// /proc/locks leaves out, is not seen.
 bool own_flock_on(const std::string& dir) {
     std::string at = dir;
     int fd = ::open(at.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -1612,11 +1616,12 @@ bool own_flock_on(const std::string& dir) {
     const bool known = lock_file_of(fd, id, mounts);
     ::close(fd);
     if (!known) return true;
-    const ScanBudget budget;
+    ScanBudget budget;
     bool readable = false;
     const std::vector<HeldFlock> held = held_flocks(&readable, &budget);
     if (!readable || !budget.in_time()) return true;
     const auto me = static_cast<long long>(::geteuid());
+    std::map<long, std::vector<unsigned long long>> mine;  // the inodes each holder of ours holds
     for (const HeldFlock& f : held) {
         if (f.pid == static_cast<long>(::getpid())) continue;
         const bool on = !id.mount_known ||
@@ -1625,7 +1630,49 @@ bool own_flock_on(const std::string& dir) {
         if (!on) continue;
         if (f.pid <= 0 || !budget.in_time()) return true;
         const std::vector<long long> ids = accounts_of(f.pid);
-        if (ids.empty() || std::find(ids.begin(), ids.end(), me) != ids.end()) return true;
+        if (ids.empty()) return true;
+        if (std::find(ids.begin(), ids.end(), me) != ids.end()) mine[f.pid].push_back(f.inode);
+    }
+    // Whether only this account or root may make, rename or remove names in `folder`.
+    const auto kept = [&](const std::string& folder) {
+        struct stat st{};
+        return ::stat(folder.c_str(), &st) == 0 && (st.st_uid == ::geteuid() || st.st_uid == 0) &&
+               (st.st_mode & 002) == 0 && ((st.st_mode & 020) == 0 || st.st_gid == ::getegid());
+    };
+    const std::string removed = " (deleted)";
+    for (const auto& [pid, inodes] : mine) {
+        if (!budget.take(me, false)) return true;
+        const std::string fds = "/proc/" + std::to_string(pid) + "/fd";
+        DIR* d = ::opendir(fds.c_str());
+        if (d == nullptr) return true;
+        std::vector<unsigned long long> found;
+        bool loose = false;
+        while (const dirent* e = ::readdir(d)) {
+            if (e->d_name[0] == '.') continue;
+            if (!budget.take(me, true)) {
+                loose = true;
+                break;
+            }
+            const std::string entry = fds + "/" + e->d_name;
+            LockFile f;
+            if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f) || f.dev != id.dev ||
+                std::find(inodes.begin(), inodes.end(), f.ino) == inodes.end())
+                continue;
+            char target[4096];
+            const ssize_t n = ::readlink(entry.c_str(), target, sizeof target - 1);
+            const std::string path(target, n > 0 ? static_cast<std::size_t>(n) : 0);
+            const std::size_t slash = path.find_last_of('/');
+            loose = path.empty() || path[0] != '/' ||
+                    (path.size() > removed.size() &&
+                     path.compare(path.size() - removed.size(), removed.size(), removed) == 0) ||
+                    !kept(path.substr(0, slash == 0 ? 1 : slash));
+            if (loose) break;
+            found.push_back(f.ino);
+        }
+        ::closedir(d);
+        if (loose) return true;
+        for (const unsigned long long inode : inodes)
+            if (std::find(found.begin(), found.end(), inode) == found.end()) return true;
     }
     return false;
 }

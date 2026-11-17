@@ -647,11 +647,13 @@ of yours may still hold only the file in the settings folder there (your account
 shared turn file at all: another account made it first, or only root may write to /run/lock), your
 eject there is also refused while any other program of yours holds a lock on a file of the file
 system your settings folder is on (Linux shows these in /proc/locks, whatever the file is named
-now), and where Linux cannot tell (/proc/locks cannot be read, or not within 3 seconds, or the
-account of a program holding a lock there is hidden): so another account cannot hide a run or
-command of yours from your eject. The cost: such an eject is also refused while a run of yours for
-another drive from the same portable copy (or another program of yours) holds a lock on that
-stick. There another account can delay your runs and commands and keep your ejects refused; it can
+now) that is now in a folder other accounts may write to (as your settings folder there; another
+account can move a file only into such a folder) or was removed, and where Linux cannot tell
+(/proc/locks cannot be read, or not within 3 seconds, or the account of a program holding a lock
+there is hidden): so another account cannot hide a run or command of yours from your eject. The
+cost: such an eject is also refused while a run of yours for another drive from the same portable
+copy (or another program of yours) holds a lock on a file in such a folder.
+There another account can delay your runs and commands and keep your ejects refused; it can
 also make two runs of yours that meet only there share the drive's speed, and let a command of
 yours that starts while such an eject is under way go on beside it instead of waiting (the eject
 then fails while the command has files open on the drive, or the command finds the drive gone).
