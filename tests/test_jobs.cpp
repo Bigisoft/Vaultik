@@ -4170,6 +4170,59 @@ TEST_CASE("drive lock: an own lock file that holds another name is never used, w
     }
 }
 
+TEST_CASE("drive lock: an own lock file with a second name that holds its own name is still used (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    const std::string key = "test-second-name-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string uid = std::to_string(::geteuid());
+    const std::string settings = os::join(tmp.dir(), "settings");
+    const fs::path link = fs::path("/run/lock") / ("vaultik-test-" + name + "-link");
+    struct Cleanup {
+        std::string name;
+        fs::path link;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            fs::remove(link, ec);
+            for (const std::string& f : run_lock_names(name)) fs::remove(fs::path("/run/lock") / f, ec);
+        }
+    } cleanup{name, link};
+    testing::set_drive_lock_hooks({false, 0, std::chrono::milliseconds(-1), {}, (tmp.path / "no-run-user").string()});
+    const auto in_use = [](const fs::path& file) {
+        const int fd = ::open(file.c_str(), O_RDONLY | O_CLOEXEC);
+        REQUIRE(fd >= 0);
+        const bool busy = ::flock(fd, LOCK_EX | LOCK_NB) != 0;
+        ::close(fd);
+        return busy;
+    };
+    // The account's own files, made by its first run and claim (each holding its name); another
+    // account (where fs.protected_hardlinks is off; here this account itself) then gives each a
+    // second name. The account's next run and claim still use them, so its runs and commands keep
+    // seeing each other there whatever settings folder each uses.
+    for (const std::string kind : {"drive", "use"}) {
+        const fs::path own = fs::path("/run/lock") / ("vaultik-" + kind + "-" + name + "." + uid + ".lock");
+        if (kind == "drive") {
+            const DriveLock first(key, settings, std::chrono::milliseconds(0));
+        } else {
+            const DriveClaim first(key, settings);
+        }
+        REQUIRE(file_text(own) == own.filename().string());
+        REQUIRE(::link(own.c_str(), link.c_str()) == 0);
+        std::unique_ptr<DriveLock> run;
+        std::unique_ptr<DriveClaim> claim;
+        if (kind == "drive") run = std::make_unique<DriveLock>(key, settings, std::chrono::milliseconds(0));
+        else claim = std::make_unique<DriveClaim>(key, settings);
+        CHECK((run ? run->held() : claim->held()));
+        CHECK(in_use(own));
+        fs::remove(link);
+    }
+}
+
 TEST_CASE("drive lock: root never makes its mark in /run/lock again while a process holds the one there (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("root test not run: needs root (runs as root and as nobody)");
