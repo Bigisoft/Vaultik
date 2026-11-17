@@ -477,8 +477,9 @@ int open_lock_file(const std::string& name, const std::string& fallback_dir) {
     return open_in_dir(name, fallback_dir);
 }
 
-// The account's own file in /run/lock, for open_own_files to use: the account's, only it may open
-// it, and it is that name's own file (see named; otherwise the file in the settings folder instead).
+// The account's own file in /run/lock, for open_account_files to use: the account's, only it may
+// open it, and it is that name's own file (see named; otherwise the file in the settings folder
+// instead).
 // A hard link to it (another account may add one at any time) does not keep the account from using
 // it: its runs would otherwise fall back to their settings folders and stop taking turns.
 bool mine(int fd, const struct stat& st, const std::string& name) {
@@ -1159,11 +1160,11 @@ std::string run_user_dir_of(long long uid, Mounts& mounts) {
     return dir;
 }
 
-// The own lock files of account `uid` for `name` (see open_own_files) that this process can see:
-// the one in its runtime folder and its file in /run/lock, each only when that account owns it and
-// no other account may open it, and the one in /run/lock only when it is no hard link either (see
-// private_by_name; only the account can make a name in its runtime folder), so that no process of
-// another account can hold it. For an eject (`eject`), each one that account owns (fail closed:
+// The own lock files of account `uid` for `name` (see open_account_files) that this process can
+// see: the one in its runtime folder and its file in /run/lock, each only when that account owns it
+// and no other account may open it, and the one in /run/lock only when it is no hard link either
+// (see private_by_name; only the account can make a name in its runtime folder), so that no process
+// of another account can hold it. For an eject (`eject`), each one that account owns (fail closed:
 // another account can add a hard link to the account's own file at any time, also while it is
 // held).
 std::vector<LockFile> own_files_of(long long uid, const std::string& name, Mounts& mounts, bool eject) {
