@@ -4995,6 +4995,56 @@ TEST_CASE("eject: a run holding only a file of a renamed lock folder is seen (Li
     CHECK(other.release() == 0);
 }
 
+TEST_CASE("eject: a settings folder swapped for a link to another file system is seen (Linux)") {
+    struct stat shm{};
+    struct stat tmp{};
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0 || ::access("/dev/shm", W_OK) != 0 ||
+        ::stat("/dev/shm", &shm) != 0 || ::stat(fs::temp_directory_path().c_str(), &tmp) != 0 ||
+        shm.st_dev == tmp.st_dev) {
+        MESSAGE("not run: needs an account other than root, a writable /run/lock and /dev/shm on "
+                "another file system than the temporary folder");
+        return;
+    }
+    OwnFileCase c("test-linked-away-");
+    // The settings folder is in a folder `open` that other accounts may write to. A run of the
+    // account (from cron: no runtime folder, another account made its own name and the shared
+    // one in /run/lock first) holds the settings folder's file alone. Another account renames the
+    // settings folder and puts a link in its place to a folder of the account's own on another
+    // file system: an eject of the account follows it, makes its file anew there and finds it
+    // free, but must still be refused.
+    const fs::path open = c.tmp.path / "open";
+    const fs::path settings = open / "settings";
+    fs::create_directories(settings);
+    REQUIRE(::chmod(open.c_str(), 0777) == 0);
+    const fs::path elsewhere = fs::path("/dev/shm") / ("vaultik-test-" + c.name);
+    fs::create_directories(elsewhere);
+    REQUIRE(::chmod(elsewhere.c_str(), 0700) == 0);
+    c.make_empty(0644);
+    const fs::path shared_drive = fs::path("/run/lock") / ("vaultik-drive-" + c.name + ".lock");
+    fs::create_directory(shared_drive);
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, settings.string(), std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    {
+        OtherProcess run("lock", c.key, settings.string(), c.tmp.path, {}, c.env);
+        REQUIRE(run.held());
+        REQUIRE(flock_taken(settings / ("vaultik-drive-" + c.name + ".lock")));
+        fs::rename(settings, open / "s2");
+        fs::create_directory_symlink(elsewhere, settings);
+        CHECK(eject_busy());
+        CHECK(fs::exists(elsewhere / ("vaultik-drive-" + c.name + ".lock")));  // made there
+        CHECK(run.release() == 0);
+    }
+    CHECK_FALSE(eject_busy());
+    fs::remove_all(elsewhere);
+}
+
 TEST_CASE("eject: a held file's folder swapped for a link while the eject looks is seen (Linux)") {
     if (::geteuid() == 0) {
         MESSAGE("not run: needs an account other than root");
