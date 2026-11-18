@@ -71,30 +71,37 @@
 // a run that holds its own file in /run/lock or its runtime folder and one that cannot use that
 // file (another account made its name first): once another account held the settings folder's
 // file for kOtherAccountWait, those two may share the drive's speed. Where other accounts may also
-// write to the settings folder (FAT, exFAT or NTFS mounted with umask 000, or a folder the account
-// does not own), they may rename or remove its file, so that a run that holds it and an eject that
-// makes it anew do not meet there: an eject of the account then counts a busy shared file as busy
-// (fail closed) instead of passing it by, and a run with no other own file waits for the shared
-// file its whole wait (another account that holds it can then make the run give up), so that such
-// a run always holds a file the account's ejects see. As a run or command may still hold the
-// settings folder's file alone there (the account cannot use the shared file at all: another
-// account made it first, or only root may write to /run/lock), an eject of the account there also
-// counts as busy every flock that a process of the account other than the eject holds on a file
-// of the settings folder's file system, as /proc/locks shows it, whatever that file is named now
-// (a name there tells nothing), that is now in a folder an account other than itself and root may
-// write to (the settings folder too: another account can move a file only into such a folder, on
-// the same file system) or removed, and where that cannot be told (/proc/locks cannot be read or
-// reading it or the holder's open files ran over the look's budget, a holder's accounts cannot be
-// read, as with hidepid): so another account cannot hide a run or command of the account from its
-// ejects. The cost: such an eject is also refused while a process of the account holds another
-// such flock (a run for another drive from the same portable copy, say). There another account
-// can delay the account's runs and commands and keep its ejects refused; it can also make two runs
-// of the account that meet only there share the drive's speed (the second makes the file anew),
-// and a command that starts while such an eject is under way go on beside it instead of waiting
-// (the eject then fails while the command has files open on the drive, or the command finds the
-// drive gone). Not seen: a process of the account in another pid namespace (/proc/locks leaves it
-// out), and a settings folder that another account swaps for a link or a mount of its own (where
-// it may also write to the folder above).
+// write to the settings folder or to any folder above it (FAT, exFAT or NTFS mounted with umask
+// 000, a folder that neither the account nor root owns, one that all accounts, a POSIX ACL or a
+// group let write to, other than the account's own group named as it with no members listed; except
+// a sticky folder, as /tmp, where what it holds on the way is the account's or root's; also a FUSE
+// mount on the way, or a folder above it that is not there yet where another account may write),
+// they may rename or remove its file or a folder it is in, or swap a folder for a link, so that a
+// run that holds that file and an eject that makes it anew do not meet there: an eject of the
+// account then counts a busy shared file as busy (fail closed) instead of passing it by, and a run
+// with no other own file waits for the shared file its whole wait (another account that holds it
+// can then make the run give up), so that such a run always holds a file the account's ejects see.
+// As a run or command may still hold the settings folder's file alone there (the account cannot use
+// the shared file at all: another account made it first, or only root may write to /run/lock), an
+// eject of the account there also counts as busy every flock that a process of the account other
+// than the eject holds, on any file system, as /proc/locks shows it, whatever that file is named
+// now (a name there tells nothing), unless the holder has that very file open (the same device and
+// inode, on the same mount, before and after the look) at a path whose every folder from / on only
+// the account and root may change by the rule above, looked at one step at a time without following
+// a link that another account could have put there, never into a FUSE mount: another account can
+// move a file, or a folder it is in, only out of a folder it may write to (or one above it), never
+// into a folder that only the account and root may change, nor mount over one. Also busy where that
+// cannot be told (/proc/locks cannot be read or reading it or the holder's open files ran over the
+// look's budget, a holder's accounts cannot be read, as with hidepid): so another account cannot
+// hide a run or command of the account from its ejects. The cost: such an eject is also refused
+// while a process of the account holds another flock on a file in a folder other accounts may write
+// to, or on a removed file (a run for another drive from the same portable copy, say). There
+// another account can delay the account's runs and commands and keep its ejects refused; it can
+// also make two runs of the account that meet only there share the drive's speed (the second makes
+// the file anew), and a command that starts while such an eject is under way go on beside it
+// instead of waiting (the eject then fails while the command has files open on the drive, or the
+// command finds the drive gone). Not seen: a process of the account in another pid namespace
+// (/proc/locks leaves it out).
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
 // that every account may look into (set so whatever root's umask); /run/lock where that folder
@@ -136,7 +143,8 @@
 // eject, any file of that name, whoever owns it and may open it, so that a run or command from a
 // portable copy on FAT or exFAT that holds only that file is seen too; root's claims do not wait
 // for such a one, as another account could hold it for good). A file there that another account
-// renamed or removed (where it may write to that settings folder) cannot be told by its name:
+// renamed or removed (where it may write to that settings folder or one above it) cannot be
+// told by its name:
 // root's eject does not see a run or command that holds only such a file; in one look at
 // most 256 processes and 65536 descriptors of each account, and 3 seconds in all, so that no
 // account can keep it looking for long: an account over that (or a look over its time) cannot be
