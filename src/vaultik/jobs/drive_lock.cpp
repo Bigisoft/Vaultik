@@ -543,7 +543,8 @@ struct AccountFiles {
     int shared = -1;
 };
 
-bool kept_path(const std::string& path);
+struct LockFile;
+bool kept_path(const std::string& path, const LockFile* held);
 
 // Whether only this account and root may make, rename or remove names in folder `dir` or in any
 // folder above it (see kept_path; a relative `dir` from the working folder). A `dir` that is not
@@ -557,11 +558,11 @@ bool private_folder(const std::string& dir) {
     const std::string path = !dir.empty() && dir[0] == '/' ? dir
                              : ::getcwd(cwd, sizeof cwd) != nullptr ? std::string(cwd) + "/" + dir
                                                                     : std::string();
-    if (kept_path(path)) return true;
+    if (kept_path(path, nullptr)) return true;
     struct stat st{};
     const std::size_t slash = path.find_last_of('/');
     return slash != std::string::npos && slash > 0 && ::lstat(path.c_str(), &st) != 0 &&
-           errno == ENOENT && kept_path(path.substr(0, slash));
+           errno == ENOENT && kept_path(path.substr(0, slash), nullptr);
 }
 
 // The account's own locks for `name`, so that its runs take turns whatever settings folder each
@@ -965,17 +966,18 @@ bool open_to_others(int fd, const LockFile& d) {
            (errno != ENODATA && errno != ENOTSUP);
 }
 
-// Whether no account other than this one and root can rename, remove or replace the folder that
-// the absolute `path` names, nor any folder on the way there: from / on, each folder is owned by
-// this account or root, and no other account may write to it (see open_to_others), or it is
-// sticky (as /tmp) and what it holds on the way is this account's or root's; the folder itself
-// may not be written to by other accounts at all. A link on the way (which no other account can
-// then swap) is followed, as is "..". Each step is looked at through the folder opened at the step
-// before, without following a link, and the opened one must be the one looked at; never into a
-// FUSE mount (its program, perhaps another account's, may show any owner or keep the look
-// waiting), nor a mount that /proc/self/mountinfo did not show when the walk began (one mounted
-// meanwhile). False where any of that cannot be told.
-bool kept_path(const std::string& path) {
+// Whether no account other than this one and root can rename, remove or replace what the absolute
+// `path` names, nor any folder on the way there: from / on, each folder is owned by this account
+// or root, and no other account may write to it (see open_to_others), or it is sticky (as /tmp)
+// and what it holds on the way is this account's or root's. A link on the way (which no other
+// account can then swap) is followed, as is "..". Each step is looked at through the folder opened
+// at the step before, without following a link, and the opened one must be the one looked at;
+// never into a FUSE mount (its program, perhaps another account's, may show any owner or keep the
+// look waiting), nor a mount that /proc/self/mountinfo did not show when the walk began (one
+// mounted meanwhile). With `held` (a file a process holds, see own_flock_on), the path must name
+// that very file (its device and inode), on its mount; without, a folder that no other account
+// may write to. False where any of that cannot be told.
+bool kept_path(const std::string& path, const LockFile* held) {
     if (path.empty() || path[0] != '/') return false;
     Mounts mounts;
     const auto ours = [](uid_t uid) { return uid == ::geteuid() || uid == 0; };
@@ -1042,7 +1044,11 @@ bool kept_path(const std::string& path) {
     }
     if (ok) {
         const Step& end = walked.back();
-        ok = S_ISDIR(end.file.mode) && ours(end.file.uid) && !open_to_others(end.fd, end.file);
+        ok = held != nullptr ? end.file.dev == held->dev && end.file.ino == held->ino &&
+                                   end.file.has_mount_id == held->has_mount_id &&
+                                   end.file.mount_id == held->mount_id
+                             : S_ISDIR(end.file.mode) && ours(end.file.uid) &&
+                                   !open_to_others(end.fd, end.file);
     }
     close_from(0);
     return ok;
@@ -1719,24 +1725,33 @@ bool other_account_holds(int fd) {
     return seen;
 }
 
+// Where the magic link `entry` (/proc/<pid>/fd/<n>) points; empty when it cannot be read.
+std::string link_of(const std::string& entry) {
+    char target[4096];
+    const ssize_t n = ::readlink(entry.c_str(), target, sizeof target - 1);
+    return std::string(target, n > 0 ? static_cast<std::size_t>(n) : 0);
+}
+
 // An account's eject where other accounts may write to its settings folder `dir` or a folder
 // above it (see AccountFiles): whether a process of this account other than this one holds a flock
-// on a file of that folder's file system that another account may have renamed or removed, as
+// on a file of that folder's file system that another account may have moved or removed, as
 // /proc/locks shows. Another account may rename or remove the settings folder's lock or claims
 // file there (or a folder above it) while a run or command holds it (perhaps alone, see the
 // header), so that this eject made and took a new one: the name tells nothing, but such a file
-// stays on that file system. So each such flock counts whose file the holder has open
-// (/proc/<pid>/fd) in a folder that, or a folder above which, an account other than this one and
-// root may change (see kept_path), or removed, or where that cannot be told (also one for another
-// drive, or of another program: the eject is then refused, fail closed). A folder that is not there
-// (or cannot be opened): the nearest folder above it that can, on whose file system a file renamed
-// away from there stays. Busy also where that cannot be told: no such folder can be looked at,
-// /proc/locks cannot be read, reading it or the holders' open files ran over the look's budget
-// (see ScanBudget, as any account can make /proc/locks long), the device of the folder's mount
-// cannot be told (then every flock of the account's counts), a holder's accounts cannot be read (a
-// holder without a process, or one hidden, as with hidepid), or the holder's descriptor of a held
-// file cannot be found. A holder in another pid namespace, which /proc/locks leaves out, is not
-// seen.
+// stays on that file system. So each such flock counts unless the holder has the file open
+// (/proc/<pid>/fd) at a path that names that very file, on its mount, through folders that only
+// this account and root may change (see kept_path), the same before and after that look: another
+// account can move a file only out of a folder it may write to (or one above it), never into a
+// folder only this account and root may change. Also counted (fail closed): a removed file, one
+// in a FUSE mount or behind a mount made meanwhile, one for another drive or of another program in
+// such a folder. A folder that is not there (or cannot be opened): the nearest folder above it
+// that can, on whose file system a file renamed away from there stays. Busy also where that
+// cannot be told: no such folder can be looked at, /proc/locks cannot be read, reading it or the
+// holders' open files ran over the look's budget (see ScanBudget, as any account can make
+// /proc/locks long), the device of the folder's mount cannot be told (then every flock of the
+// account's counts), a holder's accounts cannot be read (a holder without a process, or one
+// hidden, as with hidepid), or the holder's descriptor of a held file cannot be found. A holder in
+// another pid namespace, which /proc/locks leaves out, is not seen.
 bool own_flock_on(const std::string& dir) {
     std::string at = dir;
     int fd = ::open(at.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -1769,7 +1784,6 @@ bool own_flock_on(const std::string& dir) {
         if (ids.empty()) return true;
         if (std::find(ids.begin(), ids.end(), me) != ids.end()) mine[f.pid].push_back(f.inode);
     }
-    const std::string removed = " (deleted)";
     for (const auto& [pid, inodes] : mine) {
         if (!budget.take(me, false)) return true;
         const std::string fds = "/proc/" + std::to_string(pid) + "/fd";
@@ -1788,14 +1802,11 @@ bool own_flock_on(const std::string& dir) {
             if (!lock_file_at(AT_FDCWD, entry.c_str(), 0, f) || f.dev != id.dev ||
                 std::find(inodes.begin(), inodes.end(), f.ino) == inodes.end())
                 continue;
-            char target[4096];
-            const ssize_t n = ::readlink(entry.c_str(), target, sizeof target - 1);
-            const std::string path(target, n > 0 ? static_cast<std::size_t>(n) : 0);
-            const std::size_t slash = path.find_last_of('/');
-            loose = path.empty() || path[0] != '/' ||
-                    (path.size() > removed.size() &&
-                     path.compare(path.size() - removed.size(), removed.size(), removed) == 0) ||
-                    !kept_path(path.substr(0, slash == 0 ? 1 : slash));
+            // Where the holder has it now, which must name that very file, through folders
+            // only this account and root may change, and still be so once looked at.
+            const std::string path = link_of(entry);
+            if (hooks().held_path_read) hooks().held_path_read(path);
+            loose = !kept_path(path, &f) || link_of(entry) != path;
             if (loose) break;
             found.push_back(f.ino);
         }

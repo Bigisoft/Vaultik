@@ -431,7 +431,9 @@ namespace testing {
 // the eject's limits above); `short_name_write`: writing a file's name into it in /run/lock (a
 // new one, or an earlier version's) writes nothing (as on a full /run/lock); `scan_time`: instead
 // of the look's 3 seconds when not negative (0: every look is cut short at once); `eject_wait`:
-// instead of kEjectWait for a claim's wait when not negative.
+// instead of kEjectWait for a claim's wait when not negative; `held_path_read`: when set, called
+// by an account's eject with the path where a process of the account has a file open that it holds
+// a flock on, right after reading it and before looking at it (see the eject's look above).
 struct DriveLockHooks {
     bool own_in_folder = false;
     unsigned root_uid = 0;
@@ -450,6 +452,7 @@ struct DriveLockHooks {
     bool short_name_write = false;
     std::chrono::milliseconds scan_time{-1};
     std::chrono::milliseconds eject_wait{-1};
+    std::function<void(const std::string&)> held_path_read;
 };
 void set_drive_lock_hooks(const DriveLockHooks& hooks);
 

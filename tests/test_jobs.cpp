@@ -4979,15 +4979,87 @@ TEST_CASE("eject: a run holding only a file of a renamed lock folder is seen (Li
         CHECK(eject_busy());
         CHECK(run.release() == 0);
     }
-    // A flock of another program of the account on that file system, on a file in a folder that
-    // only the account and root may change all the way from /, does not refuse the eject.
+    // Flocks of other programs of the account on that file system, on files in folders that only
+    // the account and root may change all the way from / (one in a sticky folder, as /tmp, that
+    // the account owns), do not refuse the eject.
     const fs::path own_dir = c.tmp.path / "private";
+    const fs::path sticky = c.tmp.path / "sticky";
     fs::create_directories(own_dir);
+    fs::create_directories(sticky);
     REQUIRE(::chmod(own_dir.c_str(), 0700) == 0);
-    OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files((own_dir / "x").string()));
+    REQUIRE(::chmod(sticky.c_str(), 01777) == 0);
+    OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
+                       hold_files((own_dir / "x").string(), (sticky / "y").string()));
     REQUIRE(other.held());
     CHECK_FALSE(eject_busy());
     CHECK(other.release() == 0);
+}
+
+TEST_CASE("eject: a held file's folder swapped for a link while the eject looks is seen (Linux)") {
+    if (::geteuid() == 0) {
+        MESSAGE("not run: needs an account other than root");
+        return;
+    }
+    OwnFileCase c("test-swapped-");
+    fs::create_directories(c.settings);
+    REQUIRE(::chmod(c.settings.c_str(), 0777) == 0);
+    // A run of the account holds a file that another account moved into its own folder `pub`, in
+    // a folder `open` it may write to; while the account's eject looks at where the run has it,
+    // that account swaps `pub` for a link to a folder only the account may write to.
+    const fs::path open = c.tmp.path / "open";
+    const fs::path pub = open / "pub";
+    const fs::path priv = c.tmp.path / "priv";
+    fs::create_directories(pub);
+    fs::create_directories(priv);
+    REQUIRE(::chmod(open.c_str(), 0777) == 0);
+    REQUIRE(::chmod(pub.c_str(), 0777) == 0);
+    REQUIRE(::chmod(priv.c_str(), 0700) == 0);
+    const std::string held = (pub / "F").string();
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, c.settings, std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    OtherProcess run("flock-ex", {}, {}, c.tmp.path, {}, hold_files(held));
+    REQUIRE(run.held());
+    bool swapped = false;
+    testing::DriveLockHooks h = c.hooks();
+    h.held_path_read = [&](const std::string& path) {
+        if (path != held || swapped) return;
+        fs::rename(pub, open / "pub2");
+        fs::create_directory_symlink(priv, pub);
+        fs::create_hard_link(open / "pub2" / "F", priv / "F");
+        swapped = true;
+    };
+    testing::set_drive_lock_hooks(h);
+    CHECK(eject_busy());
+    CHECK(swapped);
+    // The path must also still be the same once looked at: here the folders on the way are made
+    // the account's own again meanwhile (another account cannot, which a test can), with the
+    // file's second name where its first was, so that only that tells.
+    fs::remove(pub);
+    fs::remove(priv / "F");
+    swapped = false;
+    const std::string held2 = (open / "pub2" / "F").string();
+    h.held_path_read = [&](const std::string& path) {
+        if (path != held2 || swapped) return;
+        fs::rename(open / "pub2", open / "pub3");
+        fs::create_directory(open / "pub2");
+        REQUIRE(::chmod((open / "pub2").c_str(), 0700) == 0);
+        fs::create_hard_link(open / "pub3" / "F", open / "pub2" / "F");
+        REQUIRE(::chmod(open.c_str(), 0755) == 0);
+        swapped = true;
+    };
+    testing::set_drive_lock_hooks(h);
+    CHECK(eject_busy());
+    CHECK(swapped);
+    CHECK(run.release() == 0);
+    testing::set_drive_lock_hooks(c.hooks());
+    CHECK_FALSE(eject_busy());
 }
 
 TEST_CASE("drive lock: a command under its run inherits the drive on a settings folder other accounts may open (Linux)") {
