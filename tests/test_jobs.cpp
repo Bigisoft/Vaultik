@@ -3394,7 +3394,9 @@ TEST_CASE("eject: a hard link another account adds to a held lock file never let
     }
     TempStore tmp;
     fs::create_directories(tmp.path);
-    fs::permissions(tmp.path, fs::perms::all);  // nobody looks for its release file here
+    // Nobody looks for its release file here; sticky, so that nobody's settings folder in it is
+    // not one other accounts may rename (its eject would otherwise count its own flocks as busy).
+    fs::permissions(tmp.path, fs::perms::all | fs::perms::sticky_bit);
     const std::string key = "test-linked-" + tmp.path.filename().string();
     const std::string name = drive_lock_name(key);
     const std::string root_dir = os::join(tmp.dir(), "root");
@@ -4931,6 +4933,61 @@ TEST_CASE("eject: a run or claim holding only a renamed settings folder file is 
     testing::set_drive_lock_hooks(h);
     CHECK(eject_busy());
     CHECK(EjectHold(c.key, c.settings).busy());
+}
+
+TEST_CASE("eject: a run holding only a file of a renamed lock folder is seen (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-renamed-folder-");
+    // The lock folder is <settings>/locks, as the app makes it, and other accounts may write to the
+    // settings folder (0777 without the sticky bit). A run of the account (from cron: no runtime
+    // folder, and another account made its own name in /run/lock first) holds the lock folder's
+    // file alone (another account made the shared name first, here a folder no run can use).
+    const fs::path top(c.settings);
+    fs::create_directories(top);
+    REQUIRE(::chmod(top.c_str(), 0777) == 0);
+    const fs::path locks = top / "locks";
+    const fs::path moved = top / "l2";
+    const fs::path shared_drive = fs::path("/run/lock") / ("vaultik-drive-" + c.name + ".lock");
+    c.make_empty(0644);
+    fs::create_directory(shared_drive);
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, locks.string(), std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    {
+        OtherProcess run("lock", c.key, locks.string(), c.tmp.path, {}, c.env);
+        REQUIRE(run.held());
+        REQUIRE(flock_taken(locks / ("vaultik-drive-" + c.name + ".lock")));
+        // Another account renames the whole lock folder: the eject makes it anew, its own, and
+        // finds its file free, but must still be refused.
+        fs::rename(locks, moved);
+        CHECK(eject_busy());
+        CHECK(fs::is_directory(locks));
+        // Another account makes the new lock folder itself, one every account may write to: the
+        // run's file is in a folder of the account's own, but one another account renamed.
+        fs::remove_all(locks);
+        fs::create_directory(locks);
+        REQUIRE(::chmod(locks.c_str(), 0777) == 0);
+        CHECK(eject_busy());
+        CHECK(run.release() == 0);
+    }
+    // A flock of another program of the account on that file system, on a file in a folder that
+    // only the account and root may change all the way from /, does not refuse the eject.
+    const fs::path own_dir = c.tmp.path / "private";
+    fs::create_directories(own_dir);
+    REQUIRE(::chmod(own_dir.c_str(), 0700) == 0);
+    OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files((own_dir / "x").string()));
+    REQUIRE(other.held());
+    CHECK_FALSE(eject_busy());
+    CHECK(other.release() == 0);
 }
 
 TEST_CASE("drive lock: a command under its run inherits the drive on a settings folder other accounts may open (Linux)") {
