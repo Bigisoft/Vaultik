@@ -1785,7 +1785,7 @@ std::string link_of(const std::string& entry) {
     return std::string(target, n > 0 ? static_cast<std::size_t>(n) : 0);
 }
 
-// Whether the file at `path` is named as a lock or claims file of the drive `hash` is
+// Whether the file at `path` is named as a lock or claims file of the drive `hash`
 // (vaultik-drive-<hash>*.lock or vaultik-use-<hash>*.lock), in whatever folder.
 bool drive_file_name(const std::string& path, const std::string& hash) {
     const std::string base = path.substr(path.find_last_of('/') + 1);
@@ -1796,20 +1796,20 @@ bool drive_file_name(const std::string& path, const std::string& hash) {
 // An account's eject of the drive `hash` where other accounts may write to its settings folder or
 // a folder above it (see AccountFiles): whether a process of this account other than this one
 // holds a flock that another account may have moved or removed, or one of the drive's own, as
-// /proc/locks shows. Another account may rename or
-// remove the settings folder's lock or claims file there (or a folder above it, or swap one for a
-// link to another file system) while a run or command holds it (perhaps alone, see the header),
-// so that this eject made and took a new one: the name tells nothing, nor where the settings
-// folder's path leads now. So each flock of the account's counts, on any file system, unless the
-// holder has the file open (/proc/<pid>/fd) at a path that names that very file, on its mount,
-// through folders that only this account and root may change (see kept_path: none that other
-// accounts may write to, also not a sticky one, as /tmp), the same before and after that look:
-// another account can move a file only out of a folder it may write to (or one above it), and only
-// into one it may write to, never into a folder that only this account and root may change. Never
-// so a file
-// named as one of this drive's lock or claims files, wherever it is: another account may have led
-// a run there before it started (a link put in place of a folder above the settings folder, taken
-// away again once the run made its file in a folder of the account's own). Counted so
+// /proc/locks shows. Another account may rename or remove the settings folder's lock or claims
+// file there (or a folder above it, or swap one for a link to another file system) while a run or
+// command holds it (perhaps alone, see the header), so that this eject made and took a new one:
+// the name tells nothing, nor where the settings folder's path leads now. So each flock of the
+// account's counts, on any file system, unless the holder has the file open (/proc/<pid>/fd) at a
+// path that names that very file, on its mount, through folders that only this account and root
+// may change (see kept_path: none that other accounts may write to, also not a sticky one, as
+// /tmp), the same before and after that look: another account can move a file only out of a
+// folder it may write to (or one above it), and only into one it may write to, never into a folder
+// that only this account and root may change. Never so a file named as one of this drive's lock or
+// claims files, wherever it is: another account may have led a run there before it started (a
+// link put in place of a folder above the settings folder, taken away again once the run made its
+// file in a folder of the account's own); nor a run's or claim's stand-in (see stand_in), which is
+// in no folder. Counted so
 // (fail closed): a removed file, one on a FUSE mount or behind a mount made meanwhile, one for
 // another drive or of another program in a folder other accounts may write to. Busy also where
 // that cannot be told: /proc/locks cannot be read, reading it or the holders' open files ran over
