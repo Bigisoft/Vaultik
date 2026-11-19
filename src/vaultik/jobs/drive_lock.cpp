@@ -1178,7 +1178,8 @@ bool open_files_of(long pid, long long account, ScanBudget& budget, std::vector<
 // open_in_run_user make them): its drive or claims file in its settings folder or runtime folder.
 // For an eject (`eject`), every regular file of that name, whoever owns it and whoever may open it
 // (fail closed: a run or command of the account may hold one alone in a settings folder that
-// other accounts may open, as a portable copy's on FAT or exFAT).
+// other accounts may open, as a portable copy's on FAT or exFAT), and a run's or claim's stand-in
+// of that name (see stand_in), which may be all it holds.
 // Each file is looked at only once its name matches, so a process with many files open costs a
 // readlink for each, within the account's budget (see ScanBudget; `unsure` is set when it runs
 // out). One on a FUSE mount (see Mounts) is not looked at, which /proc/<pid>/fdinfo tells without
@@ -1206,6 +1207,12 @@ std::vector<LockFile> private_files_of(long pid, long long account, const std::s
         char target[4096];
         const ssize_t n = ::readlink(entry.c_str(), target, sizeof target - 1);
         const std::string path(target, n > 0 ? static_cast<std::size_t>(n) : 0);
+        if (eject && path == "/memfd:" + name + " (deleted)") {
+            // The account's stand-in (see stand_in): in memory, on no mount to look up.
+            LockFile f;
+            if (lock_file_at(AT_FDCWD, entry.c_str(), 0, f) && S_ISREG(f.mode)) files.push_back(f);
+            continue;
+        }
         if (path.size() <= name.size() || path.compare(path.size() - name.size(), name.size(), name) != 0 ||
             path[path.size() - name.size() - 1] != '/')
             continue;

@@ -3388,6 +3388,82 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
     }
 }
 
+TEST_CASE("eject: root sees an account's run or claim kept from every lock file (Linux, as root)") {
+    if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("root test not run: needs root (runs as root and as nobody)");
+        return;
+    }
+    TempStore tmp;
+    fs::create_directories(tmp.path);
+    // Every account may write here (nobody looks for its release file here), so nobody's settings
+    // folder in it is one that other accounts may change.
+    fs::permissions(tmp.path, fs::perms::all);
+    const std::string key = "test-root-kept-from-" + tmp.path.filename().string();
+    const std::string name = drive_lock_name(key);
+    const std::string root_dir = os::join(tmp.dir(), "root");
+    const std::string user_dir = os::join(tmp.dir(), "nobody");
+    struct Cleanup {
+        std::string name;
+        ~Cleanup() {
+            testing::set_drive_lock_hooks({});
+            std::error_code ec;
+            for (const std::string dir : {"/run/lock", "/run/vaultik"})
+                for (const std::string kind : {"drive", "use"})
+                    for (const std::string end : {".lock", ".root.lock", ".65534.lock"})
+                        fs::remove(fs::path(dir) / ("vaultik-" + kind + "-" + name + end), ec);
+        }
+    } cleanup{name};
+    // A run and a command of nobody's (no runtime folder) find every file they would lock taken:
+    // another account (65533) made nobody's own names and the shared ones in /run/lock first, and
+    // put a folder in place of each of nobody's settings folder's files. Once they are under way,
+    // it removes those folders again: root's eject must still count them (by their files in
+    // memory, see DriveLock).
+    std::vector<fs::path> folders;
+    for (const std::string kind : {"drive", "use"}) {
+        for (const std::string end : {".lock", ".65534.lock"}) {
+            const fs::path file = fs::path("/run/lock") / ("vaultik-" + kind + "-" + name + end);
+            const int fd = open_or_make(file, 0600);
+            REQUIRE(fd >= 0);
+            REQUIRE(::fchown(fd, 65533, 65533) == 0);
+            ::close(fd);
+        }
+        folders.push_back(fs::path(user_dir) / ("vaultik-" + kind + "-" + name + ".lock"));
+    }
+    const auto take_names = [&] {
+        for (const fs::path& p : folders) fs::create_directories(p);
+    };
+    const auto free_names = [&] {
+        for (const fs::path& p : folders) fs::remove(p);
+    };
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(key, root_dir, std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return EjectHold(key, root_dir).busy();
+    };
+    take_names();
+    {
+        OtherProcess run("lock", key, user_dir, tmp.path, "65534");
+        CHECK_FALSE(run.busy());
+        free_names();
+        CHECK(eject_busy());
+        CHECK(run.release() == 0);
+    }
+    CHECK_FALSE(eject_busy());
+    take_names();
+    {
+        OtherProcess claim("claim", key, user_dir, tmp.path, "65534");
+        CHECK(claim.held());  // its file in memory
+        free_names();
+        CHECK(eject_busy());
+        CHECK(claim.release() == 0);
+    }
+    CHECK_FALSE(eject_busy());
+}
+
 TEST_CASE("eject: a hard link another account adds to a held lock file never lets an eject pass (Linux, as root)") {
     if (::geteuid() != 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("root test not run: needs root (runs as root and as nobody)");
@@ -5026,7 +5102,8 @@ TEST_CASE("eject: a run holding only a file of a renamed lock folder is seen (Li
     fs::create_directories(sticky);
     REQUIRE(::chmod(sticky.c_str(), 01777) == 0);
     {
-        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files((home.path / "x").string()));
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
+                           hold_files((home.path / "x").string()));
         REQUIRE(other.held());
         CHECK_FALSE(eject_busy());
         CHECK(other.release() == 0);
@@ -5088,7 +5165,7 @@ TEST_CASE("eject: a settings folder swapped for a link to another file system is
     fs::remove_all(elsewhere);
 }
 
-TEST_CASE("eject: a run led by a link into a folder of the account's own before it starts is seen (Linux)") {
+TEST_CASE("eject: a run led by a link to an own folder before it starts is seen (Linux)") {
     if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
         MESSAGE("not run: needs an account other than root and a writable /run/lock");
         return;
