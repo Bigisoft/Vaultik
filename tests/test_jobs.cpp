@@ -3149,6 +3149,17 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         // nobody has no runtime folder (a run started by cron, without a login): its run, claim
         // and eject hold only the files in its settings folder, which root finds through the
         // processes that hold a flock, and counts.
+        // That settings folder is one only nobody (and root) may change, so that nobody's runs and
+        // claims hold no file in memory (which root's eject counts on its own, see DriveLock).
+        TempStore own;
+        fs::create_directories(own.path);
+        fs::permissions(own.path, fs::perms::owner_all | fs::perms::group_read |
+                                      fs::perms::group_exec | fs::perms::others_read |
+                                      fs::perms::others_exec);
+        const std::string own_dir = os::join(own.dir(), "nobody");
+        fs::create_directories(own_dir);
+        REQUIRE(::chown(own_dir.c_str(), 65534, 65534) == 0);
+        REQUIRE(::chmod(own_dir.c_str(), 0700) == 0);
         testing::DriveLockHooks hooks;
         hooks.run_user_root = (tmp.path / "no-run-user").string();
         testing::set_drive_lock_hooks(hooks);
@@ -3158,7 +3169,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
                                   fs::path("/run/lock") / ("vaultik-use-" + name + ".65534.lock")})
             make_as(f, 65533);
         const auto hold = [&](const std::string& what) {
-            return std::make_unique<OtherProcess>(what, key, user_dir, tmp.path, "65534",
+            return std::make_unique<OtherProcess>(what, key, own_dir, tmp.path, "65534",
                                                   std::vector<std::pair<std::string, std::string>>{
                                                       {"VAULTIK_TEST_HOLD_RUN_USER", (tmp.path / "none").string()}});
         };
@@ -3167,7 +3178,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         {
             auto run = hold("lock");
             REQUIRE(run->held());
-            CHECK(fs::exists(fs::path(user_dir) / ("vaultik-drive-" + name + ".lock")));
+            CHECK(fs::exists(fs::path(own_dir) / ("vaultik-drive-" + name + ".lock")));
             CHECK(eject_busy());
             {
                 // A file on a FUSE mount is not looked at (see above): here a copy of mountinfo
@@ -3196,7 +3207,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
         {
             auto claim = hold("claim");
             REQUIRE(claim->held());
-            CHECK(fs::exists(fs::path(user_dir) / ("vaultik-use-" + name + ".lock")));
+            CHECK(fs::exists(fs::path(own_dir) / ("vaultik-use-" + name + ".lock")));
             CHECK(drive_claimed(key, root_dir));
             {
                 EjectHold busy(key, root_dir);
@@ -3258,7 +3269,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             // wait for it. Here a copy of mountinfo without the mount of nobody's settings folder.
             auto eject = hold("eject-hold");
             REQUIRE(eject->held());
-            const int probe = ::open(user_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            const int probe = ::open(own_dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
             REQUIRE(probe >= 0);
             std::string mount_id;
             {
@@ -3336,7 +3347,7 @@ TEST_CASE("eject: root's eject counts an account's runs and commands without the
             // within the same budget: with as many descriptors as the holder has, root finds the
             // file but cannot read them again, so it cannot tell (root's eject fails closed, root's
             // command does not wait); with twice as many it can.
-            const fs::path file = fs::path(user_dir) / ("vaultik-use-" + name + ".lock");
+            const fs::path file = fs::path(own_dir) / ("vaultik-use-" + name + ".lock");
             make_as(file, 65534);
             const auto descriptors = [](long pid) {
                 std::size_t n = 0;
