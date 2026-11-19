@@ -4912,20 +4912,24 @@ TEST_CASE("eject: a run or claim holding only a renamed settings folder file is 
         return false;
     };
     {
-        // A flock of another program of the account on that file system, on a file in a folder
-        // only the account may write to (another account could not have moved a file there),
-        // does not count; one on a file in a folder other accounts may write to does.
-        const fs::path own_dir = c.tmp.path / "private";
-        fs::create_directories(own_dir);
-        REQUIRE(::chmod(own_dir.c_str(), 0700) == 0);
-        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
-                           hold_files((own_dir / "x").string()));
-        REQUIRE(other.held());
-        CHECK_FALSE(eject_busy());
-        CHECK_FALSE(EjectHold(c.key, c.settings).busy());
-        REQUIRE(::chmod(own_dir.c_str(), 0777) == 0);
-        CHECK(eject_busy());
-        CHECK(other.release() == 0);
+        // A flock of another program of the account on a file in a folder only the account and
+        // root may change all the way from / (another account could not have moved a file there;
+        // here in its home folder) does not count; one on a file in a folder other accounts may
+        // write to does.
+        const HomeDir home;
+        if (!home.path.empty()) {
+            const fs::path own_dir = home.path / "private";
+            fs::create_directories(own_dir);
+            REQUIRE(::chmod(own_dir.c_str(), 0700) == 0);
+            OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
+                               hold_files((own_dir / "x").string()));
+            REQUIRE(other.held());
+            CHECK_FALSE(eject_busy());
+            CHECK_FALSE(EjectHold(c.key, c.settings).busy());
+            REQUIRE(::chmod(own_dir.c_str(), 0777) == 0);
+            CHECK(eject_busy());
+            CHECK(other.release() == 0);
+        }
     }
     {
         OtherProcess run("lock", c.key, c.settings, c.tmp.path, {}, c.env);
@@ -5009,19 +5013,27 @@ TEST_CASE("eject: a run holding only a file of a renamed lock folder is seen (Li
         CHECK(eject_busy());
         CHECK(run.release() == 0);
     }
-    // Flocks of other programs of the account on that file system, on files in folders that only
-    // the account and root may change all the way from / (one in a sticky folder, as /tmp, that
-    // the account owns), do not refuse the eject.
-    const fs::path own_dir = c.tmp.path / "private";
-    const fs::path sticky = c.tmp.path / "sticky";
-    fs::create_directories(own_dir);
+    // A flock of another program of the account on a file in a folder that only the account and
+    // root may change all the way from / (here in its home folder) does not refuse the eject; one
+    // on a file in a sticky folder (as /tmp), into which another account may have moved it, does,
+    // also where the account owns that folder and the file.
+    const HomeDir home;
+    if (home.path.empty()) {
+        MESSAGE("not run in full: needs a home folder only the account and root may change");
+        return;
+    }
+    const fs::path sticky = home.path / "sticky";
     fs::create_directories(sticky);
-    REQUIRE(::chmod(own_dir.c_str(), 0700) == 0);
     REQUIRE(::chmod(sticky.c_str(), 01777) == 0);
-    OtherProcess other("flock-ex", {}, {}, c.tmp.path, {},
-                       hold_files((own_dir / "x").string(), (sticky / "y").string()));
+    {
+        OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files((home.path / "x").string()));
+        REQUIRE(other.held());
+        CHECK_FALSE(eject_busy());
+        CHECK(other.release() == 0);
+    }
+    OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files((sticky / "y").string()));
     REQUIRE(other.held());
-    CHECK_FALSE(eject_busy());
+    CHECK(eject_busy());
     CHECK(other.release() == 0);
 }
 
@@ -5128,6 +5140,56 @@ TEST_CASE("eject: a run led by a link into a folder of the account's own before 
     REQUIRE(other.held());
     CHECK_FALSE(eject_busy());
     CHECK(other.release() == 0);
+}
+
+TEST_CASE("eject: a held lock file another account moved into a sticky folder is seen (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-sticky-");
+    const HomeDir home;
+    if (home.path.empty()) {
+        MESSAGE("not run: needs a home folder only the account and root may change");
+        return;
+    }
+    // The settings folder is in a folder `open` that other accounts may write to, on the same file
+    // system as a sticky folder (as /var/tmp, here one of the account's own). A run of the account
+    // (from cron: no runtime folder, another account made its own name and the shared one in
+    // /run/lock first) holds the settings folder's file alone. Another account moves that file
+    // into the sticky folder under another name (it may rename it out of `settings`, and anybody
+    // may add a name to a sticky folder): the entry there is still the account's, but the eject
+    // must still be refused.
+    const fs::path open = home.path / "open";
+    const fs::path settings = open / "settings";
+    const fs::path sticky = home.path / "sticky";
+    fs::create_directories(settings);
+    fs::create_directories(sticky);
+    REQUIRE(::chmod(open.c_str(), 0777) == 0);
+    REQUIRE(::chmod(sticky.c_str(), 01777) == 0);
+    c.make_empty(0644);
+    const fs::path shared_drive = fs::path("/run/lock") / ("vaultik-drive-" + c.name + ".lock");
+    fs::create_directory(shared_drive);
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, settings.string(), std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    {
+        OtherProcess run("lock", c.key, settings.string(), c.tmp.path, {}, c.env);
+        REQUIRE(run.held());
+        const fs::path file = settings / ("vaultik-drive-" + c.name + ".lock");
+        REQUIRE(flock_taken(file));
+        fs::rename(file, sticky / "x");
+        CHECK(eject_busy());
+        CHECK(fs::exists(file));  // the eject made it anew
+        CHECK(run.release() == 0);
+    }
+    CHECK_FALSE(eject_busy());
 }
 
 TEST_CASE("eject: a held file's folder swapped for a link while the eject looks is seen (Linux)") {

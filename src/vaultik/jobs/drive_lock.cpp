@@ -975,8 +975,11 @@ bool open_to_others(int fd, const LockFile& d) {
 // never into a FUSE mount (its program, perhaps another account's, may show any owner or keep the
 // look waiting), nor a mount that /proc/self/mountinfo did not show when the walk began (one
 // mounted meanwhile). With `held` (a file a process holds, see own_flock_on), the path must name
-// that very file (its device and inode), on its mount; without, a folder that no other account
-// may write to. False where any of that cannot be told.
+// that very file (its device and inode), on its mount, and no folder on the way may be one other
+// accounts may write to, sticky or not: another account may move a file it can rename (out of a
+// folder it may write to) into a sticky folder (anybody may add a name there), where the entry is
+// then still this account's. Without, a folder that no other account may write to. False where
+// any of that cannot be told.
 bool kept_path(const std::string& path, const LockFile* held) {
     if (path.empty() || path[0] != '/') return false;
     Mounts mounts;
@@ -1027,7 +1030,8 @@ bool kept_path(const std::string& path, const LockFile* held) {
         LockFile e;
         ok = S_ISDIR(dir.file.mode) && ours(dir.file.uid) && !mounts.fuse_at(next) &&
              lock_file_at(dir.fd, name.c_str(), AT_SYMLINK_NOFOLLOW, e) && fair(e) &&
-             (!open_to_others(dir.fd, dir.file) || ((dir.file.mode & S_ISVTX) != 0 && ours(e.uid)));
+             (!open_to_others(dir.fd, dir.file) ||
+              (held == nullptr && (dir.file.mode & S_ISVTX) != 0 && ours(e.uid)));
         if (ok && S_ISLNK(e.mode)) {
             char target[4096];
             const ssize_t n = ::readlinkat(dir.fd, name.c_str(), target, sizeof target - 1);
@@ -1749,9 +1753,11 @@ bool drive_file_name(const std::string& path, const std::string& hash) {
 // so that this eject made and took a new one: the name tells nothing, nor where the settings
 // folder's path leads now. So each flock of the account's counts, on any file system, unless the
 // holder has the file open (/proc/<pid>/fd) at a path that names that very file, on its mount,
-// through folders that only this account and root may change (see kept_path), the same before
-// and after that look: another account can move a file only out of a folder it may write to (or
-// one above it), never into a folder that only this account and root may change. Never so a file
+// through folders that only this account and root may change (see kept_path: none that other
+// accounts may write to, also not a sticky one, as /tmp), the same before and after that look:
+// another account can move a file only out of a folder it may write to (or one above it), and only
+// into one it may write to, never into a folder that only this account and root may change. Never
+// so a file
 // named as one of this drive's lock or claims files, wherever it is: another account may have led
 // a run there before it started (a link put in place of a folder above the settings folder, taken
 // away again once the run made its file in a folder of the account's own). Counted so
