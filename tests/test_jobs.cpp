@@ -20,6 +20,7 @@
 #else
 #include <fcntl.h>
 #include <grp.h>
+#include <pwd.h>
 #include <sys/file.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
@@ -4347,6 +4348,35 @@ struct OwnFileCase {
     }
 };
 
+// A new folder in the account's home folder (from its passwd entry), removed again: one that only
+// the account and root may change all the way from / (unlike one in a sticky folder such as /tmp,
+// where another account may put a file it moved). Empty when the home folder is not such a one.
+struct HomeDir {
+    fs::path path;
+    HomeDir() {
+        const struct passwd* pw = ::getpwuid(::geteuid());
+        if (pw == nullptr || pw->pw_dir == nullptr) return;
+        for (fs::path at = pw->pw_dir; !at.empty(); at = at.parent_path()) {
+            struct stat st{};
+            if (::lstat(at.c_str(), &st) != 0 || !S_ISDIR(st.st_mode) || (st.st_mode & 022) != 0 ||
+                (st.st_uid != 0 && st.st_uid != ::geteuid()))
+                return;
+            if (at == at.parent_path()) break;
+        }
+        std::uint8_t rnd[6];
+        random_bytes(rnd);
+        path = fs::path(pw->pw_dir) / (".vaultik-test-" + to_hex(rnd));
+        fs::create_directory(path);
+        REQUIRE(::chmod(path.c_str(), 0700) == 0);
+    }
+    ~HomeDir() {
+        std::error_code ec;
+        if (!path.empty()) fs::remove_all(path, ec);
+    }
+    HomeDir(const HomeDir&) = delete;
+    HomeDir& operator=(const HomeDir&) = delete;
+};
+
 // Whether a run of `key` with `settings` cannot have the drive within `wait`.
 bool run_busy(const std::string& key, const std::string& settings, std::chrono::milliseconds wait) {
     try {
@@ -5043,6 +5073,61 @@ TEST_CASE("eject: a settings folder swapped for a link to another file system is
     }
     CHECK_FALSE(eject_busy());
     fs::remove_all(elsewhere);
+}
+
+TEST_CASE("eject: a run led by a link into a folder of the account's own before it starts is seen (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-led-");
+    const HomeDir home;
+    if (home.path.empty()) {
+        MESSAGE("not run: needs a home folder only the account and root may change");
+        return;
+    }
+    // The lock folder is <settings>/locks, and other accounts may write to the settings folder.
+    // A run of the account (from cron: no runtime folder, another account made its own name and
+    // the shared one in /run/lock first) can hold only the lock folder's file. Before the run
+    // starts, another account renames the lock folder away and puts a link in its place to a
+    // folder of the account's own (here in its home folder); once the run holds its file, that
+    // account puts the lock folder back. An eject of the account makes its file anew and finds it
+    // free, and the run's file is in a folder only the account may change: it must still be
+    // refused.
+    const fs::path top(c.settings);
+    const fs::path locks = top / "locks";
+    fs::create_directories(locks);
+    REQUIRE(::chmod(top.c_str(), 0777) == 0);
+    c.make_empty(0644);
+    const fs::path shared_drive = fs::path("/run/lock") / ("vaultik-drive-" + c.name + ".lock");
+    fs::create_directory(shared_drive);
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, locks.string(), std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return false;
+    };
+    fs::rename(locks, top / "l2");
+    fs::create_directory_symlink(home.path, locks);
+    {
+        OtherProcess run("lock", c.key, locks.string(), c.tmp.path, {}, c.env);
+        REQUIRE(run.held());
+        CHECK(fs::exists(home.path / ("vaultik-drive-" + c.name + ".lock")));  // made there
+        fs::remove(locks);
+        fs::rename(top / "l2", locks);
+        CHECK(eject_busy());
+        CHECK(run.release() == 0);
+    }
+    CHECK_FALSE(eject_busy());
+    // A flock of another program of the account on a file not named as the drive's, in a folder
+    // only the account and root may change all the way from /, does not refuse the eject.
+    OtherProcess other("flock-ex", {}, {}, c.tmp.path, {}, hold_files((home.path / "x").string()));
+    REQUIRE(other.held());
+    CHECK_FALSE(eject_busy());
+    CHECK(other.release() == 0);
 }
 
 TEST_CASE("eject: a held file's folder swapped for a link while the eject looks is seen (Linux)") {

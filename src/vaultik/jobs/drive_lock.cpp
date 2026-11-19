@@ -1732,9 +1732,18 @@ std::string link_of(const std::string& entry) {
     return std::string(target, n > 0 ? static_cast<std::size_t>(n) : 0);
 }
 
-// An account's eject where other accounts may write to its settings folder or a folder above it
-// (see AccountFiles): whether a process of this account other than this one holds a flock that
-// another account may have moved or removed, as /proc/locks shows. Another account may rename or
+// Whether the file at `path` is named as a lock or claims file of the drive `hash` is
+// (vaultik-drive-<hash>*.lock or vaultik-use-<hash>*.lock), in whatever folder.
+bool drive_file_name(const std::string& path, const std::string& hash) {
+    const std::string base = path.substr(path.find_last_of('/') + 1);
+    return base.ends_with(".lock") &&
+           (base.starts_with("vaultik-drive-" + hash) || base.starts_with("vaultik-use-" + hash));
+}
+
+// An account's eject of the drive `hash` where other accounts may write to its settings folder or
+// a folder above it (see AccountFiles): whether a process of this account other than this one
+// holds a flock that another account may have moved or removed, or one of the drive's own, as
+// /proc/locks shows. Another account may rename or
 // remove the settings folder's lock or claims file there (or a folder above it, or swap one for a
 // link to another file system) while a run or command holds it (perhaps alone, see the header),
 // so that this eject made and took a new one: the name tells nothing, nor where the settings
@@ -1742,7 +1751,10 @@ std::string link_of(const std::string& entry) {
 // holder has the file open (/proc/<pid>/fd) at a path that names that very file, on its mount,
 // through folders that only this account and root may change (see kept_path), the same before
 // and after that look: another account can move a file only out of a folder it may write to (or
-// one above it), never into a folder that only this account and root may change. Counted so
+// one above it), never into a folder that only this account and root may change. Never so a file
+// named as one of this drive's lock or claims files, wherever it is: another account may have led
+// a run there before it started (a link put in place of a folder above the settings folder, taken
+// away again once the run made its file in a folder of the account's own). Counted so
 // (fail closed): a removed file, one on a FUSE mount or behind a mount made meanwhile, one for
 // another drive or of another program in a folder other accounts may write to. Busy also where
 // that cannot be told: /proc/locks cannot be read, reading it or the holders' open files ran over
@@ -1750,7 +1762,7 @@ std::string link_of(const std::string& entry) {
 // accounts cannot be read (a holder without a process, or one hidden, as with hidepid), or the
 // holder's descriptor of a held file cannot be found. A holder in another pid namespace, which
 // /proc/locks leaves out, is not seen.
-bool own_flock_on() {
+bool own_flock_on(const std::string& hash) {
     ScanBudget budget;
     bool readable = false;
     const std::vector<HeldFlock> held = held_flocks(&readable, &budget);
@@ -1790,10 +1802,11 @@ bool own_flock_on() {
                              [&](const HeldFlock& h) { return match(h, f) != Match::no; }))
                 continue;
             // Where the holder has it now, which must name that very file, through folders
-            // only this account and root may change, and still be so once looked at.
+            // only this account and root may change, and still be so once looked at; never one
+            // of this drive's files.
             const std::string path = link_of(entry);
             if (hooks().held_path_read) hooks().held_path_read(path);
-            loose = !kept_path(path, &f) || link_of(entry) != path;
+            loose = drive_file_name(path, hash) || !kept_path(path, &f) || link_of(entry) != path;
             if (loose) break;
             for (std::size_t i = 0; i < flocks.size(); ++i) {
                 const Match m = match(flocks[i], f);
@@ -2205,7 +2218,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     // also any flock of the account's that another account may have moved (see own_flock_on).
     if (fail_closed && (root ? accounts_hold(name, false) != Use::free
                              : own_held_elsewhere(name, {own, own2, own3, shared}) ||
-                                   (files.exposed && own_flock_on()))) {
+                                   (files.exposed && own_flock_on(hash)))) {
         close_all();
         throw DriveBusy("another Vaultik run uses the backup drive");
     }
@@ -2533,7 +2546,7 @@ EjectHold::EjectHold(const std::string& key, const std::string& lock_dir) {
     // may hold a settings folder's file there that another account renamed away, perhaps alone.
     const bool own_busy = !root && (root_holds(mark, false, true) ||
                                     own_held_elsewhere(name, {own, own2, own3, shared}) ||
-                                    (files.exposed && own_flock_on()));
+                                    (files.exposed && own_flock_on(hash)));
     if (root ? accounts_hold(name, false) != Use::free : own_busy) {
         busy_ = true;
         close_all();
