@@ -112,11 +112,11 @@
 // accounts may write to (a sticky one too), or on a removed file. There another account can delay
 // the account's runs and commands and keep its ejects refused; it can also make two runs of the
 // account that meet only there share the drive's speed (the second makes the file anew, or holds
-// only its file in memory), and a command that starts while such an eject is under way go on
-// beside it instead of waiting (the eject then fails while the command has files open on the
-// drive, or the command finds the drive gone). Not seen: a process of the account in another pid
-// namespace (/proc/locks leaves it out), and a command that could not make its file in memory and
-// holds none of its files.
+// only its file in memory), and a run or command that starts while such an eject is under way
+// (after it read /proc/locks) go on beside it instead of waiting (the eject then fails while that
+// one has files open on the drive, or that one finds the drive gone). Not seen: a process of the
+// account in another pid namespace (/proc/locks leaves it out), and a command that could not make
+// its file in memory and holds none of its files.
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
 // that every account may look into (set so whatever root's umask); /run/lock where that folder

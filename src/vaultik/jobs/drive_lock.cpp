@@ -586,6 +586,24 @@ bool private_folder(const std::string& dir) {
            errno == ENOENT && kept_path(path.substr(0, slash), nullptr);
 }
 
+// Where other accounts may write to the settings folder or a folder above it (see AccountFiles): a
+// flock that a run or claim of the account holds for as long as it lasts, on a file in memory of
+// its own (memfd, named `name`) that is in no folder, so that no other account can rename or remove
+// it, nor keep the run or claim from taking it (as it can for each of the account's lock files:
+// make the names in /run/lock first, or put a link, a folder or a file of its own at the settings
+// folder's file or a folder above it). An eject of the account always counts it as busy (see
+// own_flock_on), whatever happened to the other files: so another account cannot leave a run or
+// claim there that the account's ejects do not see. -1 where it cannot be made (memfd_create
+// refused, no memory or descriptors left).
+int stand_in(const std::string& name) {
+    const int fd = ::memfd_create(name.c_str(), MFD_CLOEXEC);
+    if (fd >= 0 && ::flock(fd, LOCK_SH | LOCK_NB) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 // The account's own locks for `name`, so that its runs take turns whatever settings folder each
 // uses (the installed app and a portable one, VAULTIK_CONFIG_DIR): the file `name` in its own
 // runtime folder (see run_user_dir), where no other account can make one first, and the file
@@ -608,11 +626,14 @@ bool private_folder(const std::string& dir) {
 // hold it (see other_account_holds), and a claim at most its wait for an eject (kEjectWait) and
 // then goes on without it whoever holds it (see DriveClaim); an eject still counts it as busy
 // (fail closed). Every process takes them in this order, so none waits for
-// another that waits for it.
-AccountFiles open_account_files(const std::string& name, const std::string& lock_dir) {
+// another that waits for it. With `stand`, where `exposed`, the stand-in of a run or claim (see
+// stand_in) is made first, before any of these files is opened (-1 where it cannot be made).
+AccountFiles open_account_files(const std::string& name, const std::string& lock_dir,
+                                int* stand = nullptr) {
     AccountFiles f;
     // Told before the folder is made (see private_folder).
     f.exposed = !private_folder(lock_dir);
+    if (stand != nullptr && f.exposed) *stand = stand_in(name);
     if (!hooks().own_in_folder) {
         if (const int fd = open_in_run_user(name); fd >= 0) f.own.push_back(fd);
         const std::string stem = name.substr(0, name.size() - std::string(".lock").size());
@@ -636,24 +657,6 @@ AccountFiles open_account_files(const std::string& name, const std::string& lock
     }
     f.shared = open_in_run_lock(name, 0600, own_or_roots);
     return f;
-}
-
-// Where other accounts may write to the settings folder or a folder above it (see AccountFiles): a
-// flock that a run or claim of the account holds for as long as it lasts, on a file in memory of
-// its own (memfd, named `name`) that is in no folder, so that no other account can rename or remove
-// it, nor keep the run or claim from taking it (as it can for each of the account's lock files:
-// make the names in /run/lock first, or put a link, a folder or a file of its own at the settings
-// folder's file or a folder above it). An eject of the account always counts it as busy (see
-// own_flock_on), whatever happened to the other files: so another account cannot leave a run or
-// claim there that the account's ejects do not see. -1 where it cannot be made (memfd_create
-// refused, no memory or descriptors left).
-int stand_in(const std::string& name) {
-    const int fd = ::memfd_create(name.c_str(), MFD_CLOEXEC);
-    if (fd >= 0 && ::flock(fd, LOCK_SH | LOCK_NB) != 0) {
-        ::close(fd);
-        return -1;
-    }
-    return fd;
 }
 
 // Whether a flock on the settings folder's file `fd` (see AccountFiles) failed as its file system
@@ -2110,7 +2113,7 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         }
     } else {
         // The account's own locks first, then the one all accounts share (see open_account_files).
-        files = open_account_files(name, lock_dir);
+        files = open_account_files(name, lock_dir, fail_closed ? nullptr : &stand_in_.fd);
         int* const slots[] = {&own, &own2, &own3};
         for (std::size_t i = 0; i < files.own.size() && i < 3; ++i) *slots[i] = files.own[i];
         shared = files.shared;
@@ -2122,14 +2125,11 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
     };
     if (own < 0 && shared < 0 && root) return;
     // Where other accounts may write to the settings folder or one above it, a run holds its
-    // stand-in from now on, whatever it gets of the other files (see stand_in), and does not start
-    // without it (fail closed).
-    if (files.exposed && !fail_closed) {
-        stand_in_.fd = stand_in(name);
-        if (stand_in_.fd < 0) {
-            close_all();
-            throw DriveBusy("the backup drive's lock cannot be checked");
-        }
+    // stand-in from before it opened its files on, whatever it gets of those (see stand_in), and
+    // does not start without it (fail closed).
+    if (files.exposed && !fail_closed && stand_in_.fd < 0) {
+        close_all();
+        throw DriveBusy("the backup drive's lock cannot be checked");
     }
     // The end of the short wait for a lock another account may hold (see other_account_wait),
     // from the first such wait on (the settings folder's file where other accounts may open it,
@@ -2396,13 +2396,12 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
             shared = open_lock_file(name, lock_dir);
             if (own < 0) std::swap(own, shared);
         } else {
-            files = open_account_files(name, lock_dir);
+            // Where other accounts may write to the settings folder or one above it, with the
+            // claim's stand-in (see stand_in), held also when it holds none of the files.
+            files = open_account_files(name, lock_dir, &stand_in_.fd);
             int* const slots[] = {&own, &own2, &own3};
             for (std::size_t i = 0; i < files.own.size() && i < 3; ++i) *slots[i] = files.own[i];
             shared = files.shared;
-            // Where other accounts may write to the settings folder or one above it, the claim's
-            // stand-in (see stand_in), held also when it holds none of the files.
-            if (files.exposed) stand_in_.fd = stand_in(name);
         }
         // Shared with every other claim; only an eject holds one alone, until the drive is gone.
         // False when it gave up on `fd` (closed, -1) other than as the settings folder's file that

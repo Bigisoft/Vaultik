@@ -670,9 +670,10 @@ while any run or command of yours from such a settings folder is under way, for 
 while another program of yours holds a lock on a file in a folder other accounts may write to
 (a sticky one too), or on a removed file.
 There another account can delay your runs and commands and keep your ejects refused; it can
-also make two runs of yours that meet only there share the drive's speed, and let a command of
-yours that starts while such an eject is under way go on beside it instead of waiting (the eject
-then fails while the command has files open on the drive, or the command finds the drive gone).
+also make two runs of yours that meet only there share the drive's speed, and let a run or command
+of yours that starts while such an eject is under way (after it looked at the locks) go on beside
+it instead of waiting (the eject then fails while it has files open on the drive, or it finds the
+drive gone).
 Not seen: a program of yours in another container (another pid namespace), and a command that could
 not make its turn in memory and holds none of its turn files. Your runs wait for a
 run as root as long as it runs (only the 5 minutes for another account while another account keeps
