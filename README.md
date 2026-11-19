@@ -633,7 +633,8 @@ that file as in use, and there also the shared claim while it is held, so it sti
 command. Only a command that has none of those (no /run/user folder, and another account made its
 files in /run/lock first or holds the shared one, or only root may write there) is then left
 without a claim, and once that account lets go of the file, an eject of yours could eject the
-drive under it. So
+drive under it (not where other accounts may also write to your settings folder or a folder above
+it: there it still holds its turn in memory, see below). So
 there another account can delay your runs and commands, make a run without those files give up,
 and keep your ejects refused; and two runs of yours, one with its file in /run/user or /run/lock
 and one that cannot use that file, may share the drive's speed once another account held the
@@ -645,26 +646,35 @@ FUSE mount on the way), they may rename or remove the file there or a folder it 
 folder for a link, so that a run of yours that holds it and an eject that makes it anew do not meet:
 your eject then counts the turn all accounts share in /run/lock as in use when it is held, and a run
 without its files in /run/user and /run/lock waits for that shared turn its whole wait (another
-account holding it can make the run give up), so that the run always holds a turn your eject sees.
-As a run or command of yours may still hold only the file in the settings folder there (your
-account cannot use the shared turn file at all: another account made it first, or only root may
-write to /run/lock), your eject there is also refused while any other program of yours holds a lock
-on a file (Linux shows these in /proc/locks, whatever the file is named now and on any file system)
-unless that program has that very file open in a folder that, like every folder above it up to /,
-only you and root can change by the rule above (looked at one folder at a time, never following a
+account holding it can make the run give up). There the file in your settings folder is also never
+opened through a link anywhere on its path, and every run and command of yours also holds a turn
+in memory of its own (a memfd), in no folder, which no other account can rename, remove or keep it
+from taking (as it can for each turn file: make your names in /run/lock first, or put a link, a
+folder or a file of its own in place of the settings folder's file or a folder above it). A run
+that cannot make it (memfd_create refused, as by a strict seccomp filter, or no memory left) does
+not start there; a command then goes on without it. Your eject there is refused while any other
+program of yours holds a lock on a file (Linux shows these in /proc/locks, whatever the file is
+named now and on any file system) unless that program has that very file open in a folder that,
+like every folder above it up to /, belongs to you or root and that no other account may write to
+(here a sticky folder such as /tmp or /var/tmp counts as one others may change: another account
+may move a file of yours it can rename into it), looked at one folder at a time, never following a
 link another account could have put there, never into a FUSE mount, and the same before and after
-that look): another account can move a file or folder only out of a folder it may write to, never
-into one that only you and root can change, nor mount over one. It is also refused where Linux
-cannot tell (/proc/locks cannot be read, or not within 3 seconds, or the account of a program
-holding a lock is hidden): so another account cannot hide a run or command of yours from your
-eject. The cost: such an eject is also refused while a run of yours for another drive from the same
-portable copy (or another program of yours) holds a lock on a file in a folder other accounts may
-write to, or on a removed file.
+that look: another account can move a file or folder only out of a folder it may write to and only
+into one it may write to, never into one that only you and root can change, nor mount over one.
+A file named as one of the drive's turn or claim files counts wherever it is, and the turn in
+memory always counts, so your eject sees every run and command of yours there, whatever another
+account did to their files. It is also refused where Linux cannot tell (/proc/locks cannot be read,
+or not within 3 seconds, or the account of a program holding a lock is hidden): so another account
+cannot hide a run or command of yours from your eject. The cost: such an eject is also refused
+while any run or command of yours from such a settings folder is under way, for any drive, and
+while another program of yours holds a lock on a file in a folder other accounts may write to
+(a sticky one too), or on a removed file.
 There another account can delay your runs and commands and keep your ejects refused; it can
 also make two runs of yours that meet only there share the drive's speed, and let a command of
 yours that starts while such an eject is under way go on beside it instead of waiting (the eject
 then fails while the command has files open on the drive, or the command finds the drive gone).
-Not seen: a program of yours in another container (another pid namespace). Your runs wait for a
+Not seen: a program of yours in another container (another pid namespace), and a command that could
+not make its turn in memory and holds none of its turn files. Your runs wait for a
 run as root as long as it runs (only the 5 minutes for another account while another account keeps
 /proc/locks too long to read in 3 seconds; an eject then counts the run as root as in use), also one
 that went on beside another run of yours, and also when another account made the shared file in
@@ -691,8 +701,10 @@ files in /run/lock and /run/user, and through the turn file in the settings fold
 holding a turn has open (so also a run without a /run/user folder whose file in /run/lock another
 account made first, and one from a portable copy whose turn file other accounts may open), and is
 refused where Linux cannot tell whether those are in use. A turn file that another account renamed
-or removed in a settings folder it may write to (or one above it) cannot be told by its name, so an
-eject as root does not see a run or command of yours that holds only such a file. A program
+or removed in a settings folder it may write to (or one above it) cannot be told by its name, but a
+run or command of yours there also holds its turn in memory (see above), which an eject as root
+finds by its name as well, so it still sees that run or command (not a command that could not make
+its turn in memory and holds only such a file). A program
 in another container that shares /run/lock cannot be seen holding a turn file at all, so an eject
 as root also tries the turn files it finds in /run/lock and /run/user for a moment itself (never
 waiting) and counts one it cannot take, or cannot try, as in use; this needs Linux 5.8 or later

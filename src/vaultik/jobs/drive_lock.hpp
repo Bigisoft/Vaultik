@@ -65,7 +65,8 @@
 // another own file nor the shared claims file (no runtime folder, and in /run/lock another account
 // made those names first or holds the shared one, or only root may write there) then holds no
 // claim, and once the other account lets go of the file, an eject of the account no longer sees
-// that command. So there
+// that command (except where other accounts may also write to the settings folder or a folder
+// above it: there it still holds its file in memory, see below). So there
 // another account can delay the account's runs and commands, make a run with no other own file
 // give up, and keep the account's ejects refused. Two runs of the account still meet there, except
 // a run that holds its own file in /run/lock or its runtime folder and one that cannot use that
@@ -81,27 +82,41 @@
 // account then counts a busy shared file as busy (fail closed) instead of passing it by, and a run
 // with no other own file waits for the shared file its whole wait (another account that holds it
 // can then make the run give up), so that such a run always holds a file the account's ejects see.
-// As a run or command may still hold the settings folder's file alone there (the account cannot use
-// the shared file at all: another account made it first, or only root may write to /run/lock), an
-// eject of the account there also counts as busy every flock that a process of the account other
-// than the eject holds, on any file system, as /proc/locks shows it, whatever that file is named
-// now (a name there tells nothing), unless the holder has that very file open (the same device and
-// inode, on the same mount, before and after the look) at a path whose every folder from / on only
-// the account and root may change by the rule above, looked at one step at a time without following
-// a link that another account could have put there, never into a FUSE mount: another account can
-// move a file, or a folder it is in, only out of a folder it may write to (or one above it), never
-// into a folder that only the account and root may change, nor mount over one. Also busy where that
-// cannot be told (/proc/locks cannot be read or reading it or the holder's open files ran over the
-// look's budget, a holder's accounts cannot be read, as with hidepid): so another account cannot
-// hide a run or command of the account from its ejects. The cost: such an eject is also refused
-// while a process of the account holds another flock on a file in a folder other accounts may write
-// to, or on a removed file (a run for another drive from the same portable copy, say). There
-// another account can delay the account's runs and commands and keep its ejects refused; it can
-// also make two runs of the account that meet only there share the drive's speed (the second makes
-// the file anew), and a command that starts while such an eject is under way go on beside it
-// instead of waiting (the eject then fails while the command has files open on the drive, or the
-// command finds the drive gone). Not seen: a process of the account in another pid namespace
-// (/proc/locks leaves it out).
+// There the settings folder's file is never opened through a link on the way from / either (a
+// link anywhere on that path leaves the file unused), and each run and command (claim) of the
+// account also holds, for as long as it lasts, a flock on a file in memory of its own (memfd,
+// named as the lock file) that is in no folder, so that no other account can rename or remove
+// it, nor keep the run or command from taking it, as it can for each of the account's lock files
+// (make the names in /run/lock first, put a link, a folder or a file of its own in place of the
+// settings folder's file or a folder above it). A run that cannot make that file (memfd_create
+// refused, as by a strict seccomp filter, or no memory or descriptors left) does not start there
+// (DriveBusy); a command then goes on without it. An eject of the account there counts as busy
+// every flock that a process of the account other than the eject holds, on any file system, as
+// /proc/locks shows it, whatever that file is named now, unless the holder has that very file open
+// (the same device and inode, on the same mount, before and after the look) at a path whose every
+// folder from / on is owned by the account or root and is one no other account may write to (as
+// above, but without the exception for a sticky folder: another account may move a file it can
+// rename into a sticky folder, as /tmp or /var/tmp, where anybody may add a name), looked at one
+// step at a time without following a link that another account could have put there, never into a
+// FUSE mount: another account can move a file, or a folder it is in, only out of a folder it may
+// write to (or one above it) and only into one it may write to, never into a folder that only the
+// account and root may change, nor mount over one. Never so a file named as one of the drive's lock
+// or claims files (vaultik-drive-<hash>*.lock, vaultik-use-<hash>*.lock), wherever it is, nor the
+// file in memory, which is in no folder: so the eject counts every run and command of the account
+// there, whatever another account did to its files. Also busy where that cannot be told
+// (/proc/locks cannot be read or reading it or the holder's open files ran over the look's budget,
+// a holder's accounts cannot be read, as with hidepid): so another account cannot hide a run or
+// command of the account from its ejects. The cost: such an eject is also refused while any run or
+// command of the account from such a settings folder is under way, for any drive (its file in
+// memory), and while a process of the account holds another flock on a file in a folder other
+// accounts may write to (a sticky one too), or on a removed file. There another account can delay
+// the account's runs and commands and keep its ejects refused; it can also make two runs of the
+// account that meet only there share the drive's speed (the second makes the file anew, or holds
+// only its file in memory), and a command that starts while such an eject is under way go on
+// beside it instead of waiting (the eject then fails while the command has files open on the
+// drive, or the command finds the drive gone). Not seen: a process of the account in another pid
+// namespace (/proc/locks leaves it out), and a command that could not make its file in memory and
+// holds none of its files.
 // A run of root marks that it uses the drive with root's own lock (vaultik-drive-<hash>.root.lock
 // in /run/vaultik, a folder only root may write to, so no account can put a file in its place, and
 // that every account may look into (set so whatever root's umask); /run/lock where that folder
@@ -144,10 +159,11 @@
 // portable copy on FAT or exFAT that holds only that file is seen too; root's claims do not wait
 // for such a one, as another account could hold it for good). A file there that another account
 // renamed or removed (where it may write to that settings folder or one above it) cannot be
-// told by its name:
-// root's eject does not see a run or command that holds only such a file; in one look at
-// most 256 processes and 65536 descriptors of each account, and 3 seconds in all, so that no
-// account can keep it looking for long: an account over that (or a look over its time) cannot be
+// told by its name, but a run or command there also holds its file in memory (see above), which
+// root's eject finds there by its name too (/memfd:<name>), so it sees such a run or command
+// all the same (not a command that could not make that file and holds only such a file); in one
+// look at most 256 processes and 65536 descriptors of each account, and 3 seconds in all, so that
+// no account can keep it looking for long: an account over that (or a look over its time) cannot be
 // told, so root's eject fails closed and root's claim does not wait for it. A flock held in another
 // pid namespace (another container that shares /run/lock) cannot be seen in /proc at all, as
 // /proc/locks leaves it out: root's eject therefore also tries a flock on each own file of an
@@ -384,7 +400,7 @@ private:
 
 // A shared claim on the drive behind `key` for as long as it lives (see above). Never throws; it
 // waits only while an eject of the drive is under way (at most kEjectWait). One that cannot be
-// had is not held.
+// had is not held (Linux: one that holds only its file in memory, see above, is held).
 class DriveClaim {
 public:
     DriveClaim(const std::string& key, const std::string& lock_dir);
