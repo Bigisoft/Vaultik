@@ -26,6 +26,7 @@
 #include <grp.h>
 #include <pwd.h>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/vfs.h>
@@ -466,10 +467,29 @@ std::chrono::milliseconds other_account_wait() {
 }
 
 // The file `name` in `dir` (the user's settings), for this account alone. -1 when it cannot be
-// opened.
-int open_in_dir(const std::string& name, const std::string& dir) {
+// opened. With `no_links` (other accounts may write to that folder or one above it, see
+// AccountFiles), never through a link on the way either, which another account may have put there
+// to lead the file into a folder of this account's: each folder from / (from the working folder
+// for a relative `dir`) is opened from the one before without following a link, so that a link
+// anywhere on the way leaves the file unusable (-1).
+int open_in_dir(const std::string& name, const std::string& dir, bool no_links = false) {
     (void)os::make_dir(dir);  // the user's settings folder, which is there
-    return ::open(os::join(dir, name).c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    constexpr int kFlags = O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
+    if (!no_links) return ::open(os::join(dir, name).c_str(), kFlags, 0600);
+    int at = ::open(!dir.empty() && dir[0] == '/' ? "/" : ".", O_PATH | O_DIRECTORY | O_CLOEXEC);
+    for (std::size_t start = 0; at >= 0 && start < dir.size();) {
+        const std::size_t end = std::min(dir.find('/', start), dir.size());
+        const std::string part = dir.substr(start, end - start);
+        start = end + 1;
+        if (part.empty() || part == ".") continue;
+        const int next = ::openat(at, part.c_str(), O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        ::close(at);
+        at = next;
+    }
+    if (at < 0) return -1;
+    const int fd = ::openat(at, name.c_str(), kFlags, 0600);
+    ::close(at);
+    return fd;
 }
 
 // The lock file `name` all accounts share (see open_in_run_lock): an account's own is readable by
@@ -533,8 +553,9 @@ int open_in_run_user(const std::string& name) {
 // open_account_files), so a run and a claim may pass it by after a while; `exposed`: other
 // accounts may write to the settings folder or a folder above it (see private_folder), so they
 // may also rename or remove that file (or a folder it is in), and a run and an eject that meet
-// only there may then not meet at all (an eject of the account then also looks at /proc/locks,
-// see own_flock_on).
+// only there may then not meet at all (a run or claim of the account then also holds its
+// stand-in, see stand_in, and an eject of the account also looks at /proc/locks, see
+// own_flock_on; the settings folder's file is then never opened through a link, see open_in_dir).
 struct AccountFiles {
     std::vector<int> own;
     int folder = -1;
@@ -598,7 +619,7 @@ AccountFiles open_account_files(const std::string& name, const std::string& lock
         if (const int fd = open_in_run_lock(stem + "." + std::to_string(::geteuid()) + ".lock", 0600, mine); fd >= 0)
             f.own.push_back(fd);
     }
-    if (const int fd = open_in_dir(name, lock_dir); fd >= 0) {
+    if (const int fd = open_in_dir(name, lock_dir, f.exposed); fd >= 0) {
         struct stat st{};
         const bool same = ::fstat(fd, &st) != 0 || std::any_of(f.own.begin(), f.own.end(), [&](int other) {
                               struct stat o{};
@@ -615,6 +636,24 @@ AccountFiles open_account_files(const std::string& name, const std::string& lock
     }
     f.shared = open_in_run_lock(name, 0600, own_or_roots);
     return f;
+}
+
+// Where other accounts may write to the settings folder or a folder above it (see AccountFiles): a
+// flock that a run or claim of the account holds for as long as it lasts, on a file in memory of
+// its own (memfd, named `name`) that is in no folder, so that no other account can rename or remove
+// it, nor keep the run or claim from taking it (as it can for each of the account's lock files:
+// make the names in /run/lock first, or put a link, a folder or a file of its own at the settings
+// folder's file or a folder above it). An eject of the account always counts it as busy (see
+// own_flock_on), whatever happened to the other files: so another account cannot leave a run or
+// claim there that the account's ejects do not see. -1 where it cannot be made (memfd_create
+// refused, no memory or descriptors left).
+int stand_in(const std::string& name) {
+    const int fd = ::memfd_create(name.c_str(), MFD_CLOEXEC);
+    if (fd >= 0 && ::flock(fd, LOCK_SH | LOCK_NB) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
 }
 
 // Whether a flock on the settings folder's file `fd` (see AccountFiles) failed as its file system
@@ -2075,6 +2114,16 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
         own = own2 = own3 = shared = -1;
     };
     if (own < 0 && shared < 0 && root) return;
+    // Where other accounts may write to the settings folder or one above it, a run holds its
+    // stand-in from now on, whatever it gets of the other files (see stand_in), and does not start
+    // without it (fail closed).
+    if (files.exposed && !fail_closed) {
+        stand_in_.fd = stand_in(name);
+        if (stand_in_.fd < 0) {
+            close_all();
+            throw DriveBusy("the backup drive's lock cannot be checked");
+        }
+    }
     // The end of the short wait for a lock another account may hold (see other_account_wait),
     // from the first such wait on (the settings folder's file where other accounts may open it,
     // then the shared one), so that the two together delay a run no longer than one.
@@ -2243,6 +2292,12 @@ DriveLock::DriveLock(const std::string& key, const std::string& lock_dir, std::c
 #endif
 }
 
+StandIn::~StandIn() {
+#ifndef _WIN32
+    if (fd >= 0) ::close(fd);  // with its flock
+#endif
+}
+
 DriveLock::~DriveLock() {
     if (handle_ == nullptr) return;
 #ifdef _WIN32
@@ -2338,6 +2393,9 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
             int* const slots[] = {&own, &own2, &own3};
             for (std::size_t i = 0; i < files.own.size() && i < 3; ++i) *slots[i] = files.own[i];
             shared = files.shared;
+            // Where other accounts may write to the settings folder or one above it, the claim's
+            // stand-in (see stand_in), held also when it holds none of the files.
+            if (files.exposed) stand_in_.fd = stand_in(name);
         }
         // Shared with every other claim; only an eject holds one alone, until the drive is gone.
         // False when it gave up on `fd` (closed, -1) other than as the settings folder's file that
@@ -2382,8 +2440,9 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
         for (int* fd : {&own, &own2, &own3}) {
             const bool loose = *fd >= 0 && *fd == files.folder && files.loose;
             if (*fd >= 0 && !take(*fd, false) && !loose) {
-                for (const int other : {own, own2, own3, shared})
+                for (const int other : {own, own2, own3, shared, stand_in_.fd})
                     if (other >= 0) ::close(other);
+                stand_in_.fd = -1;
                 return;
             }
         }
@@ -2402,11 +2461,13 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         if (own < 0) std::swap(own, shared);
-        if (own < 0) return;
-        handle_ = handle_of(own);
-        if (own2 >= 0) own2_ = handle_of(own2);
-        if (own3 >= 0) own3_ = handle_of(own3);
-        if (shared >= 0) shared_ = handle_of(shared);
+        if (own >= 0) {
+            handle_ = handle_of(own);
+            if (own2 >= 0) own2_ = handle_of(own2);
+            if (own3 >= 0) own3_ = handle_of(own3);
+            if (shared >= 0) shared_ = handle_of(shared);
+        }
+        if (!held()) return;  // neither a file nor the stand-in
 #endif
         hash_ = hash;
         count(in_process().claims, hash_, 1);
@@ -2415,18 +2476,16 @@ DriveClaim::DriveClaim(const std::string& key, const std::string& lock_dir) {
 }
 
 DriveClaim::~DriveClaim() {
-    if (handle_ == nullptr) return;
+    if (!held()) return;
 #ifdef _WIN32
     ReleaseMutex(static_cast<HANDLE>(handle_));
     CloseHandle(static_cast<HANDLE>(handle_));
 #else
-    for (void* h : {shared_, own3_, own2_}) {
+    for (void* h : {shared_, own3_, own2_, handle_}) {  // the stand-in goes with stand_in_
         if (h == nullptr) continue;
         ::flock(fd_of(h), LOCK_UN);
         ::close(fd_of(h));
     }
-    ::flock(fd_of(handle_), LOCK_UN);
-    ::close(fd_of(handle_));
 #endif
     count(in_process().claims, hash_, -1);
 }

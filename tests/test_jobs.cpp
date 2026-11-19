@@ -5052,8 +5052,8 @@ TEST_CASE("eject: a settings folder swapped for a link to another file system is
     // account (from cron: no runtime folder, another account made its own name and the shared
     // one in /run/lock first) holds the settings folder's file alone. Another account renames the
     // settings folder and puts a link in its place to a folder of the account's own on another
-    // file system: an eject of the account follows it, makes its file anew there and finds it
-    // free, but must still be refused.
+    // file system: an eject of the account, which then holds none of the settings folder's
+    // files, must still be refused.
     const fs::path open = c.tmp.path / "open";
     const fs::path settings = open / "settings";
     fs::create_directories(settings);
@@ -5080,7 +5080,8 @@ TEST_CASE("eject: a settings folder swapped for a link to another file system is
         fs::rename(settings, open / "s2");
         fs::create_directory_symlink(elsewhere, settings);
         CHECK(eject_busy());
-        CHECK(fs::exists(elsewhere / ("vaultik-drive-" + c.name + ".lock")));  // made there
+        // Not made there: the eject does not follow a link on the way either.
+        CHECK_FALSE(fs::exists(elsewhere / ("vaultik-drive-" + c.name + ".lock")));
         CHECK(run.release() == 0);
     }
     CHECK_FALSE(eject_busy());
@@ -5103,9 +5104,9 @@ TEST_CASE("eject: a run led by a link into a folder of the account's own before 
     // the shared one in /run/lock first) can hold only the lock folder's file. Before the run
     // starts, another account renames the lock folder away and puts a link in its place to a
     // folder of the account's own (here in its home folder); once the run holds its file, that
-    // account puts the lock folder back. An eject of the account makes its file anew and finds it
-    // free, and the run's file is in a folder only the account may change: it must still be
-    // refused.
+    // account puts the lock folder back. The run must not follow that link (it is then left
+    // without the file, see the next test), and an eject of the account, which makes its file anew
+    // and finds it free, must still be refused.
     const fs::path top(c.settings);
     const fs::path locks = top / "locks";
     fs::create_directories(locks);
@@ -5126,8 +5127,8 @@ TEST_CASE("eject: a run led by a link into a folder of the account's own before 
     fs::create_directory_symlink(home.path, locks);
     {
         OtherProcess run("lock", c.key, locks.string(), c.tmp.path, {}, c.env);
-        REQUIRE(run.held());
-        CHECK(fs::exists(home.path / ("vaultik-drive-" + c.name + ".lock")));  // made there
+        CHECK_FALSE(run.busy());
+        CHECK_FALSE(fs::exists(home.path / ("vaultik-drive-" + c.name + ".lock")));
         fs::remove(locks);
         fs::rename(top / "l2", locks);
         CHECK(eject_busy());
@@ -5140,6 +5141,67 @@ TEST_CASE("eject: a run led by a link into a folder of the account's own before 
     REQUIRE(other.held());
     CHECK_FALSE(eject_busy());
     CHECK(other.release() == 0);
+}
+
+TEST_CASE("eject: a run or claim kept from every lock file it could hold is seen (Linux)") {
+    if (::geteuid() == 0 || ::access("/run/lock", W_OK) != 0) {
+        MESSAGE("not run: needs an account other than root and a writable /run/lock");
+        return;
+    }
+    OwnFileCase c("test-kept-from-");
+    // Other accounts may write to the settings folder. A run and a command of the account (from
+    // cron: no runtime folder) find every file they would lock taken: another account made the
+    // account's own names and the shared ones in /run/lock first, and put a folder of its own in
+    // place of each settings folder's file. Once they are under way, that account removes those
+    // folders again: an eject of the account then makes its files anew and finds them free, and
+    // must still be refused while the run or the command is under way.
+    fs::create_directories(c.settings);
+    REQUIRE(::chmod(c.settings.c_str(), 0777) == 0);
+    c.make_empty(0644);
+    const std::string uid = std::to_string(::geteuid());
+    const fs::path own_use =
+        fs::path("/run/lock") / ("vaultik-use-" + c.name + "." + uid + ".lock");
+    std::ofstream(own_use).close();
+    REQUIRE(::chmod(own_use.c_str(), 0644) == 0);
+    std::vector<fs::path> taken;
+    for (const char* kind : {"vaultik-drive-", "vaultik-use-"}) {
+        taken.push_back(fs::path("/run/lock") / (kind + c.name + ".lock"));
+        taken.push_back(fs::path(c.settings) / (kind + c.name + ".lock"));
+    }
+    const auto take_names = [&] {
+        for (const fs::path& p : taken) fs::create_directory(p);
+    };
+    const auto free_names = [&] {
+        for (const fs::path& p : taken) fs::remove(p);
+    };
+    const auto eject_busy = [&] {
+        try {
+            DriveLock lock(c.key, c.settings, std::chrono::milliseconds(0), {}, {},
+                           DriveLockMode::eject);
+        } catch (const DriveBusy&) {
+            return true;
+        }
+        return EjectHold(c.key, c.settings).busy();
+    };
+    take_names();
+    {
+        OtherProcess run("lock", c.key, c.settings, c.tmp.path, {}, c.env);
+        CHECK_FALSE(run.busy());
+        free_names();
+        CHECK(eject_busy());
+        CHECK(run.release() == 0);
+    }
+    CHECK_FALSE(eject_busy());
+    free_names();
+    take_names();
+    {
+        OtherProcess claim("claim", c.key, c.settings, c.tmp.path, {}, c.env);
+        CHECK(claim.held());  // held: the claim's stand-in
+        free_names();
+        CHECK(eject_busy());
+        CHECK(claim.release() == 0);
+    }
+    CHECK_FALSE(eject_busy());
 }
 
 TEST_CASE("eject: a held lock file another account moved into a sticky folder is seen (Linux)") {

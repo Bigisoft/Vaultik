@@ -281,6 +281,17 @@ std::string drive_lock_name(const std::string& key);
 // is looked at only where /proc cannot tell who holds a busy lock.
 constexpr const char* kHeldDrivesVariable = "VAULTIK_HELD_DRIVES";
 
+// Linux, a run or claim of an account where other accounts may write to its settings folder or a
+// folder above it: the descriptor of its stand-in (see drive_lock.cpp), closed when this goes away
+// (also when the constructor that set it throws). Unused elsewhere.
+struct StandIn {
+    int fd = -1;
+    StandIn() = default;
+    ~StandIn();
+    StandIn(const StandIn&) = delete;
+    StandIn& operator=(const StandIn&) = delete;
+};
+
 class DriveLock {
 public:
     // Takes the lock of `key` (see drive_lock_key; an empty key takes none), waiting up to `wait`
@@ -366,6 +377,7 @@ private:
     bool skipped_ = false;
     bool not_shared_ = false;
     bool gave_up_ = false;
+    StandIn stand_in_;
     std::string hash_;
     std::string token_;
 };
@@ -380,13 +392,14 @@ public:
     DriveClaim(const DriveClaim&) = delete;
     DriveClaim& operator=(const DriveClaim&) = delete;
 
-    bool held() const { return handle_ != nullptr; }
+    bool held() const { return handle_ != nullptr || stand_in_.fd >= 0; }
 
 private:
     void* handle_ = nullptr;  // Windows: the slot's mutex; POSIX: the descriptor + 1
     void* shared_ = nullptr;  // POSIX: the shared file's descriptor + 1, besides an own one
     void* own2_ = nullptr;    // POSIX, an account: its second own file's descriptor + 1
     void* own3_ = nullptr;    // POSIX, an account: its third own file's descriptor + 1
+    StandIn stand_in_;
     std::string hash_;
 };
 
